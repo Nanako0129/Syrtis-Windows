@@ -309,9 +309,33 @@ finally {
     Pop-Location
 }
 
+# The MIT licences of the vendored engine and the redistributed .NET packages
+# require their notices to accompany the binary, not merely to exist in the
+# repository. Copied here rather than in package-velopack.ps1 because that
+# script packs this same publish directory, so one copy covers the portable
+# ZIP, the nupkg, and the Setup.exe built from it.
+$noticesSource = Join-Path $repoRoot "THIRD-PARTY-NOTICES.md"
+if (-not (Test-Path -LiteralPath $noticesSource -PathType Leaf)) {
+    throw "Third-party notices are missing: THIRD-PARTY-NOTICES.md"
+}
+$licenseSource = Join-Path $repoRoot "LICENSE"
+if (-not (Test-Path -LiteralPath $licenseSource -PathType Leaf)) {
+    throw "License is missing: LICENSE"
+}
+Copy-Item -LiteralPath $noticesSource -Destination (Join-Path $publishRoot "THIRD-PARTY-NOTICES.md") -Force
+Copy-Item -LiteralPath $licenseSource -Destination (Join-Path $publishRoot "LICENSE") -Force
+
 $exePath = Join-Path $publishRoot $appExecutableName
 $nativePath = Join-Path $publishRoot "tb_core_ffi.dll"
 $priPath = Join-Path $publishRoot $appPriName
+# Asserted, not assumed: a publish that silently dropped these would ship a
+# binary carrying MIT code with no notice, and nothing else in this script
+# looks for them.
+foreach ($required in @("THIRD-PARTY-NOTICES.md", "LICENSE")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $publishRoot $required) -PathType Leaf)) {
+        throw "Published output is missing the required notice file: $required"
+    }
+}
 if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
     throw "Published App executable is missing: $appExecutableName"
 }
