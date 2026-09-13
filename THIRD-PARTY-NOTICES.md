@@ -16,13 +16,19 @@ the Velopack `.nupkg`, and therefore the `Setup.exe` built from it.
 this repository references directly. Those are enumerated below with licence
 text or SPDX identifier read from each component's own metadata.
 
-**Not yet enumerated:** two sets, named here rather than left silent.
+**Not covered:** two sets, named here rather than left silent. Neither is
+discharged by this file, and both are outstanding obligations rather than
+footnotes.
 
-- **The Rust dependency graph.** `Cargo.lock` resolves 264 packages. Only the
-  direct dependencies of `crates/tb_core_ffi` and the vendored engine appear
-  below. Producing the full list needs a generator (`cargo about` or
-  equivalent) wired into CI so it cannot go stale; until that exists this file
-  does not claim to cover the transitive graph.
+- **The Rust crates**, direct and transitive alike. `Cargo.lock` resolves 264
+  packages. The section below lists the direct ones by name, which is an
+  inventory and not a notice: naming a crate places neither its licence
+  identifier nor its copyright line in the payload, and most of those licences
+  require exactly that. Discharging this needs a generator — `cargo about` or
+  equivalent — run in CI so the output cannot go stale, and the result
+  concatenated into this file. Doing the sixteen direct crates by hand while
+  248 stay missing would leave the file just as wrong while reading as though
+  it were finished.
 - **The bundled .NET runtime.** Full-channel packages carry the .NET 10
   runtime files (`coreclr.dll`, `clrjit.dll`, and the rest of `lib/app`),
   redistributed from Microsoft's .NET distribution. Its terms are published at
@@ -72,7 +78,7 @@ package marked MIT, with the copyright line shown for that package.
 | Package | Version | Licence | Copyright |
 | --- | --- | --- | --- |
 | [Velopack](https://github.com/velopack/velopack) | 1.2.0 | MIT | Copyright © Velopack Ltd. |
-| [H.NotifyIcon.WinUI](https://github.com/HavenDV/H.NotifyIcon) | 2.4.1 | MIT | — |
+| [H.NotifyIcon.WinUI](https://github.com/HavenDV/H.NotifyIcon) | 2.4.1 | MIT | Copyright (c) 2020 havendv |
 | Vortice.Direct3D11 | 3.8.3 | MIT | Copyright (c) Amer Koleci and Contributors |
 | Vortice.D3DCompiler | 3.8.3 | MIT | Copyright (c) Amer Koleci and Contributors |
 | Vortice.DXGI | 3.8.3 | MIT | Copyright (c) Amer Koleci and Contributors |
@@ -84,11 +90,14 @@ are excluded because nothing from them is redistributed.
 
 ---
 
-## Rust direct dependencies
+## Rust direct dependencies — inventory only, not a notice
 
-Every dependency declared in `crates/tb_core_ffi/Cargo.toml`, all compiled into
-`tb_core_ffi.dll`. Their own licences are declared in their crates.io metadata;
-the transitive graph they pull in is the set this file does not yet enumerate.
+**This section does not discharge anything.** It records which crates are
+compiled into `tb_core_ffi.dll` so the scope of the outstanding work is
+visible; it carries no licence identifiers and no copyright lines, which is
+what the licences actually require. See "Not covered" above.
+
+Every dependency declared in `crates/tb_core_ffi/Cargo.toml`:
 
 Unconditional — in every artifact:
 
