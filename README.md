@@ -46,10 +46,21 @@ channel/package-identity contract.
 
 ### Package managers
 
-**There is no winget or Scoop package yet.** The installers above are the only way to get it.
-winget manifests are prepared in [`packaging/winget/`](packaging/winget/) and validate against the
-real tool except for one field that is still open; see that directory's README for what remains
-before submission.
+**Scoop**, from this repository's own bucket:
+
+```powershell
+scoop bucket add syrtis https://github.com/Nanako0129/Syrtis-Windows
+scoop install syrtis
+```
+
+Scoop manages the app itself, so `scoop update syrtis` is how it updates, and the in-app check
+says so rather than offering one. Only the Full channel is published this way — Lite relies on the
+installer to fetch .NET 10, and a Scoop install never runs that installer. Your usage data lives
+outside the Scoop directory, so it survives updates and is left behind on uninstall.
+
+**winget** is not published yet. Manifests are prepared in
+[`packaging/winget/`](packaging/winget/) and validate against the real tool; what remains is the
+submission pull request to `microsoft/winget-pkgs`.
 
 ## Supported providers
 
