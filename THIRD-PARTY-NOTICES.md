@@ -86,10 +86,26 @@ are excluded because nothing from them is redistributed.
 
 ## Rust direct dependencies
 
-Direct dependencies of `crates/tb_core_ffi`, all compiled into
+Every dependency declared in `crates/tb_core_ffi/Cargo.toml`, all compiled into
 `tb_core_ffi.dll`. Their own licences are declared in their crates.io metadata;
 the transitive graph they pull in is the set this file does not yet enumerate.
 
+Unconditional — in every artifact:
+
 `tokscale-core` (vendored, above), `serde`, `serde_json`, `reqwest`,
 `hyper-util`, `tower-service`, `rustls`, `base64`, `hmac`, `sha2`, `fs2`,
-`tokio`, `parking_lot`, `chrono`.
+`tokio`, `parking_lot`, `chrono`, `dirs`, `rayon`.
+
+Windows-only, so present in every artifact this repository ships:
+
+`windows-sys`.
+
+`security-framework` is declared under
+`[target.'cfg(target_os = "macos")'.dependencies]` and is therefore compiled
+into no Windows artifact. It is listed here only so that the absence reads as
+deliberate.
+
+To re-derive this list rather than trust it, read the `[dependencies]` and
+`[target.*.dependencies]` tables of `crates/tb_core_ffi/Cargo.toml` in full —
+the first version of this section was written from a truncated view of that
+file and silently omitted `dirs`, `rayon`, and `windows-sys`.
