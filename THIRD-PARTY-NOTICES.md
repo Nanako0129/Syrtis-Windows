@@ -1,39 +1,49 @@
 # Third-party notices
 
 Syrtis is distributed as a binary that contains third-party components. This
-file carries the notices those components require, and it is copied into the
+file collects the notices those components require, and it is copied into the
 application payload so that it travels with the binary rather than only living
 in this repository — that is what the licences ask for.
+
+It is **incomplete**. See Coverage below for exactly what it does and does not
+carry, and for the remaining work.
 
 It is shipped beside `Syrtis.App.exe` in every distribution: the portable ZIP,
 the Velopack `.nupkg`, and therefore the `Setup.exe` built from it.
 
 ---
 
-## Coverage
+## Coverage — this file is not complete, and says so on purpose
 
-**Complete and verified:** the vendored parsing engine and the .NET packages
-this repository references directly. Those are enumerated below with licence
-text or SPDX identifier read from each component's own metadata.
+**It does not yet discharge the project's third-party notice obligations.** It
+carries the notices that have been verified one at a time, and the shipped
+payload contains components it does not mention. Read it as work in progress
+with a known remainder, not as the notice.
 
-**Not covered:** two sets, named here rather than left silent. Neither is
-discharged by this file, and both are outstanding obligations rather than
-footnotes.
+What is here has been verified against each component's own metadata rather
+than recalled: the vendored engine's licence in full, and the directly
+referenced .NET packages with the licence and copyright from their `.nuspec`.
 
-- **The Rust crates**, direct and transitive alike. `Cargo.lock` resolves 264
-  packages. The section below lists the direct ones by name, which is an
-  inventory and not a notice: naming a crate places neither its licence
-  identifier nor its copyright line in the payload, and most of those licences
-  require exactly that. Discharging this needs a generator — `cargo about` or
-  equivalent — run in CI so the output cannot go stale, and the result
-  concatenated into this file. Doing the sixteen direct crates by hand while
-  248 stay missing would leave the file just as wrong while reading as though
-  it were finished.
-- **The bundled .NET runtime.** Full-channel packages carry the .NET 10
-  runtime files (`coreclr.dll`, `clrjit.dll`, and the rest of `lib/app`),
-  redistributed from Microsoft's .NET distribution. Its terms are published at
-  <https://github.com/dotnet/runtime> and <https://dotnet.microsoft.com/> and
-  are not reproduced here.
+What is missing is most of it, by count:
+
+| Set | Size | State |
+| --- | --- | --- |
+| .NET packages referenced directly | 6 | licence + copyright below |
+| .NET packages resolved transitively | 29 total in `packages.lock.json` | **not covered** — `H.NotifyIcon`, `SharpGen.Runtime`, `SharpGen.Runtime.COM`, `Vortice.DirectX`, `Vortice.Mathematics` and others ship as DLLs in `lib/app` |
+| Rust crates, direct and transitive | 264 in `Cargo.lock` | **not covered** — the inventory below is names only |
+| The bundled .NET 10 runtime | — | **not covered** — terms at <https://github.com/dotnet/runtime> |
+| Windows App SDK payload | — | **partially** — named and linked below, but its `license.txt` is neither reproduced here nor shipped |
+
+Hand-curation is the wrong instrument for roughly 293 components and was
+abandoned after five successive review findings, each correctly naming a set
+this file had silently skipped. The remaining work is therefore **a generator
+rather than more entries**: resolve `Cargo.lock` against crates.io and
+`packages.lock.json` against nuget.org, emit licence identifier plus copyright
+per component, and run it in CI so a committed copy cannot drift from the lock
+files. Completing a few sets by hand would leave the file reading as finished
+while staying just as incomplete, which is worse than the state it is in now.
+
+Until that lands, the sections below are the verified subset and nothing more.
 
 ---
 
@@ -95,7 +105,7 @@ are excluded because nothing from them is redistributed.
 **This section does not discharge anything.** It records which crates are
 compiled into `tb_core_ffi.dll` so the scope of the outstanding work is
 visible; it carries no licence identifiers and no copyright lines, which is
-what the licences actually require. See "Not covered" above.
+what the licences actually require. See Coverage above.
 
 Every dependency declared in `crates/tb_core_ffi/Cargo.toml`:
 

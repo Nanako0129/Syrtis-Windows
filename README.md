@@ -158,8 +158,9 @@ The shipped binary also contains third-party code, chiefly the vendored
 tokscale-core engine compiled into `tb_core_ffi.dll`. Their notices are in
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), which packaging copies into
 the application payload so it ships beside `Syrtis.App.exe` in the portable ZIP,
-the `.nupkg`, and the installer. That file also says what it does not yet cover:
-the 264-package Rust transitive graph and the bundled .NET runtime.
+the `.nupkg`, and the installer. That file is explicit about being incomplete and about what it does not yet
+cover — most of the dependency graph by count — and about the generator that
+would close it.
 
 ## Lite channel (framework-dependent)
 
