@@ -1,0 +1,46 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+#
+# The Lite channel omits the bundled .NET 10 runtime and has Velopack acquire
+# it at install time. Everything else matches the Full package.
+#
+# This is a separate PackageIdentifier rather than a second installer entry
+# on Nyanako.Syrtis because the two are not interchangeable at the update
+# layer: Velopack refuses to serve a Full update to a Lite install and the
+# reverse, comparing the channel with StringComparison.Ordinal. A single
+# winget package offering both would let `winget upgrade` move a machine
+# across that line, and the application would then silently stop updating.
+# See docs/lite-distribution.md.
+#
+# PackageDependencies deliberately does NOT declare the .NET runtime. The
+# bootstrap is Velopack's responsibility, and docs/lite-distribution.md
+# records the standing rule not to assume winget enforces it.
+#
+# The ARP entry is identical to Full's: both channels install under the same
+# pack id, which is why they cannot coexist on one machine.
+PackageIdentifier: Nyanako.Syrtis.Lite
+PackageVersion: 0.3.0
+InstallerType: exe
+Scope: user
+InstallerLocale: en-US
+InstallModes:
+  - silent
+  - silentWithProgress
+InstallerSwitches:
+  Silent: --silent
+  SilentWithProgress: --silent
+UpgradeBehavior: install
+ReleaseDate: 2026-09-12
+AppsAndFeaturesEntries:
+  - DisplayName: Syrtis
+    Publisher: Nyanako.Syrtis
+    ProductCode: Nyanako.Syrtis
+    InstallerType: exe
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/Nanako0129/Syrtis-Windows/releases/download/v0.3.0/Nyanako.Syrtis-win-x64-lite-Setup.exe
+    InstallerSha256: 885D52FB57CBFA7B48134435756A437D8848BF432BA726345F9F9E2595C6DF24
+  - Architecture: arm64
+    InstallerUrl: https://github.com/Nanako0129/Syrtis-Windows/releases/download/v0.3.0/Nyanako.Syrtis-win-arm64-lite-Setup.exe
+    InstallerSha256: 281949DDEE50E96FBC262749BFC63E689E2AF485B23645886181D631B8B3A882
+ManifestType: installer
+ManifestVersion: 1.6.0

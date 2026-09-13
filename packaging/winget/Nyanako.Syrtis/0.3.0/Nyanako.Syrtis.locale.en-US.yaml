@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+#
+# Publisher below is the human-readable publisher for the listing. It is not
+# the same string as AppsAndFeaturesEntries.Publisher in the installer
+# manifest, which must mirror what v0.3.0 actually wrote to the registry.
+PackageIdentifier: Nyanako.Syrtis
+PackageVersion: 0.3.0
+PackageLocale: en-US
+Publisher: Nyanako
+PublisherUrl: https://github.com/Nanako0129
+PublisherSupportUrl: https://github.com/Nanako0129/Syrtis-Windows/issues
+PackageName: Syrtis
+PackageUrl: https://github.com/Nanako0129/Syrtis-Windows
+License: MIT
+LicenseUrl: https://github.com/Nanako0129/Syrtis-Windows/blob/main/LICENSE
+Copyright: Copyright (c) 2026 Nanako Tsai
+ShortDescription: Tray monitor for AI coding-agent token usage, cost, and subscription quota.
+Description: |-
+  Syrtis is the Windows port of TokenBar. It reads the transcripts your AI coding
+  agents already write to disk, prices them, and shows the result in the tray and
+  a flyout: an Overview, a Quota view of what each subscription has left, plus
+  Models, Monthly, Daily, Hourly, Stats and Agents views.
+
+  Quota is read for five agent CLIs using credentials a login you performed has
+  already written to disk. Nothing is uploaded; the parsing happens locally in a
+  shared Rust core.
+
+  This package is the Full channel and bundles the .NET 10 runtime. The Lite
+  channel, which acquires the runtime at install time, is Nyanako.Syrtis.Lite.
+  The two cannot be interchanged once installed.
+Moniker: syrtis
+Tags:
+  - ai
+  - claude-code
+  - codex
+  - cost
+  - llm
+  - token
+  - tray
+  - usage
+ReleaseNotesUrl: https://github.com/Nanako0129/Syrtis-Windows/releases/tag/v0.3.0
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

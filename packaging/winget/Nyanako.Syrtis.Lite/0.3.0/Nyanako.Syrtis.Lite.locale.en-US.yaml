@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+#
+PackageIdentifier: Nyanako.Syrtis.Lite
+PackageVersion: 0.3.0
+PackageLocale: en-US
+Publisher: Nyanako
+PublisherUrl: https://github.com/Nanako0129
+PublisherSupportUrl: https://github.com/Nanako0129/Syrtis-Windows/issues
+PackageName: Syrtis (Lite)
+PackageUrl: https://github.com/Nanako0129/Syrtis-Windows
+License: MIT
+LicenseUrl: https://github.com/Nanako0129/Syrtis-Windows/blob/main/LICENSE
+Copyright: Copyright (c) 2026 Nanako Tsai
+ShortDescription: Tray monitor for AI coding-agent token usage, cost, and subscription quota — without a bundled .NET runtime.
+Description: |-
+  The Lite channel of Syrtis, the Windows port of TokenBar. Identical to
+  Nyanako.Syrtis except that it does not bundle the .NET 10 runtime; Velopack
+  acquires the runtime at install time instead.
+
+  Lite is the smaller download only on a machine that already has .NET 10. On a
+  clean machine the download plus runtime bootstrap can approach the Full total,
+  so Full remains the safe default.
+
+  Full and Lite are not interchangeable. An installed channel cannot be switched
+  without uninstalling first, and neither channel will accept the other's
+  updates.
+Moniker: syrtis-lite
+Tags:
+  - ai
+  - claude-code
+  - codex
+  - cost
+  - llm
+  - token
+  - tray
+  - usage
+ReleaseNotesUrl: https://github.com/Nanako0129/Syrtis-Windows/releases/tag/v0.3.0
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
