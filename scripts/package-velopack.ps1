@@ -63,13 +63,16 @@ function Read-PackProperties {
 
     $product = Get-RepoProperty -Document $document -Name "TbProductName"
     $semantic = Get-RepoProperty -Document $document -Name "TbSemanticVersion"
-    if ([string]::IsNullOrWhiteSpace($product) -or [string]::IsNullOrWhiteSpace($semantic)) {
+    $publisher = Get-RepoProperty -Document $document -Name "TbPublisher"
+    if ([string]::IsNullOrWhiteSpace($product) -or [string]::IsNullOrWhiteSpace($semantic) `
+            -or [string]::IsNullOrWhiteSpace($publisher)) {
         throw "Directory.Build.props packaging properties cannot be empty."
     }
 
     return [pscustomobject]@{
         ProductName = $product
         SemanticVersion = $semantic
+        Publisher = $publisher
     }
 }
 
@@ -151,6 +154,7 @@ function Assert-VelopackPackage {
         [Parameter(Mandatory = $true)][string]$PackagePath,
         [Parameter(Mandatory = $true)][string]$PackId,
         [Parameter(Mandatory = $true)][string]$ProductName,
+        [Parameter(Mandatory = $true)][string]$Publisher,
         [Parameter(Mandatory = $true)][string]$SemanticVersion,
         [Parameter(Mandatory = $true)][string]$MainExe,
         [Parameter(Mandatory = $true)][string]$MachineArchitecture,
@@ -183,6 +187,7 @@ function Assert-VelopackPackage {
         $expected = [ordered]@{
             id = $PackId
             title = $ProductName
+            authors = $Publisher
             version = $SemanticVersion
             mainExe = $MainExe
             machineArchitecture = $MachineArchitecture
@@ -318,6 +323,7 @@ try {
         "--packDir", $publishRoot,
         "--mainExe", $appExecutableName,
         "--packTitle", $packProperties.ProductName,
+        "--packAuthors", $packProperties.Publisher,
         "--runtime", $Rid,
         "--channel", $channel,
         "--outputDir", $releasesRoot
@@ -338,7 +344,7 @@ finally {
 $packageName = "{0}-{1}-{2}-full.nupkg" -f $packId, $packProperties.SemanticVersion, $channel
 $packagePath = Join-Path $releasesRoot $packageName
 Assert-VelopackPackage -PackagePath $packagePath -PackId $packId `
-    -ProductName $packProperties.ProductName `
+    -ProductName $packProperties.ProductName -Publisher $packProperties.Publisher `
     -SemanticVersion $packProperties.SemanticVersion -MainExe $appExecutableName `
     -MachineArchitecture $machineArchitecture -Channel $channel `
     -DeploymentMode $DeploymentMode -ExpectedRuntimeDependency $frameworkSpec
