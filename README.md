@@ -150,6 +150,17 @@ originally derived from [tokscale](https://github.com/junhoyeo/tokscale) by
 junhoyeo. Original menu-bar concept by
 [handlecusion's tokcat](https://github.com/handlecusion/tokcat).
 
+## License
+
+MIT — see [`LICENSE`](LICENSE).
+
+The shipped binary also contains third-party code, chiefly the vendored
+tokscale-core engine compiled into `tb_core_ffi.dll`. Their notices are in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), which packaging copies into
+the application payload so it ships beside `Syrtis.App.exe` in the portable ZIP,
+the `.nupkg`, and the installer. That file also says what it does not yet cover:
+the 264-package Rust transitive graph and the bundled .NET runtime.
+
 ## Lite channel (framework-dependent)
 
 Optional **Lite** builds omit the bundled .NET 10 runtime. See [docs/lite-distribution.md](docs/lite-distribution.md) for channels, package identity, and the per-surface default policy (README/GitHub default Full; Scoop default Lite; winget Full + Lite package).
