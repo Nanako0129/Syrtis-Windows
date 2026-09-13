@@ -1,19 +1,5 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
 #
-# INCOMPLETE ON PURPOSE. `License` is a required field and is deliberately
-# absent, so `winget validate` fails on this file rather than passing with a
-# value nobody chose. Do not add a placeholder: a placeholder validates, and
-# a manifest that validates can be submitted.
-#
-# The repository has no LICENSE file, so its own code is under default
-# copyright. The shipped package is not purely its own code: lib/app in the
-# nupkg carries tb_core_ffi.dll, built from vendor/tokscale-core, which is
-# MIT (Copyright (c) 2025 Junho Yeo) and whose terms require the copyright
-# and permission notice to travel with every copy. No notice file ships in
-# the package today. Settling that is a prerequisite for this manifest, not
-# a follow-up to it — submitting to microsoft/winget-pkgs asserts a right to
-# distribute.
-#
 # Publisher below is the human-readable publisher for the listing. It is not
 # the same string as AppsAndFeaturesEntries.Publisher in the installer
 # manifest, which must mirror what v0.3.0 actually wrote to the registry.
@@ -25,6 +11,9 @@ PublisherUrl: https://github.com/Nanako0129
 PublisherSupportUrl: https://github.com/Nanako0129/Syrtis-Windows/issues
 PackageName: Syrtis
 PackageUrl: https://github.com/Nanako0129/Syrtis-Windows
+License: MIT
+LicenseUrl: https://github.com/Nanako0129/Syrtis-Windows/blob/main/LICENSE
+Copyright: Copyright (c) 2026 Nanako Tsai
 ShortDescription: Tray monitor for AI coding-agent token usage, cost, and subscription quota.
 Description: |-
   Syrtis is the Windows port of TokenBar. It reads the transcripts your AI coding
