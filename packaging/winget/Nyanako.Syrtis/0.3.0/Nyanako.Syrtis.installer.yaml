@@ -1,0 +1,46 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+#
+# Velopack's Setup.exe is a per-user installer: it unpacks into
+# %LOCALAPPDATA%\Nyanako.Syrtis and writes its uninstall entry under HKCU,
+# never HKLM. Scope must therefore say user, or winget will offer to elevate
+# for an install that neither needs nor uses elevation.
+#
+# --silent is the only silent switch Velopack accepts, and it is what both
+# InstallModes map to; there is no separate progress-showing silent mode.
+# Measured on 2026-09-12: `Setup.exe --silent` returned exit 0 on a win-x64
+# host upgrading 0.2.1 and on a win-arm64 host upgrading 0.2.2, and both
+# reached the application's own tray-ready gate afterwards.
+#
+# AppsAndFeaturesEntries mirrors what v0.3.0 actually wrote to the registry,
+# not what it should have written. Publisher reads Nyanako.Syrtis because
+# `vpk pack` was never given --packAuthors and fell back to the pack id.
+# That is corrected for 0.3.1 onward; this manifest describes 0.3.0, so it
+# must keep the value 0.3.0 shipped or winget will fail to correlate the
+# installed package with this one.
+PackageIdentifier: Nyanako.Syrtis
+PackageVersion: 0.3.0
+InstallerType: exe
+Scope: user
+InstallerLocale: en-US
+InstallModes:
+  - silent
+  - silentWithProgress
+InstallerSwitches:
+  Silent: --silent
+  SilentWithProgress: --silent
+UpgradeBehavior: install
+ReleaseDate: 2026-09-12
+AppsAndFeaturesEntries:
+  - DisplayName: Syrtis
+    Publisher: Nyanako.Syrtis
+    ProductCode: Nyanako.Syrtis
+    InstallerType: exe
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/Nanako0129/Syrtis-Windows/releases/download/v0.3.0/Nyanako.Syrtis-win-x64-Setup.exe
+    InstallerSha256: B9F9CBDA824A02C9F19BFC30858A60F1EF2A9AB778F42E7F08DA6FB1EBEECDB4
+  - Architecture: arm64
+    InstallerUrl: https://github.com/Nanako0129/Syrtis-Windows/releases/download/v0.3.0/Nyanako.Syrtis-win-arm64-Setup.exe
+    InstallerSha256: 7C16939E79ED0C6C59F581BE56AE5D770600D21C719056F350CEA088B74D39C6
+ManifestType: installer
+ManifestVersion: 1.6.0

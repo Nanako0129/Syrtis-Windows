@@ -44,6 +44,13 @@ Full is the safe default; Lite is smaller to download but only wins on a machine
 .NET 10 installed. See [`docs/lite-distribution.md`](docs/lite-distribution.md) for the full
 channel/package-identity contract.
 
+### Package managers
+
+**There is no winget or Scoop package yet.** The installers above are the only way to get it.
+winget manifests are prepared in [`packaging/winget/`](packaging/winget/) and validate against the
+real tool except for one field that is still open; see that directory's README for what remains
+before submission.
+
 ## Supported providers
 
 The app reads quota for five agent CLIs, using credentials already written to disk by a login
@@ -158,10 +165,6 @@ The shipped binary also contains third-party code, chiefly the vendored
 tokscale-core engine compiled into `tb_core_ffi.dll`. Their notices are in
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), which packaging copies into
 the application payload so it ships beside `Syrtis.App.exe` in the portable ZIP,
-the `.nupkg`, and the installer. That file is explicit about being incomplete and about what it does not yet
-cover — most of the dependency graph by count — and about the generator that
-would close it.
-
-## Lite channel (framework-dependent)
-
-Optional **Lite** builds omit the bundled .NET 10 runtime. See [docs/lite-distribution.md](docs/lite-distribution.md) for channels, package identity, and the per-surface default policy (README/GitHub default Full; Scoop default Lite; winget Full + Lite package).
+the `.nupkg`, and the installer. That file is explicit about being incomplete,
+about what it does not yet cover — most of the dependency graph by count — and
+about the generator that would close it.
