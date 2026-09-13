@@ -28,7 +28,23 @@ internal enum UpdateCheckState
     UpToDate,
     Available,
     Failed,
+
+    /// <summary>The running copy was not installed by Velopack, so there is
+    /// no feed for it to check. A Scoop install is the case that exists:
+    /// Scoop extracts the package payload into its own versioned directory
+    /// and updates it itself. Distinct from <see cref="Failed"/> because
+    /// nothing went wrong — reporting "could not check" would send someone
+    /// looking for a network or permissions problem that is not there.
+    /// </summary>
+    Unmanaged,
 }
+
+/// <summary>Raised when the running copy was not installed by the in-app
+/// updater. Its own type rather than a message on InvalidOperationException,
+/// because the caller has to tell it apart from a genuinely broken install to
+/// choose between two different things to say to the user.</summary>
+internal sealed class UnmanagedInstallException()
+    : InvalidOperationException("This copy was not installed by the in-app updater.");
 
 internal readonly record struct UpdateCheckResult(UpdateCheckState State, string? Version)
 {
@@ -37,6 +53,8 @@ internal readonly record struct UpdateCheckResult(UpdateCheckState State, string
     internal static UpdateCheckResult UpToDate => new(UpdateCheckState.UpToDate, null);
 
     internal static UpdateCheckResult Failed => new(UpdateCheckState.Failed, null);
+
+    internal static UpdateCheckResult Unmanaged => new(UpdateCheckState.Unmanaged, null);
 
     /// <summary>The only intended way to reach <see cref="UpdateCheckState
     /// .Available"/>, and it refuses an empty version: ValidateTarget has
@@ -54,6 +72,8 @@ internal readonly record struct UpdateCheckResult(UpdateCheckState State, string
         UpdateCheckState.UpToDate => "You are up to date.".Localized(),
         UpdateCheckState.Available =>
             "Update available: v{0}".Localized(Version ?? string.Empty),
+        UpdateCheckState.Unmanaged =>
+            "Updates are handled by whatever installed this copy.".Localized(),
         _ => "Could not check for updates.".Localized(),
     };
 }
@@ -261,8 +281,20 @@ internal class UpdateFlow
 
     private Installation GetInstallation()
     {
-        if (!_manager.IsInstalled
-            || !string.Equals(_manager.AppId, PackageId, StringComparison.Ordinal))
+        // Two different situations, deliberately not collapsed. Not installed
+        // by Velopack at all means someone else manages this copy — Scoop
+        // extracts the package payload and versions it itself. A Velopack
+        // install whose AppId disagrees is the stranded case
+        // docs/release-velopack.md records for 0.2.0/0.2.1, where the pack id
+        // changed and the install can no longer find its own feed. The first
+        // is normal, the second needs a reinstall, and the user is told
+        // different things.
+        if (!_manager.IsInstalled)
+        {
+            throw new UnmanagedInstallException();
+        }
+
+        if (!string.Equals(_manager.AppId, PackageId, StringComparison.Ordinal))
         {
             throw new InvalidOperationException("Installed package identity is invalid.");
         }
