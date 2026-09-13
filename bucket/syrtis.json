@@ -28,6 +28,27 @@
             "extract_dir": "lib\\app"
         }
     },
+    "pre_uninstall": [
+        "# Launch at login writes HKCU\\...\\Run\\Syrtis pointing at the running exe.",
+        "# Only the Velopack uninstaller clears it (OnBeforeUninstallFastCallback), and",
+        "# an extraction install never runs that, so without this the Run entry would",
+        "# survive pointing into a directory Scoop is about to delete.",
+        "#",
+        "# Conditional on the value living under this app's Scoop directory: the same",
+        "# machine may also hold a Velopack install that legitimately owns this value,",
+        "# and deleting that one would silently break its launch at login.",
+        "try {",
+        "    $appRoot = Split-Path $dir -Parent",
+        "    $run = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'",
+        "    $current = (Get-ItemProperty -Path $run -Name 'Syrtis' -ErrorAction SilentlyContinue).'Syrtis'",
+        "    if ($current -and $current.Trim('\"').StartsWith($appRoot, [System.StringComparison]::OrdinalIgnoreCase)) {",
+        "        Remove-ItemProperty -Path $run -Name 'Syrtis' -ErrorAction SilentlyContinue",
+        "        $approved = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run'",
+        "        Remove-ItemProperty -Path $approved -Name 'Syrtis' -ErrorAction SilentlyContinue",
+        "        Write-Host 'Removed the launch-at-login entry for this Scoop install.'",
+        "    }",
+        "} catch { }"
+    ],
     "shortcuts": [
         [
             "Syrtis.App.exe",
