@@ -1,0 +1,52 @@
+{
+    "version": "0.3.0",
+    "description": "Tray monitor for AI coding-agent token usage, cost, and subscription quota. Windows port of TokenBar.",
+    "homepage": "https://github.com/Nanako0129/Syrtis-Windows",
+    "license": "MIT",
+    "notes": [
+        "Syrtis is managed by Scoop here, not by its own installer. Its in-app update",
+        "check will say so rather than offering updates; use `scoop update syrtis`.",
+        "",
+        "Usage data lives in %APPDATA%\\tokscale and %LOCALAPPDATA%\\TokenBar, outside",
+        "the Scoop directory, so it survives updates and is left behind on uninstall."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/Nanako0129/Syrtis-Windows/releases/download/v0.3.0/Nyanako.Syrtis-0.3.0-win-x64-full.nupkg#/syrtis.zip",
+            "hash": "9322276e91387928a0367efc17a41dac90f6470f15b1373ead6e87524346cb3a",
+            "extract_dir": "lib\\app"
+        },
+        "arm64": {
+            "url": "https://github.com/Nanako0129/Syrtis-Windows/releases/download/v0.3.0/Nyanako.Syrtis-0.3.0-win-arm64-full.nupkg#/syrtis.zip",
+            "hash": "9b166250cef83de8cfc97e40fdc365f635cf1eca0b094d33090b3260156ed605",
+            "extract_dir": "lib\\app"
+        }
+    },
+    "shortcuts": [
+        [
+            "Syrtis.App.exe",
+            "Syrtis"
+        ]
+    ],
+    "checkver": {
+        "github": "https://github.com/Nanako0129/Syrtis-Windows"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/Nanako0129/Syrtis-Windows/releases/download/v$version/Nyanako.Syrtis-$version-win-x64-full.nupkg#/syrtis.zip",
+                "hash": {
+                    "url": "https://github.com/Nanako0129/Syrtis-Windows/releases/download/v$version/SHA256SUMS.txt",
+                    "regex": "(?<sha256>[0-9a-f]{64})\\s+Nyanako\\.Syrtis-$version-win-x64-full\\.nupkg"
+                }
+            },
+            "arm64": {
+                "url": "https://github.com/Nanako0129/Syrtis-Windows/releases/download/v$version/Nyanako.Syrtis-$version-win-arm64-full.nupkg#/syrtis.zip",
+                "hash": {
+                    "url": "https://github.com/Nanako0129/Syrtis-Windows/releases/download/v$version/SHA256SUMS.txt",
+                    "regex": "(?<sha256>[0-9a-f]{64})\\s+Nyanako\\.Syrtis-$version-win-arm64-full\\.nupkg"
+                }
+            }
+        }
+    }
+}
