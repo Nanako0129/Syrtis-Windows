@@ -9,6 +9,14 @@
   <PropertyGroup>
     <TbProductName>Syrtis</TbProductName>
     <Product>$(TbProductName)</Product>
+    <!-- Who published it, not what it is. Velopack writes this to the nuspec
+         <authors>, which becomes the Publisher column in Add or remove
+         programs and the Publisher winget matches against. Left unset it
+         falls back to the pack id, which is how v0.3.0 shipped reading
+         "Nyanako.Syrtis" where a publisher name belongs. -->
+    <TbPublisher>Nyanako</TbPublisher>
+    <Company>$(TbPublisher)</Company>
+    <Authors>$(TbPublisher)</Authors>
     <TbSemanticVersion>0.3.0</TbSemanticVersion>
     <TbAssemblyVersion>0.3.0.0</TbAssemblyVersion>
     <Version>$(TbSemanticVersion)</Version>
