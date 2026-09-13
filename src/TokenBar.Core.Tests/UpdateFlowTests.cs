@@ -247,6 +247,14 @@ public class UpdateFlowTests : IDisposable
         Assert.Empty(fixture.Downloader.Requests);
     }
 
+    // Two things are pinned here, and they are not the same thing. Rejecting
+    // before any network request is the original point and is unchanged. The
+    // exception type is now the narrower UnmanagedInstallException, because a
+    // copy Velopack never installed — a Scoop extraction — is not a failure and
+    // must not be reported as one; the sibling test above still expects a plain
+    // InvalidOperationException for an install whose identity disagrees, which
+    // is a failure. Assert.ThrowsAsync matches the exact type, so these two
+    // tests together are what keeps the distinction from being collapsed.
     [Fact]
     public async Task RejectsNotInstalledBeforeNetwork()
     {
@@ -259,7 +267,7 @@ public class UpdateFlowTests : IDisposable
         var locator = new NotInstalledLocator(packages);
         var flow = new UpdateFlow(downloader, locator);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        await Assert.ThrowsAsync<UnmanagedInstallException>(
             () => flow.CheckForUpdatesAsync());
 
         Assert.Empty(downloader.Requests);
