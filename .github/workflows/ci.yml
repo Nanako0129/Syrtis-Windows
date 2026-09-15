@@ -15,13 +15,18 @@ on:
 # starting within fifteen minutes of each other, and every superseded run ran
 # to completion for 137m47s of wall clock nobody read.
 #
-# Scoped to the ref rather than the PR so a branch pushed without a PR is
-# covered too, and never cancelling on main: a run there is the record of what
-# that commit did, and the next push is a different commit rather than a
-# correction of this one.
+# main is given a group of its own per run rather than being exempted by
+# cancel-in-progress. A group holds one running and one pending run, and a
+# newly queued run replaces the pending one - so with a shared main group, a
+# third push cancels the second regardless of cancel-in-progress, which is
+# exactly the record this is supposed to keep. A unique group cannot be
+# crowded out by anything.
+#
+# That makes cancel-in-progress moot on main, so it is stated unconditionally
+# rather than carrying a second condition that no longer decides anything.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.ref == 'refs/heads/main' && format('ci-main-{0}', github.run_id) || format('ci-{0}', github.ref) }}
+  cancel-in-progress: true
 
 jobs:
   crosscheck-swift:
