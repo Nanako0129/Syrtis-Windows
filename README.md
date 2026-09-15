@@ -143,6 +143,8 @@ repository CI gate.
 See [`docs/verification-history.md`](docs/verification-history.md) for the
 historical gate records (which specific runs proved which claim, and when).
 
+Branch naming and merge conventions are in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 ## Known limitations
 
 Windows does not yet have macOS parity on: Discord Rich Presence, per-client tray items,
