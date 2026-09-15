@@ -247,6 +247,14 @@ public class UpdateFlowTests : IDisposable
         Assert.Empty(fixture.Downloader.Requests);
     }
 
+    // Two things are pinned here, and they are not the same thing. Rejecting
+    // before any network request is the original point and is unchanged. The
+    // exception type is now the narrower UnmanagedInstallException, because a
+    // copy Velopack never installed — a Scoop extraction — is not a failure and
+    // must not be reported as one; the sibling test above still expects a plain
+    // InvalidOperationException for an install whose identity disagrees, which
+    // is a failure. Assert.ThrowsAsync matches the exact type, so these two
+    // tests together are what keeps the distinction from being collapsed.
     [Fact]
     public async Task RejectsNotInstalledBeforeNetwork()
     {
@@ -259,7 +267,7 @@ public class UpdateFlowTests : IDisposable
         var locator = new NotInstalledLocator(packages);
         var flow = new UpdateFlow(downloader, locator);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        await Assert.ThrowsAsync<UnmanagedInstallException>(
             () => flow.CheckForUpdatesAsync());
 
         Assert.Empty(downloader.Requests);
@@ -1056,6 +1064,22 @@ public class UpdateFlowTests : IDisposable
         Assert.Equal("You are up to date.", UpdateCheckResult.UpToDate.Text());
         Assert.Equal("Update available: v1.2.3", UpdateCheckResult.Available("1.2.3").Text());
         Assert.Equal("Could not check for updates.", UpdateCheckResult.Failed.Text());
+        Assert.Equal(
+            "Updates are handled by whatever installed this copy.",
+            UpdateCheckResult.Unmanaged.Text());
+    }
+
+    // A copy Velopack did not install — Scoop extracts the package payload and
+    // versions it itself — has no feed to check. Saying "could not check"
+    // there sends someone hunting a network or permissions fault that is not
+    // present, so the two states must not render the same line.
+    [Fact]
+    public void UnmanagedDoesNotRenderAsAFailedCheck()
+    {
+        Localization.Load("en", AppContext.BaseDirectory);
+        Assert.NotEqual(UpdateCheckState.Failed, UpdateCheckResult.Unmanaged.State);
+        Assert.NotEqual(
+            UpdateCheckResult.Failed.Text(), UpdateCheckResult.Unmanaged.Text());
     }
 
     // ValidateTarget already rejects an empty version, so Available("") means a
@@ -1079,6 +1103,8 @@ public class UpdateFlowTests : IDisposable
             Assert.Equal("已是最新版本。", UpdateCheckResult.UpToDate.Text());
             Assert.Equal("有可用更新：v1.2.3", UpdateCheckResult.Available("1.2.3").Text());
             Assert.Equal("無法檢查更新。", UpdateCheckResult.Failed.Text());
+            Assert.Equal(
+                "更新由安裝這份程式的工具負責。", UpdateCheckResult.Unmanaged.Text());
         }
         finally
         {

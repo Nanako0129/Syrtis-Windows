@@ -243,6 +243,15 @@ public partial class App : Application
             _ = QueueUpdateUi(() => PublishUpdate(flow, candidate));
             return UpdateCheckResult.Available(candidate.Version);
         }
+        catch (UnmanagedInstallException)
+        {
+            // Not a failure. Caught before the general handler so it is not
+            // logged as one and so the user is not sent looking for a network
+            // problem that does not exist.
+            DevLog.Write("update-check: unmanaged install");
+            _lastCandidate = null;
+            return UpdateCheckResult.Unmanaged;
+        }
         catch (Exception ex)
         {
             LogUpdateFailure("update-check", ex);

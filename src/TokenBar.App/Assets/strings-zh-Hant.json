@@ -49,6 +49,7 @@
   "Consumed {0}% of the allowance": "用掉了額度的 {0}%",
   "Could not check agent limits. It will be retried.": "無法查詢 Agent 額度，稍後會重試。",
   "Could not check for updates.": "無法檢查更新。",
+  "Updates are handled by whatever installed this copy.": "更新由安裝這份程式的工具負責。",
   "Could not save this classification: existing attribution data is invalid or foreign.": "無法儲存這項分類：現有的歸屬資料無效或來自其他格式。",
   "Could not save this classification: the attribution entry limit was reached.": "無法儲存這項分類：已達歸屬項目上限。",
   "Could not save this classification: the new value is too large or unsupported.": "無法儲存這項分類：新值太大或不受支援。",

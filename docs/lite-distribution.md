@@ -9,12 +9,13 @@ Framework-dependent **Lite** packages omit the bundled .NET 10 runtime. Full rem
 | README / primary download button | Full | none |
 | GitHub Releases asset list | Full listed first | Lite |
 | winget | `Nyanako.Syrtis` = Full | `Nyanako.Syrtis.Lite` |
-| Scoop | Lite *(intent)* | Full optional |
+| Scoop | **Full only** | — |
 
 ## Guidance
 
-- Scoop default is **intent only**, not yet decided: Scoop manages `~/scoop/apps/<name>/<version>` with its own `current` junction, while Velopack installs under `%LocalAppData%\<packId>`. Whether Scoop consumes a portable artifact or runs the Velopack installer is still open and determines whether the Lite-default row is implementable.
-- Scoop users are more likely to already have .NET 10, so Lite is the useful default *once* that packaging path is chosen.
+- **Settled: Scoop ships Full, and the earlier Lite-default intent was wrong.** Scoop consumes the published `-full.nupkg` directly, extracting `lib\app` into `~/scoop/apps/syrtis/<version>` under its own `current` junction. No new artifact and no Velopack installer is involved — and that last part is what rules Lite out. Lite is framework-dependent and relies on **Velopack's installer** to acquire .NET 10; a Scoop install never runs that installer, so a Lite payload would simply fail to start on a machine without the runtime, with nothing to bootstrap it. Full is self-contained and works unconditionally.
+- The reasoning that produced the Lite intent — Scoop users are likelier to already have .NET 10 — is still true and still irrelevant, because "likelier" is not "guaranteed" and there is no bootstrap to fall back on.
+- Verified on the x64 test host: `scoop install` from the manifest produced 555 files / 191 MB with `Syrtis.App.exe` reporting 0.3.0 and `tb_core_ffi.dll` present, and `scoop uninstall` removed the app directory and Start Menu shortcut while leaving both the Velopack install and `%APPDATA%\tokscale` untouched.
 - On a clean machine, Lite download plus runtime bootstrap may approach the Full total download size.
 - Do **not** advertise Lite as an unconditional ~50% saving for every user.
 - The .NET runtime bootstrap remains **Velopack's** responsibility.
