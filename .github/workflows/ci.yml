@@ -127,8 +127,12 @@ jobs:
         run: cargo build --release --locked --target x86_64-pc-windows-msvc
       - name: build native DLL (x64 via shared mapping)
         run: dotnet msbuild src/TokenBar.Smoke/TokenBar.Smoke.csproj -t:BuildTbNative -p:Configuration=Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64 -p:TbNativeCargoLocked=true -p:RestoreLockedMode=true
+      # --target pins the same directory the rest of this job builds into.
+      # Without it cargo test lands in target/release/ while every other step
+      # uses target/x86_64-pc-windows-msvc/release/, so the dependency tree was
+      # compiled a second time for the same triple the host already is.
       - name: cargo test (workspace, locked)
-        run: cargo test --workspace --release --locked
+        run: cargo test --workspace --profile ci-test --locked --target x86_64-pc-windows-msvc
       - name: build Core.Tests (x64)
         run: dotnet build src/TokenBar.Core.Tests/TokenBar.Core.Tests.csproj -c Release -p:Platform=x64 --no-restore
       - name: test Core.Tests (x64)
