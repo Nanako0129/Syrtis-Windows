@@ -101,6 +101,17 @@ Windows native packaging is opt-in for `TokenBar.App`, `TokenBar.Smoke`, and
 
 Prereqs: Rust `1.96.1`, .NET SDK `10.0.301`, PowerShell `7.0+`; on Windows the MSVC toolchain.
 
+The root `global.json` pins that SDK with `rollForward: disable`, so a machine carrying only a
+later 10.0.x cannot run `dotnet` from the repository root at all. [`tools/sdkfree/`](tools/sdkfree/)
+is a deliberate escape hatch for that case — run the platform-neutral tests from there:
+
+```bash
+cd tools/sdkfree && dotnet test ../../src/TokenBar.Core.Tests/TokenBar.Core.Tests.csproj
+```
+
+Use it for tests only. Builds and packaging go through the root pin, which is what makes them
+reproducible.
+
 ```bash
 git submodule update --init --recursive
 
