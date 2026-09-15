@@ -101,6 +101,28 @@ Windows native packaging is opt-in for `TokenBar.App`, `TokenBar.Smoke`, and
 
 Prereqs: Rust `1.96.1`, .NET SDK `10.0.301`, PowerShell `7.0+`; on Windows the MSVC toolchain.
 
+The root `global.json` pins that SDK with `rollForward: disable`, so a machine carrying only a
+later 10.0.x cannot run `dotnet` from the repository root at all. [`tools/sdkfree/`](tools/sdkfree/)
+is a deliberate escape hatch for that.
+
+On macOS and Linux the Windows native targets are inert, but the tests still load the release
+dylib, which `src/Directory.Build.targets` copies only if it is already there — so build it first,
+exactly as [`scripts/check.sh`](scripts/check.sh) does:
+
+```bash
+cargo build --release --locked
+cd tools/sdkfree && dotnet test ../../src/TokenBar.Core.Tests/TokenBar.Core.Tests.csproj
+```
+
+**On Windows it is not sufficient on its own.** `TokenBar.Core.Tests` opts into native packaging,
+so the same project also needs `-p:Platform=x64` and the `BuildTbNative` step from the Windows
+commands below — without them `ValidateTbNativeConfiguration` rejects the default `AnyCPU`/empty-RID
+tuple before any test runs. The escape hatch lifts the SDK pin; it does not remove the native
+prerequisites.
+
+Use it for tests only. Builds and packaging go through the root pin, which is what makes them
+reproducible.
+
 ```bash
 git submodule update --init --recursive
 

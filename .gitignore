@@ -9,12 +9,13 @@ src/**/obj/
 # macOS noise
 .DS_Store
 
-# Local agent guide stays untracked (same convention as the macOS repo)
-CLAUDE.md
-AGENTS.md
-
-# Agent handover notes and session scratch. Both were already excluded, but
-# only in .git/info/exclude, which is per-clone and never committed - so this
-# checkout was protected and a fresh clone, another machine and CI were not.
+# Keep agent guidance tracked; use this private overlay for machine-local
+# instructions. Same convention as the macOS repo, which this now actually
+# matches: the previous two lines here ignored CLAUDE.md and AGENTS.md, copied
+# from macOS on 2026-07-02 and overturned there twelve days later by a0ce4381.
+#
+# scratchpad/ is session working space. Both were already excluded, but only in
+# .git/info/exclude, which is per-clone and never committed - so this checkout
+# was protected and a fresh clone, another machine and CI were not.
 .agent-local/
 scratchpad/

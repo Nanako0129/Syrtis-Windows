@@ -1,0 +1,7 @@
+{
+  "//": "Deliberate escape hatch, not a version contract. The repository root pins .NET SDK 10.0.301 with rollForward disable so builds are reproducible; a machine with only a later 10.0.x cannot run dotnet at all from the root. Running dotnet from THIS directory rolls forward to whatever 10.0.x is installed, which is enough for the platform-neutral test project. Never use it to build or package a release: those must go through the root pin. See the Build section of README.md.",
+  "sdk": {
+    "version": "10.0.302",
+    "rollForward": "latestMinor"
+  }
+}
