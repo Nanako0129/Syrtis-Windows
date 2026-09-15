@@ -105,9 +105,12 @@ The root `global.json` pins that SDK with `rollForward: disable`, so a machine c
 later 10.0.x cannot run `dotnet` from the repository root at all. [`tools/sdkfree/`](tools/sdkfree/)
 is a deliberate escape hatch for that.
 
-On macOS and Linux the Windows native targets are inert, so that is the whole story:
+On macOS and Linux the Windows native targets are inert, but the tests still load the release
+dylib, which `src/Directory.Build.targets` copies only if it is already there — so build it first,
+exactly as [`scripts/check.sh`](scripts/check.sh) does:
 
 ```bash
+cargo build --release --locked
 cd tools/sdkfree && dotnet test ../../src/TokenBar.Core.Tests/TokenBar.Core.Tests.csproj
 ```
 
