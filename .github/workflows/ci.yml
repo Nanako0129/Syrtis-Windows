@@ -489,6 +489,7 @@ jobs:
           name: app-evidence-${{ matrix.rid }}-${{ matrix.mode }}
           path: |
             ${{ runner.temp }}/tb-vpk-${{ matrix.mode }}-${{ matrix.rid }}/app-artifact/*/evidence.json
+            ${{ runner.temp }}/tb-vpk-${{ matrix.mode }}-${{ matrix.rid }}/app-artifact/*/symbols-evidence.json
             ${{ runner.temp }}/tb-vpk-${{ matrix.mode }}-${{ matrix.rid }}/app-artifact/*/*.zip.sha256
             ${{ runner.temp }}/tb-vpk-${{ matrix.mode }}-${{ matrix.rid }}/package-evidence.json
           if-no-files-found: error
