@@ -53,10 +53,10 @@ scoop bucket add syrtis https://github.com/Nanako0129/Syrtis-Windows
 scoop install syrtis
 ```
 
-Scoop manages the app itself, so `scoop update syrtis` is how it updates. In v0.3.0 the in-app
-**Check for updates** button reports a failure on a Scoop install — that build cannot tell "someone
-else manages this copy" apart from "the check failed"; a later release says so plainly instead.
-Either way the button is not the update path here.
+Scoop manages the app itself, so `scoop update syrtis` is how it updates, and the bucket is
+refreshed after each release by [`scripts/update-scoop-manifest.sh`](scripts/update-scoop-manifest.sh).
+If the in-app **Check for updates** button reports a failure, that is expected here and nothing is
+broken: it talks to the installer's own update feed, which does not manage this copy.
 
 Only the Full channel is published this way — Lite relies on the installer to fetch .NET 10, and a
 Scoop install never runs that installer. Your usage data lives outside the Scoop directory, so it

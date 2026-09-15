@@ -46,7 +46,18 @@ Full 的 79 MB。它對已有 .NET 10 的機器才划算。分流政策見
 3. Release workflow 自動執行 → 產出草稿
 4. 從草稿下載安裝包，在乾淨 VM 上驗證
 5. gh release edit vX.Y.Z --draft=false --latest
+6. scripts/update-scoop-manifest.sh vX.Y.Z  → 提交 bucket/syrtis.json
 ```
+
+第 6 步不能提前。Scoop bucket 記的是 `.nupkg` 的雜湊，而那些檔案要等封裝作業跑完
+才存在，所以它排在發佈之後，不在 release.yml 發佈前的版本契約閘門裡。
+
+**漏掉它的後果是無聲的**：`bucket/syrtis.json` 裡的 `checkver`／`autoupdate` 是給維護者
+的 `scoop checkver <app> -u` 用的，client 端的 `scoop update syrtis` 只會重讀 bucket、
+看到 bucket 寫的版本。沒更新 bucket，Scoop 使用者就永遠停在上一次提交的版本，而且
+不會有任何錯誤訊息。
+
+驗證用 `scripts/update-scoop-manifest.sh --check vX.Y.Z`，檔案過時就以非零結束。
 
 **Tag 是建置的授權，不是發佈的授權。** workflow 一律產出草稿；是否對外由人決定。
 
