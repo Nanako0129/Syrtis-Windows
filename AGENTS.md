@@ -29,7 +29,8 @@ identity — it is an escape hatch any machine can use. "dotnet lives at
 The root `global.json` pins .NET SDK 10.0.301 with `rollForward: disable`, so a
 machine carrying only a later 10.0.x cannot run `dotnet` from the repository
 root at all. Run it from `tools/sdkfree/` instead — the Build section of the
-README has the command.
+README has the command, and the Windows caveat: there the test project also
+needs its native tuple, which the escape hatch does not provide.
 
 This is written down because forgetting it has a specific, expensive shape:
 the failure looks like "this machine cannot run the suite", which is a sentence
