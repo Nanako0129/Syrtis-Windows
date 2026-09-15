@@ -127,22 +127,18 @@ jobs:
         run: cargo build --release --locked --target x86_64-pc-windows-msvc
       - name: build native DLL (x64 via shared mapping)
         run: dotnet msbuild src/TokenBar.Smoke/TokenBar.Smoke.csproj -t:BuildTbNative -p:Configuration=Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64 -p:TbNativeCargoLocked=true -p:RestoreLockedMode=true
-      # The saving here is lto = false and nothing else. Cargo keys output on
-      # triple AND profile, so this still builds its own dependency tree in
-      # target/x86_64-pc-windows-msvc/ci-test/ rather than reusing the release
-      # one next to it - a second tree is inherent to using a second profile.
-      # It is a cheaper tree, not an absent one.
+      # cargo test carried no --target, so it built into target/release/ while
+      # every other step in this job uses target/x86_64-pc-windows-msvc/release/
+      # - the same triple the runner already is, compiled twice because the
+      # directories differ. Passing --target makes the two share one tree.
       #
-      # --target is kept only so that tree sits under the same triple root as
-      # every other step's output instead of a third top-level target/ci-test/.
-      # It buys directory consistency, not reuse.
-      #
-      # The alternative was --release --target, which would share the release
-      # tree exactly and compile no dependency twice, at the cost of ten test
-      # binaries still paying for a fat LTO link. That trade was not measured
-      # against this one; this PR's own run measures only the option taken.
+      # A non-LTO [profile.ci-test] was tried first and measured slower: a
+      # separate profile means a separate dependency tree, and building one
+      # cost more than the ten fat-LTO test links it saved. 588 s before,
+      # 1106 s cold, 801 s with that profile's tree cached. Recorded so the
+      # idea is not retried on the strength of the estimate that produced it.
       - name: cargo test (workspace, locked)
-        run: cargo test --workspace --profile ci-test --locked --target x86_64-pc-windows-msvc
+        run: cargo test --workspace --release --locked --target x86_64-pc-windows-msvc
       - name: build Core.Tests (x64)
         run: dotnet build src/TokenBar.Core.Tests/TokenBar.Core.Tests.csproj -c Release -p:Platform=x64 --no-restore
       - name: test Core.Tests (x64)
