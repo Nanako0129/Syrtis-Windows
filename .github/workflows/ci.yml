@@ -100,21 +100,11 @@ jobs:
       # primary build job still fails closed on the release contract early.
       # Run the clean-checkout artifact contract before any legacy tracked
       # spike obj/ files can be refreshed by later restores.
-      - name: Phase 10 App artifact evidence (x64 Full)
-        shell: pwsh
-        run: |
-          $root = Join-Path $env:RUNNER_TEMP "tokenbar-phase10-x64"
-          ./scripts/build-app-artifact.ps1 -Rid win-x64 -OutputRoot $root -DeploymentMode Full
-      - uses: actions/upload-artifact@v4
-        with:
-          # Sanitized evidence only — never Setup.exe / nupkg / symbols ZIP binaries.
-          name: app-evidence-win-x64-full
-          path: |
-            ${{ runner.temp }}/tokenbar-phase10-x64/*/evidence.json
-            ${{ runner.temp }}/tokenbar-phase10-x64/*/symbols-evidence.json
-            ${{ runner.temp }}/tokenbar-phase10-x64/*/*.zip.sha256
-          if-no-files-found: error
-          retention-days: 3
+      # The x64 Full evidence run that used to sit here was a second execution
+      # of build-app-artifact.ps1 with the same arguments the deployment-matrix
+      # win-x64/Full leg already runs - package-velopack.ps1:242 calls that same
+      # script, so the two differed only by the vpk pack step at the end. It is
+      # produced there now, as app-evidence-win-x64-Full.
       # Directory.Build.targets owns the only Platform/RID to Rust-target
       # mapping and produces the native source consumed by managed builds.
       - name: restore locked NuGet graphs
