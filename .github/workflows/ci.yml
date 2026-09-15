@@ -81,7 +81,6 @@ jobs:
           path: tokenbar-windows/crosscheck/swift-out
 
   build:
-    needs: crosscheck-swift
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
@@ -116,10 +115,6 @@ jobs:
             ${{ runner.temp }}/tokenbar-phase10-x64/*/*.zip.sha256
           if-no-files-found: error
           retention-days: 3
-      - uses: actions/download-artifact@v4
-        with:
-          name: crosscheck-swift-out
-          path: crosscheck/swift-out
       # Directory.Build.targets owns the only Platform/RID to Rust-target
       # mapping and produces the native source consumed by managed builds.
       - name: restore locked NuGet graphs
@@ -166,11 +161,12 @@ jobs:
             crosscheck/fixtures \
             crosscheck/csharp-out \
             provider-quota-pace-v3
-      - name: compare CrossCheck outputs
-        shell: bash
-        env:
-          PYTHONUTF8: "1"
-        run: python3 crosscheck/diff.py crosscheck/swift-out crosscheck/csharp-out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crosscheck-csharp-out
+          path: crosscheck/csharp-out
+          if-no-files-found: error
+          retention-days: 3
       # Hermetic runtime check: point HOME at a synthetic Claude tree and put
       # one valid Codex session under a different CODEX_HOME root. The strict
       # client assertions make a pre-A1 binary fail instead of silently passing
@@ -324,6 +320,33 @@ jobs:
 
   # Cross-build/package only. This x64 runner never executes ARM64 binaries;
   # real ARM64 runtime coverage remains a merge gate on the ARM64 VM.
+  # The verdict both harnesses feed. Its own job because the comparison needs
+  # nothing from either platform except their output: keeping it inside build
+  # meant Windows queued behind a macOS job it shared no work with.
+  #
+  # Splitting a check is where a check quietly stops happening, so two things
+  # hold it in place: if-no-files-found: error on both uploads, and diff.py
+  # itself, which exits non-zero when a file is present on one side only and
+  # when neither directory has any. An empty side fails here rather than
+  # passing trivially.
+  crosscheck-compare:
+    needs: [build, crosscheck-swift]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: crosscheck-swift-out
+          path: crosscheck/swift-out
+      - uses: actions/download-artifact@v4
+        with:
+          name: crosscheck-csharp-out
+          path: crosscheck/csharp-out
+      - name: compare CrossCheck outputs
+        env:
+          PYTHONUTF8: "1"
+        run: python3 crosscheck/diff.py crosscheck/swift-out crosscheck/csharp-out
+
   arm64-cross:
     runs-on: windows-latest
     steps:
