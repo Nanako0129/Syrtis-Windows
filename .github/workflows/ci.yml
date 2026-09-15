@@ -10,6 +10,24 @@ on:
     paths-ignore:
       - "**.md"
 
+# A second push to the same branch makes the first run's answer worthless, but
+# the runners do not know that: a 30-run sample held seven same-branch pairs
+# starting within fifteen minutes of each other, and every superseded run ran
+# to completion for 137m47s of wall clock nobody read.
+#
+# main is given a group of its own per run rather than being exempted by
+# cancel-in-progress. A group holds one running and one pending run, and a
+# newly queued run replaces the pending one - so with a shared main group, a
+# third push cancels the second regardless of cancel-in-progress, which is
+# exactly the record this is supposed to keep. A unique group cannot be
+# crowded out by anything.
+#
+# That makes cancel-in-progress moot on main, so it is stated unconditionally
+# rather than carrying a second condition that no longer decides anything.
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && format('ci-main-{0}', github.run_id) || format('ci-{0}', github.ref) }}
+  cancel-in-progress: true
+
 jobs:
   crosscheck-swift:
     runs-on: macos-26
