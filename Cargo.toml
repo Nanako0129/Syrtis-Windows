@@ -20,9 +20,11 @@ strip = "debuginfo"
 # settings the shipping build uses — this is deliberately not the dev profile,
 # which would change what the tests are testing.
 #
-# lto = false is the whole point. The workspace links ten test binaries and
-# `[profile.release] lto = true` made each one pay for a fat LTO link;
-# measured on CI, `cargo test` spent 961 s compiling to run 34 s of tests.
+# lto = false is the whole point, and it is the only saving: a separate
+# profile means a separate dependency tree, so this trades one LTO tree for
+# one non-LTO tree rather than removing a build. The workspace links ten test
+# binaries and `[profile.release] lto = true` made each one pay for a fat LTO
+# link; measured on CI, `cargo test` spent 961 s compiling to run 34 s.
 #
 # The shipping cdylib is built with --release and is untouched. Verified by
 # hashing target/release/libtb_core_ffi.dylib before and after adding this

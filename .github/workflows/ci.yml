@@ -127,10 +127,20 @@ jobs:
         run: cargo build --release --locked --target x86_64-pc-windows-msvc
       - name: build native DLL (x64 via shared mapping)
         run: dotnet msbuild src/TokenBar.Smoke/TokenBar.Smoke.csproj -t:BuildTbNative -p:Configuration=Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64 -p:TbNativeCargoLocked=true -p:RestoreLockedMode=true
-      # --target pins the same directory the rest of this job builds into.
-      # Without it cargo test lands in target/release/ while every other step
-      # uses target/x86_64-pc-windows-msvc/release/, so the dependency tree was
-      # compiled a second time for the same triple the host already is.
+      # The saving here is lto = false and nothing else. Cargo keys output on
+      # triple AND profile, so this still builds its own dependency tree in
+      # target/x86_64-pc-windows-msvc/ci-test/ rather than reusing the release
+      # one next to it - a second tree is inherent to using a second profile.
+      # It is a cheaper tree, not an absent one.
+      #
+      # --target is kept only so that tree sits under the same triple root as
+      # every other step's output instead of a third top-level target/ci-test/.
+      # It buys directory consistency, not reuse.
+      #
+      # The alternative was --release --target, which would share the release
+      # tree exactly and compile no dependency twice, at the cost of ten test
+      # binaries still paying for a fat LTO link. That trade was not measured
+      # against this one; this PR's own run measures only the option taken.
       - name: cargo test (workspace, locked)
         run: cargo test --workspace --profile ci-test --locked --target x86_64-pc-windows-msvc
       - name: build Core.Tests (x64)
