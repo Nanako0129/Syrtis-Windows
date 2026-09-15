@@ -10,6 +10,19 @@ on:
     paths-ignore:
       - "**.md"
 
+# A second push to the same branch makes the first run's answer worthless, but
+# the runners do not know that: a 30-run sample held seven same-branch pairs
+# starting within fifteen minutes of each other, and every superseded run ran
+# to completion for 137m47s of wall clock nobody read.
+#
+# Scoped to the ref rather than the PR so a branch pushed without a PR is
+# covered too, and never cancelling on main: a run there is the record of what
+# that commit did, and the next push is a different commit rather than a
+# correction of this one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   crosscheck-swift:
     runs-on: macos-26

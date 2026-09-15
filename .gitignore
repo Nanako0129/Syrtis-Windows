@@ -12,3 +12,9 @@ src/**/obj/
 # Local agent guide stays untracked (same convention as the macOS repo)
 CLAUDE.md
 AGENTS.md
+
+# Agent handover notes and session scratch. Both were already excluded, but
+# only in .git/info/exclude, which is per-clone and never committed - so this
+# checkout was protected and a fresh clone, another machine and CI were not.
+.agent-local/
+scratchpad/
