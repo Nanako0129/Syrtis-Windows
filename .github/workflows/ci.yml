@@ -93,10 +93,15 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.301
-          # Caches the NuGet global-packages folder, keyed on the eight
-          # packages.lock.json files. It does not cache the SDK install above
-          # it - nothing in this action does, and that step is the larger cost.
+          # Caches the NuGet global-packages folder. It does not cache the SDK
+          # install above it - nothing in this action does, and that step is
+          # the larger cost.
+          #
+          # cache-dependency-path is required, not optional: there is no
+          # packages.lock.json at the repository root, and without this the
+          # action fails during setup rather than falling back to a search.
           cache: true
+          cache-dependency-path: "**/packages.lock.json"
       - name: required-desktop-MUI guard unit test
         shell: pwsh
         run: pwsh -File ./scripts/tests/test-required-mui-guard.ps1
@@ -367,10 +372,15 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.301
-          # Caches the NuGet global-packages folder, keyed on the eight
-          # packages.lock.json files. It does not cache the SDK install above
-          # it - nothing in this action does, and that step is the larger cost.
+          # Caches the NuGet global-packages folder. It does not cache the SDK
+          # install above it - nothing in this action does, and that step is
+          # the larger cost.
+          #
+          # cache-dependency-path is required, not optional: there is no
+          # packages.lock.json at the repository root, and without this the
+          # action fails during setup rather than falling back to a search.
           cache: true
+          cache-dependency-path: "**/packages.lock.json"
       - name: Phase 10 App artifact evidence (ARM64 Full)
         shell: pwsh
         run: |
@@ -439,10 +449,15 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.301
-          # Caches the NuGet global-packages folder, keyed on the eight
-          # packages.lock.json files. It does not cache the SDK install above
-          # it - nothing in this action does, and that step is the larger cost.
+          # Caches the NuGet global-packages folder. It does not cache the SDK
+          # install above it - nothing in this action does, and that step is
+          # the larger cost.
+          #
+          # cache-dependency-path is required, not optional: there is no
+          # packages.lock.json at the repository root, and without this the
+          # action fails during setup rather than falling back to a search.
           cache: true
+          cache-dependency-path: "**/packages.lock.json"
       - name: RuntimeConfig unit test
         shell: pwsh
         run: pwsh -File ./scripts/tests/test-runtimeconfig-framework.ps1
