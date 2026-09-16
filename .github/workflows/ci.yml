@@ -93,6 +93,10 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.301
+          # Caches the NuGet global-packages folder, keyed on the eight
+          # packages.lock.json files. It does not cache the SDK install above
+          # it - nothing in this action does, and that step is the larger cost.
+          cache: true
       - name: required-desktop-MUI guard unit test
         shell: pwsh
         run: pwsh -File ./scripts/tests/test-required-mui-guard.ps1
@@ -363,6 +367,10 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.301
+          # Caches the NuGet global-packages folder, keyed on the eight
+          # packages.lock.json files. It does not cache the SDK install above
+          # it - nothing in this action does, and that step is the larger cost.
+          cache: true
       - name: Phase 10 App artifact evidence (ARM64 Full)
         shell: pwsh
         run: |
@@ -431,6 +439,10 @@ jobs:
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.301
+          # Caches the NuGet global-packages folder, keyed on the eight
+          # packages.lock.json files. It does not cache the SDK install above
+          # it - nothing in this action does, and that step is the larger cost.
+          cache: true
       - name: RuntimeConfig unit test
         shell: pwsh
         run: pwsh -File ./scripts/tests/test-runtimeconfig-framework.ps1
