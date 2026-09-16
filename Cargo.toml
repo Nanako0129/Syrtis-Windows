@@ -14,3 +14,22 @@ strip = "debuginfo"
 # inside one report degrades that one card to an error and leaves the rest of
 # the app running. Unwinding also keeps the Mutex poison-recovery in lib.rs /
 # agent_usage.rs meaningful (a Mutex is only poisoned on unwind).
+
+# CI-only profile for the test binaries. Inherits release, so tests still run
+# against optimised code with the same overflow-check and debug-assertion
+# settings the shipping build uses - deliberately not the dev profile, which
+# would change what the tests are testing.
+#
+# lto = false is the point, and the size of it was measured locally on a quiet
+# machine with both profiles' dependency trees already warm:
+#
+#   release  test binaries  226.00 s
+#   ci-test  test binaries    7.95 s   (+ 33.84 s one-time for its dep tree)
+#
+# The shipping cdylib is built with --release and is untouched: hashing
+# target/release/libtb_core_ffi.dylib before and after adding this profile
+# gives 918d8371... both times, and the rebuild finishes in 0.17 s with zero
+# recompilation.
+[profile.ci-test]
+inherits = "release"
+lto = false

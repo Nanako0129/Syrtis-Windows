@@ -89,7 +89,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.96.1
+      # Explicit key so adding [profile.ci-test] produces a new cache rather
+      # than restoring one that predates it. rust-cache derives its default key
+      # from the lockfile and toolchain; a new profile changes neither, so the
+      # old release-only tree would be restored and no new cache saved - every
+      # run paying a cold dependency tree for ci-test, permanently.
+      #
+      # THIS IS THE HYPOTHESIS UNDER TEST, not a settled fact. It is the only
+      # difference between this attempt and the one measured at 1106 s cold /
+      # 801 s on #103's earlier head. Bump the suffix to force a fresh cache.
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: build-ci-test-v1
       - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 10.0.301
@@ -127,18 +138,15 @@ jobs:
         run: cargo build --release --locked --target x86_64-pc-windows-msvc
       - name: build native DLL (x64 via shared mapping)
         run: dotnet msbuild src/TokenBar.Smoke/TokenBar.Smoke.csproj -t:BuildTbNative -p:Configuration=Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64 -p:TbNativeCargoLocked=true -p:RestoreLockedMode=true
-      # cargo test carried no --target, so it built into target/release/ while
-      # every other step in this job uses target/x86_64-pc-windows-msvc/release/
-      # - the same triple the runner already is, compiled twice because the
-      # directories differ. Passing --target makes the two share one tree.
+      # --target keeps this in the same triple root as every other step. The
+      # saving is lto = false: locally, with both dependency trees warm, the
+      # test binaries take 226 s under release and 7.95 s under ci-test.
       #
-      # A non-LTO [profile.ci-test] was tried first and measured slower: a
-      # separate profile means a separate dependency tree, and building one
-      # cost more than the ten fat-LTO test links it saved. 588 s before,
-      # 1106 s cold, 801 s with that profile's tree cached. Recorded so the
-      # idea is not retried on the strength of the estimate that produced it.
+      # A separate profile does mean a separate dependency tree, so this needs
+      # rust-cache to carry both. That is what the explicit cache key below is
+      # for - see the comment there.
       - name: cargo test (workspace, locked)
-        run: cargo test --workspace --release --locked --target x86_64-pc-windows-msvc
+        run: cargo test --workspace --profile ci-test --locked --target x86_64-pc-windows-msvc
       - name: build Core.Tests (x64)
         run: dotnet build src/TokenBar.Core.Tests/TokenBar.Core.Tests.csproj -c Release -p:Platform=x64 --no-restore
       - name: test Core.Tests (x64)
