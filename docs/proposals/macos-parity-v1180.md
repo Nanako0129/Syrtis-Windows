@@ -170,10 +170,19 @@ Windows 有**兩個**入口，兩個都吃 `providerId`、都收斂到同一個
 
 ```bash
 grep -rn "WindowEquivalence.Aggregate\|WindowEquivalence.LiveRow" src/ --include=*.cs | grep -v "Tests/"
-#   QuotaEquivalenceFold.cs:194   Aggregate(declared, …)  ← DeclaredCore(:193)
-#   WindowHistoryText.cs:347      Aggregate(declared, …)  ← 參數，唯一呼叫點 QuotaLensProjection.cs:399 → Declared
-#   WindowCardText.cs:369         LiveRow(declared, …)    ← 參數，唯一呼叫點 QuotaLensProjection.cs:269 → DeclaredSpan
 ```
+
+三個呼叫點，每個的 `declared` 都往回追到 `QuotaEquivalenceFold`：
+
+| 檔案 | 呼叫 | `declared` 從哪來 |
+|---|---|---|
+| `QuotaEquivalenceFold.cs` | `Aggregate` | 同檔上一行的 `DeclaredCore` |
+| `WindowHistoryText.cs` | `Aggregate`（在 `Equivalence` 裡） | 參數；唯一呼叫點是 `QuotaLensProjection` 的 `BuildHistory` → `Declared` |
+| `WindowCardText.cs` | `LiveRow`（在 `LiveEquivalence` 裡） | 參數；唯一呼叫點是 `QuotaLensProjection` 的 `BuildClient` → `DeclaredSpan` |
+
+> 這裡刻意只寫檔名與符號、不寫行號。這三個檔正在被 PR #112 改動，
+> 釘住的行號隔天就對不上，而一個會說謊的查證步驟比沒有查證更糟。
+> 上面那道 grep 每次都會給出當下的行號。
 
 反向再查一次「有沒有人從 record 數量算 bool」：
 `grep -rn "Records\.\(Count\|Any\)\|records\.\(Count\|Any\)" src/ --include=*.cs | grep -v "Tests/"`
