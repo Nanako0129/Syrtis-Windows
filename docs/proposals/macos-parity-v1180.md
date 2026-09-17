@@ -16,8 +16,17 @@
 
 **兩邊 pin 的是同一個 commit。**
 
+> 下面每個讀 macOS 的指令都用 `$NATIVE` 指向
+> [`Nanako0129/TokenBar`](https://github.com/Nanako0129/TokenBar) 的一份 clone。
+> 沒有的話現開一份就好，這些指令全是唯讀的：
+>
+> ```bash
+> NATIVE=$(mktemp -d)/TokenBar
+> git clone --filter=blob:none https://github.com/Nanako0129/TokenBar.git "$NATIVE"
+> ```
+
 ```bash
-git -C ~/side-project/TokenBar-Native ls-tree v1.18.0 vendor/tokscale-core
+git -C "$NATIVE" ls-tree v1.18.0 vendor/tokscale-core
 #   → 160000 commit d6512f5ae62c…  vendor/tokscale-core
 git submodule status vendor/tokscale-core
 #   →  d6512f5ae62c… vendor/tokscale-core
@@ -146,13 +155,13 @@ Windows 在 `src/TokenBar.Core/WindowEquivalence.cs`、`QuotaEquivalenceFold.cs`
 ## 查證指令
 
 ```bash
-# 基準是否還成立
-git -C ~/side-project/TokenBar-Native fetch origin
-git -C ~/side-project/TokenBar-Native log --oneline -1 origin/main   # 應為 52fdd53a
-git -C ~/side-project/TokenBar-Native rev-list --count 5b894b63..origin/main
+# 基準是否還成立（$NATIVE 見上面「最關鍵的發現」一節的 clone 指令）
+git -C "$NATIVE" fetch origin
+git -C "$NATIVE" log --oneline -1 origin/main   # 應為 52fdd53a
+git -C "$NATIVE" rev-list --count 5b894b63..origin/main
 
 # 引擎是否仍對齊
-git -C ~/side-project/TokenBar-Native ls-tree origin/main vendor/tokscale-core
+git -C "$NATIVE" ls-tree origin/main vendor/tokscale-core
 git submodule status vendor/tokscale-core
 
 # 落差

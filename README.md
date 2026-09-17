@@ -85,7 +85,7 @@ before you go looking for a missing card:
 | Layer | Path | Notes |
 |---|---|---|
 | Rust core | `crates/tb_core_ffi` + `vendor/tokscale-core` | Public shared engine pinned as a Git submodule; consumer provenance is recorded in `vendor/ENGINE.md`. C ABI, JSON envelope, built as `cdylib` for P/Invoke |
-| C ABI contract | `include/ctb.h` | 15 entry points, `{"ok":true,"data":…}` / `{"ok":false,"err":…}` |
+| C ABI contract | `include/ctb.h` | 15 entry points, `{"ok":true,"data":…}` / `{"ok":false,"err":…}` — except `tb_probe`, which keeps its Phase 0 `{"ok":true,"messages":N}` shape |
 | Interop | `src/TokenBar.Interop` | `net10.0`, platform-neutral — P/Invoke facade + envelope decode |
 | Logic | `src/TokenBar.Core` | `net10.0`, platform-neutral — C# port of the macOS `TokenBarCore` |
 | Shell | `src/TokenBar.App` | WinUI 3, unpackaged. Windows-only build (not in the slnx): `dotnet build src/TokenBar.App/TokenBar.App.csproj -c Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64` |
