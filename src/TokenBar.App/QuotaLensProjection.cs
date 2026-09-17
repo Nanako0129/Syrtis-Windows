@@ -369,6 +369,22 @@ public static class QuotaLensProjection
                 row.Cycle.RisingRuns))],
             shownCount);
 
+        // The SHOWN cycles, not every admitted one. `Aggregate` reads
+        // `declared` as an OR over the very cycles it is folding (its own doc
+        // comment says so), and this card pools the ≈ line over the rows on
+        // screen — so a `declared` taken over hidden cycles is a vote cast by
+        // evidence the reader cannot see. Concretely: with classification only
+        // in a hidden cycle, `!declared` is false, `Aggregate` skips its
+        // `Undeclared` branch, and rows with movement but nothing attributed
+        // report "the quota moved and none of it was recorded on this machine"
+        // — a data failure — when the truth is that this user has not
+        // classified what the visible rows hold.
+        //
+        // The misalignment predates the grow control (12 shown against up to
+        // ConsideredCycles folded); making the shown count variable is what
+        // turned it from a fixed skew into one the reader can move.
+        IReadOnlyList<QuotaCycle> shownCycles = [.. cycles.Take(displayRows.Count)];
+
         // Gated on the fetch's own outcome, not on whether QuotaHistory
         // itself landed: `declared` is computed from `messages`, which come
         // from the separate WindowUsage fetch. History can be ready while
@@ -380,7 +396,7 @@ public static class QuotaLensProjection
         {
             WindowEquivalence.FetchOutcome.Succeeded => WindowHistoryText.Equivalence(
                 [.. displayRows.Select(row => byResetAt[row.ResetAtMs])],
-                declared: QuotaEquivalenceFold.Declared(cycles, owner, messages, confirmed.Records)),
+                declared: QuotaEquivalenceFold.Declared(shownCycles, owner, messages, confirmed.Records)),
             WindowEquivalence.FetchOutcome.Failed => new WindowEquivalence.Row.ScanFailed(),
             _ => new WindowEquivalence.Row.Loading(),
         };

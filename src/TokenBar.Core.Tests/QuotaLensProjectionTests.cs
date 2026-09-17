@@ -93,6 +93,36 @@ public class QuotaLensProjectionTests
             [.. Enumerable.Range(1, cycles).Select(i =>
                 Sample(40, (i * 2 * FiveHours * 1_000) - 1_000, i * 2 * FiveHours * 1_000, active: false))]);
 
+    /// <summary>
+    /// Like <see cref="ManyCycleSeries"/> but each cycle carries TWO samples
+    /// that rise, so it has a non-empty <c>(first, last]</c> span and a real
+    /// <c>DeltaPercent</c>. A one-sample cycle is degenerate — first == last,
+    /// delta and observed fraction both exactly zero — which
+    /// <c>WindowEquivalence.Aggregate</c> treats as "no reliable evidence" and
+    /// short-circuits before it ever consults <c>declared</c>. Reaching that
+    /// flag's branch at all requires cycles shaped like these.
+    /// </summary>
+    private static QuotaHistorySeries RisingCycleSeries(
+        string providerId, string scope, string windowKey, int cycles) =>
+        Series(
+            providerId, scope, windowKey,
+            [.. Enumerable.Range(1, cycles).SelectMany(i =>
+            {
+                var resetAt = i * 2 * FiveHours;
+                return new[]
+                {
+                    Sample(10, resetAt - FiveHours, resetAt, active: false),
+                    Sample(70, resetAt - 60, resetAt, active: false),
+                };
+            })]);
+
+    /// <summary>A millisecond inside cycle <paramref name="index"/>'s sample
+    /// span, as <see cref="RisingCycleSeries"/> lays it out. Cycles are
+    /// 1-based and ascend in time, so index 1 is the OLDEST — the one the
+    /// history card hides first.</summary>
+    private static long InCycleSpanMs(int index) =>
+        (((index * 2 * FiveHours) - FiveHours) + 60) * 1_000;
+
     // ---- finding 1: one reading of the fetch outcome, not three -----------
 
     // Round 7's first finding: the overview path used to gate its equivalence
@@ -413,6 +443,76 @@ public class QuotaLensProjectionTests
         Assert.Equal(WindowHistoryText.VisibleRows, history.DisplayRows.Count);
         Assert.Equal(history.Cycles.Count - history.DisplayRows.Count, history.Remaining);
         Assert.True(history.Remaining > 0);
+    }
+
+    // The ≈ line is pooled over the rows ON SCREEN, so the `declared` flag it
+    // is folded with has to be asked of those same rows. Taking it over every
+    // admitted cycle lets evidence the reader cannot see cast the vote: with
+    // classification only in a hidden cycle, `!declared` is false, Aggregate
+    // skips its Undeclared branch, and visible rows carrying movement but
+    // nothing attributed report "the quota moved and none of it was recorded
+    // on this machine" — a data failure — when the truth is that this user has
+    // not classified what those rows hold.
+    //
+    // The skew predates the grow control (12 shown against up to
+    // ConsideredCycles folded); making the shown count variable is what turned
+    // it from a fixed offset into one a reader can move.
+    [Fact]
+    public void TheDeclaredFlagIsAskedOfTheShownCyclesNotTheHiddenOnes()
+    {
+        // One more cycle than the card opens with, so exactly one is hidden —
+        // and it is the oldest, which is index 1 here.
+        var series = RisingCycleSeries("codex", "primary", "weekly.v1", WindowHistoryText.VisibleRows + 1);
+        var quota = Quota("codex", Window("codex|weekly.v1", "Weekly", "weekly.v1"));
+        // The only classified usage sits in that hidden cycle.
+        var messages = new[] { Message(InCycleSpanMs(1), "codex", "openai", 5_000, 2.0) };
+        var confirmed = Confirmed(
+            new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex")));
+
+        var model = QuotaLensProjection.Build(
+            [series], quota, EmptyGraph(), new WindowUsage(messages, 0, 0),
+            WindowEquivalence.FetchOutcome.Succeeded,
+            quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            confirmed, year: null,
+            new QuotaLensProjection.Selection("codex", string.Empty));
+
+        var history = model.Client!.History;
+        // The fixture is only meaningful if the cycle holding the evidence is
+        // genuinely off screen.
+        Assert.Equal(WindowHistoryText.VisibleRows, history.DisplayRows.Count);
+        Assert.True(history.Cycles.Count > history.DisplayRows.Count);
+        Assert.DoesNotContain(
+            history.DisplayRows, row => row.ResetAtMs == history.Cycles[^1].ResetAtMs);
+
+        Assert.IsType<WindowEquivalence.Row.Undeclared>(history.Equivalence);
+    }
+
+    // The mirror: once the classified cycle is on screen, the same flag reads
+    // true and the line stops saying "classify your usage". Without this the
+    // test above would also pass on a `declared` hardwired to false.
+    [Fact]
+    public void TheDeclaredFlagReadsTrueOnceTheClassifiedCycleIsShown()
+    {
+        var series = RisingCycleSeries("codex", "primary", "weekly.v1", WindowHistoryText.VisibleRows + 1);
+        var quota = Quota("codex", Window("codex|weekly.v1", "Weekly", "weekly.v1"));
+        var messages = new[] { Message(InCycleSpanMs(1), "codex", "openai", 5_000, 2.0) };
+        var confirmed = Confirmed(
+            new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex")));
+
+        var model = QuotaLensProjection.Build(
+            [series], quota, EmptyGraph(), new WindowUsage(messages, 0, 0),
+            WindowEquivalence.FetchOutcome.Succeeded,
+            quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            confirmed, year: null,
+            // One press: the hidden cycle joins the list.
+            new QuotaLensProjection.Selection(
+                "codex", string.Empty,
+                HistoryShownWindow: "codex|primary|weekly.v1",
+                HistoryShownCount: WindowHistoryText.VisibleRows * 2));
+
+        var history = model.Client!.History;
+        Assert.Equal(history.Cycles.Count, history.DisplayRows.Count);
+        Assert.IsNotType<WindowEquivalence.Row.Undeclared>(history.Equivalence);
     }
 
     // Site 5: the undated note's own raw part, threaded through rather than
