@@ -152,9 +152,18 @@ macOS 的缺陷是把 `declared` 算成 `!records.isEmpty`——那是在問**�
 **這個訂閱**，所以宣告了任何一個 client 就等於替其他每一個都回答了。三個計算點
 都這樣寫。修法是新增 `UsageAttribution.declares(subscription:records:)`。
 
-Windows 只有**一個** call site（`QuotaLensProjection.cs:337`），走
-`QuotaEquivalenceFold.Declared(cycles, owner, messages, records)`，全 repo 沒有
-任何一處用表的空與非空來算。而且它比 macOS 的修法更窄兩層：
+Windows 有**兩個**入口，兩個都吃 `providerId`、都收斂到同一個
+`DeclaredSpanCore`：
+
+| 入口 | 呼叫點 | 給誰用 |
+|---|---|---|
+| `QuotaEquivalenceFold.Declared` | `QuotaLensProjection.cs:337` | 歷史卡（一串已完成週期） |
+| `QuotaEquivalenceFold.DeclaredSpan` | `QuotaLensProjection.cs:269` | 即時窗卡（一個進行中週期的取樣跨距） |
+
+`Declared` 只是對每個週期跑一次 `DeclaredSpanCore` 的 OR，所以兩條路問的是
+同一個問題。**全 repo 沒有任何一處用表的空與非空來算**（查證：
+`grep -rn "QuotaEquivalenceFold.Declared" src/ --include=*.cs`）。而且判定
+比 macOS 的修法更窄兩層：
 
 | | macOS `declares` | Windows `DeclaredSpanCore` |
 |---|---|---|
