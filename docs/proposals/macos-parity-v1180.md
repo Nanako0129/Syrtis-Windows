@@ -99,7 +99,7 @@ codex / claude / antigravity / copilot / grok。v1.18 新增的三個都缺：
 | 能力 | macOS | Windows 現況 |
 |---|---|---|
 | 時間窗歷史超過 12 列 | v1.18 #334：`Show N more`，每次 +12，上限 32（引擎 fold 的盡頭） | **進行中**（PR #112，沿用本 app 自己的「顯示更多（還有 N 筆）」控制項） |
-| 「從未記錄」旗標依訂閱判定 | v1.18 #322：把「本機沒記錄」與「有記錄但未分類」拆開，原本三處各自算錯 | **無落差**。Windows 從來沒有這個缺陷，且判定比 macOS 窄兩層——見下方「已核對完畢」 |
+| 「從未記錄」旗標依訂閱判定 | v1.18 #322：把「本機沒記錄」與「有記錄但未分類」拆開，原本三處各自算錯 | **無落差**。Windows 從來沒有這個缺陷；判定與 macOS 不同而非更嚴——見下方「已核對完畢」 |
 | 長模型名撐破卡片 | v1.18 #336：改成依所在列量測，讓單行截斷發揮作用 | 未核對（WinUI 版面模型不同，可能不適用） |
 
 ### F. 多帳號與掃描根目錄
@@ -144,7 +144,7 @@ Windows 在 `src/TokenBar.Core/WindowEquivalence.cs`、`QuotaEquivalenceFold.cs`
 
 ## 已核對完畢（2026-09-18）
 
-兩個正確性疑點都查完了，**兩題都是 Windows 已經有了**，而且其中一題比 macOS 嚴格。
+兩個正確性疑點都查完了，**兩題都是 Windows 已經有了**。
 
 ### #322 的「從未記錄」旗標：Windows 從來沒有這個缺陷
 
@@ -162,13 +162,13 @@ Windows 有**兩個**入口，兩個都吃 `providerId`、都收斂到同一個
 
 `Declared` 只是對每個週期跑一次 `DeclaredSpanCore` 的 OR，所以兩條路問的是
 同一個問題。**全 repo 沒有任何一處用表的空與非空來算**（查證：
-`grep -rn "QuotaEquivalenceFold.Declared" src/ --include=*.cs`）。而且判定
-比 macOS 的修法更窄兩層：
+`grep -rn "QuotaEquivalenceFold.Declared" src/ --include=*.cs`）。判定本身
+**不是「更嚴」而是「不同」**——範圍更窄，但認的狀態更多：
 
-| | macOS `declares` | Windows `DeclaredSpanCore` |
-|---|---|---|
-| 範圍 | 整張表 | 該週期的取樣跨距內 |
-| 判定 | `.assigned(subscription)` | `.assigned(providerId)`（`:281`）**或** `.excluded`（`:276`） |
+| | macOS `declares` | Windows `DeclaredSpanCore` | 哪邊寬 |
+|---|---|---|---|
+| 範圍 | 整張表 | 該週期的取樣跨距內 | ← macOS 這邊寬 |
+| 認的狀態 | 只認 `.assigned(subscription)` | `.assigned(providerId)`（`:281`）**或** `.excluded`（`:276`） | ← Windows 這邊寬 |
 
 Windows 的 `Declared` 註解記著它自己走過一輪更嚴的修正（round 11 的 P2）：
 「assigned 到別的訂閱」曾經也算數，但 session 窗和 weekly 窗在時間上重疊，
