@@ -14,3 +14,18 @@ strip = "debuginfo"
 # inside one report degrades that one card to an error and leaves the rest of
 # the app running. Unwinding also keeps the Mutex poison-recovery in lib.rs /
 # agent_usage.rs meaningful (a Mutex is only poisoned on unwind).
+
+# CI-only profile for workspace tests. Inherits release so overflow-checks
+# and debug-assertions stay where the shipping build has them — not the
+# dev profile, which would change what the tests are testing. The shipping
+# cdylib is still built with --release (lto = true) in the build job.
+#
+# lto = false is the point. P2 (#103) tried this inside `build` and closed
+# it: step times across VMs that differ 1.7–2.1× could not show an effect.
+# After #109/#110 the wall is one rustc, measured in the cargo-timings
+# artifact of run 35238681054: tokscale-core's lib unit-test binary, 744 s
+# of an 883 s compile / 1076 s job. That unit is the LTO hypothesis now,
+# and the same artifact on this profile is the measurement.
+[profile.ci-test]
+inherits = "release"
+lto = false
