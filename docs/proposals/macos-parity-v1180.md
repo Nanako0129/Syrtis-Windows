@@ -98,8 +98,8 @@ codex / claude / antigravity / copilot / grok。v1.18 新增的三個都缺：
 
 | 能力 | macOS | Windows 現況 |
 |---|---|---|
-| 時間窗歷史超過 12 列 | v1.18 #334：`Show N more`，每次 +12，上限 32（引擎 fold 的盡頭） | 缺。無分頁機制 |
-| 「從未記錄」旗標依訂閱判定 | v1.18 #322：把「本機沒記錄」與「有記錄但未分類」拆開，原本三處各自算錯 | **未判定**。`DashboardView.Quota.cs:56` 有相關語義的註解，但 Windows 是否踩同一個坑要開檔核對三個計算點 |
+| 時間窗歷史超過 12 列 | v1.18 #334：`Show N more`，每次 +12，上限 32（引擎 fold 的盡頭） | **進行中**（PR #112，沿用本 app 自己的「顯示更多（還有 N 筆）」控制項） |
+| 「從未記錄」旗標依訂閱判定 | v1.18 #322：把「本機沒記錄」與「有記錄但未分類」拆開，原本三處各自算錯 | **無落差**。Windows 從來沒有這個缺陷，且判定比 macOS 窄兩層——見下方「已核對完畢」 |
 | 長模型名撐破卡片 | v1.18 #336：改成依所在列量測，讓單行截斷發揮作用 | 未核對（WinUI 版面模型不同，可能不適用） |
 
 ### F. 多帳號與掃描根目錄
@@ -124,8 +124,7 @@ codex / claude / antigravity / copilot / grok。v1.18 新增的三個都缺：
 v1.15 #260（等價行的除數改成「讀數實際走過的距離」）與 admission 門檻、
 rising runs 的處理：macOS 在 `TokenBarCore/WindowEquivalence.swift`，
 Windows 在 `src/TokenBar.Core/WindowEquivalence.cs`、`QuotaEquivalenceFold.cs`。
-**未逐行對照**——Windows 這兩個檔是在 v1.15 之後寫的，可能已含正確語義，
-也可能是獨立實作。動這條之前先對讀兩邊。
+**無落差**——已逐行對照，Windows 兩個檔都已是修正後的語義。見下方「已核對完畢」。
 
 ## 切片順序建議
 
@@ -143,12 +142,46 @@ Windows 在 `src/TokenBar.Core/WindowEquivalence.cs`、`QuotaEquivalenceFold.cs`
 
 先做的四片都是純 UI 或純設定，不碰 FFI、不碰憑證、不碰引擎 pin。
 
+## 已核對完畢（2026-09-18）
+
+兩個正確性疑點都查完了，**兩題都是 Windows 已經有了**，而且其中一題比 macOS 嚴格。
+
+### #322 的「從未記錄」旗標：Windows 從來沒有這個缺陷
+
+macOS 的缺陷是把 `declared` 算成 `!records.isEmpty`——那是在問**表**，不是在問
+**這個訂閱**，所以宣告了任何一個 client 就等於替其他每一個都回答了。三個計算點
+都這樣寫。修法是新增 `UsageAttribution.declares(subscription:records:)`。
+
+Windows 只有**一個** call site（`QuotaLensProjection.cs:337`），走
+`QuotaEquivalenceFold.Declared(cycles, owner, messages, records)`，全 repo 沒有
+任何一處用表的空與非空來算。而且它比 macOS 的修法更窄兩層：
+
+| | macOS `declares` | Windows `DeclaredSpanCore` |
+|---|---|---|
+| 範圍 | 整張表 | 該週期的取樣跨距內 |
+| 判定 | `.assigned(subscription)` | `.assigned(providerId)`（`:281`）**或** `.excluded`（`:276`） |
+
+Windows 的 `Declared` 註解記著它自己走過一輪更嚴的修正（round 11 的 P2）：
+「assigned 到別的訂閱」曾經也算數，但 session 窗和 weekly 窗在時間上重疊，
+共用跨距裡一則指給**另一個**訂閱的訊息會讓這一個讀成 declared。
+
+**一處真實分歧**：`.excluded` 在 Windows 算 declared，在 macOS 明確不算
+（「排除是一種分類，但它不把任何東西導向這裡」）。兩邊的理由都成立，但因為
+Windows 是按跨距判定的，它看得到「這段跨距裡的訊息被使用者排除了」——那個零
+是有交代的；macOS 的表層判定看不到這件事。**這題該進 macOS 的待辦，不是 Windows 的。**
+
+### v1.15 #260 的除數：Windows 已經是修正後的語義
+
+`src/TokenBar.Core/WindowEquivalence.cs:445` 的註解就寫著
+「The distance the readings travelled, not `last - first`」，並在 `:466` 取
+`QuotaHistoryFold.RisingRuns(readings)`。#260 的後半（誤差改成每次上升一個
+量化步，而非整段位移一個步）也在：`:656` 是
+`QuantisationHalfStep * cycles.Sum(cycle => cycle.RisingRuns) / anyMovement`。
+
 ## 待核對（本次沒查、不要當成「沒落差」）
 
-- E 的「從未記錄」旗標語義（#322）——要開三個計算點對讀
 - C 的執行期字串是否也在 Windows 漏掉翻譯
 - D 的 Models 清單 hover tooltip
-- H 的 `WindowEquivalence` 兩邊逐行對照
 - v1.15–v1.18 的 240 個 commit 中，只讀了 release notes 與 commit subject；
   沒有進 release notes 的內部重構不在本清單內
 
