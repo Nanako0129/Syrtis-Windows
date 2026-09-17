@@ -301,6 +301,12 @@ public class WindowHistoryTextTests
         [
             WindowHistoryText.Title,
             () => WindowHistoryText.Subtitle(rows),
+            // The grow control. Its key is shared with the Hourly lens's
+            // timeline, so it is already in the table — which is exactly why
+            // it has to be listed here: a surface that passes for a reason
+            // outside this card is one a change to that other card can break
+            // without this card's own test noticing.
+            () => WindowHistoryText.ShowMore(1),
             () => WindowHistoryText.EmptyBody(WindowHistoryState.Loading),
             () => WindowHistoryText.EmptyBody(WindowHistoryState.NoHistory),
             () => WindowHistoryText.EmptyBody(WindowHistoryState.Failed),
