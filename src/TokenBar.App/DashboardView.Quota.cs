@@ -830,11 +830,10 @@ public sealed partial class DashboardView
             // exactly when the stored preference names a window this client
             // does not offer, and the count must follow the rows.
             var window = history.ShownWindow;
-            // From what is DRAWN, not from the stored count: after a window
-            // loses cycles the stored count can exceed its history, and adding
-            // the step to that would need several presses to have any visible
-            // effect.
-            var grown = rows.Count + WindowHistoryText.VisibleRows;
+            // From what is DRAWN, not from the stored count — see
+            // WindowHistoryText.Grown, which holds that decision because this
+            // file is WinUI and no test project compiles it.
+            var grown = WindowHistoryText.Grown(rows.Count);
             more.Click += (_, _) =>
             {
                 _historyShownWindow = window;

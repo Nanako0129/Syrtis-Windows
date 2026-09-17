@@ -154,6 +154,37 @@ public class WindowHistoryTextTests
     public void TheRemainderIsWhatIsNotOnScreen(int total, int shown, int expected) =>
         Assert.Equal(expected, WindowHistoryText.Remaining(total, shown));
 
+    // What one press produces. The non-obvious half is which number it steps
+    // from: a window that lost cycles leaves the stored count above what Rows
+    // clamps to, and stepping from the stored value would take several presses
+    // to move one row. Held here because the click handler lives in a WinUI
+    // file no test project compiles.
+    [Fact]
+    public void OnePressStepsFromWhatIsDrawnNotFromWhatWasStored()
+    {
+        var (cycles, spans) = Series(3);
+        // The stored count a shrunken window can arrive carrying.
+        var drawn = WindowHistoryText.Rows(cycles, spans, shownCount: 36);
+
+        Assert.Equal(3, drawn.Count);
+        Assert.Equal(3 + WindowHistoryText.VisibleRows, WindowHistoryText.Grown(drawn.Count));
+        // Stepping from the stored 36 would have produced 48 — four presses
+        // before the list could grow by a single row.
+        Assert.True(WindowHistoryText.Grown(drawn.Count) < 36);
+    }
+
+    // The ordinary case, so the test above is not the only statement of it.
+    [Fact]
+    public void OnePressAddsExactlyTheOpeningCount()
+    {
+        var (cycles, spans) = Series(QuotaHistoryFold.ConsideredCycles);
+        var drawn = WindowHistoryText.Rows(cycles, spans);
+
+        var next = WindowHistoryText.Grown(drawn.Count);
+        Assert.Equal(WindowHistoryText.VisibleRows * 2, next);
+        Assert.Equal(next, WindowHistoryText.Rows(cycles, spans, next).Count);
+    }
+
     // The subtitle counts what the reader can see, so it moves with the list.
     [Fact]
     public void TheSubtitleFollowsTheGrownCount()

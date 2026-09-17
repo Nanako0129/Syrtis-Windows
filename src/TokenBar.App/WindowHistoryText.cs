@@ -96,6 +96,21 @@ public static class WindowHistoryText
     /// </summary>
     public static int Remaining(int total, int shown) => Math.Max(0, total - shown);
 
+    /// <summary>
+    /// The count one press produces, from the number of rows currently DRAWN.
+    /// <para>
+    /// Taking the drawn count rather than the stored one is the whole content
+    /// of this function, and it is not interchangeable: after a window loses
+    /// cycles, <see cref="Rows"/> clamps and the stored count stays above what
+    /// is on screen, so stepping from the stored value would take several
+    /// presses to move a single row. Stated here rather than inline in the
+    /// click handler because <c>DashboardView.Quota.cs</c> is WinUI and no test
+    /// project compiles it — the arithmetic is the part a test can hold, and
+    /// what is left in the handler is wiring.
+    /// </para>
+    /// </summary>
+    public static int Grown(int drawnCount) => drawnCount + VisibleRows;
+
     /// <summary>Below this the cycle was barely witnessed and its consumption
     /// figure is not evidence about the window — the app simply was not running
     /// for most of it.</summary>
