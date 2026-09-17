@@ -350,6 +350,16 @@ jobs:
   # other target filters. The same timings report compiled the tokscale-core
   # doctest unit in 0.0 s (0 tests).
   #
+  # Run 35238681054 (PR #110, --tests, still a full dirty tree) moved that
+  # rustc from 925 s to 744 s and the job from 1193 s to 1074 s. The wall
+  # is still that one unit. --profile ci-test (lto = false, inherits
+  # release) is P2 reopened against it: #103 could not see an effect in
+  # whole-step times across VMs; the cargo-timings unit duration is the
+  # measurement this time. --target is not revived — cargo-test and build
+  # do not share a disk. A new rust-cache key is required because the
+  # profile changes neither the lockfile nor the toolchain, so the default
+  # key would restore the release tree forever.
+  #
   # An explicit rust-cache key follows arm64-cross and the matrix legs: two
   # Windows jobs caching different target trees must not write to one entry.
   cargo-test:
@@ -363,9 +373,9 @@ jobs:
           toolchain: 1.96.1
       - uses: Swatinem/rust-cache@v2
         with:
-          key: cargo-test
+          key: cargo-test-ci-test
       - name: cargo test (workspace, locked)
-        run: cargo test --workspace --release --locked --tests --timings
+        run: cargo test --workspace --profile ci-test --locked --tests --timings
       - uses: actions/upload-artifact@v4
         with:
           name: cargo-timings
