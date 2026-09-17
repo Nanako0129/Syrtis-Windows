@@ -316,7 +316,8 @@ jobs:
           path: out/smoke-win-x64
           retention-days: 3
 
-  # Moved out of build, unchanged: same command, same flags, same runner OS.
+  # Moved out of build in #109. Same runner OS, same toolchain pin, same
+  # locked workspace test.
   #
   # Measured over five runs (2026-09-15/16, all after #102): the run's wall
   # clock was 1497-1605 s, build was 1482-1594 s, and every other job had
@@ -334,10 +335,20 @@ jobs:
   # it. Projected: build ~524 s, this job ~1072 s (55 s of setup observed in
   # the same step table, plus 1017 s), run ~1082 s.
   #
-  # --timings stays on rather than being a one-off. What those ~963 s of
-  # compilation are spent on is the next question, and a 4 vCPU hosted runner
-  # is the only place that answers it for this workload; leaving it on makes
-  # every run carry its own answer instead of needing a special run to ask.
+  # --timings stays on rather than being a one-off. The artifact from run
+  # 35234922625 (PR #109, cold cache, 1094.6 s) showed the wall was one
+  # rustc: tokscale-core's lib unit-test binary, 925 s, starting at +169 s.
+  # The two tokscale-core examples (turns_probe 170 s, bench_scan 164 s)
+  # overlapped that rustc on a 4 vCPU runner. cargo test compiles examples
+  # by default so they do not bit-rot; they are not a test harness unless
+  # test = true, which neither sets. --tests keeps lib unit tests and
+  # integration tests (test = true) and skips those examples. Whether
+  # freeing the cores shortens the 925 s rustc is a measurement this flag
+  # exists to take; the assertions that run do not change.
+  #
+  # --tests also skips rustdoc doctests, because --doc cannot be mixed with
+  # other target filters. The same timings report compiled the tokscale-core
+  # doctest unit in 0.0 s (0 tests).
   #
   # An explicit rust-cache key follows arm64-cross and the matrix legs: two
   # Windows jobs caching different target trees must not write to one entry.
@@ -354,7 +365,7 @@ jobs:
         with:
           key: cargo-test
       - name: cargo test (workspace, locked)
-        run: cargo test --workspace --release --locked --timings
+        run: cargo test --workspace --release --locked --tests --timings
       - uses: actions/upload-artifact@v4
         with:
           name: cargo-timings
