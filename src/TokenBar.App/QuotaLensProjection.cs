@@ -44,7 +44,27 @@ public static class QuotaLensProjection
     /// <c>_historyExpanded</c>) choose how already-decided data is drawn and
     /// stay entirely on the view's side of this call.
     /// </summary>
-    public readonly record struct Selection(string ActiveClientTab, string WindowCardTab);
+    /// <param name="HistoryShownWindow">Which window
+    /// <paramref name="HistoryShownCount"/> was grown against, as
+    /// <see cref="WindowId"/> formats it, or null before the reader has
+    /// pressed anything. The count is honoured only when this still names the
+    /// window <see cref="BuildHistory"/> resolves, so it cannot survive into a
+    /// different history. The alternative — resetting on the view's side when
+    /// the tab is clicked — answers only one of the two ways the resolved
+    /// window moves: a stored preference belonging to another client leaves
+    /// this one's window alone, and a window vanishing from the payload moves
+    /// it with no click at all.</param>
+    /// <param name="HistoryShownCount">How many history rows the reader has
+    /// grown the card to. Not a display-only toggle despite looking like one:
+    /// it decides which cycles are folded, and the ≈ line and the usage bar's
+    /// scale are both computed over exactly those — which is why it is read
+    /// here and not left on the view's side with
+    /// <c>_historyExpanded</c>.</param>
+    public readonly record struct Selection(
+        string ActiveClientTab,
+        string WindowCardTab,
+        string? HistoryShownWindow = null,
+        int HistoryShownCount = WindowHistoryText.VisibleRows);
 
     /// <summary>Everything the Quota lens's seven sites decided, assembled
     /// once. <see cref="Client"/> is null exactly when <see cref="Selection.ActiveClientTab"/>
@@ -85,12 +105,23 @@ public static class QuotaLensProjection
 
     /// <summary>Site 6 on its own: the window-history card's rows and its
     /// pooled ≈ line.</summary>
+    /// <param name="Remaining">How many admitted cycles are not on screen,
+    /// zero when every one of them is already drawn. Folded here rather than
+    /// recomputed by the view, so the button and the rows beside it cannot
+    /// disagree about how much history is left.</param>
+    /// <param name="ShownWindow">The window <see cref="DisplayRows"/> was
+    /// resolved from, as <see cref="WindowId"/> formats it — what the view
+    /// stores alongside its own count so the next render can tell whether the
+    /// count still belongs to this history. Null when no window resolved, in
+    /// which case there are no rows to grow either.</param>
     public sealed record WindowHistory(
         IReadOnlyList<QuotaCycle> Cycles,
         IReadOnlyList<QuotaHistoryRow> Rows,
         IReadOnlyDictionary<long, QuotaHistoryRow> ByResetAt,
         IReadOnlyList<WindowHistoryRow> DisplayRows,
-        WindowEquivalence.Row Equivalence);
+        WindowEquivalence.Row Equivalence,
+        int Remaining,
+        string? ShownWindow);
 
     /// <summary>
     /// <paramref name="windowUsageOutcome"/> is the ONE fact every EQUIVALENCE
@@ -156,7 +187,8 @@ public static class QuotaLensProjection
             ? null
             : BuildClient(
                 selection.ActiveClientTab, selection.WindowCardTab,
-                history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed);
+                history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed,
+                selection);
         return new Model(overview, trend, pastYearSelected, client);
     }
 
@@ -235,7 +267,8 @@ public static class QuotaLensProjection
         Interop.WindowUsage? windowUsage,
         WindowEquivalence.FetchOutcome windowUsageOutcome,
         WindowEquivalence.FetchOutcome quotaHistoryOutcome,
-        UsageAttribution.Table confirmed)
+        UsageAttribution.Table confirmed,
+        Selection selection)
     {
         // Every subscription-facing lookup below is keyed by the quota OWNER,
         // not the raw client id — antigravity-cli spends the antigravity
@@ -271,7 +304,8 @@ public static class QuotaLensProjection
             liveEquivalence = WindowCardText.LiveEquivalence(clippedSamples, mine, declared, windowUsageOutcome);
         }
 
-        var windowHistory = BuildHistory(history, selected, messages, confirmed, owner, windowUsageOutcome);
+        var windowHistory = BuildHistory(
+            history, selected, messages, confirmed, owner, windowUsageOutcome, selection);
         return new Client(
             owner, tabs, selected, messages, mine, liveEquivalence,
             windowUsage?.UndatedCount ?? 0, windowHistory, quotaHistoryOutcome);
@@ -283,7 +317,8 @@ public static class QuotaLensProjection
         IReadOnlyList<WindowMessage> messages,
         UsageAttribution.Table confirmed,
         string owner,
-        WindowEquivalence.FetchOutcome windowUsageOutcome)
+        WindowEquivalence.FetchOutcome windowUsageOutcome,
+        Selection selection)
     {
         IReadOnlyList<QuotaHistorySeries> series = history ?? [];
         var matched = selected is null
@@ -295,6 +330,16 @@ public static class QuotaLensProjection
         IReadOnlyList<QuotaCycle> cycles = matched is null
             ? []
             : QuotaHistoryFold.Considered(QuotaHistoryFold.Cycles(matched.Samples));
+
+        // The RESOLVED window, not the stored preference: the preference can
+        // name a window this client does not offer, and the window can move
+        // without the preference changing. Keying the grown row count on the
+        // resolution — the same one `cycles` above just went through — is what
+        // stops a count grown on Session from arriving on Weekly.
+        var shownWindow = selected is null ? null : WindowId(selected.Id);
+        var shownCount = shownWindow is not null && shownWindow == selection.HistoryShownWindow
+            ? selection.HistoryShownCount
+            : WindowHistoryText.VisibleRows;
 
         // One join for the whole card, same shape as the view held before
         // this move: sorted once, one contiguous slice per cycle.
@@ -321,7 +366,8 @@ public static class QuotaLensProjection
             cycles,
             [.. rows.Select(row => new WindowEquivalence.Cycle(
                 row.Cycle.UsedPercent, row.MineTokens, row.MineCost, row.Cycle.ObservedFraction,
-                row.Cycle.RisingRuns))]);
+                row.Cycle.RisingRuns))],
+            shownCount);
 
         // Gated on the fetch's own outcome, not on whether QuotaHistory
         // itself landed: `declared` is computed from `messages`, which come
@@ -339,7 +385,12 @@ public static class QuotaLensProjection
             _ => new WindowEquivalence.Row.Loading(),
         };
 
-        return new WindowHistory(cycles, rows, byResetAt, displayRows, equivalence);
+        // Against `cycles`, the admitted list, and `displayRows`, what the
+        // fold actually clamped to — not against `shownCount`, which can be
+        // larger than either after a window loses history.
+        return new WindowHistory(
+            cycles, rows, byResetAt, displayRows, equivalence,
+            WindowHistoryText.Remaining(cycles.Count, displayRows.Count), shownWindow);
     }
 
     /// <summary>The store's own triple, flattened for matching the persisted

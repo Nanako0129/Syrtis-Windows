@@ -83,6 +83,16 @@ public class QuotaLensProjectionTests
     // TwoCycleSeries) so WindowEquivalence.LiveRow can see it as evidence.
     private const long InActiveSpanMs = 5_200_000;
 
+    /// <summary>A completed cycle per sample, spaced far enough apart that
+    /// QuotaHistoryFold cannot fold two into one — enough of them to reach
+    /// past the history card's opening row count.</summary>
+    private static QuotaHistorySeries ManyCycleSeries(
+        string providerId, string scope, string windowKey, int cycles) =>
+        Series(
+            providerId, scope, windowKey,
+            [.. Enumerable.Range(1, cycles).Select(i =>
+                Sample(40, (i * 2 * FiveHours * 1_000) - 1_000, i * 2 * FiveHours * 1_000, active: false))]);
+
     // ---- finding 1: one reading of the fetch outcome, not three -----------
 
     // Round 7's first finding: the overview path used to gate its equivalence
@@ -344,6 +354,65 @@ public class QuotaLensProjectionTests
         Assert.Equal("antigravity", model.Client!.Owner);
         Assert.Equal(2, model.Client.Tabs.Count);
         Assert.Equal("session.v1", model.Client.Selected?.Id.WindowKey);
+    }
+
+    // ---- site 6: growing the history card (parity with macOS #334) ---------
+
+    // The count is honoured only for the window it was grown on. macOS keys
+    // the same state on the RESOLVED window for two reasons, and this covers
+    // the second: a stored preference belonging to another client leaves this
+    // one's window alone, so a reset driven by the click alone would miss it.
+    [Fact]
+    public void AGrownRowCountAppliesOnlyToTheWindowItWasGrownOn()
+    {
+        var weekly = ManyCycleSeries("antigravity", "primary", "weekly.v1", 20);
+        var session = ManyCycleSeries("antigravity", "primary", "session.v1", 20);
+        var quota = Quota(
+            "antigravity",
+            Window("antigravity|weekly.v1", "Weekly", "weekly.v1"),
+            Window("antigravity|session.v1", "Session", "session.v1"));
+
+        QuotaLensProjection.Model Build(string? grownOn) =>
+            QuotaLensProjection.Build(
+                [weekly, session], quota, EmptyGraph(), windowUsage: null,
+                WindowEquivalence.FetchOutcome.NotAttempted,
+                quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+                UsageAttribution.Table.Empty, year: null,
+                new QuotaLensProjection.Selection(
+                    "antigravity-cli", "antigravity|primary|session.v1",
+                    HistoryShownWindow: grownOn, HistoryShownCount: 18));
+
+        // Grown on the window that is actually resolved: the count applies.
+        var onSession = Build("antigravity|primary|session.v1");
+        Assert.Equal("antigravity|primary|session.v1", onSession.Client!.History.ShownWindow);
+        Assert.Equal(18, onSession.Client.History.DisplayRows.Count);
+
+        // Grown on the sibling window: the card opens at its usual count
+        // rather than inheriting a list the reader grew somewhere else.
+        var onWeekly = Build("antigravity|primary|weekly.v1");
+        Assert.Equal(
+            WindowHistoryText.VisibleRows, onWeekly.Client!.History.DisplayRows.Count);
+    }
+
+    // The remainder is folded here, not in the view, so the control and the
+    // rows beside it cannot disagree about how much history is left.
+    [Fact]
+    public void TheRemainderCountsTheAdmittedCyclesNotYetDrawn()
+    {
+        var series = ManyCycleSeries("codex", "primary", "weekly.v1", 20);
+        var quota = Quota("codex", Window("codex|weekly.v1", "Weekly", "weekly.v1"));
+
+        var model = QuotaLensProjection.Build(
+            [series], quota, EmptyGraph(), windowUsage: null,
+            WindowEquivalence.FetchOutcome.NotAttempted,
+            quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            UsageAttribution.Table.Empty, year: null,
+            new QuotaLensProjection.Selection("codex", string.Empty));
+
+        var history = model.Client!.History;
+        Assert.Equal(WindowHistoryText.VisibleRows, history.DisplayRows.Count);
+        Assert.Equal(history.Cycles.Count - history.DisplayRows.Count, history.Remaining);
+        Assert.True(history.Remaining > 0);
     }
 
     // Site 5: the undated note's own raw part, threaded through rather than

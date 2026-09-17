@@ -101,6 +101,98 @@ public class WindowHistoryTextTests
     public void TheVisibleCapFitsInsideTheConsideredCap() =>
         Assert.True(WindowHistoryText.VisibleRows <= QuotaHistoryFold.ConsideredCycles);
 
+    // ---- growing the list (parity with macOS #334) --------------------------
+
+    // The whole point of the control: the thirteenth cycle was unreachable.
+    [Fact]
+    public void GrowingTheCountDrawsPastTheOpeningTwelve()
+    {
+        var (cycles, spans) = Series(QuotaHistoryFold.ConsideredCycles);
+
+        Assert.Equal(
+            WindowHistoryText.VisibleRows,
+            WindowHistoryText.Rows(cycles, spans).Count);
+        Assert.Equal(
+            WindowHistoryText.VisibleRows * 2,
+            WindowHistoryText.Rows(cycles, spans, WindowHistoryText.VisibleRows * 2).Count);
+    }
+
+    // Pressing to exhaustion reaches every cycle the fold admits and no
+    // further: the ceiling belongs to the engine, not to this card.
+    [Fact]
+    public void PressingToExhaustionStopsAtTheConsideredCap()
+    {
+        var (cycles, spans) = Series(QuotaHistoryFold.ConsideredCycles);
+
+        var rows = WindowHistoryText.Rows(cycles, spans, QuotaHistoryFold.ConsideredCycles * 4);
+
+        Assert.Equal(QuotaHistoryFold.ConsideredCycles, rows.Count);
+        Assert.Equal(0, WindowHistoryText.Remaining(cycles.Count, rows.Count));
+    }
+
+    // A count grown against a longer history must not draw rows a shorter one
+    // does not have — the case a window losing cycles between two renders
+    // produces, which no click is involved in.
+    [Fact]
+    public void AnInheritedCountIsClampedToTheHistoryItArrivesAt()
+    {
+        var (cycles, spans) = Series(3);
+
+        var rows = WindowHistoryText.Rows(cycles, spans, shownCount: 36);
+
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(0, WindowHistoryText.Remaining(cycles.Count, rows.Count));
+    }
+
+    // The control is drawn on what is left, so it disappears exactly when the
+    // last cycle arrives on screen rather than one press later.
+    [Theory]
+    // A full list at the fold's own cap (32), freshly opened: 20 still to go.
+    [InlineData(32, 12, 20)]
+    [InlineData(12, 12, 0)]    // opens already complete
+    [InlineData(5, 12, 0)]     // fewer cycles than the opening count
+    public void TheRemainderIsWhatIsNotOnScreen(int total, int shown, int expected) =>
+        Assert.Equal(expected, WindowHistoryText.Remaining(total, shown));
+
+    // The subtitle counts what the reader can see, so it moves with the list.
+    [Fact]
+    public void TheSubtitleFollowsTheGrownCount()
+    {
+        var (cycles, spans) = Series(QuotaHistoryFold.ConsideredCycles);
+
+        Assert.Equal(
+            "24 windows",
+            WindowHistoryText.Subtitle(
+                WindowHistoryText.Rows(cycles, spans, WindowHistoryText.VisibleRows * 2)));
+    }
+
+    // The scale rule above, restated against a GROWN list: the aggregates
+    // describe what is on screen, so a press moves them. A row past the new
+    // cut must still not set the scale.
+    [Fact]
+    public void TheUsageScaleFollowsTheGrownRowsRatherThanTheWholeHistory()
+    {
+        var count = WindowHistoryText.VisibleRows * 2;
+        var cycles = Enumerable.Range(0, count + 1)
+            .Select(i => Cycle((100 - i) * Hour, 10))
+            .ToList();
+        // Still the one row past the cut, now that the cut has moved.
+        var spans = Enumerable.Range(0, cycles.Count)
+            .Select(i => Span(i == count ? 10_000 : 1_000, 1))
+            .ToList();
+
+        var rows = WindowHistoryText.Rows(cycles, spans, count);
+
+        Assert.Equal(count, rows.Count);
+        Assert.All(rows, row => Assert.Equal(1, row.UsageFraction, 6));
+    }
+
+    /// <summary>Newest first, one token each, so a row's identity is its
+    /// index — the shape the grow tests care about and nothing else.</summary>
+    private static (List<QuotaCycle> Cycles, List<WindowEquivalence.Cycle> Spans) Series(int count) =>
+        ([.. Enumerable.Range(0, count).Select(i => Cycle((100 - i) * Hour, 10))],
+         [.. Enumerable.Range(0, count).Select(_ => Span(1_000, 1))]);
+
     // A window nobody was watching for most of its length reports a floor, and
     // says so. Silently printing the figure would present a partial observation
     // as a measurement.

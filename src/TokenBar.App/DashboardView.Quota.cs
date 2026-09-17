@@ -108,7 +108,8 @@ public sealed partial class DashboardView
             snapshot.QuotaHistoryOutcome,
             UsageAttribution.Confirmed(AppSettings.Store),
             _model?.Year,
-            new QuotaLensProjection.Selection(_activeClientTab, _windowCardTab));
+            new QuotaLensProjection.Selection(
+                _activeClientTab, _windowCardTab, _historyShownWindow, _historyShownCount));
 
         // A client tab asks about one subscription, so it gets that
         // subscription's own three cards rather than the all-clients four.
@@ -391,6 +392,16 @@ public sealed partial class DashboardView
     /// <summary>Which history row is open, keyed by the cycle's reset instant —
     /// the same value the fold uses as a row's identity.</summary>
     private long? _historyExpanded;
+
+    /// <summary>How many history rows the reader has grown the card to, and
+    /// which window they grew it on. Stored as a pair and handed to
+    /// <see cref="QuotaLensProjection.Selection"/> together, because the count
+    /// alone is meaningless: the projection honours it only while the window
+    /// it names is still the one that resolves, and otherwise opens at
+    /// <see cref="WindowHistoryText.VisibleRows"/> again. Not persisted — a
+    /// list grown during one reading of the lens is not a preference.</summary>
+    private string? _historyShownWindow;
+    private int _historyShownCount = WindowHistoryText.VisibleRows;
 
     /// <summary>One subscription's own three cards: the window it is in now,
     /// where its allowance stands, and the windows before this one.</summary>
@@ -801,6 +812,36 @@ public sealed partial class DashboardView
         foreach (var row in rows)
         {
             body.Children.Add(HistoryRow(row, history.ByResetAt[row.ResetAtMs], colors));
+        }
+
+        // The grow control, above the disclaimer so it reads as belonging to
+        // the list rather than to the small print. Absent once every admitted
+        // cycle is drawn, which is also how the card says there is no more
+        // history rather than leaving a control that would do nothing.
+        if (history.Remaining > 0)
+        {
+            // Same control the Hourly lens's timeline grows itself with, so
+            // the gesture is one the reader has already met.
+            var more = LensPill(WindowHistoryText.ShowMore(history.Remaining), false);
+            more.HorizontalAlignment = HorizontalAlignment.Center;
+            more.Margin = new Thickness(0, 6, 0, 0);
+            // The window this press grows, captured from the projection's own
+            // resolution rather than from _windowCardTab: the two disagree
+            // exactly when the stored preference names a window this client
+            // does not offer, and the count must follow the rows.
+            var window = history.ShownWindow;
+            // From what is DRAWN, not from the stored count: after a window
+            // loses cycles the stored count can exceed its history, and adding
+            // the step to that would need several presses to have any visible
+            // effect.
+            var grown = rows.Count + WindowHistoryText.VisibleRows;
+            more.Click += (_, _) =>
+            {
+                _historyShownWindow = window;
+                _historyShownCount = grown;
+                RenderContent(animated: false);
+            };
+            body.Children.Add(more);
         }
 
         // The line that keeps the money column from reading as a bill.
