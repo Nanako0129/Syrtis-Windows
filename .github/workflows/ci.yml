@@ -127,8 +127,6 @@ jobs:
         run: cargo build --release --locked --target x86_64-pc-windows-msvc
       - name: build native DLL (x64 via shared mapping)
         run: dotnet msbuild src/TokenBar.Smoke/TokenBar.Smoke.csproj -t:BuildTbNative -p:Configuration=Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64 -p:TbNativeCargoLocked=true -p:RestoreLockedMode=true
-      - name: cargo test (workspace, locked)
-        run: cargo test --workspace --release --locked
       - name: build Core.Tests (x64)
         run: dotnet build src/TokenBar.Core.Tests/TokenBar.Core.Tests.csproj -c Release -p:Platform=x64 --no-restore
       - name: test Core.Tests (x64)
@@ -316,6 +314,52 @@ jobs:
         with:
           name: smoke-win-x64
           path: out/smoke-win-x64
+          retention-days: 3
+
+  # Moved out of build, unchanged: same command, same flags, same runner OS.
+  #
+  # Measured over five runs (2026-09-15/16, all after #102): the run's wall
+  # clock was 1497-1605 s, build was 1482-1594 s, and every other job had
+  # finished by 641 s. build alone set the wall clock, and this one step was
+  # 1017 s of its 1541 s mean.
+  #
+  # Almost none of that is testing. In the 995 s instance captured on
+  # 2026-09-12 the first test result landed at +969 s and all 1868 tests
+  # finished in about 32 s - the step is 97% compilation. It compiles for the
+  # host directory (target/release), which is not the one the rest of build
+  # fills: there is no build.target in .cargo/config.toml, so the earlier
+  # `cargo build --target x86_64-pc-windows-msvc` lands in a different tree.
+  # Nothing here consumes what build produces and nothing in build consumes
+  # this result, so the step was only holding the ~70 s of dotnet steps behind
+  # it. Projected: build ~524 s, this job ~1072 s (55 s of setup observed in
+  # the same step table, plus 1017 s), run ~1082 s.
+  #
+  # --timings stays on rather than being a one-off. What those ~963 s of
+  # compilation are spent on is the next question, and a 4 vCPU hosted runner
+  # is the only place that answers it for this workload; leaving it on makes
+  # every run carry its own answer instead of needing a special run to ask.
+  #
+  # An explicit rust-cache key follows arm64-cross and the matrix legs: two
+  # Windows jobs caching different target trees must not write to one entry.
+  cargo-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cargo-test
+      - name: cargo test (workspace, locked)
+        run: cargo test --workspace --release --locked --timings
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cargo-timings
+          path: target/cargo-timings
+          if-no-files-found: error
           retention-days: 3
 
   # Cross-build/package only. This x64 runner never executes ARM64 binaries;
