@@ -161,9 +161,26 @@ Windows 有**兩個**入口，兩個都吃 `providerId`、都收斂到同一個
 | `QuotaEquivalenceFold.DeclaredSpan` | `QuotaLensProjection.cs:269` | 即時窗卡（一個進行中週期的取樣跨距） |
 
 `Declared` 只是對每個週期跑一次 `DeclaredSpanCore` 的 OR，所以兩條路問的是
-同一個問題。**全 repo 沒有任何一處用表的空與非空來算**（查證：
-`grep -rn "QuotaEquivalenceFold.Declared" src/ --include=*.cs`）。判定本身
-**不是「更嚴」而是「不同」**——範圍更窄，但認的狀態更多：
+同一個問題。
+
+要證明「沒有任何一處用表的空與非空來算」，光 grep `Declared` 是不夠的——那只找得到
+入口，找不到別處自己算出來的 bool。要從**消費端**反推：`declared` 這個 bool 只有
+兩個型別會吃（`WindowEquivalence.Aggregate` 與 `LiveRow`），全 repo 三個呼叫點，
+每一個的值都來自 `QuotaEquivalenceFold` 的 providerId-scoped 判定：
+
+```bash
+grep -rn "WindowEquivalence.Aggregate\|WindowEquivalence.LiveRow" src/ --include=*.cs | grep -v "Tests/"
+#   QuotaEquivalenceFold.cs:194   Aggregate(declared, …)  ← DeclaredCore(:193)
+#   WindowHistoryText.cs:347      Aggregate(declared, …)  ← 參數，唯一呼叫點 QuotaLensProjection.cs:399 → Declared
+#   WindowCardText.cs:369         LiveRow(declared, …)    ← 參數，唯一呼叫點 QuotaLensProjection.cs:269 → DeclaredSpan
+```
+
+反向再查一次「有沒有人從 record 數量算 bool」：
+`grep -rn "Records\.\(Count\|Any\)\|records\.\(Count\|Any\)" src/ --include=*.cs | grep -v "Tests/"`
+命中五處，全部與 declaration 無關——`MaxEntries` 上限驗證、重複 source key 偵測、
+以及設定頁 `AcceptAll` 的空清單早退。
+
+判定本身**不是「更嚴」而是「不同」**——範圍更窄，但認的狀態更多：
 
 | | macOS `declares` | Windows `DeclaredSpanCore` | 哪邊寬 |
 |---|---|---|---|
