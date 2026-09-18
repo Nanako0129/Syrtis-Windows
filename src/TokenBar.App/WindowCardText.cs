@@ -396,11 +396,19 @@ public static class WindowCardText
         };
     }
 
+    /// <summary>The card's own heading. The window half goes through
+    /// <see cref="QuotaLabels.Window"/> — the one place a window is named — so
+    /// this title, the tab pill above it and the strip card's row cannot
+    /// disagree about what the same window is called.</summary>
     public static string Title(WindowCardTab? tab) =>
         tab is null
             ? "Session window".Localized()
-            : "{0} window".Localized(
-                string.IsNullOrWhiteSpace(tab.Label) ? tab.Id.WindowKey : tab.Label!.Localized());
+            : "{0} window".Localized(QuotaLabels.Window(tab.Label, tab.Id.WindowKey));
+
+    /// <summary>The tab pill's text. Same naming as <see cref="Title"/>, without
+    /// the "window" noun the heading adds.</summary>
+    public static string TabLabel(WindowCardTab tab) =>
+        QuotaLabels.Window(tab.Label, tab.Id.WindowKey);
 
     /// <summary>The line under the title. Every state names itself, so the
     /// subtitle can never say "waiting" while the body says it gave up.</summary>
