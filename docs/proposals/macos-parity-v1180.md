@@ -278,13 +278,17 @@ git -C "$NATIVE" rev-list --count 5b894b63..origin/main
 git -C "$NATIVE" ls-tree origin/main vendor/tokscale-core
 git submodule status vendor/tokscale-core
 
-# 落差。每一道下面貼的是它 2026-09-19 的實際輸出，不是我對輸出的轉述——
+# 落差。每一道下面貼的是它未經刪節的輸出，逐字，不是我對輸出的轉述——
 # 前四輪審查抓到的每一則，都是「指令證明 A、旁邊的句子宣稱 B」。
 # 讀者要比對的是輸出，不是我的形容詞。行號會漂，形狀不會。
+#
+# 這些輸出是我在 2026-09-19 撰寫本節時跑出來的。那是執行日期，不是任何
+# 可以從 repo 反推的東西——commit 時間戳證明不了指令何時跑過，所以這裡
+# 只宣稱它是什麼：一次人工執行的結果，讀者重跑就能比對。
 
 git grep -in "discord" -- . | grep -v "^docs/"
-#   .github/release-notes/v0.3.0.md:69:Present on the macOS build, not yet here: Discord …
-#   README.md:187:Windows does not yet have macOS parity on: Discord Rich Presence, …
+#   .github/release-notes/v0.3.0.md:69:Present on the macOS build, not yet here: Discord Rich Presence, per-client tray items, Simplified Chinese, menu-bar font colour, the flat-heatmap chart mode, agent brand icons (clients render as coloured discs), the Agent-limits sparkline and chart layout, the Stats attribution-breakdown card, and support for multiple Claude accounts.
+#   README.md:187:Windows does not yet have macOS parity on: Discord Rich Presence, per-client tray items,
 #   兩筆都是散文在宣告它不存在。零實作。
 
 git grep -n "prerelease: false" -- 'src/**/*.cs'
@@ -301,8 +305,8 @@ git grep -il "sparkline\|AttributionBreakdown" -- 'src/**/*.cs'
 #   （無輸出）
 
 git grep -n "SetChartView(bool\|tokenbar.chart.view" -- 'src/**/*.cs'
-#   DashboardView.xaml.cs:43:  …GetString("tokenbar.chart.view", "2d") == "3d";
-#   DashboardView.xaml.cs:272: private void SetChartView(bool use3D)
-#   DashboardView.xaml.cs:281: …SetString("tokenbar.chart.view", use3D ? "3d" : "2d");
+#   src/TokenBar.App/DashboardView.xaml.cs:43:        AppSettings.Store.GetString("tokenbar.chart.view", "2d") == "3d";
+#   src/TokenBar.App/DashboardView.xaml.cs:272:    private void SetChartView(bool use3D)
+#   src/TokenBar.App/DashboardView.xaml.cs:281:        AppSettings.Store.SetString("tokenbar.chart.view", use3D ? "3d" : "2d");
 #   唯一讀取點、bool 簽名、唯一寫入點且只寫兩個值——所以是二元，沒有第三個模式。
 ```
