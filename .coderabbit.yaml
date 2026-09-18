@@ -1,0 +1,67 @@
+# CodeRabbit configuration.
+# Schema: https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+#
+# Every instruction below restates a rule this repository already writes down in
+# AGENTS.md or CONTRIBUTING.md. Nothing here is a new policy.
+#
+# The one setting that is a choice rather than a restatement is
+# auto_pause_after_reviewed_commits, commented at its key.
+
+reviews:
+  auto_review:
+    # 0 disables the pause entirely, which is the schema's documented sentinel
+    # ("Set to 0 to disable"), not a large number chosen by hand. At the default
+    # of 5, automatic review stops silently once a pull request has five
+    # reviewed commits, and a poller waiting on the verdict reads that pause as
+    # a timeout rather than as a stop. Measured: sepia#250 ran four rounds.
+    auto_pause_after_reviewed_commits: 0
+
+  pre_merge_checks:
+    docstrings:
+      # Off. The coverage denominator is every function the diff TOUCHED, not
+      # the functions it added, so a small change inherits whatever the file
+      # already lacked. Measured on the sibling TokenBar repository: it failed
+      # three PRs without once naming a real defect.
+      mode: off
+
+  path_instructions:
+    - path: "**"
+      instructions: |
+        Public repository (AGENTS.md). Never put private paths, credentials, or
+        machine-specific tooling details in tracked files.
+
+        The distinction that matters is not "local" but "particular to one
+        machine". tools/sdkfree/global.json is tracked because it encodes no
+        path and no identity — it is an escape hatch any machine can use.
+        "dotnet lives at /opt/homebrew/... on this laptop" is not, and belongs
+        in the untracked .agent-local/ overlay.
+
+    - path: "{global.json,tools/sdkfree/**}"
+      instructions: |
+        The root global.json pins .NET SDK 10.0.301 with rollForward: disable,
+        so a machine carrying only a later 10.0.x cannot run dotnet from the
+        repository root at all. tools/sdkfree/ lifts the SDK pin and nothing
+        else.
+
+        Flag a change that widens the pin to work around one machine's missing
+        SDK. That failure looks like "this machine cannot run the suite", which
+        is a sentence about the machine rather than about a missing line of
+        configuration, and it survives being written into a commit message as
+        though it were a fact.
+
+    - path: "docs/*.md"
+      instructions: |
+        These documents are where things are written down: release channels and
+        what they promise (lite-distribution.md), how a release is cut
+        (release-velopack.md), and which gate proved which claim and when
+        (verification-history.md). A change to release behaviour that does not
+        update the matching document leaves the claim and the mechanism
+        disagreeing.
+
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - "AGENTS.md"
+      - "CONTRIBUTING.md"
+      - "README.md"
+      - "docs/*.md"
