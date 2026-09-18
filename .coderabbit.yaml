@@ -19,10 +19,6 @@ reviews:
       # three PRs without once naming a real defect.
       mode: off
 
-  path_filters:
-    # Owned and reviewed in tokscale-core.
-    - "!vendor/**"
-
   path_instructions:
     - path: "**"
       instructions: |
@@ -30,16 +26,16 @@ reviews:
         machine-specific tooling details in tracked files.
 
         The distinction that matters is not "local" but "particular to one
-        machine". `tools/sdkfree/global.json` is tracked because it encodes no
+        machine". tools/sdkfree/global.json is tracked because it encodes no
         path and no identity — it is an escape hatch any machine can use.
         "dotnet lives at /opt/homebrew/... on this laptop" is not, and belongs
-        in the untracked `.agent-local/` overlay.
+        in the untracked .agent-local/ overlay.
 
     - path: "{global.json,tools/sdkfree/**}"
       instructions: |
-        The root global.json pins .NET SDK 10.0.301 with `rollForward: disable`,
+        The root global.json pins .NET SDK 10.0.301 with rollForward: disable,
         so a machine carrying only a later 10.0.x cannot run dotnet from the
-        repository root at all. `tools/sdkfree/` lifts the SDK pin and nothing
+        repository root at all. tools/sdkfree/ lifts the SDK pin and nothing
         else.
 
         Flag a change that widens the pin to work around one machine's missing
