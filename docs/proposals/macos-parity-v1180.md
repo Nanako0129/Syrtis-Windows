@@ -157,22 +157,25 @@ Windows 有**兩個**入口，兩個都吃 `providerId`、都收斂到同一個
 
 | 入口 | 呼叫點 | 給誰用 |
 |---|---|---|
-| `QuotaEquivalenceFold.Declared` | `QuotaLensProjection.cs:337` | 歷史卡（一串已完成週期） |
-| `QuotaEquivalenceFold.DeclaredSpan` | `QuotaLensProjection.cs:269` | 即時窗卡（一個進行中週期的取樣跨距） |
+| `QuotaEquivalenceFold.Declared` | `QuotaLensProjection.BuildHistory` | 歷史卡（一串已完成週期） |
+| `QuotaEquivalenceFold.DeclaredSpan` | `QuotaLensProjection.BuildClient` | 即時窗卡（一個進行中週期的取樣跨距） |
 
 `Declared` 只是對每個週期跑一次 `DeclaredSpanCore` 的 OR，所以兩條路問的是
 同一個問題。
 
 要證明「沒有任何一處用表的空與非空來算」，光 grep `Declared` 是不夠的——那只找得到
 入口，找不到別處自己算出來的 bool。要從**消費端**反推：`declared` 這個 bool 只有
-兩個型別會吃（`WindowEquivalence.Aggregate` 與 `LiveRow`），全 repo 三個呼叫點，
-每一個的值都來自 `QuotaEquivalenceFold` 的 providerId-scoped 判定：
+兩個型別會吃（`WindowEquivalence.Aggregate` 與 `LiveRow`），而整個 repo 只有
+三個呼叫點，每一個的值都來自 `QuotaEquivalenceFold` 的 providerId-scoped 判定。
+
+指令要涵蓋整個 repo，`git grep` 而非 `grep -r src/ --include=*.cs`：後者只看
+`src/` 底下的 C#，證不出「沒有別的地方」——這份文件的前一版就是用它撐一個它撐
+不起來的句子。
 
 ```bash
-grep -rn "WindowEquivalence.Aggregate\|WindowEquivalence.LiveRow" src/ --include=*.cs | grep -v "Tests/"
+git grep -n "WindowEquivalence.Aggregate\|WindowEquivalence.LiveRow" -- . \
+  | grep -v "^src/TokenBar.Core.Tests/" | grep -v "///" | grep -v "^docs/"
 ```
-
-三個呼叫點，每個的 `declared` 都往回追到 `QuotaEquivalenceFold`：
 
 | 檔案 | 呼叫 | `declared` 從哪來 |
 |---|---|---|
@@ -180,12 +183,15 @@ grep -rn "WindowEquivalence.Aggregate\|WindowEquivalence.LiveRow" src/ --include
 | `WindowHistoryText.cs` | `Aggregate`（在 `Equivalence` 裡） | 參數；唯一呼叫點是 `QuotaLensProjection` 的 `BuildHistory` → `Declared` |
 | `WindowCardText.cs` | `LiveRow`（在 `LiveEquivalence` 裡） | 參數；唯一呼叫點是 `QuotaLensProjection` 的 `BuildClient` → `DeclaredSpan` |
 
+測試專案與這份文件自己被排掉，理由不同：測試不是出貨路徑，文件命中的是它引用
+自己的那兩行。
+
 > 這裡刻意只寫檔名與符號、不寫行號。實作檔會動——這份文件的前一版就釘了一組
 > 在另一個分支量到的行號，對這條分支根本不成立——而一個會說謊的查證步驟比
 > 沒有查證更糟。上面那道 grep 每次都會給出當下的行號。
 
 反向再查一次「有沒有人從 record 數量算 bool」：
-`grep -rn "Records\.\(Count\|Any\)\|records\.\(Count\|Any\)" src/ --include=*.cs | grep -v "Tests/"`
+`git grep -n "Records\.\(Count\|Any\)\|records\.\(Count\|Any\)" -- 'src/**/*.cs' | grep -v "^src/TokenBar.Core.Tests/"`
 命中五處，全部與 declaration 無關——`MaxEntries` 上限驗證、重複 source key 偵測、
 以及設定頁 `AcceptAll` 的空清單早退。
 
@@ -194,7 +200,7 @@ grep -rn "WindowEquivalence.Aggregate\|WindowEquivalence.LiveRow" src/ --include
 | | macOS `declares` | Windows `DeclaredSpanCore` | 哪邊寬 |
 |---|---|---|---|
 | 範圍 | 整張表 | 該週期的取樣跨距內 | ← macOS 這邊寬 |
-| 認的狀態 | 只認 `.assigned(subscription)` | `.assigned(providerId)`（`:281`）**或** `.excluded`（`:276`） | ← Windows 這邊寬 |
+| 認的狀態 | 只認 `.assigned(subscription)` | `.assigned(providerId)` **或** `.excluded` | ← Windows 這邊寬 |
 
 Windows 的 `Declared` 註解記著它自己走過一輪更嚴的修正（round 11 的 P2）：
 「assigned 到別的訂閱」曾經也算數，但 session 窗和 weekly 窗在時間上重疊，
@@ -207,11 +213,12 @@ Windows 是按跨距判定的，它看得到「這段跨距裡的訊息被使用
 
 ### v1.15 #260 的除數：Windows 已經是修正後的語義
 
-`src/TokenBar.Core/WindowEquivalence.cs:445` 的註解就寫著
-「The distance the readings travelled, not `last - first`」，並在 `:466` 取
+`src/TokenBar.Core/WindowEquivalence.cs` 的註解就寫著
+「The distance the readings travelled, not `last - first`」，並在同一個函式裡取
 `QuotaHistoryFold.RisingRuns(readings)`。#260 的後半（誤差改成每次上升一個
-量化步，而非整段位移一個步）也在：`:656` 是
+量化步，而非整段位移一個步）也在，是這個式子：
 `QuantisationHalfStep * cycles.Sum(cycle => cycle.RisingRuns) / anyMovement`。
+三者都可以直接 `git grep` 那段文字或那個式子找到。
 
 ## 待核對（本次沒查、不要當成「沒落差」）
 
