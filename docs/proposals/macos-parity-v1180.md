@@ -107,7 +107,7 @@ codex / claude / antigravity / copilot / grok。v1.18 新增的三個都缺：
 | 能力 | macOS | Windows 現況 |
 |---|---|---|
 | 第二個 Claude 帳號分帳 | v1.15 #261：每個帳號對自己註冊的 root 各自掃描 | 缺 |
-| 自訂掃描根目錄 `CLAUDE_CONFIG_DIR` | v1.14.x | 缺（全 repo 零命中） |
+| 自訂掃描根目錄 `CLAUDE_CONFIG_DIR` | v1.14.x | 缺。repo-wide 零命中（只有這兩份 parity 文件提到它） |
 
 > 這兩項碰認證與路徑，走 security 風險門。
 
@@ -115,8 +115,8 @@ codex / claude / antigravity / copilot / grok。v1.18 新增的三個都缺：
 
 | 能力 | Windows 現況 |
 |---|---|
-| Discord Rich Presence | `grep -rni discord src/ --include=*.cs --include=*.xaml` → 0 |
-| Beta 更新通道 | `src/TokenBar.App/UpdateFlow.cs:120` 寫死 `prerelease: false` |
+| Discord Rich Presence | 零實作。repo-wide `git grep -in discord -- .` 只有兩筆，都是散文宣告它不存在（`README.md` 的 Known limitations、`.github/release-notes/v0.3.0.md`） |
+| Beta 更新通道 | `src/TokenBar.App/UpdateFlow.cs` 寫死 `prerelease: false`（出貨路徑唯一一處） |
 | Individual tray items | **明列非目標**，不計入落差 |
 
 ### H. 引擎等價但與 UI 相關的 v1.15 修正
@@ -125,6 +125,31 @@ v1.15 #260（等價行的除數改成「讀數實際走過的距離」）與 adm
 rising runs 的處理：macOS 在 `TokenBarCore/WindowEquivalence.swift`，
 Windows 在 `src/TokenBar.Core/WindowEquivalence.cs`、`QuotaEquivalenceFold.cs`。
 **無落差**——已逐行對照，Windows 兩個檔都已是修正後的語義。見下方「已核對完畢」。
+
+### I. 這份調查原本漏掉的四項（2026-09-19 補）
+
+**來源不是 macOS，是這個 repo 自己的 `README.md`。** 下面「這份調查怎麼漏的」一節
+說明為什麼。四項都親自對過兩邊：
+
+| 能力 | macOS | Windows 現況 |
+|---|---|---|
+| 平面貢獻熱圖 | `Charts/ContributionHeatmap.swift`——整年、週日起始，與 3D 同資料不同 renderer | 缺。只有 `Graph3DPanel.cs`／`Graph3DRenderer.cs`。**舊文件說「兩邊都有 2D 熱圖與 3D 兩種呈現」是錯的**：Windows 的 2D 熱圖是 quota 的 7×24（`QuotaHeatmap.cs`），跟 365 天的貢獻熱圖是兩張不同的圖 |
+| Agent 品牌圖示 | `Views/AgentIconView.swift`——品牌色圓盤上放 SVG，mono 描白、full 用原設計，無圖示者退回首字母 | 缺。客戶端畫成 `GlowingDisc` 純色點 |
+| Agent-limits sparkline／圖表版面 | 8 個檔提到 `Sparkline` | 缺。`git grep -il sparkline -- 'src/**/*.cs'` → 0 |
+| Stats 歸因細分卡 | 6 個檔提到 `AttributionBreakdown` | 缺。同樣 → 0 |
+
+### 這份調查怎麼漏的
+
+上面的落差清單是從**兩個來源**推出來的：macOS v1.15–v1.18 的 release notes，加上
+被取代的 `macos-parity-v1143.md`。這四項在兩個來源裡都沒有——它們早於 v1.14，而舊
+文件也沒列。
+
+但 `README.md` 的 Known limitations 一直列著它們，`.github/release-notes/v0.3.0.md`
+也是。**我從變更紀錄和前一份調查推清單，卻沒有問這個 repo 自己已經記下了什麼。**
+它們是在稽核一道無關指令（Discord 那道 grep 的範圍）時掉出來的。
+
+下次重跑這份調查，第一步應該是 `git grep -n "parity" -- . | grep -v "^docs/"`，
+把 repo 自己的說法先收齊，再去比對 macOS。
 
 ## 切片順序建議
 
@@ -139,6 +164,9 @@ Windows 在 `src/TokenBar.Core/WindowEquivalence.cs`、`QuotaEquivalenceFold.cs`
 | 7 | 多帳號／自訂掃描根目錄（F） | security 風險門 |
 | 8 | Grok Bot 憑證同意（A 尾項） | security 風險門；Windows 的同意 UX 要重新設計 |
 | 9 | Discord RPC（G） | 最大；對外發布使用者資料，security 風險門 |
+
+I 的四項未排序——它們是新發現，成本還沒估過。直覺上 sparkline 與歸因細分卡
+偏純 UI，平面貢獻熱圖要新 renderer，品牌圖示要處理 SVG 資產與授權。
 
 先做的四片都是純 UI 或純設定，不碰 FFI、不碰憑證、不碰引擎 pin。
 
@@ -191,7 +219,7 @@ git grep -n "WindowEquivalence.Aggregate\|WindowEquivalence.LiveRow" -- . \
 > 沒有查證更糟。上面那道 grep 每次都會給出當下的行號。
 
 反向再查一次「有沒有人從 record 數量算 bool」：
-`git grep -n "Records\.\(Count\|Any\)\|records\.\(Count\|Any\)" -- 'src/**/*.cs' | grep -v "^src/TokenBar.Core.Tests/"`
+`git grep -n "Records\.\(Count\|Any\)\|records\.\(Count\|Any\)" -- . | grep -v "^src/TokenBar.Core.Tests/" | grep -v "^docs/"`
 命中五處，全部與 declaration 無關——`MaxEntries` 上限驗證、重複 source key 偵測、
 以及設定頁 `AcceptAll` 的空清單早退。
 
@@ -239,10 +267,12 @@ git -C "$NATIVE" rev-list --count 5b894b63..origin/main
 git -C "$NATIVE" ls-tree origin/main vendor/tokscale-core
 git submodule status vendor/tokscale-core
 
-# 落差
-grep -rni "discord" src/ --include=*.cs --include=*.xaml     # → 0
-grep -n "prerelease" src/TokenBar.App/UpdateFlow.cs          # → :120 prerelease: false
-grep -rni "CLAUDE_CONFIG_DIR" src/                           # → 0
-ls src/TokenBar.App/Assets/strings-*.json                    # → 只有 zh-Hant
-grep -n "codex/claude/antigravity/copilot/grok" crates/tb_core_ffi/src/lib.rs
+# 落差——每一道都涵蓋它所支持的宣稱的範圍，所以是 repo-wide 的 git grep，
+# 不是 grep -r src/。排除項只有 docs/（這份文件會命中自己）。
+git grep -in "discord" -- . | grep -v "^docs/"          # → 2，都是散文，零實作
+git grep -n "prerelease: false" -- 'src/**/*.cs'        # → UpdateFlow.cs 一處（出貨路徑）
+git grep -n "CLAUDE_CONFIG_DIR" -- . | grep -v "^docs/" # → 0
+git ls-files | grep -i "strings-.*\.json"              # → 只有 zh-Hant
+git grep -il "sparkline\|AttributionBreakdown" -- 'src/**/*.cs'  # → 0（見 I）
+git ls-files src/TokenBar.App | grep -i "contribution"  # → 0；只有 Graph3D*（見 I）
 ```
