@@ -222,6 +222,12 @@ git grep -n "WindowEquivalence.Aggregate\|WindowEquivalence.LiveRow" -- . \
 > 這裡刻意只寫檔名與符號、不寫行號。實作檔會動——這份文件的前一版就釘了一組
 > 在另一個分支量到的行號，對這條分支根本不成立——而一個會說謊的查證步驟比
 > 沒有查證更糟。上面那道 grep 每次都會給出當下的行號。
+>
+> **這份文件學到的教訓，寫在這裡給下一個編輯它的人**：前四輪審查的每一則發現
+> 都是同一個形狀——指令證明 A，旁邊的句子宣稱 B。修掉一個實例，下一輪就在隔壁
+> 一行找到同一個。所以最後的做法是把每一道指令的**真實輸出**貼在它下面（見文末
+> 查證區塊），讓讀者比對輸出而不是比對我的形容詞。寫新宣稱時請照做：先跑指令，
+> 貼輸出，再讓輸出自己說話。
 
 反向再查一次「有沒有人從 record 數量算 bool」：
 `git grep -n "Records\.\(Count\|Any\)\|records\.\(Count\|Any\)" -- . | grep -v "^src/TokenBar.Core.Tests/" | grep -v "^docs/"`
@@ -272,12 +278,31 @@ git -C "$NATIVE" rev-list --count 5b894b63..origin/main
 git -C "$NATIVE" ls-tree origin/main vendor/tokscale-core
 git submodule status vendor/tokscale-core
 
-# 落差——每一道都涵蓋它所支持的宣稱的範圍，所以是 repo-wide 的 git grep，
-# 不是 grep -r src/。排除項只有 docs/（這份文件會命中自己）。
-git grep -in "discord" -- . | grep -v "^docs/"          # → 2，都是散文，零實作
-git grep -n "prerelease: false" -- 'src/**/*.cs'        # → UpdateFlow.cs 一處（出貨路徑）
-git grep -n "CLAUDE_CONFIG_DIR" -- . | grep -v "^docs/" # → 0
-git ls-files | grep -i "strings-.*\.json"              # → 只有 zh-Hant
-git grep -il "sparkline\|AttributionBreakdown" -- 'src/**/*.cs'  # → 0（見 I）
-git grep -n "SetChartView" -- 'src/**/*.cs'              # → 二元 bool，無第三個模式（見 I）
+# 落差。每一道下面貼的是它 2026-09-19 的實際輸出，不是我對輸出的轉述——
+# 前四輪審查抓到的每一則，都是「指令證明 A、旁邊的句子宣稱 B」。
+# 讀者要比對的是輸出，不是我的形容詞。行號會漂，形狀不會。
+
+git grep -in "discord" -- . | grep -v "^docs/"
+#   .github/release-notes/v0.3.0.md:69:Present on the macOS build, not yet here: Discord …
+#   README.md:187:Windows does not yet have macOS parity on: Discord Rich Presence, …
+#   兩筆都是散文在宣告它不存在。零實作。
+
+git grep -n "prerelease: false" -- 'src/**/*.cs'
+#   src/TokenBar.App/UpdateFlow.cs:120:            prerelease: false,
+#   出貨路徑唯一一處。
+
+git grep -n "CLAUDE_CONFIG_DIR" -- . | grep -v "^docs/"
+#   （無輸出）
+
+git ls-files | grep -i "strings-.*\.json"
+#   src/TokenBar.App/Assets/strings-zh-Hant.json
+
+git grep -il "sparkline\|AttributionBreakdown" -- 'src/**/*.cs'
+#   （無輸出）
+
+git grep -n "SetChartView(bool\|tokenbar.chart.view" -- 'src/**/*.cs'
+#   DashboardView.xaml.cs:43:  …GetString("tokenbar.chart.view", "2d") == "3d";
+#   DashboardView.xaml.cs:272: private void SetChartView(bool use3D)
+#   DashboardView.xaml.cs:281: …SetString("tokenbar.chart.view", use3D ? "3d" : "2d");
+#   唯一讀取點、bool 簽名、唯一寫入點且只寫兩個值——所以是二元，沒有第三個模式。
 ```
