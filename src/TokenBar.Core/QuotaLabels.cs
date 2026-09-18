@@ -22,9 +22,16 @@ namespace TokenBar.Core;
 /// </summary>
 public static class QuotaLabels
 {
+    /// <summary>The strip card's row header: this window named after the client
+    /// that owns it, because that card lists every client's windows together
+    /// and the window name alone would not say whose it is.</summary>
     public static string RowLabel(QuotaWindowSummary summary) =>
         Compose(summary.Id, summary.WindowLabel);
 
+    /// <summary>The heatmap picker's entries. Same composition as
+    /// <see cref="RowLabel"/> deliberately — the picker chooses among the rows
+    /// the strip card lists, so a reader matching one against the other must
+    /// find the same string.</summary>
     public static string PickerLabel(QuotaHeatmapWindow window) =>
         Compose(window.Id, window.WindowLabel);
 
