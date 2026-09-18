@@ -60,7 +60,14 @@ public class QuotaLensDataTests
 
     // A no-match series keeps its identity and loses only its label. The null
     // has to survive this seam: pre-filling it with the WindowKey here would
-    // read identically on screen and leave nothing able to tell the two apart.
+    // leave nothing able to tell the two apart.
+    //
+    // Since 2026-09-19 the two DO render alike — QuotaLabels.Window turns the
+    // key `session.v1` into the same "Session" a joined label produces, because
+    // an internal code has no business on screen. That makes the null MORE
+    // load-bearing, not less: the rendered string can no longer distinguish a
+    // live label from a derived one, so this field is the only thing that can,
+    // and any future code needing the distinction has to read it here.
     [Theory]
     [InlineData("codex", "session.v1")] // wrong client
     [InlineData("claude", "weekly.v1")] // wrong window
@@ -72,7 +79,7 @@ public class QuotaLensDataTests
 
         var summary = Assert.Single(summaries);
         Assert.Null(summary.WindowLabel);
-        Assert.Equal("Claude Code · session.v1", QuotaLabels.RowLabel(summary));
+        Assert.Equal("Claude Code · Session", QuotaLabels.RowLabel(summary));
     }
 
     [Fact]

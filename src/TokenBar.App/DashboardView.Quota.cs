@@ -508,9 +508,7 @@ public sealed partial class DashboardView
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
         foreach (var tab in tabs)
         {
-            var pill = LensPill(
-                string.IsNullOrWhiteSpace(tab.Label) ? tab.Id.WindowKey : tab.Label!.Localized(),
-                tab == selected);
+            var pill = LensPill(WindowCardText.TabLabel(tab), tab == selected);
             var id = WindowId(tab.Id);
             pill.Click += (_, _) =>
             {

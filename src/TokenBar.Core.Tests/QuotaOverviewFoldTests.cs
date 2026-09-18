@@ -230,20 +230,63 @@ public class QuotaOverviewFoldTests
     }
 
     // The join can miss, and PaceStatus.WindowKey is itself nullable. A no-match
-    // series keeps its identity and loses only its label, so the label falls
-    // back to the series' own raw WindowKey — the value the join was looking for
-    // in the first place.
+    // series keeps its identity and loses only its label, so it still names its
+    // window — which is what this has always guarded. What changed on
+    // 2026-09-19 is the string: the fallback used to be the raw `session.v1`,
+    // and a reader meets it in the ordinary case (any provider whose live read
+    // is unavailable, an expired login included), where it reads as an internal
+    // code rather than a name.
     [Theory]
     [InlineData(null)]
     [InlineData("")]
     [InlineData("   ")]
-    public void AnUnjoinedLabelFallsBackToTheRawWindowKey(string? label)
+    public void AnUnjoinedLabelStillNamesItsWindow(string? label)
     {
-        Assert.Equal("Claude Code · session.v1", QuotaLabels.RowLabel(Summary(label)));
+        Assert.Equal("Claude Code · Session", QuotaLabels.RowLabel(Summary(label)));
         Assert.Equal(
-            "Claude Code · session.v1",
+            "Claude Code · Session",
             QuotaLabels.PickerLabel(new QuotaHeatmapWindow(Id(), label, 0)));
     }
+
+    // The store's keys compose, and one of them is built at runtime, so the
+    // fallback reads them segment by segment rather than matching whole keys.
+    [Theory]
+    // The two every provider has.
+    [InlineData("session.v1", "Session")]
+    [InlineData("weekly.v1", "Weekly")]
+    // Underscores are word breaks, not part of the word.
+    [InlineData("extra_usage.v1", "Extra usage")]
+    [InlineData("premium_interactions.v1", "Premium interactions")]
+    // Composed keys keep every segment, in order.
+    [InlineData("main.weekly.v1", "Main · Weekly")]
+    [InlineData("opus.weekly.v1", "Opus · Weekly")]
+    // Codex's per-account key: the hash is not a name and is dropped.
+    [InlineData(
+        "additional.d62616d234d82d5e7e4593f3112e1eefe54104f92fac0b29d052e87e3ec71975.primary.v1",
+        "Additional · Primary")]
+    // A segment this vocabulary has never seen still reads as a word.
+    [InlineData("some_future_window.v3", "Some future window")]
+    // Not always a store key: WindowCardText.Tabs puts the live CardId in this
+    // slot for a window the store has nothing under, and a CardId is
+    // `<client>|<window>`.
+    [InlineData("claude|weekly.v1", "Claude · Weekly")]
+    public void AWindowKeyReadsAsWordsRatherThanAsAnIdentifier(string key, string expected) =>
+        Assert.Equal(expected, QuotaLabels.FromKey(key));
+
+    // The version suffix is on every key, so it names nothing — but a key that
+    // is ONLY a version, or only a hash, would render as an empty pill. The raw
+    // key is the lesser evil there, and it is unreachable in practice.
+    [Theory]
+    [InlineData("v1")]
+    [InlineData("deadbeefdeadbeefdeadbeef")]
+    public void AKeyWithNoWordsInItKeepsItsRawForm(string key) =>
+        Assert.Equal(key, QuotaLabels.FromKey(key));
+
+    // Hex-looking words must not be mistaken for hashes. The bound is length,
+    // and no English word this vocabulary could meet comes near it.
+    [Fact]
+    public void AShortHexLikeWordIsNotTreatedAsAHash() =>
+        Assert.Equal("Decade · Weekly", QuotaLabels.FromKey("decade.weekly.v1"));
 
     // Never a separator with nothing after it — the visible defect this slice
     // refuses everywhere else too. With no label and no window key there is only
