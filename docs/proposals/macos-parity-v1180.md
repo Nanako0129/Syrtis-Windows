@@ -180,9 +180,9 @@ grep -rn "WindowEquivalence.Aggregate\|WindowEquivalence.LiveRow" src/ --include
 | `WindowHistoryText.cs` | `Aggregate`（在 `Equivalence` 裡） | 參數；唯一呼叫點是 `QuotaLensProjection` 的 `BuildHistory` → `Declared` |
 | `WindowCardText.cs` | `LiveRow`（在 `LiveEquivalence` 裡） | 參數；唯一呼叫點是 `QuotaLensProjection` 的 `BuildClient` → `DeclaredSpan` |
 
-> 這裡刻意只寫檔名與符號、不寫行號。這三個檔正在被 PR #112 改動，
-> 釘住的行號隔天就對不上，而一個會說謊的查證步驟比沒有查證更糟。
-> 上面那道 grep 每次都會給出當下的行號。
+> 這裡刻意只寫檔名與符號、不寫行號。實作檔會動——這份文件的前一版就釘了一組
+> 在另一個分支量到的行號，對這條分支根本不成立——而一個會說謊的查證步驟比
+> 沒有查證更糟。上面那道 grep 每次都會給出當下的行號。
 
 反向再查一次「有沒有人從 record 數量算 bool」：
 `grep -rn "Records\.\(Count\|Any\)\|records\.\(Count\|Any\)" src/ --include=*.cs | grep -v "Tests/"`
