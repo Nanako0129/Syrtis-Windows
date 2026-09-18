@@ -133,7 +133,12 @@ Windows 在 `src/TokenBar.Core/WindowEquivalence.cs`、`QuotaEquivalenceFold.cs`
 
 | 能力 | macOS | Windows 現況 |
 |---|---|---|
-| 平面貢獻熱圖 | `Charts/ContributionHeatmap.swift`——整年、週日起始，與 3D 同資料不同 renderer | 缺。只有 `Graph3DPanel.cs`／`Graph3DRenderer.cs`。**舊文件說「兩邊都有 2D 熱圖與 3D 兩種呈現」是錯的**：Windows 的 2D 熱圖是 quota 的 7×24（`QuotaHeatmap.cs`），跟 365 天的貢獻熱圖是兩張不同的圖 |
+| 平面貢獻熱圖（第三個圖表模式） | `Views/UsageChartCard.swift` 的 `enum ChartView` 有**三個** case：`bars = "2d"`、`heatmap = "heat"`、`threeD = "3d"`。`Charts/ContributionHeatmap.swift` 是整年、週日起始，與 3D **同一份 `GridLayout`**、只是不同 renderer | 缺第三個模式。Windows 的 `SetChartView(bool use3D)`（`DashboardView.xaml.cs`）是**二元**的，同一個 store key `tokenbar.chart.view` 只寫 `"2d"`／`"3d"`：2D＝30 天堆疊長條（可依 Model／Agent 堆疊、Tokens／Cost），3D＝整年貢獻圖。缺的是「整年、平面」這一格 |
+> 舊文件寫「兩邊都有 2D 熱圖與 3D 兩種呈現」。那句話**對錯各半**，而我第一次
+> 查證時只看了檔名就把它整句判錯——Windows 確實有 2D／3D 兩種呈現，只是它的 2D
+> 是 30 天長條而非整年熱圖；`QuotaHeatmap.cs` 的 7×24 又是第三張無關的圖。
+> 真正的落差是 macOS 多出來的那個 `heat` 模式。
+
 | Agent 品牌圖示 | `Views/AgentIconView.swift`——品牌色圓盤上放 SVG，mono 描白、full 用原設計，無圖示者退回首字母 | 缺。客戶端畫成 `GlowingDisc` 純色點 |
 | Agent-limits sparkline／圖表版面 | 8 個檔提到 `Sparkline` | 缺。`git grep -il sparkline -- 'src/**/*.cs'` → 0 |
 | Stats 歸因細分卡 | 6 個檔提到 `AttributionBreakdown` | 缺。同樣 → 0 |
@@ -274,5 +279,5 @@ git grep -n "prerelease: false" -- 'src/**/*.cs'        # → UpdateFlow.cs 一�
 git grep -n "CLAUDE_CONFIG_DIR" -- . | grep -v "^docs/" # → 0
 git ls-files | grep -i "strings-.*\.json"              # → 只有 zh-Hant
 git grep -il "sparkline\|AttributionBreakdown" -- 'src/**/*.cs'  # → 0（見 I）
-git ls-files src/TokenBar.App | grep -i "contribution"  # → 0；只有 Graph3D*（見 I）
+git grep -n "SetChartView" -- 'src/**/*.cs'              # → 二元 bool，無第三個模式（見 I）
 ```
