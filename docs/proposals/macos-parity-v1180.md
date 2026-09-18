@@ -98,8 +98,8 @@ codex / claude / antigravity / copilot / grok。v1.18 新增的三個都缺：
 
 | 能力 | macOS | Windows 現況 |
 |---|---|---|
-| 時間窗歷史超過 12 列 | v1.18 #334：`Show N more`，每次 +12，上限 32（引擎 fold 的盡頭） | 缺。無分頁機制 |
-| 「從未記錄」旗標依訂閱判定 | v1.18 #322：把「本機沒記錄」與「有記錄但未分類」拆開，原本三處各自算錯 | **未判定**。`DashboardView.Quota.cs:56` 有相關語義的註解，但 Windows 是否踩同一個坑要開檔核對三個計算點 |
+| 時間窗歷史超過 12 列 | v1.18 #334：`Show N more`，每次 +12，上限 32（引擎 fold 的盡頭） | **進行中**（PR #112，沿用本 app 自己的「顯示更多（還有 N 筆）」控制項） |
+| 「從未記錄」旗標依訂閱判定 | v1.18 #322：把「本機沒記錄」與「有記錄但未分類」拆開，原本三處各自算錯 | **無落差**。Windows 從來沒有這個缺陷；判定與 macOS 不同而非更嚴——見下方「已核對完畢」 |
 | 長模型名撐破卡片 | v1.18 #336：改成依所在列量測，讓單行截斷發揮作用 | 未核對（WinUI 版面模型不同，可能不適用） |
 
 ### F. 多帳號與掃描根目錄
@@ -107,7 +107,7 @@ codex / claude / antigravity / copilot / grok。v1.18 新增的三個都缺：
 | 能力 | macOS | Windows 現況 |
 |---|---|---|
 | 第二個 Claude 帳號分帳 | v1.15 #261：每個帳號對自己註冊的 root 各自掃描 | 缺 |
-| 自訂掃描根目錄 `CLAUDE_CONFIG_DIR` | v1.14.x | 缺（全 repo 零命中） |
+| 自訂掃描根目錄 `CLAUDE_CONFIG_DIR` | v1.14.x | 缺。repo-wide 零命中（只有這兩份 parity 文件提到它） |
 
 > 這兩項碰認證與路徑，走 security 風險門。
 
@@ -115,8 +115,8 @@ codex / claude / antigravity / copilot / grok。v1.18 新增的三個都缺：
 
 | 能力 | Windows 現況 |
 |---|---|
-| Discord Rich Presence | `grep -rni discord src/ --include=*.cs --include=*.xaml` → 0 |
-| Beta 更新通道 | `src/TokenBar.App/UpdateFlow.cs:120` 寫死 `prerelease: false` |
+| Discord Rich Presence | 零實作。repo-wide `git grep -in discord -- .` 只有兩筆，都是散文宣告它不存在（`README.md` 的 Known limitations、`.github/release-notes/v0.3.0.md`） |
+| Beta 更新通道 | `src/TokenBar.App/UpdateFlow.cs` 寫死 `prerelease: false`（出貨路徑唯一一處） |
 | Individual tray items | **明列非目標**，不計入落差 |
 
 ### H. 引擎等價但與 UI 相關的 v1.15 修正
@@ -124,8 +124,37 @@ codex / claude / antigravity / copilot / grok。v1.18 新增的三個都缺：
 v1.15 #260（等價行的除數改成「讀數實際走過的距離」）與 admission 門檻、
 rising runs 的處理：macOS 在 `TokenBarCore/WindowEquivalence.swift`，
 Windows 在 `src/TokenBar.Core/WindowEquivalence.cs`、`QuotaEquivalenceFold.cs`。
-**未逐行對照**——Windows 這兩個檔是在 v1.15 之後寫的，可能已含正確語義，
-也可能是獨立實作。動這條之前先對讀兩邊。
+**無落差**——已逐行對照，Windows 兩個檔都已是修正後的語義。見下方「已核對完畢」。
+
+### I. 這份調查原本漏掉的四項（2026-09-19 補）
+
+**來源不是 macOS，是這個 repo 自己的 `README.md`。** 下面「這份調查怎麼漏的」一節
+說明為什麼。四項都親自對過兩邊：
+
+| 能力 | macOS | Windows 現況 |
+|---|---|---|
+| 平面貢獻熱圖（第三個圖表模式） | `Views/UsageChartCard.swift` 的 `enum ChartView` 有**三個** case：`bars = "2d"`、`heatmap = "heat"`、`threeD = "3d"`。`Charts/ContributionHeatmap.swift` 是整年、週日起始，與 3D **同一份 `GridLayout`**、只是不同 renderer | 缺第三個模式。Windows 的 `SetChartView(bool use3D)`（`DashboardView.xaml.cs`）是**二元**的，同一個 store key `tokenbar.chart.view` 只寫 `"2d"`／`"3d"`：2D＝30 天堆疊長條（可依 Model／Agent 堆疊、Tokens／Cost），3D＝整年貢獻圖。缺的是「整年、平面」這一格 |
+> 舊文件寫「兩邊都有 2D 熱圖與 3D 兩種呈現」。那句話**對錯各半**，而我第一次
+> 查證時只看了檔名就把它整句判錯——Windows 確實有 2D／3D 兩種呈現，只是它的 2D
+> 是 30 天長條而非整年熱圖；`QuotaHeatmap.cs` 的 7×24 又是第三張無關的圖。
+> 真正的落差是 macOS 多出來的那個 `heat` 模式。
+
+| Agent 品牌圖示 | `Views/AgentIconView.swift`——品牌色圓盤上放 SVG，mono 描白、full 用原設計，無圖示者退回首字母 | 缺。客戶端畫成 `GlowingDisc` 純色點 |
+| Agent-limits sparkline／圖表版面 | 8 個檔提到 `Sparkline` | 缺。`git grep -il sparkline -- 'src/**/*.cs'` → 0 |
+| Stats 歸因細分卡 | 6 個檔提到 `AttributionBreakdown` | 缺。同樣 → 0 |
+
+### 這份調查怎麼漏的
+
+上面的落差清單是從**兩個來源**推出來的：macOS v1.15–v1.18 的 release notes，加上
+被取代的 `macos-parity-v1143.md`。這四項在兩個來源裡都沒有——它們早於 v1.14，而舊
+文件也沒列。
+
+但 `README.md` 的 Known limitations 一直列著它們，`.github/release-notes/v0.3.0.md`
+也是。**我從變更紀錄和前一份調查推清單，卻沒有問這個 repo 自己已經記下了什麼。**
+它們是在稽核一道無關指令（Discord 那道 grep 的範圍）時掉出來的。
+
+下次重跑這份調查，第一步應該是 `git grep -n "parity" -- . | grep -v "^docs/"`，
+把 repo 自己的說法先收齊，再去比對 macOS。
 
 ## 切片順序建議
 
@@ -141,14 +170,99 @@ Windows 在 `src/TokenBar.Core/WindowEquivalence.cs`、`QuotaEquivalenceFold.cs`
 | 8 | Grok Bot 憑證同意（A 尾項） | security 風險門；Windows 的同意 UX 要重新設計 |
 | 9 | Discord RPC（G） | 最大；對外發布使用者資料，security 風險門 |
 
+I 的四項未排序——它們是新發現，成本還沒估過。直覺上 sparkline 與歸因細分卡
+偏純 UI，平面貢獻熱圖要新 renderer，品牌圖示要處理 SVG 資產與授權。
+
 先做的四片都是純 UI 或純設定，不碰 FFI、不碰憑證、不碰引擎 pin。
+
+## 已核對完畢（2026-09-18）
+
+兩個正確性疑點都查完了，**兩題都是 Windows 已經有了**。
+
+### #322 的「從未記錄」旗標：Windows 從來沒有這個缺陷
+
+macOS 的缺陷是把 `declared` 算成 `!records.isEmpty`——那是在問**表**，不是在問
+**這個訂閱**，所以宣告了任何一個 client 就等於替其他每一個都回答了。三個計算點
+都這樣寫。修法是新增 `UsageAttribution.declares(subscription:records:)`。
+
+Windows 有**兩個**入口，兩個都吃 `providerId`、都收斂到同一個
+`DeclaredSpanCore`：
+
+| 入口 | 呼叫點 | 給誰用 |
+|---|---|---|
+| `QuotaEquivalenceFold.Declared` | `QuotaLensProjection.BuildHistory` | 歷史卡（一串已完成週期） |
+| `QuotaEquivalenceFold.DeclaredSpan` | `QuotaLensProjection.BuildClient` | 即時窗卡（一個進行中週期的取樣跨距） |
+
+`Declared` 只是對每個週期跑一次 `DeclaredSpanCore` 的 OR，所以兩條路問的是
+同一個問題。
+
+要證明「沒有任何一處用表的空與非空來算」，光 grep `Declared` 是不夠的——那只找得到
+入口，找不到別處自己算出來的 bool。要從**消費端**反推：`declared` 這個 bool 只有
+兩個型別會吃（`WindowEquivalence.Aggregate` 與 `LiveRow`），而整個 repo 只有
+三個呼叫點，每一個的值都來自 `QuotaEquivalenceFold` 的 providerId-scoped 判定。
+
+指令要涵蓋整個 repo，`git grep` 而非 `grep -r src/ --include=*.cs`：後者只看
+`src/` 底下的 C#，證不出「沒有別的地方」——這份文件的前一版就是用它撐一個它撐
+不起來的句子。
+
+```bash
+git grep -n "WindowEquivalence.Aggregate\|WindowEquivalence.LiveRow" -- . \
+  | grep -v "^src/TokenBar.Core.Tests/" | grep -v "///" | grep -v "^docs/"
+```
+
+| 檔案 | 呼叫 | `declared` 從哪來 |
+|---|---|---|
+| `QuotaEquivalenceFold.cs` | `Aggregate` | 同檔上一行的 `DeclaredCore` |
+| `WindowHistoryText.cs` | `Aggregate`（在 `Equivalence` 裡） | 參數；唯一呼叫點是 `QuotaLensProjection` 的 `BuildHistory` → `Declared` |
+| `WindowCardText.cs` | `LiveRow`（在 `LiveEquivalence` 裡） | 參數；唯一呼叫點是 `QuotaLensProjection` 的 `BuildClient` → `DeclaredSpan` |
+
+測試專案與這份文件自己被排掉，理由不同：測試不是出貨路徑，文件命中的是它引用
+自己的那兩行。
+
+> 這裡刻意只寫檔名與符號、不寫行號。實作檔會動——這份文件的前一版就釘了一組
+> 在另一個分支量到的行號，對這條分支根本不成立——而一個會說謊的查證步驟比
+> 沒有查證更糟。上面那道 grep 每次都會給出當下的行號。
+>
+> **這份文件學到的教訓，寫在這裡給下一個編輯它的人**：前四輪審查的每一則發現
+> 都是同一個形狀——指令證明 A，旁邊的句子宣稱 B。修掉一個實例，下一輪就在隔壁
+> 一行找到同一個。所以最後的做法是把每一道指令的**真實輸出**貼在它下面（見文末
+> 查證區塊），讓讀者比對輸出而不是比對我的形容詞。寫新宣稱時請照做：先跑指令，
+> 貼輸出，再讓輸出自己說話。
+
+反向再查一次「有沒有人從 record 數量算 bool」：
+`git grep -n "Records\.\(Count\|Any\)\|records\.\(Count\|Any\)" -- . | grep -v "^src/TokenBar.Core.Tests/" | grep -v "^docs/"`
+命中五處，全部與 declaration 無關——`MaxEntries` 上限驗證、重複 source key 偵測、
+以及設定頁 `AcceptAll` 的空清單早退。
+
+判定本身**不是「更嚴」而是「不同」**——範圍更窄，但認的狀態更多：
+
+| | macOS `declares` | Windows `DeclaredSpanCore` | 哪邊寬 |
+|---|---|---|---|
+| 範圍 | 整張表 | 該週期的取樣跨距內 | ← macOS 這邊寬 |
+| 認的狀態 | 只認 `.assigned(subscription)` | `.assigned(providerId)` **或** `.excluded` | ← Windows 這邊寬 |
+
+Windows 的 `Declared` 註解記著它自己走過一輪更嚴的修正（round 11 的 P2）：
+「assigned 到別的訂閱」曾經也算數，但 session 窗和 weekly 窗在時間上重疊，
+共用跨距裡一則指給**另一個**訂閱的訊息會讓這一個讀成 declared。
+
+**一處真實分歧**：`.excluded` 在 Windows 算 declared，在 macOS 明確不算
+（「排除是一種分類，但它不把任何東西導向這裡」）。兩邊的理由都成立，但因為
+Windows 是按跨距判定的，它看得到「這段跨距裡的訊息被使用者排除了」——那個零
+是有交代的；macOS 的表層判定看不到這件事。**這題該進 macOS 的待辦，不是 Windows 的。**
+
+### v1.15 #260 的除數：Windows 已經是修正後的語義
+
+`src/TokenBar.Core/WindowEquivalence.cs` 的註解就寫著
+「The distance the readings travelled, not `last - first`」，並在同一個函式裡取
+`QuotaHistoryFold.RisingRuns(readings)`。#260 的後半（誤差改成每次上升一個
+量化步，而非整段位移一個步）也在，是這個式子：
+`QuantisationHalfStep * cycles.Sum(cycle => cycle.RisingRuns) / anyMovement`。
+三者都可以直接 `git grep` 那段文字或那個式子找到。
 
 ## 待核對（本次沒查、不要當成「沒落差」）
 
-- E 的「從未記錄」旗標語義（#322）——要開三個計算點對讀
 - C 的執行期字串是否也在 Windows 漏掉翻譯
 - D 的 Models 清單 hover tooltip
-- H 的 `WindowEquivalence` 兩邊逐行對照
 - v1.15–v1.18 的 240 個 commit 中，只讀了 release notes 與 commit subject；
   沒有進 release notes 的內部重構不在本清單內
 
@@ -164,10 +278,35 @@ git -C "$NATIVE" rev-list --count 5b894b63..origin/main
 git -C "$NATIVE" ls-tree origin/main vendor/tokscale-core
 git submodule status vendor/tokscale-core
 
-# 落差
-grep -rni "discord" src/ --include=*.cs --include=*.xaml     # → 0
-grep -n "prerelease" src/TokenBar.App/UpdateFlow.cs          # → :120 prerelease: false
-grep -rni "CLAUDE_CONFIG_DIR" src/                           # → 0
-ls src/TokenBar.App/Assets/strings-*.json                    # → 只有 zh-Hant
-grep -n "codex/claude/antigravity/copilot/grok" crates/tb_core_ffi/src/lib.rs
+# 落差。每一道下面貼的是它未經刪節的輸出，逐字，不是我對輸出的轉述——
+# 前四輪審查抓到的每一則，都是「指令證明 A、旁邊的句子宣稱 B」。
+# 讀者要比對的是輸出，不是我的形容詞。行號會漂，形狀不會。
+#
+# 這些輸出是我在 2026-09-19 撰寫本節時跑出來的。那是執行日期，不是任何
+# 可以從 repo 反推的東西——commit 時間戳證明不了指令何時跑過，所以這裡
+# 只宣稱它是什麼：一次人工執行的結果，讀者重跑就能比對。
+
+git grep -in "discord" -- . | grep -v "^docs/"
+#   .github/release-notes/v0.3.0.md:69:Present on the macOS build, not yet here: Discord Rich Presence, per-client tray items, Simplified Chinese, menu-bar font colour, the flat-heatmap chart mode, agent brand icons (clients render as coloured discs), the Agent-limits sparkline and chart layout, the Stats attribution-breakdown card, and support for multiple Claude accounts.
+#   README.md:187:Windows does not yet have macOS parity on: Discord Rich Presence, per-client tray items,
+#   兩筆都是散文在宣告它不存在。零實作。
+
+git grep -n "prerelease: false" -- 'src/**/*.cs'
+#   src/TokenBar.App/UpdateFlow.cs:120:            prerelease: false,
+#   出貨路徑唯一一處。
+
+git grep -n "CLAUDE_CONFIG_DIR" -- . | grep -v "^docs/"
+#   （無輸出）
+
+git ls-files | grep -i "strings-.*\.json"
+#   src/TokenBar.App/Assets/strings-zh-Hant.json
+
+git grep -il "sparkline\|AttributionBreakdown" -- 'src/**/*.cs'
+#   （無輸出）
+
+git grep -n "SetChartView(bool\|tokenbar.chart.view" -- 'src/**/*.cs'
+#   src/TokenBar.App/DashboardView.xaml.cs:43:        AppSettings.Store.GetString("tokenbar.chart.view", "2d") == "3d";
+#   src/TokenBar.App/DashboardView.xaml.cs:272:    private void SetChartView(bool use3D)
+#   src/TokenBar.App/DashboardView.xaml.cs:281:        AppSettings.Store.SetString("tokenbar.chart.view", use3D ? "3d" : "2d");
+#   唯一讀取點、bool 簽名、唯一寫入點且只寫兩個值——所以是二元，沒有第三個模式。
 ```
