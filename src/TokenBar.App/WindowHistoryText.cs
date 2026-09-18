@@ -58,13 +58,58 @@ public sealed record WindowHistoryRow(
 /// </summary>
 public static class WindowHistoryText
 {
-    /// <summary>Enough to read a trend without turning the lens into a scroll
-    /// marathon. The engine retains 128 cycles, so this is a display choice,
-    /// not a storage one — and <see cref="QuotaHistoryFold.ConsideredCycles"/>
-    /// has to stay at or above it, which a test asserts: a cap below this
-    /// number would draw fewer rows than this card intends with nothing saying
-    /// so.</summary>
+    /// <summary>
+    /// How many rows the card opens with, and how many each press of the
+    /// footer button adds. The ceiling is not here:
+    /// <see cref="QuotaLensProjection"/> hands this file a cycle list already
+    /// capped at <see cref="QuotaHistoryFold.ConsideredCycles"/>, so pressing
+    /// until the button disappears shows everything the fold admits and
+    /// reaching further is an engine change, not a display one.
+    /// <para>
+    /// Growing the list rather than paging it: the two aggregates on this card
+    /// — the ≈ line (<see cref="Equivalence"/>) and the usage bar's scale
+    /// (<see cref="Rows"/>) — are computed over the rows on screen, so a pager
+    /// would hand the same history a different ratio on every page. The whole
+    /// flyout also already sits in one vertical scroller, which a second
+    /// same-axis scroller inside the card would fight for the wheel.
+    /// </para>
+    /// <para>
+    /// <see cref="QuotaHistoryFold.ConsideredCycles"/> has to stay at or above
+    /// this, which a test asserts: a cap below it would draw fewer rows than
+    /// this card intends with nothing saying so.
+    /// </para>
+    /// </summary>
     public const int VisibleRows = 12;
+
+    /// <summary>
+    /// How many admitted cycles are not on screen. Zero means the grow control
+    /// is not drawn at all, which is also how the card says there is no more
+    /// history rather than leaving a control that would do nothing.
+    /// <para>
+    /// The count that is LEFT, not the count the next press adds: that is the
+    /// phrasing this app's other grown list already uses (the Hourly lens's
+    /// timeline, <c>"Show more ({0} left)"</c>), and a second wording for the
+    /// same gesture would be the only thing distinguishing the two cards.
+    /// macOS names the step instead and has to clamp it so a "Show 0 more"
+    /// cannot appear; naming the remainder makes that case unreachable.
+    /// </para>
+    /// </summary>
+    public static int Remaining(int total, int shown) => Math.Max(0, total - shown);
+
+    /// <summary>
+    /// The count one press produces, from the number of rows currently DRAWN.
+    /// <para>
+    /// Taking the drawn count rather than the stored one is the whole content
+    /// of this function, and it is not interchangeable: after a window loses
+    /// cycles, <see cref="Rows"/> clamps and the stored count stays above what
+    /// is on screen, so stepping from the stored value would take several
+    /// presses to move a single row. Stated here rather than inline in the
+    /// click handler because <c>DashboardView.Quota.cs</c> is WinUI and no test
+    /// project compiles it — the arithmetic is the part a test can hold, and
+    /// what is left in the handler is wiring.
+    /// </para>
+    /// </summary>
+    public static int Grown(int drawnCount) => drawnCount + VisibleRows;
 
     /// <summary>Below this the cycle was barely witnessed and its consumption
     /// figure is not evidence about the window — the app simply was not running
@@ -95,12 +140,24 @@ public static class WindowHistoryText
     /// states the same rule and records what breaking it cost: a hidden older
     /// cycle with the largest total set the scale and made every visible bar
     /// short, which is precisely the comparison the bar claims to be making.
+    /// Pressing Show more therefore moves both this scale and the ≈ line, and
+    /// that is the intended reading: they describe what is on screen. It is
+    /// also why <paramref name="shownCount"/> only ever grows — a control that
+    /// could shrink it would make the ≈ line oscillate between two answers for
+    /// one history.
     /// </para>
     /// </summary>
+    /// <param name="shownCount">How many rows the reader has grown the list
+    /// to. Defaults to the card's opening state, which is what every caller
+    /// but the projection wants; clamped at both ends here rather than at the
+    /// call site, because a window that lost cycles between two renders
+    /// carries a count larger than its own history.</param>
     public static IReadOnlyList<WindowHistoryRow> Rows(
-        IReadOnlyList<QuotaCycle> cycles, IReadOnlyList<WindowEquivalence.Cycle> spans)
+        IReadOnlyList<QuotaCycle> cycles,
+        IReadOnlyList<WindowEquivalence.Cycle> spans,
+        int shownCount = VisibleRows)
     {
-        var shown = Math.Min(cycles.Count, VisibleRows);
+        var shown = Math.Min(cycles.Count, Math.Max(VisibleRows, shownCount));
         var peak = 0L;
         for (var i = 0; i < shown && i < spans.Count; i++)
         {
@@ -137,8 +194,14 @@ public static class WindowHistoryText
 
     public static string Title() => "Window history".Localized();
 
+    /// <summary>Counts the rows ON SCREEN, not the cycles retained: the
+    /// subtitle names what the reader can see, and grows with each press.</summary>
     public static string? Subtitle(IReadOnlyList<WindowHistoryRow> rows) =>
         rows.Count == 0 ? null : "{0} windows".Localized(rows.Count);
+
+    /// <summary>The grow control's label, shared verbatim with the Hourly
+    /// lens's timeline so the two grown lists read as the same gesture.</summary>
+    public static string ShowMore(int remaining) => "Show more ({0} left)".Localized(remaining);
 
     public static string EmptyBody(WindowHistoryState state) => state switch
     {
