@@ -2,6 +2,12 @@
   "version": 1,
   "dependencies": {
     "net10.0": {
+      "tokenbar.core": {
+        "type": "Project",
+        "dependencies": {
+          "TokenBar.Interop": "[0.3.0, )"
+        }
+      },
       "tokenbar.interop": {
         "type": "Project"
       }
