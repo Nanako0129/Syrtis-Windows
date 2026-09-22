@@ -1569,11 +1569,15 @@ public sealed partial class DashboardView : UserControl
         name.Children.Add(subDiscHost);
         name.Children.Add(Ui.Text(
             $"{client.ModelId} · {ClientRegistry.ShortName(client.Client)}", 10, 0.85));
+        // Token-aware, like the Models row: this sub-row's hover card is the
+        // same ModelTip (attached below), which reads "—" for an unpriced model,
+        // and a row must not say "$0.00" while its own tooltip says "—".
         var row = Ui.Row(
             name,
             Ui.Text(
                 $"{Format.CompactTokens(client.Tokens.Total)} · "
-                    + CostSurfaceProjection.CostText(client.Cost, authoritative),
+                    + CostSurfaceProjection.CostText(
+                        client.Tokens.Total, client.Cost, authoritative),
                 10,
                 0.7));
 
