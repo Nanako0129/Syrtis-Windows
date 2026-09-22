@@ -116,7 +116,7 @@ codex / claude / antigravity / copilot / grok。v1.18 新增的三個都缺：
 | 能力 | Windows 現況 |
 |---|---|
 | Discord Rich Presence | 零實作。repo-wide `git grep -in discord -- .` 只有兩筆，都是散文宣告它不存在（`README.md` 的 Known limitations、`.github/release-notes/v0.3.0.md`） |
-| Beta 更新通道 | `src/TokenBar.App/UpdateFlow.cs` 寫死 `prerelease: false`（出貨路徑唯一一處） |
+| Beta 更新通道 | **明列非目標**（2026-09-23 決定不做），不計入落差。`src/TokenBar.App/UpdateFlow.cs` 寫死 `prerelease: false` 是刻意的：app 內更新只走正式版 |
 | Individual tray items | **明列非目標**，不計入落差 |
 
 ### H. 引擎等價但與 UI 相關的 v1.15 修正
@@ -160,9 +160,9 @@ Windows 在 `src/TokenBar.Core/WindowEquivalence.cs`、`QuotaEquivalenceFold.cs`
 
 | # | 切片 | 理由 |
 |---|---|---|
-| 1 | Beta 更新通道 | 最小；一個布林加一個設定，UpdateFlow 已有完整結構 |
+| ~~1~~ | ~~Beta 更新通道~~ | **不做**（2026-09-23 決定），見 G |
 | 2 | 不合理成本警示（D） | 純 UI ＋ 一個閾值，無新資料來源 |
-| 3 | 時間窗歷史分頁（E） | 純 UI；資料已在 `tb_quota_history`（引擎 fold 上限 32） |
+| ~~3~~ | ~~時間窗歷史分頁（E）~~ | **已完成**（PR #112） |
 | 4 | 選單列文字顏色（B） | 純設定 ＋ 托盤繪製，無網路無憑證 |
 | 5 | 三個新 quota provider（A，不含 Grok Bot 憑證） | 要寫 Rust fetcher；OpenCode Go 與 Kiro 不碰系統憑證庫 |
 | 6 | 簡體中文（C） | 488 個 key，量大但機械；需要審過的譯文而非字元轉換 |
@@ -293,7 +293,7 @@ git grep -in "discord" -- . | grep -v "^docs/"
 
 git grep -n "prerelease: false" -- 'src/**/*.cs'
 #   src/TokenBar.App/UpdateFlow.cs:120:            prerelease: false,
-#   出貨路徑唯一一處。
+#   出貨路徑唯一一處。Beta 通道是明列非目標，所以這一行是刻意的，不是落差。
 
 git grep -n "CLAUDE_CONFIG_DIR" -- . | grep -v "^docs/"
 #   （無輸出）
