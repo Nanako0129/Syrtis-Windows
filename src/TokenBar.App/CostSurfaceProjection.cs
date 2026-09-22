@@ -35,6 +35,28 @@ public static class CostSurfaceProjection
     public static string CostText(double cost, bool authoritative) =>
         authoritative ? Format.Usd(cost) : Checking;
 
+    /// <summary>
+    /// A cost shown beside the token count it was charged for — the shape of a
+    /// per-model row, where a model the engine could not price must not read
+    /// as a free one.
+    /// <para>
+    /// Two questions, answered by two layers that cannot substitute for each
+    /// other. <paramref name="authoritative"/> is whole-graph: it is true as
+    /// soon as ANY message priced (<see cref="IsAuthoritative"/> counts
+    /// Partial on purpose), so it cannot say that THIS row did not. That half
+    /// comes from the row itself through <see cref="Format.Money"/> — tokens
+    /// with no cost is usage nobody could price, and reads as a dash.
+    /// </para>
+    /// <para>
+    /// Reported 2026-09-23: a model released that day was absent from both
+    /// pricing sources while the rest of the profile priced normally, so
+    /// coverage was Partial, <paramref name="authoritative"/> was true, and
+    /// the two-argument overload rendered that model's row "$0.00".
+    /// </para>
+    /// </summary>
+    public static string CostText(long tokens, double cost, bool authoritative) =>
+        authoritative ? Format.Money(tokens, cost) : Checking;
+
     public static string HeaderCostLine(
         double todayCost, UsageStats stats, bool authoritative) =>
         authoritative
@@ -145,8 +167,11 @@ public static class CostSurfaceProjection
     public static string DayTipCost(double cost, bool authoritative) =>
         CostText(cost, authoritative);
 
-    public static string ModelTipCost(double cost, bool authoritative) =>
-        CostText(cost, authoritative);
+    /// <summary>The Models row's hover card. Token-aware for the same reason as
+    /// the row it sits on: the two describe one model, and must not disagree
+    /// about whether it has a price.</summary>
+    public static string ModelTipCost(long tokens, double cost, bool authoritative) =>
+        CostText(tokens, cost, authoritative);
 
     private static double FiniteOrZero(double value) => double.IsFinite(value) ? value : 0;
 }

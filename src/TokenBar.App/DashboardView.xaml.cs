@@ -1441,9 +1441,11 @@ public sealed partial class DashboardView : UserControl
             var trailing = new StackPanel { HorizontalAlignment = HorizontalAlignment.Right };
             var tokensText = Ui.Text(Format.CompactTokens(entry.Total), 11, 0.9);
             tokensText.HorizontalAlignment = HorizontalAlignment.Right;
+            // Token-aware: a model the engine could not price reads "—", not
+            // "$0.00" beside its own token count.
             var costText = Ui.Text(
                 CostSurfaceProjection.CostText(
-                    entry.Cost, snapshot.CostAuthoritative), 10, 0.65);
+                    entry.Total, entry.Cost, snapshot.CostAuthoritative), 10, 0.65);
             costText.HorizontalAlignment = HorizontalAlignment.Right;
             trailing.Children.Add(tokensText);
             trailing.Children.Add(costText);
@@ -2057,7 +2059,7 @@ public sealed partial class DashboardView : UserControl
         panel.Children.Add(TipRow(
             TipText("{0} tokens".Localized(Format.CompactTokens(entry.Total)), 11, 0.9),
             CostSurfaceProjection.ModelTipCost(
-                entry.Cost, costAuthoritative), 0.9));
+                entry.Total, entry.Cost, costAuthoritative), 0.9));
         (string Label, string Color)[] kinds =
         [
             ("Input".Localized(), Ui.TokenKinds[0].Color),
