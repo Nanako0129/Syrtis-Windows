@@ -88,11 +88,11 @@ public class CostSurfaceProjectionTests
         Assert.Equal("Checking",
             CostSurfaceProjection.CostText(100, false));
         Assert.Equal("Checking",
-            CostSurfaceProjection.DayTipCost(100, false));
+            CostSurfaceProjection.DayTipCost(1_000, 100, false));
         Assert.Equal("Checking",
-            CostSurfaceProjection.HourlyCost(100, false));
+            CostSurfaceProjection.HourlyCost(1_000, 100, false));
         Assert.Equal("Checking",
-            CostSurfaceProjection.ModelTipCost(100, false));
+            CostSurfaceProjection.ModelTipCost(1_000, 100, false));
         Assert.Equal("Checking",
             CostSurfaceProjection.BestDayText(stats.BestDay, false));
         Assert.Equal("Agents by tokens",
@@ -174,6 +174,59 @@ public class CostSurfaceProjectionTests
                 null,
                 null,
                 true));
+    }
+
+    // ---- a model the engine could not price (reported 2026-09-23) --------
+
+    // The reported case, end to end through both layers. A model released that
+    // day had no entry in either pricing source while the rest of the profile
+    // priced normally, so coverage was Partial — which IS authoritative, on
+    // purpose (see the matrix above). The whole-graph flag therefore cannot
+    // say that this one row did not price; only the row's own tokens-without-
+    // cost can, and the old overload rendered it "$0.00".
+    [Fact]
+    public void AnUnpricedModelInAPartiallyPricedProfileReadsAsUnpricedNotFree()
+    {
+        var authoritative = CostSurfaceProjection.IsAuthoritative(
+            Payload(coverage: CostCoverage.Partial));
+        Assert.True(authoritative);
+
+        Assert.Equal("—", CostSurfaceProjection.CostText(42_729, 0, authoritative));
+        // The row's hover card describes the same model and must agree.
+        Assert.Equal("—", CostSurfaceProjection.ModelTipCost(42_729, 0, authoritative));
+        // What the two-argument overload says about the very same row — kept
+        // as the record of the defect, so the difference is asserted rather
+        // than remembered.
+        Assert.Equal("$0.00", CostSurfaceProjection.CostText(0, authoritative));
+    }
+
+    [Theory]
+    // No usage and no cost is a real total, not an unpriced one.
+    [InlineData(0L, 0.0, "$0.00")]
+    // Priced normally.
+    [InlineData(42_729L, 0.11, "$0.11")]
+    // Priced but below the format's resolution: small, not nothing. The same
+    // rule Format.Money states — "$0.00" there would claim a price nobody has.
+    [InlineData(1_000L, 0.001, "<$0.01")]
+    public void APricedOrEmptyRowKeepsItsAmount(long tokens, double cost, string expected) =>
+        Assert.Equal(expected, CostSurfaceProjection.CostText(tokens, cost, true));
+
+    // The graph-level answer still comes first: while nothing has priced yet,
+    // the row says so rather than guessing between free and unpriced.
+    [Fact]
+    public void AnUnresolvedGraphStillReadsCheckingForAnUnpricedRow() =>
+        Assert.Equal("Checking", CostSurfaceProjection.CostText(42_729, 0, false));
+
+    // The Hourly row and the day tooltip render their amount beside their own
+    // token count too, so they follow the same rule as the Models row.
+    [Fact]
+    public void HourlyAndDayTooltipAmountsMarkAnUnpricedBucket()
+    {
+        Assert.Equal("—", CostSurfaceProjection.HourlyCost(5_000, 0, true));
+        Assert.Equal("—", CostSurfaceProjection.DayTipCost(5_000, 0, true));
+        // An empty bucket is a real zero, not an unpriced one.
+        Assert.Equal("$0.00", CostSurfaceProjection.HourlyCost(0, 0, true));
+        Assert.Equal("$0.00", CostSurfaceProjection.DayTipCost(0, 0, true));
     }
 
     [Fact]

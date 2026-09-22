@@ -37,7 +37,7 @@ public static class DrillDownSummary
         }
 
         return summary + " · " + Format.CompactTokens(tokens)
-            + " · " + CostSurfaceProjection.CostText(cost, authoritative);
+            + " · " + CostSurfaceProjection.CostText(tokens, cost, authoritative);
     }
 
     /// <summary>Which clients the turn count covers.

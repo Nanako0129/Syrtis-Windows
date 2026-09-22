@@ -410,4 +410,13 @@ public class QuotaSummaryTextTests
     public void TodayTextDoesNotInventAPriceForAnUnpricedZeroDay() =>
         Assert.DoesNotContain(
             "$0.00", QuotaSummaryText.TodayText(0, 0, authoritative: false), StringComparison.Ordinal);
+
+
+    // The case this method's doc comment used to claim it handled and did not:
+    // a day of usage that all failed to price, in a graph where something else
+    // priced (so authority is true). It read "$0.00". Now "—".
+    [Fact]
+    public void TodayTextMarksAnUnpricedDayRatherThanCallingItFree() =>
+        Assert.Equal(
+            "1.2M tokens · —", QuotaSummaryText.TodayText(1_234_000, 0, authoritative: true));
 }

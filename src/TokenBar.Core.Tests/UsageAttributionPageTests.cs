@@ -403,4 +403,22 @@ public class UsageAttributionPageTests : IDisposable
             Localization.Load("en", AppContext.BaseDirectory);
         }
     }
+
+
+    // An observed source whose usage the engine could not price reads "—"
+    // beside its tokens, not "$0.00": this page asks the user which
+    // subscription the usage belongs to, and a false "free" is the one answer
+    // that would make classifying it look pointless.
+    [Fact]
+    public void AnUnpricedSourceReadsAsUnpricedNotFree()
+    {
+        var row = new UsageAttributionSettings.Row(
+            "claude", "anthropic", 1_234_567, 0,
+            UsageAttribution.State.Unassigned, UsageAttribution.State.Unassigned);
+
+        var line = UsageAttributionPage.ObservedLine(row);
+
+        Assert.EndsWith("· —", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("$0.00", line, StringComparison.Ordinal);
+    }
 }

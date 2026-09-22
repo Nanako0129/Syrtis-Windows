@@ -507,10 +507,12 @@ public sealed class TrayService : IDisposable
             ProductIdentity.Name,
             "Today {0}".Localized(Format.CompactTokens(totals.TodayTokens))
                 + " · "
-                + CostSurfaceProjection.CostText(totals.TodayCost, _feed.CostAuthoritative),
+                + CostSurfaceProjection.CostText(
+                    totals.TodayTokens, totals.TodayCost, _feed.CostAuthoritative),
             "All time {0}".Localized(Format.CompactTokens(totals.TotalTokens))
                 + " · "
-                + CostSurfaceProjection.CostText(totals.TotalCost, _feed.CostAuthoritative),
+                + CostSurfaceProjection.CostText(
+                    totals.TotalTokens, totals.TotalCost, _feed.CostAuthoritative),
         };
         var persistedSelection = AppSettings.Store.GetString(
             "tokenbar.quota.source", QuotaResolver.Auto) ?? QuotaResolver.Auto;

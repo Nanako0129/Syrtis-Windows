@@ -1441,9 +1441,11 @@ public sealed partial class DashboardView : UserControl
             var trailing = new StackPanel { HorizontalAlignment = HorizontalAlignment.Right };
             var tokensText = Ui.Text(Format.CompactTokens(entry.Total), 11, 0.9);
             tokensText.HorizontalAlignment = HorizontalAlignment.Right;
+            // Token-aware: a model the engine could not price reads "—", not
+            // "$0.00" beside its own token count.
             var costText = Ui.Text(
                 CostSurfaceProjection.CostText(
-                    entry.Cost, snapshot.CostAuthoritative), 10, 0.65);
+                    entry.Total, entry.Cost, snapshot.CostAuthoritative), 10, 0.65);
             costText.HorizontalAlignment = HorizontalAlignment.Right;
             trailing.Children.Add(tokensText);
             trailing.Children.Add(costText);
@@ -1567,11 +1569,15 @@ public sealed partial class DashboardView : UserControl
         name.Children.Add(subDiscHost);
         name.Children.Add(Ui.Text(
             $"{client.ModelId} · {ClientRegistry.ShortName(client.Client)}", 10, 0.85));
+        // Token-aware, like the Models row: this sub-row's hover card is the
+        // same ModelTip (attached below), which reads "—" for an unpriced model,
+        // and a row must not say "$0.00" while its own tooltip says "—".
         var row = Ui.Row(
             name,
             Ui.Text(
                 $"{Format.CompactTokens(client.Tokens.Total)} · "
-                    + CostSurfaceProjection.CostText(client.Cost, authoritative),
+                    + CostSurfaceProjection.CostText(
+                        client.Tokens.Total, client.Cost, authoritative),
                 10,
                 0.7));
 
@@ -1795,7 +1801,7 @@ public sealed partial class DashboardView : UserControl
                     Ui.Text(
                         $"{Format.CompactTokens(entry.Total)} · "
                             + CostSurfaceProjection.HourlyCost(
-                                entry.Cost, snapshot.CostAuthoritative),
+                                entry.Total, entry.Cost, snapshot.CostAuthoritative),
                         11,
                         0.75)));
             }
@@ -1892,7 +1898,7 @@ public sealed partial class DashboardView : UserControl
                     "{0} msgs".Localized(entry.Messages)
                         + $" · {Format.CompactTokens(entry.Total)} · "
                         + CostSurfaceProjection.CostText(
-                            entry.Cost, snapshot.CostAuthoritative),
+                            entry.Total, entry.Cost, snapshot.CostAuthoritative),
                     10,
                     0.75)));
             block.Children.Add(Ui.ShareBar(
@@ -1996,7 +2002,8 @@ public sealed partial class DashboardView : UserControl
         panel.Children.Add(TipText(Format.MonthDay(bar.Date), 12, bold: true));
         panel.Children.Add(TipRow(
             TipText("{0} tokens".Localized(Format.ExactTokens(bar.TotalTokens)), 11, 0.9),
-            CostSurfaceProjection.DayTipCost(bar.TotalCost, costAuthoritative), 0.9));
+            CostSurfaceProjection.DayTipCost(
+                bar.TotalTokens, bar.TotalCost, costAuthoritative), 0.9));
         var ordered = CostSurfaceProjection.OrderDaySegments(
             bar.Segments, costAuthoritative, _chartMetric);
         foreach (var seg in ordered)
@@ -2005,7 +2012,7 @@ public sealed partial class DashboardView : UserControl
                 TipLabel(seg.Color, seg.Label),
                 $"{Format.CompactTokens(seg.Tokens)} · "
                     + CostSurfaceProjection.DayTipCost(
-                        seg.Cost, costAuthoritative)));
+                        seg.Tokens, seg.Cost, costAuthoritative)));
         }
 
         return panel;
@@ -2057,7 +2064,7 @@ public sealed partial class DashboardView : UserControl
         panel.Children.Add(TipRow(
             TipText("{0} tokens".Localized(Format.CompactTokens(entry.Total)), 11, 0.9),
             CostSurfaceProjection.ModelTipCost(
-                entry.Cost, costAuthoritative), 0.9));
+                entry.Total, entry.Cost, costAuthoritative), 0.9));
         (string Label, string Color)[] kinds =
         [
             ("Input".Localized(), Ui.TokenKinds[0].Color),
