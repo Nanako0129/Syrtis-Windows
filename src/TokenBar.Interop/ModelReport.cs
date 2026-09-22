@@ -18,7 +18,12 @@ public sealed record ModelReportEntry(
     long Total,
     int MessageCount,
     double Cost,
-    double? MsPer1kTokens = null);
+    double? MsPer1kTokens = null,
+    // What the local pricing table would charge for these tokens (wire key
+    // `costEstimate`), or null when it cannot price them. Evidence only: the
+    // judgement is TokenBar.Core's CostPlausibility, taken on the row after
+    // ModelReportFold has merged provider-split rows.
+    double? CostEstimate = null);
 
 public sealed record ModelReport(
     IReadOnlyList<ModelReportEntry> Entries,

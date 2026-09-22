@@ -877,4 +877,28 @@ public class DtoDecodeTests
         Assert.Same(first, unique[0]);
         Assert.Same(other, unique[1]);
     }
+
+
+    // The FFI now ships a local price estimate per row. Present, it decodes;
+    // absent — any payload from before this field existed — or explicitly
+    // null (the Rust side's "cannot price these tokens"), it is null. Neither
+    // of the last two may throw or become 0, which would be a usable-looking
+    // denominator for a price nobody computed.
+    [Theory]
+    [InlineData(",\"costEstimate\":1.25", 1.25)]
+    [InlineData("", null)]
+    [InlineData(",\"costEstimate\":null", null)]
+    public void ModelReportCarriesTheLocalCostEstimate(string field, double? expected)
+    {
+        var json = """
+            {"ok":true,"data":{"entries":[{"client":"opencode","model":"m","provider":"deepseek",
+             "input":1,"output":2,"cacheRead":0,"cacheWrite":0,"reasoning":0,"total":3,
+             "messageCount":1,"cost":0.5
+            """ + field + """
+            }],"totalInput":1,"totalOutput":2,"totalCacheRead":0,"totalCacheWrite":0,
+             "totalMessages":1,"totalCost":0.5}}
+            """;
+        var r = TbCore.DecodeEnvelope<ModelReport>(json);
+        Assert.Equal(expected, r.Entries[0].CostEstimate);
+    }
 }

@@ -46,6 +46,12 @@ public static class Format
     // "$" prepended outside the numeric format so a negative amount renders
     // "$-1.50" like Swift's "$%.2f", not .NET's "-$1.50". Bare F2 is printf
     // %.2f (IEEE-correct from the binary value — see CompactTokens).
+    /// <summary>A multiple, as a whole number (port of Format.swift's
+    /// compactRatio, "%.0f"). Used for "about 308x the local estimate", where
+    /// the ratio clears 50 by definition, so a fraction would carry nothing.</summary>
+    public static string CompactRatio(double ratio) =>
+        ratio.ToString("F0", CultureInfo.InvariantCulture);
+
     public static string Usd(double amount) =>
         "$" + amount.ToString("F2", CultureInfo.InvariantCulture);
 

@@ -114,4 +114,52 @@ public class ModelReportFoldTests
 
         Assert.Equal(string.Empty, Assert.Single(folded).Provider);
     }
+
+
+    // ---- the local price estimate across a merge ----------------------------
+
+    private static ModelReport Report(params ModelReportEntry[] entries) =>
+        new(entries, 0, 0, 0, 0, entries.Length, entries.Sum(e => e.Cost));
+
+    // Cost is summed, so the estimate beside it must be summed too: the ratio
+    // taken from the merged row then describes the merged spend.
+    [Fact]
+    public void EstimatesOfTwoPricedProvidersAreSummed()
+    {
+        var folded = Assert.Single(Report(
+            Entry("opencode", "deepseek", "m", 100, 0, cost: 10) with { CostEstimate = 1.0 },
+            Entry("opencode", "openrouter", "m", 100, 0, cost: 20) with { CostEstimate = 2.0 })
+            .ModelLevelEntries());
+
+        Assert.Equal(30, folded.Cost);
+        Assert.Equal(3.0, folded.CostEstimate);
+    }
+
+    // The hazard this field brings to a `with`-based fold. Left unset, `with`
+    // would keep the FIRST row's estimate (1.0) while Cost is the sum (30), and
+    // 30 / 1.0 is a ratio inflated by construction. All-or-nothing instead: a
+    // merged row with any unpriced component has no estimate, so it cannot be
+    // judged at all rather than judged on a partial denominator.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AMergedRowWithAnyUnpricedComponentHasNoEstimate(bool unpricedFirst)
+    {
+        var priced = Entry("opencode", "deepseek", "m", 100, 0, cost: 10) with { CostEstimate = 1.0 };
+        var unpriced = Entry("opencode", "openrouter", "m", 100, 0, cost: 20) with { CostEstimate = null };
+
+        var folded = Assert.Single((unpricedFirst
+            ? Report(unpriced, priced)
+            : Report(priced, unpriced)).ModelLevelEntries());
+
+        Assert.Equal(30, folded.Cost);
+        Assert.Null(folded.CostEstimate);
+    }
+
+    // A row that is never merged keeps its own estimate untouched.
+    [Fact]
+    public void AnUnmergedRowKeepsItsEstimate() =>
+        Assert.Equal(4.5, Assert.Single(Report(
+            Entry("opencode", "deepseek", "m", 100, 0, cost: 10) with { CostEstimate = 4.5 })
+            .ModelLevelEntries()).CostEstimate);
 }

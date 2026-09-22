@@ -63,6 +63,16 @@ public static class ModelReportFold
                 MessageCount = messageSum > int.MaxValue ? int.MaxValue : (int)messageSum,
                 Cost = current.Cost + entry.Cost,
                 MsPer1kTokens = null,
+                // Set explicitly, never left to `with`: an unset property would
+                // keep the FIRST row's estimate while Cost above is the sum, and
+                // cost/estimate would then describe two rows' spend against one
+                // row's price — a ratio inflated by construction, i.e. a false
+                // warning. All-or-nothing, as macOS: if any contributing row
+                // could not be priced, the merged row has no estimate rather
+                // than a partial denominator.
+                CostEstimate = current.CostEstimate is { } a && entry.CostEstimate is { } b
+                    ? a + b
+                    : null,
             };
         }
 
