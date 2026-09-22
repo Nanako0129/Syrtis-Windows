@@ -229,6 +229,59 @@ public class CostSurfaceProjectionTests
         Assert.Equal("$0.00", CostSurfaceProjection.DayTipCost(0, 0, true));
     }
 
+    // ---- the implausible-cost warning (port of macOS v1.15 #264) ----------
+
+    private static ModelReportEntry Reported(double cost, double? estimate) =>
+        new("opencode", "deepseek-v4-flash", "deepseek", 1_000, 0, 0, 0, 0, 1_000, 1, cost,
+            CostEstimate: estimate);
+
+    // The sentence the glyph's accessible name and the hover line both use.
+    [Fact]
+    public void AnImplausibleCostNamesTheMultiple() =>
+        Assert.Equal(
+            "Cost reported by the client, about 308x the local price estimate",
+            CostSurfaceProjection.CostWarning(Reported(308, 1), authoritative: true));
+
+    // Windows's authority gate, which macOS has no equivalent of: while the
+    // graph is not authoritative the row shows "Checking" instead of a cost,
+    // and a warning about the multiple of a figure nobody can see would state
+    // a number that is not on screen. Same row, same ratio, only authority
+    // differs.
+    [Fact]
+    public void NoWarningBesideACostThatReadsChecking()
+    {
+        var row = Reported(308, 1);
+        Assert.Null(CostSurfaceProjection.CostWarning(row, authoritative: false));
+        Assert.NotNull(CostSurfaceProjection.CostWarning(row, authoritative: true));
+    }
+
+    // Healthy, at-threshold, and unjudgeable rows carry no warning.
+    [Theory]
+    [InlineData(0.3, 1.0)]
+    [InlineData(50.0, 1.0)]
+    [InlineData(1000.0, null)]
+    public void NoWarningWhenTheRowIsHealthyOrCannotBeJudged(double cost, double? estimate) =>
+        Assert.Null(CostSurfaceProjection.CostWarning(Reported(cost, estimate), authoritative: true));
+
+    // The sentence has a zh-Hant table entry: a missing key falls back to
+    // English, so equality with the English text means the entry is absent.
+    [Fact]
+    public void TheWarningIsTranslated()
+    {
+        var english = CostSurfaceProjection.CostWarning(Reported(308, 1), authoritative: true);
+        Localization.Load("zh-Hant", AppContext.BaseDirectory);
+        try
+        {
+            var zh = CostSurfaceProjection.CostWarning(Reported(308, 1), authoritative: true);
+            Assert.NotEqual(english, zh);
+            Assert.Contains("308", zh, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
+    }
+
     [Fact]
     public void DelayedOldGenerationCannotRestoreCostAuthority()
     {

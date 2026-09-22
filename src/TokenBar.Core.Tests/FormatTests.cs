@@ -164,4 +164,13 @@ public class FormatTests
         Assert.Equal("3 小時前", At(10_800));
         Assert.Equal("2 天前", At(172_800));
     });
+
+
+    // A multiple as a whole number: the warning only ever names ratios above
+    // 50, where a fraction carries nothing.
+    [Theory]
+    [InlineData(308.4, "308")]
+    [InlineData(50.6, "51")]
+    public void CompactRatioIsAWholeNumber(double ratio, string expected) =>
+        Assert.Equal(expected, Format.CompactRatio(ratio));
 }

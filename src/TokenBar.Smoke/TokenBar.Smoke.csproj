@@ -2,6 +2,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\TokenBar.Interop\TokenBar.Interop.csproj" />
+    <!-- For the model-report step's implausible-cost probe: it must judge rows
+         with the same fold and rule the Models lens uses (ModelReportFold,
+         CostPlausibility, ClientRegistry), not a re-implementation of them. -->
+    <ProjectReference Include="..\TokenBar.Core\TokenBar.Core.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

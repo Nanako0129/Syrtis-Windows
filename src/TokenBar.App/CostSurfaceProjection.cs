@@ -57,6 +57,31 @@ public static class CostSurfaceProjection
     public static string CostText(long tokens, double cost, bool authoritative) =>
         authoritative ? Format.Money(tokens, cost) : Checking;
 
+    /// <summary>
+    /// The warning for a Models row whose reported cost the local price estimate
+    /// cannot justify, or null when there is nothing to warn about. One wording,
+    /// used both for the row's glyph (as its accessible name) and for the line in
+    /// its hover card: the card is summoned by a pointer only, so the glyph has
+    /// to say the same thing itself for a keyboard or screen-reader user.
+    /// <para>
+    /// Null whenever <paramref name="authoritative"/> is false. The row renders
+    /// its cost as "Checking" then — a gate macOS does not have — and a line
+    /// saying that cost is "about Nx the estimate" beside a cost nobody can see
+    /// would state a number that is not on screen.
+    /// </para>
+    /// <para>
+    /// Takes the FOLDED row. <see cref="CostPlausibility.ImplausibleRatio"/> is
+    /// only meaningful after <see cref="ModelReportFold"/>, which sums cost and
+    /// estimate together; judging a provider-split component would describe
+    /// part of the row's spend.
+    /// </para>
+    /// </summary>
+    public static string? CostWarning(ModelReportEntry entry, bool authoritative) =>
+        authoritative && CostPlausibility.ImplausibleRatio(entry) is { } ratio
+            ? "Cost reported by the client, about {0}x the local price estimate"
+                .Localized(Format.CompactRatio(ratio))
+            : null;
+
     public static string HeaderCostLine(
         double todayCost, UsageStats stats, bool authoritative) =>
         authoritative

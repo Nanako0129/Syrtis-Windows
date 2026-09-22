@@ -1448,7 +1448,9 @@ public sealed partial class DashboardView : UserControl
                     entry.Total, entry.Cost, snapshot.CostAuthoritative), 10, 0.65);
             costText.HorizontalAlignment = HorizontalAlignment.Right;
             trailing.Children.Add(tokensText);
-            trailing.Children.Add(costText);
+            trailing.Children.Add(ModelCostCell(
+                costText,
+                CostSurfaceProjection.CostWarning(entry, snapshot.CostAuthoritative)));
             block.Children.Add(Ui.Row(name, trailing));
             var tokenBar = TokenKindBar(entry);
             var barHost = new Grid { Height = 4 };
@@ -2041,6 +2043,51 @@ public sealed partial class DashboardView : UserControl
             costAuthoritative,
             includeZeroKinds: true);
 
+    /// <summary>The warning line's wrap width in the hover card: the card is
+    /// sized by its widest row, and an unwrapped sentence would widen every
+    /// model's card to fit the one that carries it.</summary>
+    private const double ModelTipWarningMaxWidth = 240;
+
+    /// <summary>The glyph's size relative to the 10pt cost beside it: large
+    /// enough to read as a mark, small enough not to push the cost out of line
+    /// with the rows that carry none.</summary>
+    private const double CostWarningGlyphSize = 10;
+
+    /// <summary>
+    /// A Models row's cost, with the implausible-cost glyph in front of it when
+    /// <paramref name="warning"/> is non-null. The decision is
+    /// <see cref="CostSurfaceProjection.CostWarning"/>'s, not this file's — this
+    /// file is compiled by no test project. The glyph carries the warning as its
+    /// accessible name, because the hover card that explains it is reachable by
+    /// pointer only.
+    /// </summary>
+    private static FrameworkElement ModelCostCell(TextBlock costText, string? warning)
+    {
+        if (warning is null)
+        {
+            return costText;
+        }
+
+        var glyph = new FontIcon
+        {
+            Glyph = "\uE7BA", // Warning (Segoe Fluent Icons / MDL2)
+            FontSize = CostWarningGlyphSize,
+            Foreground = Ui.BrushFromHex(CostPlausibility.WarningColor),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(glyph, warning);
+
+        var cell = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 3,
+            HorizontalAlignment = HorizontalAlignment.Right,
+        };
+        cell.Children.Add(glyph);
+        cell.Children.Add(costText);
+        return cell;
+    }
+
     private static UIElement ModelTip(
         ModelReportEntry entry,
         ModelColorMap colors,
@@ -2065,6 +2112,16 @@ public sealed partial class DashboardView : UserControl
             TipText("{0} tokens".Localized(Format.CompactTokens(entry.Total)), 11, 0.9),
             CostSurfaceProjection.ModelTipCost(
                 entry.Total, entry.Cost, costAuthoritative), 0.9));
+        // The same wording as the row's glyph. Null for the drill-down, whose
+        // entry is rebuilt from a ContributionClient with no estimate.
+        if (CostSurfaceProjection.CostWarning(entry, costAuthoritative) is { } warning)
+        {
+            var line = TipText(warning, 10);
+            line.Foreground = Ui.BrushFromHex(CostPlausibility.WarningColor);
+            line.TextWrapping = TextWrapping.Wrap;
+            line.MaxWidth = ModelTipWarningMaxWidth;
+            panel.Children.Add(line);
+        }
         (string Label, string Color)[] kinds =
         [
             ("Input".Localized(), Ui.TokenKinds[0].Color),

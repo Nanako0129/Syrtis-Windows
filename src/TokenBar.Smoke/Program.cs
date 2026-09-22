@@ -1,3 +1,4 @@
+using TokenBar.Core;
 using TokenBar.Interop;
 
 // End-to-end check of the Rust↔C# seam: load the cdylib and exercise every
@@ -93,8 +94,23 @@ Step("tb_model_report", () =>
     if (expectedClient is not null && !r.Entries.Any(e => e.Client == expectedClient))
         throw new InvalidOperationException(
             $"tb_model_report expected client '{expectedClient}' in Entries");
+    // Implausible-cost probe. Every folded (client, model) row whose reported
+    // cost the local estimate cannot justify, judged with the same
+    // ModelLevelEntries fold and CostPlausibility rule the Models lens uses,
+    // and named by the canonical client the lens's tabs are keyed on. All-time
+    // (this call passes no year): compare it against the lens with the year
+    // picker on All years, or the two are looking at different slices.
+    var flagged = r.ModelLevelEntries()
+        .Select(e => (Entry: e, Ratio: CostPlausibility.ImplausibleRatio(e)))
+        .Where(x => x.Ratio is not null)
+        .Select(x => $"{ClientRegistry.CanonicalClient(x.Entry.Client)}/"
+            + $"{x.Entry.Model}@{Format.CompactRatio(x.Ratio!.Value)}")
+        .ToList();
+    var estimated = r.Entries.Count(e => e.CostEstimate is not null);
     return $"ok entries={r.Entries.Count} totalCost={r.TotalCost:F2} " +
-           $"pricingUpdatedAt={(r.PricingUpdatedAt?.ToString() ?? "-")}";
+           $"pricingUpdatedAt={(r.PricingUpdatedAt?.ToString() ?? "-")} " +
+           $"estimated={estimated} " +
+           $"flagged={(flagged.Count == 0 ? "none" : string.Join(",", flagged))}";
 });
 
 Step("tb_hourly_report", () =>
