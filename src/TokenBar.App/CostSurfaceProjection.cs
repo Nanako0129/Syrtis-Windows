@@ -161,11 +161,18 @@ public static class CostSurfaceProjection
             ? Checking
             : mode.Title(totals, tokensPerMin, quotaRemaining);
 
-    public static string HourlyCost(double cost, bool authoritative) =>
-        CostText(cost, authoritative);
+    /// <summary>An Hourly row, which renders "&lt;tokens&gt; · &lt;cost&gt;"
+    /// unconditionally, so an hour whose usage all failed to price must read
+    /// "—" beside its tokens rather than "$0.00". macOS draws a blank there
+    /// instead (its row omits a zero cost), which is why the two apps differ in
+    /// shape while applying the same rule.</summary>
+    public static string HourlyCost(long tokens, double cost, bool authoritative) =>
+        CostText(tokens, cost, authoritative);
 
-    public static string DayTipCost(double cost, bool authoritative) =>
-        CostText(cost, authoritative);
+    /// <summary>The usage chart's day tooltip — both the day's total and each
+    /// model/agent segment in it are shown beside their own token count.</summary>
+    public static string DayTipCost(long tokens, double cost, bool authoritative) =>
+        CostText(tokens, cost, authoritative);
 
     /// <summary>The Models row's hover card. Token-aware for the same reason as
     /// the row it sits on: the two describe one model, and must not disagree

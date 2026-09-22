@@ -266,7 +266,7 @@ public static class UsageAttributionPage
             ClientRegistry.Style(row.Client).DisplayName, ProviderLabel(row.Provider));
 
     public static string ObservedLine(UsageAttributionSettings.Row row) =>
-        Copy.Observed.Localized(Format.CompactTokens(row.Tokens), Format.Usd(row.Cost));
+        Copy.Observed.Localized(Format.CompactTokens(row.Tokens), Format.Money(row.Tokens, row.Cost));
 
     public static string AcceptAllLabel(int count) => Copy.AcceptSuggestions.Localized(count);
 

@@ -570,7 +570,7 @@ internal sealed class Graph3DPanel : SwapChainPanel
         panel.Children.Add(TooltipText(
             "{0} tokens".Localized(Format.ExactTokens(cell.Tokens)), 11, 0.9));
         panel.Children.Add(TooltipText(
-            CostSurfaceProjection.CostText(cell.Cost, _costAuthoritative), 11, 0.9));
+            CostSurfaceProjection.CostText(cell.Tokens, cell.Cost, _costAuthoritative), 11, 0.9));
         return panel;
     }
 

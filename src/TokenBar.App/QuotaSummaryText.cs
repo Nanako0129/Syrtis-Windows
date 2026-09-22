@@ -204,13 +204,21 @@ public static class QuotaSummaryText
         return tail is null ? ahead : $"{ahead} · {tail}";
     }
 
-    /// <summary>"1.2M tokens · $3.40". The cost half goes through
-    /// CostSurfaceProjection.CostText — not a plain currency formatter — so a
-    /// day of entirely unpriced models reads "Checking" instead of a
-    /// fabricated "$0.00".</summary>
+    /// <summary>"1.2M tokens · $3.40". The cost half goes through the
+    /// token-aware <c>CostSurfaceProjection.CostText</c>, so a day whose usage
+    /// all failed to price reads "—" beside its tokens.
+    /// <para>
+    /// This comment used to claim such a day reads "Checking" instead of a
+    /// fabricated "$0.00". That held only when the WHOLE graph had
+    /// <c>CostCoverage.None</c>: authority is graph-level, and with anything
+    /// else priced it is true, so the day read "$0.00" — exactly what the
+    /// comment said it prevented. "Checking" still appears, but only while
+    /// nothing has priced at all; the per-day answer comes from the tokens.
+    /// </para></summary>
     public static string TodayText(long tokens, double cost, bool authoritative) =>
         "{0} tokens · {1}".Localized(
-            Format.CompactTokens(tokens), CostSurfaceProjection.CostText(cost, authoritative));
+            Format.CompactTokens(tokens),
+            CostSurfaceProjection.CostText(tokens, cost, authoritative));
 
     public static string NoWindowReporting() =>
         "No subscription is reporting a usage window right now.".Localized();

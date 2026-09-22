@@ -88,9 +88,9 @@ public class CostSurfaceProjectionTests
         Assert.Equal("Checking",
             CostSurfaceProjection.CostText(100, false));
         Assert.Equal("Checking",
-            CostSurfaceProjection.DayTipCost(100, false));
+            CostSurfaceProjection.DayTipCost(1_000, 100, false));
         Assert.Equal("Checking",
-            CostSurfaceProjection.HourlyCost(100, false));
+            CostSurfaceProjection.HourlyCost(1_000, 100, false));
         Assert.Equal("Checking",
             CostSurfaceProjection.ModelTipCost(1_000, 100, false));
         Assert.Equal("Checking",
@@ -216,6 +216,18 @@ public class CostSurfaceProjectionTests
     [Fact]
     public void AnUnresolvedGraphStillReadsCheckingForAnUnpricedRow() =>
         Assert.Equal("Checking", CostSurfaceProjection.CostText(42_729, 0, false));
+
+    // The Hourly row and the day tooltip render their amount beside their own
+    // token count too, so they follow the same rule as the Models row.
+    [Fact]
+    public void HourlyAndDayTooltipAmountsMarkAnUnpricedBucket()
+    {
+        Assert.Equal("—", CostSurfaceProjection.HourlyCost(5_000, 0, true));
+        Assert.Equal("—", CostSurfaceProjection.DayTipCost(5_000, 0, true));
+        // An empty bucket is a real zero, not an unpriced one.
+        Assert.Equal("$0.00", CostSurfaceProjection.HourlyCost(0, 0, true));
+        Assert.Equal("$0.00", CostSurfaceProjection.DayTipCost(0, 0, true));
+    }
 
     [Fact]
     public void DelayedOldGenerationCannotRestoreCostAuthority()

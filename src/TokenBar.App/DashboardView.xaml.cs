@@ -1801,7 +1801,7 @@ public sealed partial class DashboardView : UserControl
                     Ui.Text(
                         $"{Format.CompactTokens(entry.Total)} · "
                             + CostSurfaceProjection.HourlyCost(
-                                entry.Cost, snapshot.CostAuthoritative),
+                                entry.Total, entry.Cost, snapshot.CostAuthoritative),
                         11,
                         0.75)));
             }
@@ -1898,7 +1898,7 @@ public sealed partial class DashboardView : UserControl
                     "{0} msgs".Localized(entry.Messages)
                         + $" · {Format.CompactTokens(entry.Total)} · "
                         + CostSurfaceProjection.CostText(
-                            entry.Cost, snapshot.CostAuthoritative),
+                            entry.Total, entry.Cost, snapshot.CostAuthoritative),
                     10,
                     0.75)));
             block.Children.Add(Ui.ShareBar(
@@ -2002,7 +2002,8 @@ public sealed partial class DashboardView : UserControl
         panel.Children.Add(TipText(Format.MonthDay(bar.Date), 12, bold: true));
         panel.Children.Add(TipRow(
             TipText("{0} tokens".Localized(Format.ExactTokens(bar.TotalTokens)), 11, 0.9),
-            CostSurfaceProjection.DayTipCost(bar.TotalCost, costAuthoritative), 0.9));
+            CostSurfaceProjection.DayTipCost(
+                bar.TotalTokens, bar.TotalCost, costAuthoritative), 0.9));
         var ordered = CostSurfaceProjection.OrderDaySegments(
             bar.Segments, costAuthoritative, _chartMetric);
         foreach (var seg in ordered)
@@ -2011,7 +2012,7 @@ public sealed partial class DashboardView : UserControl
                 TipLabel(seg.Color, seg.Label),
                 $"{Format.CompactTokens(seg.Tokens)} · "
                     + CostSurfaceProjection.DayTipCost(
-                        seg.Cost, costAuthoritative)));
+                        seg.Tokens, seg.Cost, costAuthoritative)));
         }
 
         return panel;

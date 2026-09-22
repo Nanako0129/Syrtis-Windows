@@ -123,4 +123,17 @@ public class DrillDownSummaryTests
         Assert.Contains(
             "Claude",
             DrillDownSummary.Text(Day(turns: 40, turnClients: ["claude"]), true)));
+
+
+    // A day or month whose usage all failed to price shows "—" beside its own
+    // token count, not "$0.00" — the same rule as the per-model rows beneath
+    // it, which the drill-down expands into. Authority is graph-level and was
+    // true here, so it cannot be what says this bucket had no price.
+    [Fact]
+    public void AnUnpricedDayReadsAsUnpricedNotFree() =>
+        Assert.Equal("12 msgs · 12.3K · —", DrillDownSummary.Text(Day(cost: 0), true));
+
+    [Fact]
+    public void AnUnpricedMonthReadsAsUnpricedNotFree() =>
+        Assert.Equal("12 msgs · 12.3K · —", DrillDownSummary.Text(Month(cost: 0), true));
 }
