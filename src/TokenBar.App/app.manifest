@@ -2,7 +2,7 @@
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
   <!-- Keep this checked template literal aligned with Directory.Build.props;
        the Phase 10 artifact verifier rejects drift. -->
-  <assemblyIdentity version="0.3.0.0" name="TokenBar.App" />
+  <assemblyIdentity version="0.4.0.0" name="TokenBar.App" />
 
   <!-- Without this the process runs DPI-virtualized: AppWindow coordinates
        live in a scaled-down space while the screen (and the low-level mouse
