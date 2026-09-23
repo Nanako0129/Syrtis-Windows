@@ -157,7 +157,7 @@ async fn agy_leg(
 
 #[cfg(any(windows, test))]
 const AGY_PAUSED_MESSAGE: &str =
-    "Antigravity CLI quota check paused after a failed attempt. Run agy once, or restart Syrtis.";
+    "Antigravity CLI quota check paused after a failed attempt. Restart Syrtis, or sign in to agy again, to retry.";
 
 #[cfg(windows)]
 const AGY_CREDENTIAL_TARGET: &str = "gemini:antigravity";
@@ -190,6 +190,10 @@ struct CredentialUnreadable;
 /// keeps the same `LastWritten` — a failure may be the signed-out browser
 /// prompt, and repeating it every poll is the harm. A re-login (which rewrites
 /// the credential) or an app restart (the latch is in memory) re-arms it.
+/// Merely running agy need not: with a still-valid token it signs in silently
+/// and may leave the credential untouched (unmeasured), which is why the paused
+/// message names only restart and re-login. No timed re-arm, on purpose: with
+/// a dead credential each re-arm is another sign-in page.
 ///
 /// Check-then-set is not atomic across the await on the run. That is safe
 /// because there is at most one in-flight agent-usage fetch per process:
@@ -3683,7 +3687,7 @@ mod tests {
         let paused = with_agy_fallback(primary(), || fakes.poll_with(&latch, agy_success)).await;
         assert_eq!(
             display(paused),
-            "Antigravity CLI quota check paused after a failed attempt. Run agy once, or restart Syrtis."
+            "Antigravity CLI quota check paused after a failed attempt. Restart Syrtis, or sign in to agy again, to retry."
         );
         assert_eq!(fakes.runs.get(), 0);
 
