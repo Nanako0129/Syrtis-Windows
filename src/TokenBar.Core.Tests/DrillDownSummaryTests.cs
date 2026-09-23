@@ -37,28 +37,37 @@ public class DrillDownSummaryTests
     public void NoTurnsIsMessagesTokensCost() =>
         Assert.Equal("12 msgs · 12.3K · $5.20", DrillDownSummary.Text(Day(), true));
 
+    // The scope is not on the row: it is said once above the list, so a row
+    // carries only the count even when it knows which clients it covers.
     [Fact]
-    public void TurnsAddCountAndScope() =>
+    public void TurnsAddCountWithoutScope() =>
         Assert.Equal(
-            "12 msgs · 40 turns · Codex only · 12.3K · $5.20",
-            DrillDownSummary.Text(Day(turns: 40, turnClients: ["codex"]), true));
+            "12 msgs · 40 turns · 12.3K · $5.20",
+            DrillDownSummary.Text(Day(turns: 40, turnClients: ["codex", "claude"]), true));
+
+    [Fact]
+    public void ScopeLineNamesOneClient() =>
+        Assert.Equal("Turns · Codex only", DrillDownSummary.ScopeLine(["codex"]));
 
     // Both names are arguments to one key rather than joined outside it: the
     // separator is not " + " in every language.
     [Fact]
-    public void TwoTurnClientsNameBoth() =>
+    public void ScopeLineNamesBoth() =>
         Assert.Equal(
-            "12 msgs · 40 turns · Codex + Claude only · 12.3K · $5.20",
-            DrillDownSummary.Text(
-                Day(turns: 40, turnClients: ["codex", "claude"]), true));
+            "Turns · Codex + Claude only", DrillDownSummary.ScopeLine(["codex", "claude"]));
 
-    // DailyRows leaves Turns null when TurnClients is empty, so production
-    // never reaches this arm; a directly-constructed row still can.
+    // No selected client has turn counts: no line at all, not an empty one.
     [Fact]
-    public void TurnsWithoutClientsFallsBackToTheGenericScope() =>
+    public void ScopeLineIsAbsentWithoutTurnClients() =>
+        Assert.Null(DrillDownSummary.ScopeLine([]));
+
+    // The line describes the selection, so a client selected but idle on a
+    // given day is still named, and unsupported clients never are.
+    [Fact]
+    public void TurnScopeIsTheSupportedPartOfTheSelectionInOrder() =>
         Assert.Equal(
-            "12 msgs · 40 turns · selected clients · 12.3K · $5.20",
-            DrillDownSummary.Text(Day(turns: 40), true));
+            ["claude", "codex"],
+            DailyRows.TurnScope(["gemini", "claude", "codex", "claude"]));
 
     [Fact]
     public void UnauthoritativeCostShowsCheckingInstead() =>
@@ -98,19 +107,15 @@ public class DrillDownSummaryTests
         Assert.Equal("12 則訊息 · 12.3K · $5.20", DrillDownSummary.Text(Day(), true));
 
         Assert.Equal(
-            "12 則訊息 · 40 互動 · 僅計 Codex · 12.3K · $5.20",
+            "12 則訊息 · 40 互動 · 12.3K · $5.20",
             DrillDownSummary.Text(Day(turns: 40, turnClients: ["codex"]), true));
+
+        Assert.Equal("互動 · 僅計 Codex", DrillDownSummary.ScopeLine(["codex"]));
 
         // 、 rather than " + " — the separator lives inside the key, matching
         // macOS's "Turns · %@ + %@ only" = "互動 · 僅計 %@、%@".
         Assert.Equal(
-            "12 則訊息 · 40 互動 · 僅計 Codex、Claude · 12.3K · $5.20",
-            DrillDownSummary.Text(
-                Day(turns: 40, turnClients: ["codex", "claude"]), true));
-
-        Assert.Equal(
-            "12 則訊息 · 40 互動 · 所選用戶端 · 12.3K · $5.20",
-            DrillDownSummary.Text(Day(turns: 40), true));
+            "互動 · 僅計 Codex、Claude", DrillDownSummary.ScopeLine(["codex", "claude"]));
 
         Assert.Equal("12 則訊息 · 12.3K · 查詢中", DrillDownSummary.Text(Day(), false));
     });
@@ -122,7 +127,7 @@ public class DrillDownSummaryTests
     public void ClientNamesAreNotTranslated() => InChinese(() =>
         Assert.Contains(
             "Claude",
-            DrillDownSummary.Text(Day(turns: 40, turnClients: ["claude"]), true)));
+            DrillDownSummary.ScopeLine(["claude"])));
 
 
     // A day or month whose usage all failed to price shows "—" beside its own

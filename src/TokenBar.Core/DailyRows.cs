@@ -27,11 +27,7 @@ public static class DailyRows
         var selected = orderedSelectedClients
             .Select(ClientRegistry.CanonicalClient)
             .ToHashSet(StringComparer.Ordinal);
-        var orderedTurnClients = orderedSelectedClients
-            .Select(ClientRegistry.CanonicalClient)
-            .Where(SupportedTurnClients.Contains)
-            .Distinct(StringComparer.Ordinal)
-            .ToList();
+        var orderedTurnClients = TurnScope(orderedSelectedClients);
         var rows = new List<DailyRow>();
 
         foreach (var contribution in payload.Contributions)
@@ -77,6 +73,16 @@ public static class DailyRows
             .OrderByDescending(row => row.Date, StringComparer.Ordinal)
             .ToList();
     }
+
+    /// <summary>The selected clients whose turns are counted, canonical and in
+    /// selection order. The lens-level scope: a row's own TurnClients is the
+    /// subset of this that was active that day.</summary>
+    public static IReadOnlyList<string> TurnScope(IReadOnlyList<string> orderedSelectedClients) =>
+        orderedSelectedClients
+            .Select(ClientRegistry.CanonicalClient)
+            .Where(SupportedTurnClients.Contains)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
 
     private static long SumTurns(
         IReadOnlyDictionary<string, long>? turnsByClient,
