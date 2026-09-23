@@ -111,9 +111,11 @@ where
     }
 }
 
-/// Auto: prefer the live Local IDE API; fall back to the OAuth remote API.
+/// Auto: prefer the live Local IDE API, then the OAuth remote API, and finally
+/// (Windows only) the `agy` CLI usage command when the earlier routes are
+/// unavailable.
 pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
-    fetch_with(
+    let primary = fetch_with(
         || async move {
             match fetch_local_ide(now).await {
                 Ok(local) if !local.windows.is_empty() => LocalAttempt::Success(local),
@@ -123,7 +125,353 @@ pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFa
         || fetch_oauth_primary(now),
         |context| fetch_oauth_secondary(context, now),
     )
+    .await;
+    agy_leg(primary, now).await
+}
+
+#[cfg(windows)]
+async fn agy_leg(
+    primary: Result<Fetched, ProviderFetchFailure>,
+    now: DateTime<Utc>,
+) -> Result<Fetched, ProviderFetchFailure> {
+    with_agy_fallback(primary, || fetch_agy_cli(now)).await
+}
+
+/// This repository ships Windows only; its non-Windows build exists to run the
+/// tests, so the CLI leg is not wired there.
+#[cfg(not(windows))]
+async fn agy_leg(
+    primary: Result<Fetched, ProviderFetchFailure>,
+    _now: DateTime<Utc>,
+) -> Result<Fetched, ProviderFetchFailure> {
+    primary
+}
+
+// ── agy CLI route ───────────────────────────────────────────────────────────
+//
+// A user signed in only through the `agy` CLI has neither a running IDE nor
+// `oauth_creds.json`; `agy` keeps its tokens in Credential Manager. Measured on
+// Windows (2026-09-23): a signed-OUT `agy --print` does not fail, it starts a
+// browser OAuth flow and waits. So a background poll may spawn it only when
+// agy's credential exists, the route is not latched, and DNS resolves.
+
+#[cfg(any(windows, test))]
+const AGY_PAUSED_MESSAGE: &str =
+    "Antigravity CLI quota check paused after a failed attempt. Run agy once, or restart Syrtis.";
+
+#[cfg(windows)]
+const AGY_CREDENTIAL_TARGET: &str = "gemini:antigravity";
+
+#[cfg(windows)]
+const AGY_STDOUT_CAP: u64 = 1 << 20;
+
+/// Why the `agy` leg produced no windows. Only `Paused` is ever shown; every
+/// other reason surfaces the earlier routes' failure instead.
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+enum AgyFailure {
+    Paused,
+    Unavailable,
+}
+
+/// A run's outcome as far as the latch cares: whether a process was created.
+#[cfg(any(windows, test))]
+#[derive(Debug)]
+enum AgyRunFailure {
+    NotStarted,
+    Failed,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug)]
+struct CredentialUnreadable;
+
+/// Once a spawned `agy` fails, it is not spawned again while its credential
+/// keeps the same `LastWritten` — a failure may be the signed-out browser
+/// prompt, and repeating it every poll is the harm. A re-login (which rewrites
+/// the credential) or an app restart (the latch is in memory) re-arms it.
+///
+/// Check-then-set is not atomic across the await on the run. That is safe
+/// because there is at most one in-flight agent-usage fetch per process:
+/// `with_publication_gate` (lib.rs) is held across `agent_usage::run`, and the
+/// C# `AgentUsageFetchCoordinator` shares one fetch across callers.
+#[cfg(any(windows, test))]
+struct AgyLatch(std::sync::Mutex<Option<u64>>);
+
+#[cfg(any(windows, test))]
+impl AgyLatch {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, Option<u64>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn blocks(&self, last_written: u64) -> bool {
+        *self.state() == Some(last_written)
+    }
+
+    fn set(&self, latched: Option<u64>) {
+        *self.state() = latched;
+    }
+}
+
+#[cfg(windows)]
+static AGY_LATCH: AgyLatch = AgyLatch::new();
+
+/// The `agy` route's arbitration. When the CLI cannot answer, the caller sees
+/// the ORIGINAL failure rather than the CLI's (as on macOS), with one Windows
+/// exception: a latched route says so, instead of the misleading
+/// "not logged in" the earlier routes produce for a CLI-only user.
+#[cfg(any(windows, test))]
+async fn with_agy_fallback<Agy, AgyFuture>(
+    primary: Result<Fetched, ProviderFetchFailure>,
+    agy: Agy,
+) -> Result<Fetched, ProviderFetchFailure>
+where
+    Agy: FnOnce() -> AgyFuture,
+    AgyFuture: std::future::Future<Output = Result<Fetched, AgyFailure>>,
+{
+    match primary {
+        Ok(fetched) => Ok(fetched),
+        Err(primary_failure) if should_try_agy_fallback(&primary_failure) => match agy().await {
+            Ok(fetched) => Ok(fetched),
+            Err(AgyFailure::Paused) => Err(ProviderFetchFailure::terminal(AGY_PAUSED_MESSAGE)),
+            Err(AgyFailure::Unavailable) => Err(primary_failure),
+        },
+        Err(primary_failure) => Err(primary_failure),
+    }
+}
+
+#[cfg(any(windows, test))]
+fn should_try_agy_fallback(failure: &ProviderFetchFailure) -> bool {
+    matches!(failure, ProviderFetchFailure::Terminal { .. })
+}
+
+/// At most one candidate: agy's installer location, else the first ABSOLUTE
+/// PATH entry holding a file named exactly `agy.exe`. Empty and relative
+/// entries are skipped and PATHEXT is not consulted (no .cmd/.bat shims), so a
+/// file planted in the working directory or a script wrapper never runs.
+/// Not cached: agy may be installed after launch, and the fixed path sees that
+/// even though the process's PATH snapshot does not.
+#[cfg(any(windows, test))]
+fn agy_executable_from(
+    local_app_data: Option<&std::ffi::OsStr>,
+    path: Option<&std::ffi::OsStr>,
+    is_file: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let installed = local_app_data
+        .map(|root| Path::new(root).join("agy").join("bin").join("agy.exe"))
+        .filter(|candidate| candidate.is_absolute() && is_file(candidate));
+    installed.or_else(|| {
+        std::env::split_paths(path?)
+            .filter(|dir| dir.is_absolute())
+            .map(|dir| dir.join("agy.exe"))
+            .find(|candidate| is_file(candidate))
+    })
+}
+
+/// One poll of the `agy` leg: executable -> credential -> latch -> DNS -> run.
+///
+/// Every dependency is injected so the ordering and the latch table are
+/// tested without a CLI, Credential Manager or the network:
+/// - no process created (not found, credential absent or unreadable, DNS
+///   refused, spawn failed): no latch;
+/// - process created and usage parsed: clear the latch;
+/// - process created and anything else: latch on the credential's
+///   `LastWritten` read AFTER the run (agy may rewrite it while failing).
+#[cfg(any(windows, test))]
+async fn fetch_agy_cli_gated<Cred, Dns, DnsFuture, Run, RunFuture>(
+    now: DateTime<Utc>,
+    executable: Option<PathBuf>,
+    credential_last_written: Cred,
+    latch: &AgyLatch,
+    endpoint_resolves: Dns,
+    run: Run,
+) -> Result<Fetched, AgyFailure>
+where
+    Cred: Fn() -> Result<Option<u64>, CredentialUnreadable>,
+    Dns: FnOnce() -> DnsFuture,
+    DnsFuture: std::future::Future<Output = bool>,
+    Run: FnOnce(PathBuf) -> RunFuture,
+    RunFuture: std::future::Future<Output = Result<Vec<u8>, AgyRunFailure>>,
+{
+    let Some(executable) = executable else {
+        return Err(AgyFailure::Unavailable);
+    };
+    // Absent and unreadable both fail closed: without agy's credential a run
+    // is the signed-out browser prompt.
+    let Ok(Some(before)) = credential_last_written() else {
+        return Err(AgyFailure::Unavailable);
+    };
+    if latch.blocks(before) {
+        return Err(AgyFailure::Paused);
+    }
+    // #329 (macOS): with an unresolvable token endpoint `agy --print` escalates
+    // to interactive OAuth, and a post-spawn timeout cannot stop it across a
+    // sleep. Only not spawning does.
+    if !endpoint_resolves().await {
+        return Err(AgyFailure::Unavailable);
+    }
+    let parsed = match run(executable).await {
+        Err(AgyRunFailure::NotStarted) => return Err(AgyFailure::Unavailable),
+        Err(AgyRunFailure::Failed) => None,
+        // The raw output and the parse error are dropped here on purpose.
+        Ok(stdout) => parse_agy_usage(&stdout, now).ok(),
+    };
+    match parsed {
+        Some(fetched) => {
+            latch.set(None);
+            Ok(fetched)
+        }
+        None => {
+            // Credential gone or unreadable after the run: the gate already
+            // closes the route while that lasts; the pre-run value keeps it
+            // closed if the same credential comes back.
+            let after = match credential_last_written() {
+                Ok(Some(after)) => after,
+                Ok(None) | Err(_) => before,
+            };
+            latch.set(Some(after));
+            // Paused from this poll on, not the next: returning Unavailable
+            // here would show the primary "not logged in" for the one poll
+            // in which agy was in fact found, signed in and run.
+            Err(AgyFailure::Paused)
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn fetch_agy_cli(now: DateTime<Utc>) -> Result<Fetched, AgyFailure> {
+    let executable = agy_executable_from(
+        std::env::var_os("LOCALAPPDATA").as_deref(),
+        std::env::var_os("PATH").as_deref(),
+        Path::is_file,
+    );
+    fetch_agy_cli_gated(
+        now,
+        executable,
+        read_agy_credential_last_written,
+        &AGY_LATCH,
+        oauth_endpoint_resolves,
+        run_agy_cli,
+    )
     .await
+}
+
+/// Existence and `LastWritten` of agy's Credential Manager entry, nothing
+/// else. `CredReadW` has no metadata-only mode, so the secret enters this
+/// process regardless; it is zeroed before `CredFree`, and no pointer into the
+/// `CREDENTIALW` (blob, `UserName`, `Comment`) leaves the unsafe block. No
+/// keyring crate and no `Debug` type touches it, so nothing can format it.
+#[cfg(windows)]
+fn read_agy_credential_last_written() -> Result<Option<u64>, CredentialUnreadable> {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
+    use windows_sys::Win32::Security::Credentials::{
+        CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC,
+    };
+
+    let target: Vec<u16> = AGY_CREDENTIAL_TARGET
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
+    // SAFETY: `target` is NUL-terminated and outlives the call. On success
+    // CredReadW hands back one allocation that is only read here, its blob is
+    // written within `CredentialBlobSize`, and it is freed exactly once.
+    unsafe {
+        if CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) == 0 {
+            return if GetLastError() == ERROR_NOT_FOUND {
+                Ok(None)
+            } else {
+                Err(CredentialUnreadable)
+            };
+        }
+        if credential.is_null() {
+            return Err(CredentialUnreadable);
+        }
+        let written = (*credential).LastWritten;
+        let blob = (*credential).CredentialBlob;
+        if !blob.is_null() {
+            for offset in 0..(*credential).CredentialBlobSize as usize {
+                std::ptr::write_volatile(blob.add(offset), 0);
+            }
+        }
+        CredFree(credential.cast::<core::ffi::c_void>());
+        Ok(Some(
+            (u64::from(written.dwHighDateTime) << 32) | u64::from(written.dwLowDateTime),
+        ))
+    }
+}
+
+#[cfg(windows)]
+const OAUTH_TOKEN_HOST: &str = "oauth2.googleapis.com";
+
+/// DNS only, 2 s: the escalation is gated on resolution failing, and this runs
+/// ahead of a subprocess already allowed 35 s. An empty answer is a failure.
+#[cfg(windows)]
+async fn oauth_endpoint_resolves() -> bool {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::net::lookup_host((OAUTH_TOKEN_HOST, 443)),
+    )
+    .await
+    {
+        Ok(Ok(mut addresses)) => addresses.next().is_some(),
+        Ok(Err(_)) | Err(_) => false,
+    }
+}
+
+/// Direct spawn, no shell and no Job Object (measured: a native exe whose only
+/// child is conhost; a job could also kill a browser agy started). The working
+/// directory is agy's own bin directory, not whatever Syrtis inherited.
+#[cfg(windows)]
+async fn run_agy_cli(executable: PathBuf) -> Result<Vec<u8>, AgyRunFailure> {
+    use tokio::io::AsyncReadExt as _;
+
+    let bin_dir = executable.parent().ok_or(AgyRunFailure::NotStarted)?;
+    let mut child = tokio::process::Command::new(&executable)
+        .args([
+            "--print",
+            "/usage",
+            "--output-format",
+            "json",
+            "--print-timeout",
+            "30s",
+        ])
+        .current_dir(bin_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| AgyRunFailure::NotStarted)?;
+    // `child` moves into the future, so a timeout or an early return drops it
+    // and `kill_on_drop` ends the process.
+    let run = async move {
+        let stdout = child.stdout.take().ok_or(AgyRunFailure::Failed)?;
+        let mut output = Vec::new();
+        stdout
+            .take(AGY_STDOUT_CAP + 1)
+            .read_to_end(&mut output)
+            .await
+            .map_err(|_| AgyRunFailure::Failed)?;
+        if output.len() as u64 > AGY_STDOUT_CAP {
+            return Err(AgyRunFailure::Failed);
+        }
+        let status = child.wait().await.map_err(|_| AgyRunFailure::Failed)?;
+        if !status.success() {
+            return Err(AgyRunFailure::Failed);
+        }
+        Ok(output)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(35), run)
+        .await
+        .map_err(|_| AgyRunFailure::Failed)?
 }
 
 // ── Local IDE API ───────────────────────────────────────────────────────────
@@ -551,6 +899,46 @@ struct QuotaBucketsResponse {
     buckets: Vec<Box<RawValue>>,
 }
 
+#[cfg(any(windows, test))]
+#[derive(Debug, Deserialize)]
+struct AgyUsageResponse {
+    status: Option<String>,
+    command: Option<AgyUsageCommand>,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Deserialize)]
+struct AgyUsageCommand {
+    name: Option<String>,
+    data: Option<AgyUsageData>,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Deserialize)]
+struct AgyUsageData {
+    #[serde(default)]
+    groups: Vec<AgyUsageGroup>,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Deserialize)]
+struct AgyUsageGroup {
+    name: Option<String>,
+    #[serde(default)]
+    buckets: Vec<AgyUsageBucket>,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Deserialize)]
+struct AgyUsageBucket {
+    id: Option<String>,
+    name: Option<String>,
+    #[serde(rename = "remaining_fraction")]
+    remaining_fraction: Option<f64>,
+    #[serde(rename = "reset_time")]
+    reset_time: Option<String>,
+}
+
 #[derive(Debug)]
 struct ModelCandidate {
     model_id: Option<String>,
@@ -574,6 +962,72 @@ fn quota_window(
 ) -> Option<UsageWindow> {
     UsageWindow::try_from_provider_fraction(label, fraction, reset, now)
         .map(|window| window.with_identity(card_id, window_key, None, None))
+}
+
+#[cfg(any(windows, test))]
+fn parse_agy_usage(body: &[u8], now: DateTime<Utc>) -> Result<Fetched, String> {
+    let response: AgyUsageResponse =
+        serde_json::from_slice(body).map_err(|e| format!("decode agy usage: {e}"))?;
+    if response.status.as_deref() != Some("SUCCESS") {
+        return Err("agy usage command was not successful".to_string());
+    }
+    let command = response
+        .command
+        .ok_or_else(|| "agy usage response missing command".to_string())?;
+    if command.name.as_deref() != Some("usage") {
+        return Err("agy usage response missing usage command".to_string());
+    }
+    let data = command
+        .data
+        .ok_or_else(|| "agy usage response missing data".to_string())?;
+
+    let mut windows = Vec::new();
+    for group in data.groups {
+        let group_name = group
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("Antigravity");
+        for bucket in group.buckets {
+            let Some(id) = bucket
+                .id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            else {
+                continue;
+            };
+            let Some(fraction) = bucket.remaining_fraction else {
+                continue;
+            };
+            let reset = bucket.reset_time.as_deref().and_then(parse_datetime);
+            let label = bucket
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(|name| format!("{group_name} · {name}"))
+                .unwrap_or_else(|| format!("{group_name} · Limit"));
+            let card_id = format!("agy.{id}.v1");
+            if let Some(window) =
+                quota_window(label, fraction, reset, now, card_id.clone(), Some(card_id))
+            {
+                windows.push(window);
+            }
+        }
+    }
+    if windows.is_empty() {
+        return Err("agy usage response contained no valid quota windows".to_string());
+    }
+
+    Ok(Fetched {
+        source: "agy".to_string(),
+        identity: None,
+        account_scope: Err(AccountScopeError::NoTrustedEvidence),
+        cache_binding: None,
+        windows,
+    })
 }
 
 fn parse_user_status(body: &str, now: DateTime<Utc>) -> Result<Fetched, String> {
@@ -2903,5 +3357,427 @@ mod tests {
             ProviderFetchFailure::Terminal { .. } => panic!("timeout must remain transient"),
         }
         scope.cleanup();
+    }
+
+    // ── agy CLI route ───────────────────────────────────────────────────────
+
+    /// Shape measured from `agy --print /usage --output-format json` on Windows
+    /// (2026-09-23). The Gemini buckets carry the measured values; the brief
+    /// that relayed the measurement elided the second group's buckets, so
+    /// those two are illustrative (ids as on macOS).
+    const AGY_WINDOWS_USAGE: &[u8] = br#"{
+        "status": "SUCCESS",
+        "response": "usage",
+        "command": {
+            "name": "usage",
+            "data": {
+                "description": "Quota usage",
+                "groups": [
+                    {
+                        "name": "Gemini Models",
+                        "description": "Gemini quota",
+                        "buckets": [
+                            {"id": "gemini-weekly", "name": "Weekly Limit Remaining", "description": "Weekly", "window": "weekly", "remaining_fraction": 0.8521391749382019, "reset_time": "2026-09-23T14:09:40Z"},
+                            {"id": "gemini-5h", "name": "Five Hour Limit Remaining", "window": "5h", "remaining_fraction": 1, "reset_time": "2026-09-23T18:30:15Z"}
+                        ]
+                    },
+                    {
+                        "name": "Claude and GPT models",
+                        "description": "Third-party quota",
+                        "buckets": [
+                            {"id": "3p-weekly", "name": "Weekly Limit Remaining", "window": "weekly", "remaining_fraction": 1, "reset_time": "2026-09-28T13:14:23Z"},
+                            {"id": "3p-5h", "name": "Five Hour Limit Remaining", "window": "5h", "remaining_fraction": 1, "reset_time": "2026-09-23T18:30:15Z"}
+                        ]
+                    }
+                ]
+            }
+        }
+    }"#;
+
+    fn agy_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-09-23T06:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn parses_agy_usage_json_into_quota_windows() {
+        let fetched = parse_agy_usage(AGY_WINDOWS_USAGE, agy_now()).unwrap();
+        assert_eq!(fetched.source, "agy");
+        assert!(fetched.identity.is_none());
+        assert!(fetched.cache_binding.is_none());
+        assert_eq!(fetched.windows.len(), 4);
+        assert_eq!(
+            fetched.windows[0].label_for_test(),
+            "Gemini Models · Weekly Limit Remaining"
+        );
+        assert!((fetched.windows[0].remaining_for_test() - 85.21391749382019).abs() < 1e-9);
+        assert_eq!(
+            fetched.windows[0].pace_window_key_for_test(),
+            Some("agy.gemini-weekly.v1")
+        );
+        assert_eq!(
+            fetched.windows[2].label_for_test(),
+            "Claude and GPT models · Weekly Limit Remaining"
+        );
+        let wire = serde_json::to_value(&fetched.windows[1]).unwrap();
+        assert_eq!(wire["cardId"], "agy.gemini-5h.v1");
+        let third_wire = serde_json::to_value(&fetched.windows[2]).unwrap();
+        assert_eq!(third_wire["cardId"], "agy.3p-weekly.v1");
+    }
+
+    #[test]
+    fn rejects_agy_usage_without_valid_windows() {
+        let now = Utc::now();
+        let body = br#"{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"buckets":[{"id":"bad","remaining_fraction":2.0}]}]}}}"#;
+        assert!(parse_agy_usage(body, now).is_err());
+    }
+
+    #[test]
+    fn rejects_agy_chat_response_without_usage_command() {
+        let now = Utc::now();
+        let body = br#"{
+            "status": "SUCCESS",
+            "response": "A model-generated answer",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        }"#;
+        assert!(parse_agy_usage(body, now).is_err());
+    }
+
+    #[test]
+    fn agy_fallback_only_runs_for_terminal_failures() {
+        assert!(!should_try_agy_fallback(&orchestration_transient(
+            "temporary"
+        )));
+        assert!(should_try_agy_fallback(&ProviderFetchFailure::terminal(
+            "terminal"
+        )));
+    }
+
+    /// Counting fakes for one gated poll. `last_written` is what the credential
+    /// read returns (`None` = absent); `unreadable` makes the read fail.
+    #[derive(Default)]
+    struct AgyFakes {
+        last_written: std::cell::Cell<Option<u64>>,
+        unreadable: std::cell::Cell<bool>,
+        resolves: std::cell::Cell<bool>,
+        credential_reads: std::cell::Cell<u32>,
+        dns_probes: std::cell::Cell<u32>,
+        runs: std::cell::Cell<u32>,
+    }
+
+    impl AgyFakes {
+        fn signed_in(last_written: u64) -> Self {
+            let fakes = Self::default();
+            fakes.last_written.set(Some(last_written));
+            fakes.resolves.set(true);
+            fakes
+        }
+
+        /// `run` executes when (and only when) the runner is called, so it may
+        /// change `last_written` the way agy rewriting its credential would.
+        async fn poll(
+            &self,
+            latch: &AgyLatch,
+            executable: Option<PathBuf>,
+            run: impl FnOnce() -> Result<Vec<u8>, AgyRunFailure>,
+        ) -> Result<Fetched, AgyFailure> {
+            fetch_agy_cli_gated(
+                agy_now(),
+                executable,
+                || {
+                    self.credential_reads.set(self.credential_reads.get() + 1);
+                    if self.unreadable.get() {
+                        Err(CredentialUnreadable)
+                    } else {
+                        Ok(self.last_written.get())
+                    }
+                },
+                latch,
+                || {
+                    self.dns_probes.set(self.dns_probes.get() + 1);
+                    let resolves = self.resolves.get();
+                    async move { resolves }
+                },
+                |_executable| {
+                    self.runs.set(self.runs.get() + 1);
+                    let result = run();
+                    async move { result }
+                },
+            )
+            .await
+        }
+
+        async fn poll_with(
+            &self,
+            latch: &AgyLatch,
+            run: impl FnOnce() -> Result<Vec<u8>, AgyRunFailure>,
+        ) -> Result<Fetched, AgyFailure> {
+            self.poll(latch, Some(std::env::temp_dir().join("agy.exe")), run)
+                .await
+        }
+    }
+
+    fn agy_success() -> Result<Vec<u8>, AgyRunFailure> {
+        Ok(AGY_WINDOWS_USAGE.to_vec())
+    }
+
+    #[tokio::test]
+    async fn agy_not_found_never_touches_the_credential() {
+        let fakes = AgyFakes::signed_in(1);
+        let latch = AgyLatch::new();
+        let result = fakes.poll(&latch, None, agy_success).await;
+        assert_eq!(result.unwrap_err(), AgyFailure::Unavailable);
+        assert_eq!(fakes.credential_reads.get(), 0);
+        assert_eq!(fakes.runs.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn agy_without_a_readable_credential_is_never_spawned() {
+        let latch = AgyLatch::new();
+
+        let absent = AgyFakes::signed_in(1);
+        absent.last_written.set(None);
+        let result = absent.poll_with(&latch, agy_success).await;
+        assert_eq!(result.unwrap_err(), AgyFailure::Unavailable);
+        assert_eq!(absent.runs.get(), 0, "credential absent must not spawn agy");
+        assert_eq!(absent.dns_probes.get(), 0);
+
+        let unreadable = AgyFakes::signed_in(1);
+        unreadable.unreadable.set(true);
+        let result = unreadable.poll_with(&latch, agy_success).await;
+        assert_eq!(result.unwrap_err(), AgyFailure::Unavailable);
+        assert_eq!(unreadable.runs.get(), 0, "a failed read must fail closed");
+
+        // Control: the same latch and runner do spawn with a credential, so
+        // the zeros above are the gate and not a dead runner.
+        let control = AgyFakes::signed_in(1);
+        assert!(control.poll_with(&latch, agy_success).await.is_ok());
+        assert_eq!(control.runs.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn agy_dns_refusal_does_not_spawn_and_does_not_latch() {
+        let fakes = AgyFakes::signed_in(1);
+        let latch = AgyLatch::new();
+        fakes.resolves.set(false);
+        let refused = fakes.poll_with(&latch, agy_success).await;
+        assert_eq!(refused.unwrap_err(), AgyFailure::Unavailable);
+        assert_eq!(
+            fakes.runs.get(),
+            0,
+            "an unresolvable endpoint must not spawn agy"
+        );
+
+        fakes.resolves.set(true);
+        assert!(fakes.poll_with(&latch, agy_success).await.is_ok());
+        assert_eq!(
+            fakes.runs.get(),
+            1,
+            "a refusal must not pause the next poll"
+        );
+    }
+
+    #[tokio::test]
+    async fn agy_failed_run_pauses_the_route_until_the_credential_changes() {
+        let fakes = AgyFakes::signed_in(1);
+        let latch = AgyLatch::new();
+        let failed = fakes.poll_with(&latch, || Err(AgyRunFailure::Failed)).await;
+        assert_eq!(failed.unwrap_err(), AgyFailure::Paused);
+        assert_eq!(fakes.runs.get(), 1);
+
+        let paused = fakes.poll_with(&latch, agy_success).await;
+        assert_eq!(paused.unwrap_err(), AgyFailure::Paused);
+        assert_eq!(fakes.runs.get(), 1, "a latched route must not spawn agy");
+        assert_eq!(fakes.dns_probes.get(), 1, "the latch is checked before DNS");
+
+        // Re-armed by a new credential state; a success clears the latch, so
+        // the old state no longer blocks either.
+        fakes.last_written.set(Some(2));
+        assert!(fakes.poll_with(&latch, agy_success).await.is_ok());
+        assert_eq!(fakes.runs.get(), 2);
+        fakes.last_written.set(Some(1));
+        assert!(fakes.poll_with(&latch, agy_success).await.is_ok());
+        assert_eq!(fakes.runs.get(), 3, "success must clear the latch");
+    }
+
+    #[tokio::test]
+    async fn agy_latch_keys_on_the_credential_as_the_failed_run_left_it() {
+        let fakes = AgyFakes::signed_in(1);
+        let latch = AgyLatch::new();
+        let failed = fakes
+            .poll_with(&latch, || {
+                fakes.last_written.set(Some(2));
+                Err(AgyRunFailure::Failed)
+            })
+            .await;
+        assert_eq!(failed.unwrap_err(), AgyFailure::Paused);
+        let paused = fakes.poll_with(&latch, agy_success).await;
+        assert_eq!(paused.unwrap_err(), AgyFailure::Paused);
+        assert_eq!(
+            fakes.runs.get(),
+            1,
+            "a rewrite during the failed run must not re-arm"
+        );
+
+        fakes.last_written.set(Some(3));
+        assert!(fakes.poll_with(&latch, agy_success).await.is_ok());
+        assert_eq!(fakes.runs.get(), 2, "a later credential change re-arms");
+
+        // A run that removes the credential: while it is gone the gate closes
+        // the route; if the same credential comes back it is still latched.
+        let removed = AgyFakes::signed_in(7);
+        let latch = AgyLatch::new();
+        let _ = removed
+            .poll_with(&latch, || {
+                removed.last_written.set(None);
+                Err(AgyRunFailure::Failed)
+            })
+            .await;
+        removed.last_written.set(Some(7));
+        let paused = removed.poll_with(&latch, agy_success).await;
+        assert_eq!(paused.unwrap_err(), AgyFailure::Paused);
+        assert_eq!(removed.runs.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn agy_exit_zero_without_usable_usage_latches() {
+        for body in [
+            &b"Authentication required. Please visit the URL to log in"[..],
+            br#"{"status":"ERROR"}"#,
+            br#"{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[]}}}"#,
+        ] {
+            let fakes = AgyFakes::signed_in(1);
+            let latch = AgyLatch::new();
+            let failed = fakes.poll_with(&latch, || Ok(body.to_vec())).await;
+            assert_eq!(failed.unwrap_err(), AgyFailure::Paused);
+            let paused = fakes.poll_with(&latch, agy_success).await;
+            assert_eq!(paused.unwrap_err(), AgyFailure::Paused);
+            assert_eq!(fakes.runs.get(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn agy_spawn_that_created_no_process_does_not_latch() {
+        let fakes = AgyFakes::signed_in(1);
+        let latch = AgyLatch::new();
+        let failed = fakes
+            .poll_with(&latch, || Err(AgyRunFailure::NotStarted))
+            .await;
+        assert_eq!(failed.unwrap_err(), AgyFailure::Unavailable);
+        assert!(fakes.poll_with(&latch, agy_success).await.is_ok());
+        assert_eq!(fakes.runs.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn agy_fallback_surfaces_only_the_paused_failure() {
+        let primary = || Err(ProviderFetchFailure::terminal("primary terminal"));
+        let display = |result: Result<Fetched, ProviderFetchFailure>| match result {
+            Err(ProviderFetchFailure::Terminal { display }) => display,
+            other => panic!("expected a terminal failure, got {other:?}"),
+        };
+
+        let fakes = AgyFakes::signed_in(1);
+        let latch = AgyLatch::new();
+        latch.set(Some(1));
+        let paused = with_agy_fallback(primary(), || fakes.poll_with(&latch, agy_success)).await;
+        assert_eq!(
+            display(paused),
+            "Antigravity CLI quota check paused after a failed attempt. Run agy once, or restart Syrtis."
+        );
+        assert_eq!(fakes.runs.get(), 0);
+
+        let absent = AgyFakes::signed_in(1);
+        absent.last_written.set(None);
+        let latch = AgyLatch::new();
+        let unchanged =
+            with_agy_fallback(primary(), || absent.poll_with(&latch, agy_success)).await;
+        assert_eq!(display(unchanged), "primary terminal");
+
+        let failing = AgyFakes::signed_in(1);
+        // The failing run itself already reports the pause.
+        let failed = with_agy_fallback(primary(), || {
+            failing.poll_with(&latch, || Err(AgyRunFailure::Failed))
+        })
+        .await;
+        assert_eq!(display(failed), AGY_PAUSED_MESSAGE);
+
+        let working = AgyFakes::signed_in(5);
+        let fetched = with_agy_fallback(primary(), || working.poll_with(&latch, agy_success))
+            .await
+            .unwrap();
+        assert_eq!(fetched.source, "agy");
+    }
+
+    #[test]
+    fn agy_discovery_prefers_the_installer_location_then_one_absolute_exact_path_entry() {
+        let root = std::env::temp_dir().join("agy-discovery-fixture");
+        let local_app_data = root.join("LocalAppData");
+        let installed = local_app_data.join("agy").join("bin").join("agy.exe");
+        let tools = root.join("tools");
+        let second = root.join("second");
+        let shims = root.join("shims");
+        let existing = [
+            installed.clone(),
+            tools.join("agy.exe"),
+            second.join("agy.exe"),
+            shims.join("agy.cmd"),
+            shims.join("agy.bat"),
+            // What empty, `.` and relative entries (and a relative
+            // LOCALAPPDATA) would resolve to, present so skipping is observable.
+            PathBuf::from("agy.exe"),
+            Path::new(".").join("agy.exe"),
+            Path::new("relative").join("agy.exe"),
+            Path::new("LocalAppData")
+                .join("agy")
+                .join("bin")
+                .join("agy.exe"),
+        ];
+        let is_file = |candidate: &Path| existing.iter().any(|file| file == candidate);
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let path_of = |dirs: &[&str]| std::ffi::OsString::from(dirs.join(sep));
+        let untrusted = ["", "", ".", "relative", shims.to_str().unwrap()];
+        let with_tools = path_of(
+            &[
+                &untrusted[..],
+                &[tools.to_str().unwrap(), second.to_str().unwrap()],
+            ]
+            .concat(),
+        );
+
+        assert_eq!(
+            agy_executable_from(Some(local_app_data.as_os_str()), Some(&with_tools), is_file),
+            Some(installed.clone()),
+            "the installer location wins over PATH"
+        );
+        assert_eq!(
+            agy_executable_from(None, Some(&with_tools), is_file),
+            Some(tools.join("agy.exe")),
+            "only the first absolute PATH entry with agy.exe"
+        );
+        assert_eq!(
+            agy_executable_from(
+                Some(root.join("elsewhere").as_os_str()),
+                Some(&with_tools),
+                is_file
+            ),
+            Some(tools.join("agy.exe")),
+            "a missing installer location falls back to PATH"
+        );
+        assert_eq!(
+            agy_executable_from(
+                Some(std::ffi::OsStr::new("LocalAppData")),
+                Some(&with_tools),
+                is_file
+            ),
+            Some(tools.join("agy.exe")),
+            "a relative LOCALAPPDATA is not trusted"
+        );
+        assert_eq!(
+            agy_executable_from(None, Some(&path_of(&untrusted)), is_file),
+            None,
+            "empty, `.`, relative entries and .cmd/.bat shims never match"
+        );
+        assert_eq!(agy_executable_from(None, None, is_file), None);
     }
 }
