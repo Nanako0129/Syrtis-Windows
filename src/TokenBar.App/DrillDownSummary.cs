@@ -3,7 +3,7 @@ using TokenBar.Core;
 namespace TokenBar.App;
 
 /// <summary>The trailing summary line on a Daily or Monthly row — messages,
-/// optional turn count and scope, tokens, cost.
+/// optional turn count, tokens, cost — plus the one scope line above the list.
 ///
 /// Daily and Monthly each built this inline and the two blocks were byte
 /// identical; BuildDaily/BuildMonthly already share ModelStripeRow so the
@@ -17,15 +17,14 @@ namespace TokenBar.App;
 public static class DrillDownSummary
 {
     public static string Text(DailyRow row, bool authoritative) =>
-        Compose(row.Messages, row.Turns, row.TurnClients, row.Tokens, row.Cost, authoritative);
+        Compose(row.Messages, row.Turns, row.Tokens, row.Cost, authoritative);
 
     public static string Text(MonthlyRow row, bool authoritative) =>
-        Compose(row.Messages, row.Turns, row.TurnClients, row.Tokens, row.Cost, authoritative);
+        Compose(row.Messages, row.Turns, row.Tokens, row.Cost, authoritative);
 
     private static string Compose(
         long messages,
         long? turns,
-        IReadOnlyList<string> turnClients,
         long tokens,
         double cost,
         bool authoritative)
@@ -33,38 +32,31 @@ public static class DrillDownSummary
         var summary = "{0} msgs".Localized(messages);
         if (turns is { } turnCount)
         {
-            summary += " · " + "{0} turns".Localized(turnCount) + " · " + Scope(turnClients);
+            summary += " · " + "{0} turns".Localized(turnCount);
         }
 
         return summary + " · " + Format.CompactTokens(tokens)
             + " · " + CostSurfaceProjection.CostText(tokens, cost, authoritative);
     }
 
-    /// <summary>Which clients the turn count covers.
+    /// <summary>Which clients the turn counts cover, said once above the list
+    /// rather than on every row — as macOS does with its card subtitle
+    /// (DailyView.swift <c>TurnCountBuckets.scope</c>). It describes the lens's
+    /// selection, <see cref="DailyRows.TurnScope"/>, not any one row's clients.
+    /// Null when no selected client has turn counts, so nothing is drawn.
     ///
     /// The two-name arm takes both names as arguments rather than joining them
     /// outside the key, because the separator is not " + " in every language —
-    /// macOS renders 、 in zh-Hant. Two arguments is exhaustive, not a cap:
-    /// DailyRows filters TurnClients through SupportedTurnClients ("codex",
-    /// "claude") and de-duplicates, and MonthlyRows only folds ids that were
-    /// already in a DailyRow, so the list holds at most two. A third supported
-    /// turn client would need a new key here and in macOS's DailyView.swift,
-    /// which drops the third name the same way.
-    ///
-    /// macOS keys this as "Turns · %@ only" because it renders the scope once
-    /// as the card subtitle; here it follows the per-row turn count, where the
-    /// prefix would repeat, so the prefix is dropped and the count stays its
-    /// own key.</summary>
-    private static string Scope(IReadOnlyList<string> turnClients) =>
+    /// macOS renders 、 in zh-Hant. TurnScope holds at most two ids (the
+    /// supported set is codex and claude); a third would need a new key here
+    /// and in macOS, which drops the third name the same way.</summary>
+    public static string? ScopeLine(IReadOnlyList<string> turnClients) =>
         turnClients.Count switch
         {
-            1 => "{0} only".Localized(ClientRegistry.ShortName(turnClients[0])),
-            > 1 => "{0} + {1} only".Localized(
+            0 => null,
+            1 => "Turns · {0} only".Localized(ClientRegistry.ShortName(turnClients[0])),
+            _ => "Turns · {0} + {1} only".Localized(
                 ClientRegistry.ShortName(turnClients[0]),
                 ClientRegistry.ShortName(turnClients[1])),
-            // Defensive: DailyRows leaves Turns null when TurnClients is empty,
-            // so production never reaches this. Kept because the arm it ports
-            // was already here, and a directly-constructed row can still hit it.
-            _ => "selected clients".Localized(),
         };
 }

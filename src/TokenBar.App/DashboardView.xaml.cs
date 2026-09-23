@@ -1623,6 +1623,10 @@ public sealed partial class DashboardView : UserControl
         {
             panel.Children.Add(Ui.Dim("No active days.".Localized()));
         }
+        else if (DrillDownSummary.ScopeLine(DailyRows.TurnScope(_selectedClients)) is { } scope)
+        {
+            panel.Children.Add(Ui.Dim(scope));
+        }
 
         foreach (var selectedDay in days)
         {
@@ -1678,6 +1682,10 @@ public sealed partial class DashboardView : UserControl
         if (months.Count == 0)
         {
             panel.Children.Add(Ui.Dim("No usage in this range.".Localized()));
+        }
+        else if (DrillDownSummary.ScopeLine(DailyRows.TurnScope(_selectedClients)) is { } scope)
+        {
+            panel.Children.Add(Ui.Dim(scope));
         }
 
         foreach (var month in months)
