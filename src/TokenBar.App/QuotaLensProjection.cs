@@ -276,7 +276,7 @@ public static class QuotaLensProjection
         var owner = ClientRegistry.QuotaOwner(clientId);
         var tabs = WindowCardText.Tabs(history, quota, owner);
         var selected = tabs.FirstOrDefault(tab => WindowId(tab.Id) == windowCardTab)
-            ?? tabs.FirstOrDefault();
+            ?? DefaultTab(tabs);
         var messages = windowUsage?.Messages ?? [];
         var mine = WindowCardText.Mine(messages, owner, confirmed.Records);
 
@@ -309,6 +309,30 @@ public static class QuotaLensProjection
         return new Client(
             owner, tabs, selected, messages, mine, liveEquivalence,
             windowUsage?.UndatedCount ?? 0, windowHistory, quotaHistoryOutcome);
+    }
+
+    /// <summary>Which tab opens when the user has no explicit pick for this
+    /// client — port of macOS's <c>WindowCardLoader.pick</c> (its
+    /// no-explicit-pick tail): (1) the first session-class tab, by
+    /// <see cref="WindowCardText.IsSessionClass"/>; else (2) the tab with the
+    /// lowest finite <see cref="WindowCardTab.RemainingPercent"/>; else
+    /// (3) the first tab. Tab display order (<see cref="WindowCardText.Tabs"/>)
+    /// is the provider's own order and plays no part in this choice — the
+    /// defect this replaces conflated the two by re-sorting the tabs
+    /// themselves so "first" happened to mean "running".</summary>
+    private static WindowCardTab? DefaultTab(IReadOnlyList<WindowCardTab> tabs)
+    {
+        var session = tabs.FirstOrDefault(tab => WindowCardText.IsSessionClass(tab.Id.WindowKey));
+        if (session is not null)
+        {
+            return session;
+        }
+
+        var mostDepleted = tabs
+            .Where(tab => tab.RemainingPercent is { } percent && double.IsFinite(percent))
+            .OrderBy(tab => tab.RemainingPercent!.Value)
+            .FirstOrDefault();
+        return mostDepleted ?? tabs.FirstOrDefault();
     }
 
     private static WindowHistory BuildHistory(

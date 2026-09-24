@@ -45,8 +45,14 @@ public enum WindowCardState
 /// happens when a series EXISTS but its last window simply ended, which is
 /// <see cref="WindowCardState.Idle"/>, not <see cref="WindowCardState.NoQuotaHistory"/>
 /// — two different facts a shared null would collapse into one.</param>
+/// <param name="RemainingPercent">The live window's own remaining percent,
+/// for <see cref="QuotaLensProjection"/>'s "most depleted" default-selection
+/// tiebreak — mirroring macOS's <c>$0.remainingPercent</c> scan in
+/// <c>WindowCardLoader.pick</c>. Null on the store-fallback path (no live
+/// <c>UsageWindow</c> to read it off).</param>
 public sealed record WindowCardTab(
-    QuotaWindowIdentity Id, string? Label, QuotaActiveCycle? Active, bool HasHistory);
+    QuotaWindowIdentity Id, string? Label, QuotaActiveCycle? Active, bool HasHistory,
+    double? RemainingPercent = null);
 
 /// <summary>
 /// Every state choice and every string on the Session-window card (port of
@@ -311,9 +317,12 @@ public static class WindowCardText
                 tabs.Add(new WindowCardTab(
                     // The store's own WindowKey when a series was found — that is
                     // what BuildWindowHistoryCard joins back against to find this
-                    // window's past cycles — and the live CardId only as a
-                    // fallback identity for a window the store has nothing under,
-                    // where no such join is possible anyway. The account half
+                    // window's past cycles — else the live PaceStatus.WindowKey
+                    // (still the real dotted key, just not one the store has
+                    // recorded yet), and the live CardId (`<client>|<window>`,
+                    // per QuotaLabels) only as the last-resort identity for a
+                    // window with neither — where no join and no dot-component
+                    // read (IsSessionClass) is possible anyway. The account half
                     // prefers the matched series' own scope, then the live scope
                     // (a window the store has nothing under yet, yet the live
                     // agent still names an account), then the last-resort
@@ -321,18 +330,32 @@ public static class WindowCardText
                     new QuotaWindowIdentity(
                         clientId,
                         series?.AccountScope ?? liveScope ?? PrimaryAccountScope,
-                        series?.WindowKey ?? window.CardId),
+                        series?.WindowKey ?? window.PaceStatus.WindowKey ?? window.CardId),
                     window.Label,
                     series is null ? null : QuotaHistoryFold.Active(series.Samples),
-                    HasHistory: series is not null));
+                    HasHistory: series is not null,
+                    RemainingPercent: window.RemainingPercent));
             }
         }
 
-        // A running window leads: it is the one the card exists to draw, and on
-        // a client with a session and a weekly window the weekly one is
-        // routinely the idle half.
-        return [.. tabs.OrderByDescending(tab => tab.Active is not null)];
+        // Tab order is the provider's own order (live UniqueCardWindows order,
+        // or the store's order on the fallback path) — never re-sorted here.
+        // Which tab OPENS first is a separate question, answered by
+        // QuotaLensProjection's default-selection logic, the same split
+        // macOS's WindowCardLoader keeps between `candidates` (display order)
+        // and `pick` (which one is shown first).
+        return tabs;
     }
+
+    /// <summary>Whether <paramref name="windowKey"/> names a session-class
+    /// window — a dot-COMPONENT match, so <c>weekly_scoped.fable.v1</c> does
+    /// not qualify despite containing the substring nowhere. Mirrors macOS's
+    /// <c>WindowCardLoader.isSessionClass</c> exactly, including the reason:
+    /// a substring match would let a provider's own naming (e.g. a scoped
+    /// weekly window) pass for the window the card was built to prefer.
+    /// </summary>
+    internal static bool IsSessionClass(string? windowKey) =>
+        windowKey is not null && windowKey.Split('.').Contains("session");
 
     /// <summary>
     /// The one predicate every "does this client have live windows worth
