@@ -1,5 +1,5 @@
 use crate::agent_account_scope::{
-    self, AccountScope, AccountScopeError, AuthoritativeIdKind, RefreshCheckpoint,
+    self, AccountScope, AccountScopeError, AuthoritativeIdKind, HistoryScope, RefreshCheckpoint,
     RefreshScopeTransaction,
 };
 use crate::agent_antigravity;
@@ -8,7 +8,7 @@ use crate::agent_grok;
 use crate::agent_quota_duration::{DurationEvidence, DurationSource, DurationUnavailableReason};
 use crate::agent_quota_history::{
     BatchObservationResult, HistoricalPace, HistoryError, HistoryOutcome, QuotaObservation,
-    SeriesKey,
+    SeriesKey, StrandedSeriesFold,
 };
 use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
 use hyper_util::client::legacy::connect::dns::{
@@ -76,6 +76,18 @@ pub struct AgentUsageSnapshot {
     /// scope needed" rather than "could not tell".
     #[serde(serialize_with = "serialize_account_scope")]
     pub(crate) account_scope: Result<AccountScope, AccountScopeError>,
+    /// Identity for the durable pace history only. Distinct from `account_scope`
+    /// on purpose: the cache binding and the plan label must fragment when the
+    /// credential rotates, and a weeks-long series must not.
+    ///
+    /// Serialized (macOS keeps it `#[serde(skip)]`) because on Windows the join
+    /// between a live card and its stored series happens in C#: the store keys
+    /// series on this value, and `accountScope` no longer equals it for a
+    /// provider without an authoritative owner ID. Same wire shape as
+    /// `accountScope`. Not a new exposure: the same string is already the
+    /// `accountScope` of the series `tb_quota_history` exports.
+    #[serde(serialize_with = "serialize_history_scope")]
+    pub(crate) history_scope: Result<HistoryScope, AccountScopeError>,
     windows: Vec<UsageWindow>,
     credits: Option<CreditsSnapshot>,
     error: Option<String>,
@@ -99,9 +111,29 @@ fn serialize_account_scope<S>(
 where
     S: serde::Serializer,
 {
+    serialize_scope_wire(value.as_ref().map(AccountScope::as_str), serializer)
+}
+
+fn serialize_history_scope<S>(
+    value: &Result<HistoryScope, AccountScopeError>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serialize_scope_wire(value.as_ref().map(HistoryScope::as_str), serializer)
+}
+
+fn serialize_scope_wire<S>(
+    value: Result<&str, &AccountScopeError>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
     let wire = match value {
         Ok(scope) => AccountScopeWire {
-            scope: Some(scope.as_str()),
+            scope: Some(scope),
             error: None,
         },
         Err(error) => AccountScopeWire {
@@ -1170,6 +1202,7 @@ fn empty_error_snapshot(
         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
         identity: None,
         account_scope: Err(AccountScopeError::NoTrustedEvidence),
+        history_scope: Err(AccountScopeError::NoTrustedEvidence),
         windows: Vec::new(),
         credits: None,
         error: Some(display),
@@ -1290,12 +1323,28 @@ where
     }
 }
 
+/// Takes no `now`: it reads the clock itself, and the outcome it is handed is
+/// proof the response has already arrived (macOS bf7a6b92).
+///
+/// Every caller used to capture `Utc::now()` before its request and hold it
+/// across the round trip, so the timestamp the pace evidence was validated
+/// against was older than the response by construction. For a window a
+/// provider reports as not yet started — Codex answers one with no usage with
+/// `reset_at = <its now> + limit_window_seconds` — `valid_evidence`'s
+/// `cycle_started_at <= now` then rejects the provider's duration whenever the
+/// round trip crosses a second boundary, and `UsageWindow::unavailable` clears
+/// the window's duration and pace with it. Measured on macOS, not on Windows.
+///
+/// The parameter is gone rather than moved below the `await` at each caller,
+/// so a pre-request timestamp cannot be handed back in.
+/// `apply_provider_outcome_with` still takes one, because a test needs to
+/// state the instant it is asserting about.
 fn apply_provider_outcome(
     client_id: &str,
     failure_source: &str,
-    now: DateTime<Utc>,
     outcome: ProviderFetchOutcome,
 ) -> Option<AgentUsageSnapshot> {
+    let now = Utc::now();
     apply_provider_outcome_with(
         &PROVIDER_LAST_GOOD,
         client_id,
@@ -1343,6 +1392,8 @@ async fn fetch_grok() -> Option<AgentUsageSnapshot> {
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                 identity: data.identity,
                 account_scope: data.account_scope,
+                // Grok has no authoritative owner ID in anything TokenBar fetches.
+                history_scope: agent_account_scope::resolve_history_scope("grok", None),
                 windows: data.windows,
                 credits: None,
                 error: None,
@@ -1352,7 +1403,7 @@ async fn fetch_grok() -> Option<AgentUsageSnapshot> {
         Ok(None) => ProviderFetchOutcome::Absent,
         Err(failure) => ProviderFetchOutcome::Failure(failure),
     };
-    apply_provider_outcome("grok", "oauth", now, outcome)
+    apply_provider_outcome("grok", "oauth", outcome)
 }
 
 async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
@@ -1374,6 +1425,8 @@ async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
                         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                         identity: data.identity,
                         account_scope: data.account_scope,
+                        // Copilot has no authoritative owner ID either.
+                        history_scope: agent_account_scope::resolve_history_scope("copilot", None),
                         windows: data.windows,
                         credits: None,
                         error: None,
@@ -1384,7 +1437,7 @@ async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
             }
         }
     };
-    apply_provider_outcome("copilot", "oauth", now, outcome)
+    apply_provider_outcome("copilot", "oauth", outcome)
 }
 
 async fn fetch_antigravity() -> AgentUsageSnapshot {
@@ -1398,6 +1451,7 @@ async fn fetch_antigravity() -> AgentUsageSnapshot {
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                 identity: fetched.identity,
                 account_scope: fetched.account_scope,
+                history_scope: fetched.history_scope,
                 windows: fetched.windows,
                 credits: None,
                 error: None,
@@ -1406,13 +1460,12 @@ async fn fetch_antigravity() -> AgentUsageSnapshot {
         },
         Err(failure) => ProviderFetchOutcome::Failure(failure),
     };
-    apply_provider_outcome("antigravity", "oauth", now, outcome)
+    apply_provider_outcome("antigravity", "oauth", outcome)
         .expect("Antigravity is a required provider card")
 }
 
 async fn fetch_codex() -> AgentUsageSnapshot {
-    let now = Utc::now();
-    apply_provider_outcome("codex", "oauth", now, fetch_codex_inner().await)
+    apply_provider_outcome("codex", "oauth", fetch_codex_inner().await)
         .expect("Codex is a required provider card")
 }
 
@@ -1507,9 +1560,8 @@ fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<Dat
 }
 
 async fn fetch_claude() -> AgentUsageSnapshot {
-    let now = Utc::now();
     let (failure_source, outcome) = fetch_claude_inner().await;
-    apply_provider_outcome("claude", failure_source, now, outcome)
+    apply_provider_outcome("claude", failure_source, outcome)
         .expect("Claude is a required provider card")
 }
 
@@ -1635,11 +1687,19 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
         ));
     }
 
-    if let Some(request_account_id) = request_account_id {
+    let history_scope = codex_history_scope(&credentials);
+
+    if let (Some(request_account_id), Ok(history_scope)) =
+        (request_account_id, history_scope.as_ref())
+    {
+        // The importer keys on the same history scope as the live path. Keying
+        // it on the account scope would let imported v2 samples land in a series
+        // the live path never touches again, the moment the two diverge.
         let _ = crate::agent_quota_history::migrate_codex_v2(
             request_account_id,
-            account_scope.as_str(),
+            history_scope,
             now.timestamp(),
+            stranded_series_fold,
         );
     }
 
@@ -1650,6 +1710,7 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
             updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
             identity,
             account_scope: Ok(account_scope),
+            history_scope,
             windows,
             credits: usage.credits.map(|credits| CreditsSnapshot {
                 remaining: credits.balance,
@@ -2047,6 +2108,7 @@ async fn fetch_claude_oauth_usage_request(
                     .map(clean_plan),
                 }),
                 account_scope: Ok(account_scope),
+                history_scope: claude_history_scope(),
                 windows,
                 credits: claude_credits(usage.extra_usage.as_ref()),
                 error: None,
@@ -2201,6 +2263,7 @@ async fn claude_header_snapshot(
                 .map(clean_plan),
             }),
             account_scope,
+            history_scope: claude_history_scope(),
             windows,
             credits: None,
             error: None,
@@ -2208,6 +2271,41 @@ async fn claude_header_snapshot(
         },
         cache_binding,
     }
+}
+
+/// Claude's durable history identity: the per-installation constant, on every
+/// route. Claude's usage payload carries no owner ID, so a lineage — which a
+/// Claude CLI refresh-token rotation moves — was the only other candidate, and
+/// that is what stranded the old series. macOS gives an extra
+/// `CLAUDE_CONFIG_DIR` account its own authoritative scope; Windows has only the
+/// primary account, which macOS also keys on this constant.
+fn claude_history_scope() -> Result<HistoryScope, AccountScopeError> {
+    agent_account_scope::resolve_history_scope("claude", None)
+}
+
+/// Codex is one of the two routes with an authoritative owner ID today. Its
+/// history scope must consume the same `ChatGPT-Account-Id` the cache binding
+/// corroborates on, so two accounts on one installation keep two series.
+fn codex_history_scope(credentials: &CodexCredentials) -> Result<HistoryScope, AccountScopeError> {
+    codex_history_scope_with(credentials, agent_account_scope::resolve_history_scope)
+}
+
+fn codex_history_scope_with<R>(
+    credentials: &CodexCredentials,
+    resolve: R,
+) -> Result<HistoryScope, AccountScopeError>
+where
+    R: FnOnce(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>,
+{
+    resolve(
+        "codex",
+        credentials
+            .account_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|account_id| (AuthoritativeIdKind::OpaqueId, account_id)),
+    )
 }
 
 fn load_codex_credentials() -> Result<CodexCredentials, String> {
@@ -3414,8 +3512,71 @@ fn rollback_codex_credentials_if_unchanged(
 
 fn enrich_snapshot(snapshot: &mut AgentUsageSnapshot, now: i64) {
     enrich_snapshot_with(snapshot, now, |active_keys, observations, now| {
-        crate::agent_quota_history::record_observations_and_evaluate(active_keys, observations, now)
+        crate::agent_quota_history::record_observations_and_evaluate(
+            active_keys,
+            observations,
+            now,
+            stranded_series_fold,
+        )
     });
+}
+
+/// Every provider's input to the one-time schema-3 history fold (see
+/// `agent_quota_history::fold_stranded_series`), resolved here — before the
+/// history lock — because it needs the installation key and the account-scope
+/// metadata lock.
+///
+/// Built for all five providers, not for the one being recorded: whichever
+/// provider writes first under this build is the only transaction that folds,
+/// and a provider left out of it would stay stranded. Passed lazily: once this
+/// process has seen the store past schema 3, the history module stops calling
+/// it (`FOLD_SETTLED`).
+///
+/// claude, copilot and grok have only ever keyed history on a credential
+/// lineage on Windows, so every series of theirs folds. codex and antigravity
+/// also keyed on an authoritative owner ID when they had one (ChatGPT account
+/// ID; the local IDE's email) — those series already carry the exact key the
+/// writer now produces, so only their lineage-scoped series fold.
+///
+/// Best effort: a provider whose inputs cannot be resolved right now is left
+/// out and its old series stay where they are. Refusing the write instead would
+/// withhold every provider's history for as long as the failure lasts.
+fn stranded_series_fold() -> Vec<StrandedSeriesFold> {
+    stranded_series_fold_with(
+        |provider| agent_account_scope::resolve_history_scope(provider, None),
+        agent_account_scope::resolve_lineage_scopes,
+    )
+}
+
+fn stranded_series_fold_with(
+    constant: impl Fn(&str) -> Result<HistoryScope, AccountScopeError>,
+    lineage_scopes: impl Fn(&str) -> Result<Vec<AccountScope>, AccountScopeError>,
+) -> Vec<StrandedSeriesFold> {
+    const EVERY_SCOPE: [&str; 3] = ["claude", "copilot", "grok"];
+    const LINEAGE_ONLY: [&str; 2] = ["codex", "antigravity"];
+    let every = EVERY_SCOPE.into_iter().filter_map(|provider| {
+        let target = constant(provider).ok()?;
+        Some(StrandedSeriesFold {
+            provider_id: provider,
+            target,
+            lineage_scopes: None,
+        })
+    });
+    let lineage = LINEAGE_ONLY.into_iter().filter_map(|provider| {
+        let target = constant(provider).ok()?;
+        let scopes = lineage_scopes(provider).ok()?;
+        Some(StrandedSeriesFold {
+            provider_id: provider,
+            target,
+            lineage_scopes: Some(
+                scopes
+                    .iter()
+                    .map(|scope| scope.as_str().to_string())
+                    .collect(),
+            ),
+        })
+    });
+    every.chain(lineage).collect()
 }
 
 fn enrich_snapshot_with<F>(snapshot: &mut AgentUsageSnapshot, now: i64, mut record: F)
@@ -3444,7 +3605,12 @@ where
         true
     });
 
-    let Ok(account_scope) = snapshot.account_scope.as_ref() else {
+    // Deliberately still keyed on `account_scope`: this is the sole suppressor
+    // of durable history for an identity that was never verified.
+    // `history_scope` resolves whenever the installation key is readable, so
+    // re-keying this guard on it would start recording per-account history for
+    // an unverified identity.
+    let Ok(_account_scope) = snapshot.account_scope.as_ref() else {
         for window in &mut snapshot.windows {
             if window.window_key.is_some() {
                 window.unavailable("accountScope");
@@ -3452,7 +3618,14 @@ where
         }
         return;
     };
-    let account_scope = account_scope.as_str();
+    let Ok(history_scope) = snapshot.history_scope.as_ref() else {
+        for window in &mut snapshot.windows {
+            if window.window_key.is_some() {
+                window.unavailable("accountScope");
+            }
+        }
+        return;
+    };
     let mut active_keys = Vec::new();
     let mut observations = Vec::new();
     let mut mapped_indices = Vec::new();
@@ -3462,7 +3635,7 @@ where
             // The provider already classified this card as windowIdentity.
             continue;
         };
-        let key = SeriesKey::new(snapshot.client_id.clone(), account_scope, window_key);
+        let key = SeriesKey::new(snapshot.client_id.clone(), history_scope, window_key);
         active_keys.push(key.clone());
         if matches!(window.pace_status.state, PaceState::Unavailable) {
             // Emission protects existing history from capacity eviction, but
@@ -4649,6 +4822,10 @@ mod tests {
                 email: Some("fixture@example.invalid".to_string()),
                 plan: Some("Fixture".to_string()),
             }),
+            history_scope: account_scope
+                .as_ref()
+                .map(|scope| HistoryScope::for_test(scope.as_str()))
+                .map_err(|error| *error),
             account_scope,
             windows: vec![UsageWindow::from_provider_used_percent(
                 "Session".to_string(),
@@ -4963,6 +5140,7 @@ mod tests {
                     source: "oauth".to_string(),
                     updated_at: response_at.to_rfc3339_opts(SecondsFormat::Millis, true),
                     identity: Some(AgentIdentity { email: None, plan }),
+                    history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
                     account_scope: Ok(account_scope),
                     windows,
                     credits: None,
@@ -6079,6 +6257,7 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows,
             credits: None,
@@ -6632,6 +6811,7 @@ mod tests {
             source: "oauth".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![window],
             credits: None,
@@ -6643,7 +6823,11 @@ mod tests {
             calls.set(calls.get() + 1);
             assert_eq!(
                 active,
-                &[SeriesKey::new("claude", &expected_scope, "extra_usage.v1")]
+                &[SeriesKey::new(
+                    "claude",
+                    &HistoryScope::for_test(&expected_scope),
+                    "extra_usage.v1"
+                )]
             );
             assert!(observations.is_empty());
             Ok(Vec::new())
@@ -6672,15 +6856,12 @@ mod tests {
             .join(crate::agent_quota_history::HISTORY_FILE_NAME);
         let seed_now = 1_800_000_000_i64;
         let seed_reset = seed_now + 86_400;
-        let weekly_key = SeriesKey::new("claude", &account_scope_value, "weekly.v1");
+        let history_scope = HistoryScope::for_test(&account_scope_value);
+        let weekly_key = SeriesKey::new("claude", &history_scope, "weekly.v1");
         let mut seeded_keys = vec![weekly_key.clone()];
         seeded_keys.extend(
             (0..crate::agent_quota_history::MAX_SERIES - 1).map(|index| {
-                SeriesKey::new(
-                    "claude",
-                    &account_scope_value,
-                    format!("zzzz.{index:04}.v1"),
-                )
+                SeriesKey::new("claude", &history_scope, format!("zzzz.{index:04}.v1"))
             }),
         );
         for (sample_index, sampled_at) in [
@@ -6743,6 +6924,7 @@ mod tests {
             source: "oauth".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![weekly, new_window],
             credits: None,
@@ -8269,6 +8451,7 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![
                 make_window("First", "shared-card.v1", "first.v1", 10.0),
@@ -8325,6 +8508,7 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![
                 make_window("A/X", "a.v1", "x.v1", 10.0),
@@ -8397,6 +8581,7 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![
                 UsageWindow::from_provider_used_percent(
@@ -8483,6 +8668,7 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![UsageWindow::from_provider_used_percent(
                 "Weekly".to_string(),
@@ -8536,6 +8722,7 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            history_scope: Ok(HistoryScope::for_test(account_scope.as_str())),
             account_scope: Ok(account_scope),
             windows: vec![UsageWindow::from_provider_used_percent(
                 "Weekly".to_string(),
@@ -8649,6 +8836,245 @@ mod tests {
         }
     }
 
+    fn histid_window(used_percent: f64, reset_at: i64, sampled_at: i64) -> UsageWindow {
+        UsageWindow::from_provider_used_percent(
+            "Session".to_string(),
+            used_percent,
+            Some(Utc.timestamp_opt(reset_at, 0).single().unwrap()),
+            Utc.timestamp_opt(sampled_at, 0).single().unwrap(),
+        )
+        .with_identity(
+            "session.v1",
+            Some("session.v1".to_string()),
+            None,
+            Some(DurationEvidence::contract(5 * 3_600)),
+        )
+    }
+
+    /// A sibling application rotating the shared OAuth refresh token used to
+    /// mint a fresh lineage, a fresh account scope, a fresh `SeriesKey` and
+    /// therefore a history that restarts from zero (ported from macOS
+    /// 76e0ff38).
+    #[test]
+    fn histid_a_history_survives_three_external_credential_rotations() {
+        let scope = TestRefreshScope::new("claude", "histid-rotation");
+        let history_path = scope
+            .root()
+            .join(crate::agent_quota_history::HISTORY_FILE_NAME);
+        let start = 1_800_000_000_i64;
+        let reset = start + 5 * 3_600;
+        let mut account_scopes = Vec::new();
+        let mut observed_keys = Vec::new();
+
+        for (index, marker) in [
+            b"rotation-one".as_slice(),
+            b"rotation-two".as_slice(),
+            b"rotation-three".as_slice(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let account_scope = scope
+                .resolve_current("fixture", "histid-rotation", marker)
+                .unwrap();
+            let history_scope = scope.resolve_history("claude", None).unwrap();
+            account_scopes.push(account_scope.as_str().to_string());
+            let sampled_at = start + index as i64 * 900;
+            let mut snapshot = AgentUsageSnapshot {
+                client_id: "claude".to_string(),
+                source: "oauth".to_string(),
+                updated_at: String::new(),
+                identity: None,
+                account_scope: Ok(account_scope),
+                history_scope: Ok(history_scope),
+                windows: vec![histid_window(10.0 + index as f64 * 10.0, reset, sampled_at)],
+                credits: None,
+                error: None,
+                transport_diagnostic: None,
+            };
+            enrich_snapshot_with(&mut snapshot, sampled_at, |active, observations, now| {
+                observed_keys.extend(active.iter().cloned());
+                crate::agent_quota_history::record_observations_at_path_and_evaluate(
+                    active,
+                    observations,
+                    now,
+                    &history_path,
+                )
+            });
+        }
+
+        // Precondition: the three markers really did fragment the account scope.
+        assert_ne!(account_scopes[0], account_scopes[1]);
+        assert_ne!(account_scopes[1], account_scopes[2]);
+        assert_ne!(account_scopes[0], account_scopes[2]);
+
+        assert_eq!(observed_keys.len(), 3);
+        assert!(observed_keys.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(account_scopes
+            .iter()
+            .all(|value| value != &observed_keys[0].account_scope));
+
+        let store: Value = serde_json::from_slice(&fs::read(&history_path).unwrap()).unwrap();
+        let series = store["series"].as_array().unwrap();
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0]["samples"].as_array().unwrap().len(), 3);
+        scope.cleanup();
+    }
+
+    /// The account-scope guard is the sole suppressor. The Antigravity local
+    /// route reaches here with non-empty windows and `Err(NoTrustedEvidence)`
+    /// (`agent_antigravity.rs` `parse_user_status`, admitted by
+    /// `apply_provider_outcome_with`), while its history scope resolves fine.
+    #[test]
+    fn histid_a_unverified_account_records_no_history_even_with_a_resolvable_history_scope() {
+        let scope = TestRefreshScope::new("antigravity", "histid-fail-closed");
+        let history_scope = scope.resolve_history("antigravity", None).unwrap();
+        let start = 1_800_000_000_i64;
+        let mut snapshot = AgentUsageSnapshot {
+            client_id: "antigravity".to_string(),
+            source: "cli".to_string(),
+            updated_at: String::new(),
+            identity: None,
+            account_scope: Err(AccountScopeError::NoTrustedEvidence),
+            history_scope: Ok(history_scope),
+            windows: vec![histid_window(20.0, start + 5 * 3_600, start)],
+            credits: None,
+            error: None,
+            transport_diagnostic: None,
+        };
+        let calls = std::cell::Cell::new(0);
+        enrich_snapshot_with(&mut snapshot, start, |_, _, _| {
+            calls.set(calls.get() + 1);
+            Ok(Vec::new())
+        });
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            snapshot.windows[0].pace_status.reason.as_deref(),
+            Some("accountScope")
+        );
+        assert_eq!(
+            snapshot.windows[0].pace_status.state,
+            PaceState::Unavailable
+        );
+        scope.cleanup();
+    }
+
+    fn histid_codex_credentials(account_id: Option<&str>) -> CodexCredentials {
+        CodexCredentials {
+            access_token: "codex-access".to_string(),
+            refresh_token: Some("codex-refresh".to_string()),
+            id_token: None,
+            account_id: account_id.map(str::to_string),
+            last_refresh: None,
+            auth_path: PathBuf::new(),
+            raw_json: Value::Null,
+            scope_slot: CredentialSlot {
+                semantic_source: "fixture",
+                canonical_location: "fixture".to_string(),
+            },
+        }
+    }
+
+    /// Codex resolves authoritatively and must keep doing so. Its history
+    /// scope has to stay byte-equal to the account scope the cache binding
+    /// corroborates on — which is also what keeps every series Windows already
+    /// recorded under a ChatGPT account ID on its exact key.
+    #[test]
+    fn histid_a_codex_history_scope_consumes_the_authoritative_account_id() {
+        let scope = TestRefreshScope::new("codex", "histid-codex");
+        let resolve = |provider: &str, authoritative: Option<(AuthoritativeIdKind, &str)>| {
+            scope.resolve_history(provider, authoritative)
+        };
+
+        let one = codex_history_scope_with(&histid_codex_credentials(Some("acct-1")), resolve)
+            .expect("authoritative history scope");
+        let expected = scope
+            .resolve_authoritative("codex", AuthoritativeIdKind::OpaqueId, "acct-1")
+            .unwrap();
+        assert_eq!(one.as_str(), expected.as_str());
+
+        let two = codex_history_scope_with(&histid_codex_credentials(Some("acct-2")), resolve)
+            .expect("second authoritative history scope");
+        assert_ne!(
+            SeriesKey::new("codex", &one, "main.weekly.v1"),
+            SeriesKey::new("codex", &two, "main.weekly.v1")
+        );
+
+        let constant = scope.resolve_history("codex", None).unwrap();
+        for absent in [None, Some(""), Some("   ")] {
+            let fallback = codex_history_scope_with(&histid_codex_credentials(absent), resolve)
+                .expect("account-id-less Codex must fall back to the constant, not error");
+            assert_eq!(fallback.as_str(), constant.as_str());
+            assert_ne!(fallback.as_str(), one.as_str());
+            assert_ne!(fallback.as_str(), two.as_str());
+        }
+        scope.cleanup();
+    }
+
+    /// The fold inputs name every provider, and only codex and antigravity —
+    /// the two that ever keyed history on an authoritative owner ID — are
+    /// restricted to their lineage scopes. The lineage set is exactly the scope
+    /// the credential route handed out; the authoritative scope is not in it.
+    #[test]
+    fn stranded_series_fold_restricts_only_the_authoritative_providers_to_lineage_scopes() {
+        let scope = TestRefreshScope::new("codex", "fold-inputs");
+        let lineage = scope
+            .resolve_current("fixture", "fold-inputs", b"marker")
+            .unwrap();
+        let authoritative = scope
+            .resolve_authoritative("codex", AuthoritativeIdKind::OpaqueId, "acct-1")
+            .unwrap();
+
+        let folds = stranded_series_fold_with(
+            |provider| scope.resolve_history(provider, None),
+            |provider| scope.resolve_lineage(provider),
+        );
+
+        let providers = folds
+            .iter()
+            .map(|fold| fold.provider_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            providers,
+            ["claude", "copilot", "grok", "codex", "antigravity"]
+        );
+        for fold in &folds {
+            assert_eq!(
+                fold.target,
+                scope.resolve_history(fold.provider_id, None).unwrap()
+            );
+            match fold.provider_id {
+                "codex" => {
+                    let scopes = fold.lineage_scopes.as_ref().expect("codex is lineage-only");
+                    assert_eq!(scopes.len(), 1);
+                    assert!(scopes.contains(lineage.as_str()));
+                    assert!(!scopes.contains(authoritative.as_str()));
+                }
+                "antigravity" => {
+                    assert_eq!(
+                        fold.lineage_scopes.as_ref().map(|scopes| scopes.len()),
+                        Some(0)
+                    );
+                }
+                _ => assert!(fold.lineage_scopes.is_none()),
+            }
+        }
+
+        // A provider whose inputs cannot be resolved is left out, not guessed.
+        let without_lineage = stranded_series_fold_with(
+            |provider| scope.resolve_history(provider, None),
+            |_| Err(AccountScopeError::MetadataCorrupt),
+        );
+        assert_eq!(
+            without_lineage
+                .iter()
+                .map(|fold| fold.provider_id)
+                .collect::<Vec<_>>(),
+            ["claude", "copilot", "grok"]
+        );
+        scope.cleanup();
+    }
+
     #[test]
     fn stage4_scope_error_is_sticky_and_skips_history() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
@@ -8657,6 +9083,9 @@ mod tests {
             source: "fixture".to_string(),
             updated_at: String::new(),
             identity: None,
+            // `Ok` on purpose: it keeps this test proving that the account-scope
+            // guard alone suppresses history.
+            history_scope: Ok(HistoryScope::for_test("stage4-history-scope")),
             account_scope: Err(AccountScopeError::MetadataWrite),
             windows: vec![
                 UsageWindow::from_provider_used_percent(
@@ -8765,6 +9194,50 @@ mod tests {
         assert!(serde_json::to_value(&window).is_err());
     }
 
+    /// Both scopes cross the wire in the same two-case shape — `{ "scope" }` or
+    /// `{ "error" }`, never both — because the C# window card joins a live
+    /// agent to its stored series on `historyScope.scope`, and a shape the
+    /// decoder does not recognise would arrive as null and silently fall back
+    /// to first-wins. The Err half is also pinned inside
+    /// `provider_quota_pace_v3_fixture_locks_production_serializer`.
+    #[test]
+    fn account_and_history_scopes_serialize_as_two_case_objects() {
+        let scope = TestRefreshScope::new("claude", "scope-wire");
+        let account_scope = scope
+            .resolve_current("fixture", "scope-wire", b"marker")
+            .unwrap();
+        let history_scope = scope.resolve_history("claude", None).unwrap();
+        let account_value = account_scope.as_str().to_string();
+        let history_value = history_scope.as_str().to_string();
+        assert_ne!(account_value, history_value);
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let mut snapshot = cache_test_snapshot("claude", Ok(account_scope), now);
+        snapshot.history_scope = Ok(history_scope);
+
+        let ok = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(
+            ok["accountScope"],
+            serde_json::json!({ "scope": account_value })
+        );
+        assert_eq!(
+            ok["historyScope"],
+            serde_json::json!({ "scope": history_value })
+        );
+
+        snapshot.account_scope = Err(AccountScopeError::MetadataWrite);
+        snapshot.history_scope = Err(AccountScopeError::InvalidInstallationKey);
+        let err = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(
+            err["accountScope"],
+            serde_json::json!({ "error": "account-scope metadata could not be saved" })
+        );
+        assert_eq!(
+            err["historyScope"],
+            serde_json::json!({ "error": "installation key failed validation" })
+        );
+        scope.cleanup();
+    }
+
     #[test]
     fn provider_quota_pace_v3_fixture_locks_production_serializer() {
         fn window(
@@ -8814,6 +9287,7 @@ mod tests {
                 updated_at: "2026-07-10T12:00:00.000Z".to_string(),
                 identity: None,
                 account_scope: Err(AccountScopeError::NoTrustedEvidence),
+                history_scope: Err(AccountScopeError::NoTrustedEvidence),
                 windows: vec![
                     window(
                         "ahead.invalid",
@@ -8946,10 +9420,14 @@ mod tests {
         // card falls back to picking whichever stored series comes first —
         // which is the defect this field was added to remove.
         // This fixture's snapshot resolves no credential, so it exercises the
-        // Err half. The Ok half is pinned by `account_scope_serializes_as_a
-        // _two_case_object`.
+        // Err half. The Ok half is pinned by
+        // `account_and_history_scopes_serialize_as_two_case_objects`.
         assert_eq!(
             serialized["agents"][0]["accountScope"],
+            serde_json::json!({ "error": "no trusted account evidence" })
+        );
+        assert_eq!(
+            serialized["agents"][0]["historyScope"],
             serde_json::json!({ "error": "no trusted account evidence" })
         );
 
@@ -8965,6 +9443,8 @@ mod tests {
             for agent in agents {
                 if let Some(object) = agent.as_object_mut() {
                     object.remove("accountScope");
+                    // Windows-only for the same reason, added with HistoryScope.
+                    object.remove("historyScope");
                 }
             }
         }

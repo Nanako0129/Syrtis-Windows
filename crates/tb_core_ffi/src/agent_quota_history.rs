@@ -1,4 +1,9 @@
-//! Schema-3 provider-neutral quota pace history transaction.
+//! Schema-4 provider-neutral quota pace history transaction.
+//!
+//! The schema counter and the `v3` in the store's filename are two different
+//! numbers: the filename names the store family and was fixed when the store
+//! was introduced, while `HISTORY_SCHEMA_VERSION` is the shape of what is
+//! inside it and is now `4`.
 //!
 //! The locked v3 transaction owns sampling, cycle-aware retention, migration,
 //! and the coherent historical evaluator. Provider adapters resolve identity
@@ -6,25 +11,69 @@
 
 #![allow(dead_code)]
 
+use crate::agent_account_scope::HistoryScope;
+// Windows keeps sourcing this from `agent_history` (macOS inlined an identical
+// copy when it retired that module; Windows retires it in its own slice).
+use crate::agent_history::weighted_median;
 use crate::agent_quota_duration::{
     self, observe_reset, valid_duration, DurationEvidence, DurationResolution, DurationSource,
     DurationUnavailableReason, ObservedState,
 };
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
-pub(crate) const HISTORY_SCHEMA_VERSION: u32 = 3;
+pub(crate) const HISTORY_SCHEMA_VERSION: u32 = 4;
+/// The version this store shipped as from v1.10.0 through v1.13.3, which is
+/// every version that has written the file. `migrate_store_to_current` upgrades
+/// it in memory on load; see `load_store_at_with_mode`.
+pub(crate) const HISTORY_SCHEMA_VERSION_V3: u32 = 3;
+/// `v3` in these names is the store *family*, fixed when the file was
+/// introduced — not its schema version. The version lives in
+/// `HISTORY_SCHEMA_VERSION` and in the file's own `schemaVersion` field. A v4
+/// store is read from and written to these same paths; renaming them would
+/// strand every existing file.
 pub(crate) const HISTORY_FILE_NAME: &str = "quota-pace-history-v3.json";
 pub(crate) const HISTORY_LOCK_FILE_NAME: &str = "quota-pace-v3.lock";
 pub(crate) const LEGACY_V2_FILE_NAME: &str = "codex-weekly-history-v2.json";
+/// Floor for `phase_bucket_count`, and the count every window used to get.
 pub(crate) const PHASE_BUCKET_COUNT: usize = 48;
+/// The only factor `phase_bucket_count` may apply to the floor. Whole, so the
+/// finer grid nests inside the coarser one and no existing sample can change
+/// which cell it shares — see `phase_bucket_count`.
+pub(crate) const PHASE_BUCKET_MULTIPLE: usize = 4;
+/// Ceiling for `phase_bucket_count`, and what a long window actually gets.
+pub(crate) const MAX_PHASE_BUCKET_COUNT: usize = PHASE_BUCKET_COUNT * PHASE_BUCKET_MULTIPLE;
 pub(crate) const GRID_POINT_COUNT: usize = 169;
+/// How many samples one transaction may drop to make a store writable again.
+///
+/// A store can become invalid through no fault of the sample being recorded:
+/// `normalize_reset` and `sample_key` derive their quantum from a sample's own
+/// `duration_seconds`, so a series holding both a contract duration and a
+/// learned one is bucketed two ways, and a set that was valid can stop being
+/// valid the moment eviction changes it. Refusing the write leaves the history
+/// permanently unwritable and every window reporting "history unavailable",
+/// which is what #370 measured.
+///
+/// The floor of the allowance, not the whole of it: `repair_drop_allowance`
+/// takes the larger of this and `MAX_REPAIR_DROP_PERCENT` of the series. It
+/// exists so a short series, where a percentage rounds to nothing, still has a
+/// workable allowance.
+pub(crate) const MAX_REPAIR_DROPS_PER_TRANSACTION: usize = 8;
+
+/// The share of one series a repair may drop. 2% keeps the measured #370 case
+/// inside the allowance (39 of 5815 samples, 0.67%) while still refusing the
+/// failure this bound exists for: shredding a history to force a write through.
+/// Raise it only against a measurement, never to make a particular store pass.
+pub(crate) const MAX_REPAIR_DROP_PERCENT: usize = 2;
+
 pub(crate) const MAX_SERIES: usize = 512;
 pub(crate) const MAX_SAMPLES: usize = 65_536;
 pub(crate) const MAX_SAMPLES_PER_CYCLE: usize = PHASE_BUCKET_COUNT;
@@ -33,12 +82,40 @@ pub(crate) const MAX_PHASE_GAP: f64 = 0.30;
 pub(crate) const RETENTION_MIN_SECONDS: i64 = 56 * 86_400;
 pub(crate) const RETENTION_MAX_SECONDS: i64 = 400 * 86_400;
 pub(crate) const RETENTION_MIN_CYCLES: usize = 8;
+
+/// How many groups retention keeps purely as a record — ones
+/// `retention_cycle_descriptor` refuses, so no curve will ever be fitted to
+/// them.
+///
+/// Its own budget, separate from `retention_limits`' cycle count, so a record
+/// can never evict a cycle the model would have used. The floor rather than
+/// the cap: a record earns its place by being recent and substantial, not by
+/// being one of a long history, and the cases this exists for — a reset the
+/// provider revised, a window whose tail a write outage swallowed — arrive one
+/// or two at a time.
+pub(crate) const RETENTION_RECORD_GROUPS: usize = RETENTION_MIN_CYCLES;
 pub(crate) const RETENTION_MAX_CYCLES: usize = 128;
 pub(crate) const RUNOUT_THRESHOLD_PERCENT: f64 = 100.0 - 1e-9;
 pub(crate) const EPSILON: f64 = 1e-9;
 
 static HISTORY_PROCESS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Set once this process has seen the production store at a schema other
+/// than 3: a successful load of a file already at the current schema, or a
+/// successful save (every save writes the current schema). From then on the
+/// one-time fold can never trigger again in this process, so the production
+/// entry points stop resolving its inputs (`fold_inputs_unless_settled`).
+/// Never set by a load of a schema-3 file, nor by a write that failed: until a
+/// save lands, the file on disk is still schema 3 and the next write must fold.
+///
+/// Process-lifetime by design. It assumes the file does not go back to
+/// schema 3 underneath a running process — the restore procedure stops every
+/// Syrtis process before putting a backup in place.
+static FOLD_SETTLED: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+thread_local! {
+    static SAVE_CALL_COUNT: Cell<u64> = Cell::new(0);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StorageMode {
@@ -59,6 +136,7 @@ pub(crate) enum HistoryError {
     LockAcquire,
     LockRelease,
     Read,
+    Corrupt,
     CorruptQuarantine,
     InvalidSeriesKey,
     StoreCapacity,
@@ -74,6 +152,7 @@ impl std::fmt::Display for HistoryError {
             Self::LockAcquire => "quota pace lock could not be acquired",
             Self::LockRelease => "quota pace lock could not be released",
             Self::Read => "quota pace history could not be read",
+            Self::Corrupt => "quota pace history is corrupt and was quarantined",
             Self::CorruptQuarantine => "quota pace history could not be quarantined",
             Self::InvalidSeriesKey => "quota pace series key is invalid",
             Self::StoreCapacity => "quota pace history store capacity is exhausted",
@@ -94,15 +173,32 @@ pub(crate) struct SeriesKey {
 }
 
 impl SeriesKey {
+    /// The scope argument is a `HistoryScope`, never an `AccountScope`: a key
+    /// that outlives a credential rotation cannot be derived from the credential.
+    /// The persisted field name stays `accountScope` because renaming it would
+    /// orphan every record already on disk, and no migration renames fields —
+    /// the version-4 upgrade adds `QuotaSample.plan` and touches nothing else.
     pub(crate) fn new(
         provider_id: impl Into<String>,
-        account_scope: impl Into<String>,
+        history_scope: &HistoryScope,
         window_key: impl Into<String>,
     ) -> Self {
         Self {
             provider_id: provider_id.into(),
-            account_scope: account_scope.into(),
+            account_scope: history_scope.as_str().to_string(),
             window_key: window_key.into(),
+        }
+    }
+
+    /// Rebuild a key from strings already persisted in the store. This is not
+    /// choosing a scope, so it deliberately does not go through `HistoryScope`;
+    /// giving `HistoryScope` a string constructor would reopen the hole `new`
+    /// closes.
+    fn from_stored_parts(provider_id: &str, account_scope: &str, window_key: &str) -> Self {
+        Self {
+            provider_id: provider_id.to_string(),
+            account_scope: account_scope.to_string(),
+            window_key: window_key.to_string(),
         }
     }
 
@@ -129,6 +225,31 @@ pub(crate) struct QuotaSample {
     pub(crate) used_percent: f64,
     pub(crate) sampled_at: i64,
     pub(crate) origin: SampleOrigin,
+    /// The subscription plan this sample was taken under. Always `None` for
+    /// now: the field exists so the schema bump and its migration land once,
+    /// ahead of the contract that decides where a plan value may be read from.
+    /// `None` means "not recorded", never "no plan" — nothing may infer a
+    /// value for a sample taken before this field existed, because a plan
+    /// change in the user's past would be recorded as a fact that never
+    /// happened, and no downstream check could tell.
+    ///
+    /// `default` covers v3 samples, which carry no key. Deliberately not
+    /// `skip_serializing_if`: writing `"plan": null` is what makes a v4 file
+    /// unreadable by a v3 build's `deny_unknown_fields`, which is a property
+    /// the downgrade test pins rather than papers over.
+    ///
+    /// **This field must never enter `sample_key`.** Anything that changes
+    /// that key's range is a data migration even when it looks like a
+    /// constant: two samples the old range separated can collide under the
+    /// new one, a duplicate key makes `validate_series` call the series
+    /// corrupt, and the remedy is quarantining the whole file. A per-sample
+    /// flaw then destroys every series. That is not hypothetical — it
+    /// happened on this store when the phase-bucket count moved from a fixed
+    /// 48 to a per-duration value, and 168 is not a multiple of 48 (see
+    /// `PHASE_BUCKET_MULTIPLE`). Pooling by plan belongs in the consumer, not
+    /// in the identity of a stored sample.
+    #[serde(default)]
+    pub(crate) plan: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -159,11 +280,7 @@ impl SeriesState {
     }
 
     fn key(&self) -> SeriesKey {
-        SeriesKey::new(
-            self.provider_id.clone(),
-            self.account_scope.clone(),
-            self.window_key.clone(),
-        )
+        SeriesKey::from_stored_parts(&self.provider_id, &self.account_scope, &self.window_key)
     }
 }
 
@@ -200,6 +317,65 @@ pub(crate) struct HistoricalPace {
     pub(crate) eta_seconds: Option<f64>,
     pub(crate) will_last_to_reset: bool,
     pub(crate) run_out_probability: Option<f64>,
+}
+
+/// The one product-wide out-of-sample quality threshold shared by v3 and v2.
+pub(crate) const EXPECTED_FIT_RMSE_PP: f64 = 6.0;
+pub(crate) const TAIL_PHASE_THRESHOLD: f64 = 0.75;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FitPoint {
+    pub(crate) phase: f64,
+    pub(crate) bucket: usize,
+    pub(crate) used_percent: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FitCycleInput {
+    pub(crate) recency_weight: f64,
+    pub(crate) points: Vec<FitPoint>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CompletedFitResult {
+    pub(crate) historical_curve: Vec<f64>,
+    pub(crate) overall_rmse: f64,
+    pub(crate) tail_rmse: Option<f64>,
+    pub(crate) tail_cycle_count: usize,
+    pub(crate) total_weight: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PartialFitResult {
+    pub(crate) beta: f64,
+    pub(crate) walk_forward_rmse: f64,
+}
+
+pub(crate) fn fit_quality(rmse: f64) -> Option<f64> {
+    if !rmse.is_finite() || rmse < 0.0 || rmse > EXPECTED_FIT_RMSE_PP + EPSILON {
+        return None;
+    }
+    Some((1.0 - rmse / 12.0).clamp(0.0, 1.0))
+}
+
+pub(crate) fn completed_blend_weight(fit_quality: f64, total_weight: f64) -> Option<f64> {
+    if !fit_quality.is_finite()
+        || !total_weight.is_finite()
+        || !(0.0..=1.0).contains(&fit_quality)
+        || total_weight <= EPSILON
+    {
+        return None;
+    }
+    let evidence_share = total_weight / (total_weight + 1.0);
+    let weight = fit_quality * evidence_share;
+    weight.is_finite().then_some(weight.clamp(0.0, 1.0))
+}
+
+pub(crate) fn partial_blend_weight(fit_quality: f64) -> Option<f64> {
+    if !fit_quality.is_finite() || !(0.0..=1.0).contains(&fit_quality) {
+        return None;
+    }
+    Some((0.5 * fit_quality).clamp(0.0, 0.5))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +428,13 @@ struct LegacyV2Store {
 #[derive(Debug)]
 struct LoadedStore {
     store: Store,
+    quarantined: bool,
+    /// The `schemaVersion` the file on disk carried, read BEFORE
+    /// `migrate_store_to_current` stamped the value in memory; `None` when
+    /// there was no file or it was quarantined. `Some(3)` is the only trigger
+    /// for `fold_stranded_series`: a schema-3 file has never been written by a
+    /// build that keys history on `HistoryScope`.
+    on_disk_schema: Option<u32>,
 }
 
 /// Record a provider-neutral quota observation in the production v3 store.
@@ -376,6 +559,20 @@ pub(crate) struct ExportedSeries {
 /// violates through no fault of the data. A skewed clock should not blank the
 /// lens.
 ///
+/// **The loader's two in-memory steps before validation are kept, and nothing
+/// else of it.** `migrate_store_to_current` stamps a schema-3 store as the
+/// current version, and `drop_unplaceable_samples` forgets the samples this
+/// build cannot place (an individually invalid sample, a duplicate sample key,
+/// a cycle over its bucket cap) — exactly what the loader does before its own
+/// `validate_store`. Without the first, a store the lazy migration has not yet
+/// rewritten — every schema-3 file on disk until its next recording write —
+/// fails the exact version check and blanks the lens. Without the second, the
+/// export would refuse a file the writer accepts and would keep recording into.
+/// Both act on the deserialized value only: the file is never rewritten and
+/// never quarantined here. A store at any version other than 3 or the current
+/// one is still refused, as is a store whose failure is structural (series out
+/// of order, an invalid key, an inconsistent rollover).
+///
 /// The guarded read primitives are still used — `read_owner_only_with_mode`
 /// (which is `open_existing_owner_only_with_mode` +
 /// `verify_open_regular_file_with_mode`) rather than a plain `fs::read`, so a
@@ -431,7 +628,12 @@ fn export_history_at_with_mode(
     else {
         return Ok(Vec::new());
     };
-    let store = serde_json::from_slice::<Store>(&bytes).map_err(|_| HistoryError::Read)?;
+    // Same order as the loader: version first, samples second (see
+    // `migrate_store_to_current`). Both run on the value in memory only.
+    let store = serde_json::from_slice::<Store>(&bytes)
+        .map(migrate_store_to_current)
+        .map(drop_unplaceable_samples)
+        .map_err(|_| HistoryError::Read)?;
     if !validate_store(&store) {
         return Err(HistoryError::Read);
     }
@@ -463,13 +665,66 @@ fn export_history_at_with_mode(
         .collect())
 }
 
+pub(crate) fn read_series_at_path(
+    key: &SeriesKey,
+    path: &Path,
+    now: i64,
+) -> Result<Option<SeriesState>, HistoryError> {
+    read_series_at_path_with_mode(StorageMode::Generic, key, path, now)
+}
+
+pub(crate) fn read_series(key: &SeriesKey, now: i64) -> Result<Option<SeriesState>, HistoryError> {
+    let path = production_history_path().ok_or(HistoryError::StorageUnavailable)?;
+    read_series_at_path_with_mode(StorageMode::System, key, &path, now)
+}
+
+fn read_series_at_path_with_mode(
+    mode: StorageMode,
+    key: &SeriesKey,
+    path: &Path,
+    now: i64,
+) -> Result<Option<SeriesState>, HistoryError> {
+    if !key.is_valid() {
+        return Err(HistoryError::InvalidSeriesKey);
+    }
+    let directory = path.parent().ok_or(HistoryError::StorageUnavailable)?;
+    ensure_real_directory_with_mode(mode, directory)
+        .map_err(|_| HistoryError::StorageUnavailable)?;
+
+    let _process_guard = HISTORY_PROCESS_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lock_file = open_history_lock(mode, &directory.join(HISTORY_LOCK_FILE_NAME))?;
+    let result = load_store_at_with_mode(mode, path, now, now).and_then(|loaded| {
+        if loaded.quarantined {
+            Err(HistoryError::Corrupt)
+        } else {
+            Ok(find_target_series(&loaded.store, key).cloned())
+        }
+    });
+    let unlock = fs2::FileExt::unlock(&lock_file).map_err(|_| HistoryError::LockRelease);
+    match (result, unlock) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(series), Ok(())) => Ok(series),
+    }
+}
+
 /// Import only the legacy Codex records bound to the account ID used by the
-/// successful request. The caller supplies the already-resolved opaque scope;
-/// this API never turns a legacy raw key into a v3 scope.
+/// successful request. The caller supplies the already-resolved opaque history
+/// scope — the same one the live recording path keys on, so imported samples
+/// cannot land in a series the live path never touches again — and this API
+/// never turns a legacy raw key into a v3 scope.
+///
+/// `fold` resolves every provider's input to the one-time schema-3 fold: this
+/// can be the first write under a `HistoryScope` build, and a write that stamps
+/// schema 4 without folding would strand the old series for good. It is called
+/// only once there is something to import, and before the history lock.
 pub(crate) fn migrate_codex_v2(
     request_account_id: &str,
-    account_scope: &str,
+    history_scope: &HistoryScope,
     now: i64,
+    fold: impl FnOnce() -> Vec<StrandedSeriesFold>,
 ) -> Result<MigrationOutcome, HistoryError> {
     let Some(preferred) = dirs::data_dir().map(|directory| directory.join("com.nyanako.tokenbar"))
     else {
@@ -480,27 +735,29 @@ pub(crate) fn migrate_codex_v2(
         .map_err(|_| HistoryError::StorageUnavailable)?;
     #[cfg(not(target_os = "windows"))]
     let destination = preferred.clone();
-    migrate_codex_v2_at_paths_with_clock_and_mode(
+    migrate_codex_v2_at_paths_with_clock_mode_and_fold(
         request_account_id,
-        account_scope,
+        history_scope,
         now,
         &preferred.join(LEGACY_V2_FILE_NAME),
         &destination.join(HISTORY_FILE_NAME),
         StorageMode::System,
         unix_now,
+        fold,
+        &FOLD_SETTLED,
     )
 }
 
 pub(crate) fn migrate_codex_v2_at_paths(
     request_account_id: &str,
-    account_scope: &str,
+    history_scope: &HistoryScope,
     now: i64,
     v2_path: &Path,
     v3_path: &Path,
 ) -> Result<MigrationOutcome, HistoryError> {
     migrate_codex_v2_at_paths_with_clock_and_mode(
         request_account_id,
-        account_scope,
+        history_scope,
         now,
         v2_path,
         v3_path,
@@ -511,15 +768,40 @@ pub(crate) fn migrate_codex_v2_at_paths(
 
 fn migrate_codex_v2_at_paths_with_clock_and_mode(
     request_account_id: &str,
-    account_scope: &str,
+    history_scope: &HistoryScope,
     now: i64,
     v2_path: &Path,
     v3_path: &Path,
     mode: StorageMode,
     transaction_clock: impl FnOnce() -> i64,
 ) -> Result<MigrationOutcome, HistoryError> {
+    migrate_codex_v2_at_paths_with_clock_mode_and_fold(
+        request_account_id,
+        history_scope,
+        now,
+        v2_path,
+        v3_path,
+        mode,
+        transaction_clock,
+        Vec::new,
+        &AtomicBool::new(false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn migrate_codex_v2_at_paths_with_clock_mode_and_fold(
+    request_account_id: &str,
+    history_scope: &HistoryScope,
+    now: i64,
+    v2_path: &Path,
+    v3_path: &Path,
+    mode: StorageMode,
+    transaction_clock: impl FnOnce() -> i64,
+    fold: impl FnOnce() -> Vec<StrandedSeriesFold>,
+    settled: &AtomicBool,
+) -> Result<MigrationOutcome, HistoryError> {
     let accepted_account = request_account_id.trim();
-    if accepted_account.is_empty() || account_scope.trim().is_empty() {
+    if accepted_account.is_empty() || history_scope.as_str().trim().is_empty() {
         return Ok(MigrationOutcome {
             imported_samples: 0,
             skipped_samples: 0,
@@ -571,6 +853,7 @@ fn migrate_codex_v2_at_paths_with_clock_and_mode(
             used_percent: sample.used_percent,
             sampled_at: sample.sampled_at,
             origin: SampleOrigin::ImportedV2,
+            plan: None,
         });
     }
     if candidates.is_empty() {
@@ -580,7 +863,7 @@ fn migrate_codex_v2_at_paths_with_clock_and_mode(
         });
     }
 
-    let key = SeriesKey::new("codex", account_scope.trim(), "main.weekly.v1");
+    let key = SeriesKey::new("codex", history_scope, "main.weekly.v1");
     if !key.is_valid() {
         return Err(HistoryError::InvalidSeriesKey);
     }
@@ -615,8 +898,16 @@ fn migrate_codex_v2_at_paths_with_clock_and_mode(
         retain_store(store, now, &active_keys)?;
         Ok(merge.imported_samples)
     };
-    let imported =
-        with_locked_transaction_with_mode(mode, v3_path, now, transaction_clock, transaction)?;
+    let imported = with_locked_transaction_with_save_and_mode(
+        mode,
+        v3_path,
+        now,
+        transaction_clock,
+        |path, store| save_store_atomic_with_mode(mode, path, store),
+        &fold_inputs_unless_settled(settled, fold),
+        Some(settled),
+        transaction,
+    )?;
     Ok(MigrationOutcome {
         imported_samples: imported,
         skipped_samples: skipped,
@@ -690,21 +981,210 @@ fn choose_sample(existing: QuotaSample, candidate: QuotaSample) -> QuotaSample {
     }
 }
 
+/// One provider's input to the one-time schema-3 fold. Windows-only: macOS
+/// switched to `HistoryScope` without merging the series the old key left
+/// behind.
+///
+/// Resolved by the caller before any history lock is taken: the target needs
+/// the installation key and the lineage set needs the account-scope metadata
+/// lock, and taking either inside `with_locked_transaction_with_save_and_mode`
+/// would invert the lock order. Holds opaque scopes only, so it deliberately
+/// has no `Debug`.
+pub(crate) struct StrandedSeriesFold {
+    pub(crate) provider_id: &'static str,
+    /// The provider's constant `HistoryScope` — what the live writer keys on
+    /// whenever it has no authoritative owner ID.
+    pub(crate) target: HistoryScope,
+    /// `None`: every scope this provider ever wrote was a credential lineage,
+    /// so every series of it is stranded. `Some`: only series under one of
+    /// these lineage scopes are; any other scope — an authoritative owner ID,
+    /// which the live writer still produces byte-for-byte — is left exactly as
+    /// it is, and so is a scope that matches nothing.
+    pub(crate) lineage_scopes: Option<BTreeSet<String>>,
+}
+
+/// What `fold_stranded_series` did, in counts only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FoldReport {
+    /// Source series removed because their samples now live in the target.
+    pub(crate) folded_series: usize,
+    /// Source samples whose key the target already held; the held one is kept.
+    pub(crate) collisions: usize,
+    /// `(provider, window)` pairs left unfolded because the merge failed
+    /// `validate_series`.
+    pub(crate) refused_windows: usize,
+}
+
+/// Fold every stranded series into its provider's `HistoryScope` series, once.
+///
+/// Before `HistoryScope`, Windows keyed durable history on the live
+/// `AccountScope`, and for a provider without an authoritative owner ID that is
+/// a credential lineage: a sibling application rotating the refresh token
+/// minted a new one, and the window started learning from zero. The writer now
+/// keys on `HistoryScope`, which does not move — and on its own would leave
+/// every one of those series behind. This moves them.
+///
+/// **When:** only in a transaction that loaded a file still stamped schema 3
+/// (`LoadedStore::on_disk_schema`). No build that keys on `HistoryScope` leaves
+/// a file at 3 once it has written, because every save stamps 4, so the fold
+/// happens once. A later write never folds: a future build that records a
+/// second account under its own scope must not have a primary write swallow it.
+///
+/// **How, per `(provider, window)`:** the target's samples (if that series
+/// already exists) and then each source's, most recently active first, are
+/// unioned by `sample_key`; the first holder of a key wins and every later one
+/// is counted as a collision. No repair lane: `repair_invalid_series` may drop
+/// valid samples, and once the sources are gone that loss would be permanent.
+/// A merge that fails `validate_series` is not applied — its sources stay
+/// exactly as they were — and the transaction goes on.
+///
+/// Series-level state (`active_reset_at`, `rollover`) comes from the existing
+/// target, or else from the most recently active source, so it stays
+/// consistent with itself; `last_activity_at` is the maximum over all of them.
+fn fold_stranded_series(store: &mut Store, folds: &[StrandedSeriesFold]) -> FoldReport {
+    let mut report = FoldReport::default();
+    for fold in folds {
+        let target_scope = fold.target.as_str();
+        let is_source = |series: &SeriesState| {
+            series.provider_id == fold.provider_id
+                && series.account_scope != target_scope
+                && fold
+                    .lineage_scopes
+                    .as_ref()
+                    .is_none_or(|scopes| scopes.contains(&series.account_scope))
+        };
+        let windows = store
+            .series
+            .iter()
+            .filter(|series| is_source(series))
+            .map(|series| series.window_key.clone())
+            .collect::<BTreeSet<_>>();
+        for window_key in windows {
+            let target_key = SeriesKey::new(fold.provider_id, &fold.target, window_key.clone());
+            let mut sources = store
+                .series
+                .iter()
+                .filter(|series| is_source(series) && series.window_key == window_key)
+                .collect::<Vec<_>>();
+            sources.sort_by(|left, right| {
+                right
+                    .last_activity_at
+                    .cmp(&left.last_activity_at)
+                    .then_with(|| left.key().cmp(&right.key()))
+            });
+            let mut merged = find_target_series(store, &target_key)
+                .cloned()
+                .unwrap_or_else(|| SeriesState {
+                    provider_id: target_key.provider_id.clone(),
+                    account_scope: target_key.account_scope.clone(),
+                    window_key: target_key.window_key.clone(),
+                    samples: Vec::new(),
+                    ..sources[0].clone()
+                });
+            let mut keys = merged
+                .samples
+                .iter()
+                .map(sample_key)
+                .collect::<BTreeSet<_>>();
+            let mut collisions = 0;
+            for source in &sources {
+                for sample in &source.samples {
+                    if keys.insert(sample_key(sample)) {
+                        merged.samples.push(sample.clone());
+                    } else {
+                        collisions += 1;
+                    }
+                }
+                merged.last_activity_at = merged.last_activity_at.max(source.last_activity_at);
+            }
+            merged.samples.sort_by(sample_order);
+            if !validate_series(&merged) {
+                report.refused_windows += 1;
+                continue;
+            }
+            report.folded_series += sources.len();
+            report.collisions += collisions;
+            store.series.retain(|series| {
+                !(is_source(series) && series.window_key == window_key)
+                    && series.key() != target_key
+            });
+            let index = store
+                .series
+                .binary_search_by(|series| series.key().cmp(&target_key))
+                .unwrap_or_else(|index| index);
+            store.series.insert(index, merged);
+        }
+    }
+    report
+}
+
+/// Resolve the fold inputs only while the fold can still trigger. Lazy on
+/// purpose: once `settled` is set the resolver — five installation-key reads
+/// and two metadata loads — is never called.
+fn fold_inputs_unless_settled(
+    settled: &AtomicBool,
+    resolve: impl FnOnce() -> Vec<StrandedSeriesFold>,
+) -> Vec<StrandedSeriesFold> {
+    if settled.load(Ordering::Acquire) {
+        Vec::new()
+    } else {
+        resolve()
+    }
+}
+
 /// Record a complete provider snapshot in one locked transaction. The active
 /// key set may include emitted cards that have no observation in this poll.
+///
+/// `fold` carries every provider's input to the one-time schema-3 fold, not
+/// only this snapshot's: whichever provider writes first under a
+/// `HistoryScope` build is the one transaction that folds (see
+/// `fold_stranded_series`). It is resolved before the history lock, and only
+/// until `FOLD_SETTLED` says the fold can no longer trigger.
 pub(crate) fn record_observations_and_evaluate(
     emitted_active_keys: &[SeriesKey],
     observations: &[QuotaObservation],
     now: i64,
+    fold: impl FnOnce() -> Vec<StrandedSeriesFold>,
 ) -> Result<Vec<BatchObservationResult>, HistoryError> {
     let path = production_history_path().ok_or(HistoryError::StorageUnavailable)?;
-    record_observations_at_path_and_evaluate_with_clock_and_mode(
+    record_observations_gated(
         emitted_active_keys,
         observations,
         now,
         &path,
         StorageMode::System,
         unix_now,
+        |path, store| save_store_atomic_with_mode(StorageMode::System, path, store),
+        fold,
+        &FOLD_SETTLED,
+    )
+}
+
+/// `record_observations_and_evaluate` with its path, clock, save and settled
+/// flag injected, so a test can drive the gate without the process-wide flag.
+#[allow(clippy::too_many_arguments)]
+fn record_observations_gated(
+    emitted_active_keys: &[SeriesKey],
+    observations: &[QuotaObservation],
+    now: i64,
+    path: &Path,
+    mode: StorageMode,
+    transaction_clock: impl FnOnce() -> i64,
+    save: impl Fn(&Path, &Store) -> io::Result<()>,
+    fold: impl FnOnce() -> Vec<StrandedSeriesFold>,
+    settled: &AtomicBool,
+) -> Result<Vec<BatchObservationResult>, HistoryError> {
+    let fold = fold_inputs_unless_settled(settled, fold);
+    record_observations_with_fold(
+        emitted_active_keys,
+        observations,
+        now,
+        path,
+        mode,
+        transaction_clock,
+        save,
+        &fold,
+        Some(settled),
     )
 }
 
@@ -895,6 +1375,31 @@ fn record_observations_at_path_and_evaluate_with_clock_and_mode_and_save(
     transaction_clock: impl FnOnce() -> i64,
     save: impl Fn(&Path, &Store) -> io::Result<()>,
 ) -> Result<Vec<BatchObservationResult>, HistoryError> {
+    record_observations_with_fold(
+        emitted_active_keys,
+        observations,
+        now,
+        path,
+        mode,
+        transaction_clock,
+        save,
+        &[],
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_observations_with_fold(
+    emitted_active_keys: &[SeriesKey],
+    observations: &[QuotaObservation],
+    now: i64,
+    path: &Path,
+    mode: StorageMode,
+    transaction_clock: impl FnOnce() -> i64,
+    save: impl Fn(&Path, &Store) -> io::Result<()>,
+    fold: &[StrandedSeriesFold],
+    settled: Option<&AtomicBool>,
+) -> Result<Vec<BatchObservationResult>, HistoryError> {
     let active_keys = validate_batch_keys(emitted_active_keys, observations)?;
     let mut results = vec![None; observations.len()];
     let mut admissions = Vec::new();
@@ -910,6 +1415,7 @@ fn record_observations_at_path_and_evaluate_with_clock_and_mode_and_save(
     }
 
     let transaction = |store: &mut Store| {
+        repair_closed_cycles(store, now);
         retain_store(store, now, &active_keys)?;
         let admitted = admit_observation_keys(store, &active_keys, &candidate_keys, now)?;
         for admission in &admissions {
@@ -969,9 +1475,7 @@ fn record_observations_at_path_and_evaluate_with_clock_and_mode_and_save(
             };
             let (pace, complete_cycles) = duration_for_outcome(*outcome)
                 .map(|duration| {
-                    let complete_cycles =
-                        complete_cycle_count(store, &observation.key, reset_at, duration, now);
-                    let pace = evaluate_current(
+                    let calculation = calculate_target(
                         store,
                         &observation.key,
                         reset_at,
@@ -979,7 +1483,7 @@ fn record_observations_at_path_and_evaluate_with_clock_and_mode_and_save(
                         observation.used_percent,
                         now,
                     );
-                    (pace, complete_cycles)
+                    (calculation.pace, calculation.complete_cycles)
                 })
                 .unwrap_or((None, 0));
             results[admission.index] = Some(Ok((*outcome, pace, complete_cycles)));
@@ -992,6 +1496,8 @@ fn record_observations_at_path_and_evaluate_with_clock_and_mode_and_save(
         now,
         transaction_clock,
         save,
+        fold,
+        settled,
         transaction,
     )?;
 
@@ -1146,6 +1652,283 @@ fn requires_observed_relearning(series: &SeriesState) -> bool {
     }
 }
 
+fn resets_differ_beyond_quantum(left: i64, right: i64, duration_seconds: i64) -> bool {
+    normalize_reset(left, duration_seconds) != normalize_reset(right, duration_seconds)
+}
+
+fn duration_quantum(duration_seconds: i64) -> i64 {
+    duration_seconds
+        .checked_div(100)
+        .unwrap_or(0)
+        .clamp(60, 300)
+        .max(1)
+}
+
+/// How far a reset must move before it describes a *different* window.
+///
+/// This is deliberately not `duration_quantum`. That quantum exists to collapse
+/// the jitter a provider reports within one window, and on a long window its
+/// 300-second ceiling is thousands of times smaller than the window itself.
+/// Reusing it here answers "did the reported reset change at all", not "is this
+/// another window", and Codex reports a rolling weekly reset that drifts
+/// continuously while usage sits at zero.
+///
+/// Measured against 10,911 real Codex weekly samples, with ground truth taken
+/// from usage drops that persist over the following samples — a signal that
+/// does not involve `reset_at` at all, so it cannot agree with either candidate
+/// by construction. Fifteen real resets; comparison is `>=`:
+///
+/// | threshold | fires | correct | false | missed |
+/// |-----------|-------|---------|-------|--------|
+/// | 300s      | 1268  | 15      | 1253  | 0      |
+/// | 1200s     | 19    | 15      | 4     | 0      |
+/// | 1800s     | 17    | 15      | 2     | 0      |
+/// | 2400s     | 16    | 14      | 2     | 1      |
+///
+/// Thirty minutes is therefore the weekly figure, expressed as the fraction of
+/// the window it represents so shorter windows scale down rather than inherit a
+/// constant tuned on a week. The floor keeps a short window exactly where it is
+/// today: at five hours the fraction is 53 seconds, below the 180-second
+/// quantum, so the quantum governs and behaviour is unchanged there.
+fn supersede_threshold(duration_seconds: i64) -> i64 {
+    duration_seconds
+        .saturating_mul(30 * 60)
+        .checked_div(7 * 86_400)
+        .unwrap_or(0)
+        .max(duration_quantum(duration_seconds))
+}
+
+/// Whether `right` names a different window from `left`.
+///
+/// `>=` rather than `>`: normalized resets are multiples of the quantum, and
+/// the floor of [`supersede_threshold`] is that same quantum, so `>` would
+/// require two quanta and would silently double the trigger point on every
+/// window short enough for the floor to apply.
+fn reset_superseded(left: i64, right: i64, duration_seconds: i64) -> bool {
+    normalize_reset(right, duration_seconds)
+        .saturating_sub(normalize_reset(left, duration_seconds))
+        .saturating_abs()
+        >= supersede_threshold(duration_seconds)
+}
+
+fn group_already_closed(samples: &[QuotaSample], now: i64, handover_was_on_time: bool) -> bool {
+    if samples.is_empty() {
+        return true;
+    }
+    let reset = normalize_reset(samples[0].reset_at, samples[0].duration_seconds);
+    // Coverage becomes satisfiable once the newest sample reaches `1 - b`,
+    // which on a weekly window is 90% elapsed, so on its own it cannot tell a
+    // window that finished from one still running with most of a day to go.
+    // Paired with an on-time handover it can, and the pair stays independent of
+    // the caller's clock — which is the property a stale observation needs, and
+    // which no comparison against `now` can offer.
+    if handover_was_on_time && cycle_meets_retention_coverage(reset, samples) {
+        return true;
+    }
+    let quantum = cycle_duration(samples).map(duration_quantum).unwrap_or(60);
+    samples.iter().all(|sample| {
+        sample.duration_source == DurationSource::Observed
+            && sample.reset_at <= now.saturating_add(quantum)
+    })
+}
+
+fn successor_duration_from_series(series: &SeriesState, successor_reset: i64) -> Option<i64> {
+    if let Some(ObservedState::Ready {
+        reset_at,
+        duration_seconds,
+        ..
+    }) = series.rollover
+    {
+        if reset_at == successor_reset {
+            return Some(duration_seconds);
+        }
+    }
+    // Deliberately the quantum, not `supersede_threshold`. This asks which
+    // stored group *is* the successor, not whether one window replaced another,
+    // and it is a first match over a `BTreeMap`: widening the window would make
+    // it take the lowest key rather than the nearest one. The duration it
+    // returns becomes `inferred_new_start`, then `close_at`, then the restamped
+    // reset of every sample in the cycle being closed, so a match one group off
+    // mis-lengths a recovered window with nothing to signal it.
+    grouped_samples(&series.samples)
+        .into_iter()
+        .find(|(reset, samples)| {
+            cycle_duration(samples).is_some_and(|duration| {
+                !resets_differ_beyond_quantum(*reset, successor_reset, duration)
+            })
+        })
+        .and_then(|(_, samples)| cycle_duration(&samples))
+}
+
+fn dedupe_restamped_group(samples: Vec<QuotaSample>, duration_seconds: i64) -> Vec<QuotaSample> {
+    let cap = phase_bucket_count(duration_seconds);
+    let mut ordered = samples;
+    ordered.sort_by(|left, right| left.sampled_at.cmp(&right.sampled_at));
+    let mut kept = Vec::new();
+    let mut keys = BTreeMap::new();
+    if let Some(zero) = ordered
+        .iter()
+        .find(|sample| sample.used_percent == 0.0)
+        .cloned()
+    {
+        keys.insert(sample_key(&zero), 0);
+        kept.push(zero);
+    }
+    for sample in ordered {
+        if sample.used_percent == 0.0 {
+            continue;
+        }
+        let key = sample_key(&sample);
+        if keys.contains_key(&key) {
+            continue;
+        }
+        if kept.len() >= cap {
+            continue;
+        }
+        keys.insert(key, kept.len());
+        kept.push(sample);
+    }
+    kept
+}
+
+/// Restamp remaining points of a superseded group onto its observed duration.
+/// A 0% reading belongs to the new cycle and is never a fake end cap here.
+fn close_superseded_cycle(
+    series: &mut SeriesState,
+    old_reset: i64,
+    successor_reset: i64,
+    successor_duration: Option<i64>,
+    now: i64,
+) -> bool {
+    let Some(old_samples) = grouped_samples(&series.samples).remove(&old_reset) else {
+        return false;
+    };
+    if old_samples.is_empty() {
+        return false;
+    }
+    let Some(old_duration) = cycle_duration(&old_samples) else {
+        return false;
+    };
+    // `repair_closed_cycles` walks every adjacent pair of groups, so a window
+    // that simply finished and handed over to the next one arrives here too.
+    // What separates that from an irregular reset is where the successor
+    // *began*: on time it begins at the old window's advertised end, and an
+    // irregular reset begins before it. Reading the distinction from the
+    // successor rather than from `now` is what lets a stale caller be wrong
+    // about the time without re-opening a cycle that already finished.
+    let handover_was_on_time = match successor_duration
+        .and_then(|duration| successor_reset.checked_sub(duration))
+    {
+        Some(start) => start >= old_reset.saturating_sub(duration_quantum(old_duration)),
+        // Nothing says where the successor began, so the conservative reading
+        // stands and a coverage-complete group counts as finished. Closing on
+        // a guess would restamp healthy cycles.
+        None => true,
+    };
+    if group_already_closed(&old_samples, now, handover_was_on_time) {
+        return false;
+    }
+    if !reset_superseded(old_reset, successor_reset, old_duration) {
+        return false;
+    }
+    if normalize_reset(successor_reset, old_duration) < normalize_reset(old_reset, old_duration) {
+        return false;
+    }
+    let Some(advertised_start) = old_reset.checked_sub(old_duration) else {
+        return false;
+    };
+    let inferred_new_start =
+        successor_duration.and_then(|duration| successor_reset.checked_sub(duration));
+    let last_sampled_at = old_samples
+        .iter()
+        .map(|sample| sample.sampled_at)
+        .max()
+        .unwrap_or(now);
+    let close_at = inferred_new_start
+        .unwrap_or(now)
+        .min(now)
+        .max(last_sampled_at);
+    let Some(observed_duration) = close_at.checked_sub(advertised_start) else {
+        return false;
+    };
+    if !valid_duration(observed_duration) {
+        return false;
+    }
+
+    let restamped = old_samples
+        .into_iter()
+        .filter_map(|sample| {
+            let restamped = QuotaSample {
+                reset_at: normalize_sample_reset(close_at, observed_duration, sample.sampled_at),
+                duration_seconds: observed_duration,
+                duration_source: DurationSource::Observed,
+                used_percent: sample.used_percent,
+                sampled_at: sample.sampled_at,
+                origin: sample.origin,
+                plan: sample.plan,
+            };
+            validate_sample(&restamped).then_some(restamped)
+        })
+        .collect::<Vec<_>>();
+    let restamped = dedupe_restamped_group(restamped, observed_duration);
+    if restamped.is_empty() {
+        return false;
+    }
+
+    series
+        .samples
+        .retain(|sample| normalize_reset(sample.reset_at, sample.duration_seconds) != old_reset);
+    series.samples.extend(restamped);
+    series.samples.sort_by(sample_order);
+    true
+}
+
+fn close_groups_superseded_by(
+    series: &mut SeriesState,
+    successor_reset: i64,
+    successor_duration: Option<i64>,
+    now: i64,
+) {
+    let old_resets = grouped_samples(&series.samples)
+        .into_keys()
+        .collect::<Vec<_>>();
+    for old_reset in old_resets {
+        close_superseded_cycle(series, old_reset, successor_reset, successor_duration, now);
+    }
+}
+
+fn repair_series_closed_cycles(series: &mut SeriesState, now: i64) {
+    let groups = grouped_samples(&series.samples)
+        .into_iter()
+        .collect::<Vec<_>>();
+    for pair in groups.windows(2) {
+        let older_reset = pair[0].0;
+        let newer_reset = pair[1].0;
+        let newer_duration = cycle_duration(&pair[1].1);
+        close_superseded_cycle(series, older_reset, newer_reset, newer_duration, now);
+    }
+    let Some(active_reset) = series.active_reset_at else {
+        return;
+    };
+    let successor_duration = successor_duration_from_series(series, active_reset);
+    let remaining = grouped_samples(&series.samples)
+        .into_iter()
+        .filter_map(|(reset, samples)| {
+            let duration = cycle_duration(&samples)?;
+            (reset > now && reset_superseded(reset, active_reset, duration)).then_some(reset)
+        })
+        .collect::<Vec<_>>();
+    for old_reset in remaining {
+        close_superseded_cycle(series, old_reset, active_reset, successor_duration, now);
+    }
+}
+
+fn repair_closed_cycles(store: &mut Store, now: i64) {
+    for series in &mut store.series {
+        repair_series_closed_cycles(series, now);
+    }
+}
+
 fn apply_known_duration(
     series: &mut SeriesState,
     reset_at: i64,
@@ -1165,7 +1948,9 @@ fn apply_known_duration(
         series.active_reset_at = None;
         return HistoryOutcome::LearningDuration;
     }
+    close_groups_superseded_by(series, reset_at, Some(duration_seconds), now);
     series.active_reset_at = Some(reset_at);
+    clean_active_partial_duration(series, reset_at, duration_seconds, now);
     let sampled = add_sample_if_new(
         series,
         reset_at,
@@ -1194,7 +1979,9 @@ fn apply_observed_duration(
     let duration_seconds = transition.duration_seconds;
     series.rollover = Some(transition.state);
     if let Some(duration_seconds) = duration_seconds {
+        close_groups_superseded_by(series, reset_at, Some(duration_seconds), now);
         series.active_reset_at = Some(reset_at);
+        clean_active_partial_duration(series, reset_at, duration_seconds, now);
         // Once an observed rollover is confirmed, subsequent polls use the
         // same phase-bucket admission rules as provider/contract samples. The
         // duplicate flag only describes the rollover state transition; it must
@@ -1214,10 +2001,50 @@ fn apply_observed_duration(
         })
     } else {
         if series.active_reset_at != Some(reset_at) {
+            close_groups_superseded_by(series, reset_at, None, now);
             series.active_reset_at = None;
         }
         Ok(HistoryOutcome::LearningDuration)
     }
+}
+
+fn clean_active_partial_duration(
+    series: &mut SeriesState,
+    active_reset_at: i64,
+    accepted_duration: i64,
+    now: i64,
+) {
+    let active_samples = series
+        .samples
+        .iter()
+        .filter(|sample| is_active_group_sample(active_reset_at, sample))
+        .cloned()
+        .collect::<Vec<_>>();
+    if active_samples.is_empty() {
+        return;
+    }
+
+    let group_reset = active_samples
+        .first()
+        .map(|sample| normalize_reset(sample.reset_at, sample.duration_seconds));
+    let is_complete = active_reset_at <= now
+        && group_reset
+            .filter(|reset| {
+                active_samples.iter().all(|sample| {
+                    normalize_reset(sample.reset_at, sample.duration_seconds) == *reset
+                })
+            })
+            .and_then(|reset| retention_cycle_descriptor(reset, &active_samples, now))
+            .is_some();
+    if is_complete {
+        return;
+    }
+
+    series.samples.retain(|sample| {
+        !is_active_group_sample(active_reset_at, sample)
+            || sample.duration_seconds == accepted_duration
+    });
+    series.samples.sort_by(sample_order);
 }
 
 fn add_sample_if_new(
@@ -1228,9 +2055,20 @@ fn add_sample_if_new(
     used_percent: f64,
     sampled_at: i64,
 ) -> bool {
+    // `0.0 <=`, not `0.0 <`. A fresh window reads 0% used, and rejecting it
+    // meant no cycle ever recorded its own start: the first stored sample was
+    // always after some consumption, so `usedPercent` — the span between the
+    // lowest and highest reading — understated every cycle by whatever had been
+    // spent before the app first saw a non-zero number.
+    //
+    // Zero is not a "no data" sentinel here. By the time `enrich_snapshot_with`
+    // builds an observation it has already dropped `PaceState::Unavailable`,
+    // an unparseable reset and any non-finite reading, and its own range check
+    // is `(0.0..=100.0)` — inclusive. The store was the only layer treating a
+    // measured zero as an absence.
     if !(valid_duration(duration_seconds)
         && used_percent.is_finite()
-        && 0.0 < used_percent
+        && 0.0 <= used_percent
         && used_percent <= 100.0)
     {
         return false;
@@ -1243,6 +2081,7 @@ fn add_sample_if_new(
         used_percent,
         sampled_at,
         origin: SampleOrigin::LiveV3,
+        plan: None,
     };
     if !validate_sample(&candidate) {
         return false;
@@ -1254,6 +2093,22 @@ fn add_sample_if_new(
         .position(|sample| sample_key(sample) == candidate_key)
     {
         let existing = &series.samples[index];
+        // A cycle's own zero is never replaced. Admitting it (see the range
+        // check above) bought nothing while this path could overwrite it: a
+        // window that moves a point before its first bucket closes puts the
+        // later reading in the same bucket, and the replacement guards below
+        // all pass — later timestamp, larger value — so the stored cycle began
+        // at a nonzero minimum again and `usedPercent`, the span between the
+        // lowest and highest reading, understated it by exactly the amount the
+        // zero was recorded to capture.
+        //
+        // Only the zero. Every other bucket keeps "newest wins", because
+        // elsewhere the latest level is what the profile wants; at the start of
+        // a cycle the BASELINE is, and there is only one sample that can carry
+        // it.
+        if existing.used_percent == 0.0 && used_percent > 0.0 {
+            return false;
+        }
         if (used_percent - existing.used_percent).abs() < 1.0
             || sampled_at < existing.sampled_at
             || (sampled_at == existing.sampled_at && used_percent <= existing.used_percent)
@@ -1271,7 +2126,7 @@ fn add_sample_if_new(
             normalize_reset(sample.reset_at, sample.duration_seconds) == normalized_reset
         })
         .count();
-    if cycle_count >= MAX_SAMPLES_PER_CYCLE {
+    if cycle_count >= phase_bucket_count(duration_seconds) {
         return false;
     }
     series.samples.push(candidate);
@@ -1338,21 +2193,6 @@ fn normalize_sample_reset(reset_at: i64, duration_seconds: i64, sampled_at: i64)
     )
 }
 
-/// Whether a stored sample belongs to the cycle the window is still inside.
-///
-/// Both sides are normalized, and that is the whole point. `series.active_reset_at`
-/// holds the RAW provider value while every stored sample holds
-/// `normalize_sample_reset(...)`, so an exact comparison between them fails
-/// whenever the provider's reset is not already on the quantum — which is the
-/// ordinary case, not the exotic one (codex was off by 62s, grok by 19s). This
-/// predicate is the producer's own answer and is published per point so no
-/// consumer has to re-derive a quantization rule across the FFI boundary.
-pub(crate) fn is_active_group_sample(active_reset_at: i64, sample: &QuotaSample) -> bool {
-    validate_sample(sample)
-        && normalize_reset(sample.reset_at, sample.duration_seconds)
-            == normalize_reset(active_reset_at, sample.duration_seconds)
-}
-
 fn normalize_legacy_reset(reset_at: i64) -> i64 {
     let quantum = 300_i64;
     let quotient = reset_at.div_euclid(quantum);
@@ -1373,10 +2213,49 @@ fn phase(sample: &QuotaSample) -> f64 {
     (1.0 - remaining as f64 / sample.duration_seconds as f64).clamp(0.0, 1.0)
 }
 
+/// How many phase buckets a cycle of this length is divided into.
+///
+/// Derived from the duration rather than fixed, because a fixed count divides
+/// every window into the same NUMBER of buckets and therefore gives long
+/// windows coarse ones: at 48, a 5-hour session window buckets every six
+/// minutes and a 7-day weekly window every 3.5 hours. A freshly reset weekly
+/// window then holds one sample for its first 3.5 hours no matter how often
+/// the app polls, because a second sample in the same bucket replaces the
+/// first rather than joining it.
+///
+/// A WHOLE MULTIPLE of the floor, never an arbitrary hourly count. This is the
+/// part that cannot be relaxed, and it cost a real store to learn: bucket
+/// boundaries sit at `k / count` of the cycle, so a count that is not a
+/// multiple of the previous one produces a grid that does not NEST inside it,
+/// and two samples separated by the old grid can land in one new cell.
+///
+/// The first attempt was `duration / 1 hour`, which gives 168 for a weekly
+/// window — and 168/48 is 3.5. On this author's own store that merged three
+/// pairs of samples that 48 buckets had kept apart. `validate_series` treats a
+/// duplicate sample key as corruption, and the response to a corrupt store is
+/// quarantine, so a resolution change silently became a history wipe. The data
+/// survived in the `.corrupt-*` file, which is the only reason this is a story
+/// rather than a loss.
+///
+/// So: 48, or 4x that. A 7-day window at 192 buckets is 52.5 minutes each —
+/// past the "one per hour" this was asked for — and a monthly one lands at
+/// 3.75 hours. Short windows keep 48 and are byte-identical: five hours at 48
+/// is already finer than the 60-second poll can fill.
+pub(crate) fn phase_bucket_count(duration_seconds: i64) -> usize {
+    // Above two days. A 48-hour window already buckets at one hour with the
+    // floor, so nothing shorter has anything to gain.
+    if duration_seconds > 2 * 86_400 {
+        PHASE_BUCKET_COUNT * PHASE_BUCKET_MULTIPLE
+    } else {
+        PHASE_BUCKET_COUNT
+    }
+}
+
 fn phase_bucket(reset_at: i64, duration_seconds: i64, sampled_at: i64) -> usize {
+    let count = phase_bucket_count(duration_seconds);
     let remaining = reset_at.saturating_sub(sampled_at);
     let u = (1.0 - remaining as f64 / duration_seconds.max(1) as f64).clamp(0.0, 1.0);
-    ((u * PHASE_BUCKET_COUNT as f64).floor() as usize).min(PHASE_BUCKET_COUNT - 1)
+    ((u * count as f64).floor() as usize).min(count - 1)
 }
 
 fn validate_sample(sample: &QuotaSample) -> bool {
@@ -1387,7 +2266,10 @@ fn validate_sample(sample: &QuotaSample) -> bool {
         && cycle_started_at <= sample.sampled_at
         && sample.sampled_at <= sample.reset_at
         && sample.used_percent.is_finite()
-        && (0.0 < sample.used_percent && sample.used_percent <= 100.0)
+        // Inclusive of zero — see the admission rule in `admit`. `QuotaCurve`'s
+        // Swift decoder mirrors this function exactly and must widen with it,
+        // or a store containing a legitimate 0 would decode as corrupt.
+        && (0.0 <= sample.used_percent && sample.used_percent <= 100.0)
 }
 
 fn validate_series(series: &SeriesState) -> bool {
@@ -1401,7 +2283,11 @@ fn validate_series(series: &SeriesState) -> bool {
         let reset = normalize_reset(sample.reset_at, sample.duration_seconds);
         let count = cycle_counts.entry(reset).or_default();
         *count += 1;
-        *count <= MAX_SAMPLES_PER_CYCLE
+        // Same duration-derived cap `admit` enforces. A fixed one here would
+        // call a store the writer legitimately produced corrupt — a weekly
+        // cycle now holds up to 168 samples — and quarantine would then delete
+        // the history this cap exists to bound.
+        *count <= phase_bucket_count(sample.duration_seconds)
     });
     let rollover_valid = series.rollover.as_ref().is_none_or(|rollover| {
         if !agent_quota_duration::validate_observed_state(rollover) {
@@ -1448,12 +2334,210 @@ fn validate_store(store: &Store) -> bool {
         && store.series.iter().all(validate_series)
 }
 
+/// Drop the fewest samples that make every series valid again, or report that
+/// it cannot be done within the bound.
+///
+/// Every rule applied here is the one `validate_series` enforces, read through
+/// the same functions: a duplicate `sample_key`, and a cycle carrying more
+/// samples than `phase_bucket_count` allows. Oldest first, so the reading that
+/// has been stored longest is the one kept and the newest observation — the
+/// one this transaction exists to record — is never the casualty.
+///
+/// Returns `None` when the repair would exceed one series' `repair_drop_allowance`
+/// or when the result still fails validation, leaving the caller to refuse the
+/// write as it did before. Silence is not an option either way: a store that
+/// needs more than a handful of drops is a different problem, and this must not
+/// be the thing that hides it.
+fn repair_invalid_series(store: &mut Store, now: i64) -> Option<usize> {
+    let mut dropped = 0usize;
+    for series in &mut store.series {
+        if validate_series(series) {
+            continue;
+        }
+        let mut ordered = series.samples.clone();
+        ordered.sort_by(sample_order);
+        let mut keys: BTreeSet<(i64, usize)> = BTreeSet::new();
+        let mut counts: BTreeMap<i64, usize> = BTreeMap::new();
+        let mut kept: Vec<QuotaSample> = Vec::with_capacity(ordered.len());
+        let mut series_dropped = 0usize;
+        for sample in ordered {
+            // Reserve the key only for a sample that is kept. Both the key and
+            // the cap are derived from `duration_seconds`, and `sample_order`
+            // sorts by `reset_at` before `duration_seconds`, so a short sample
+            // (cap 48) can be cap-rejected ahead of a long one (cap 192) that
+            // shares its key and is under its own cap. Inserting first made
+            // that long sample a duplicate of a sample nobody kept, costing a
+            // drop that was not needed -- and drops are what the allowance
+            // spends before it refuses the write entirely.
+            let key = sample_key(&sample);
+            if keys.contains(&key) {
+                series_dropped += 1;
+                continue;
+            }
+            let reset = normalize_reset(sample.reset_at, sample.duration_seconds);
+            let count = counts.entry(reset).or_default();
+            if *count + 1 > phase_bucket_count(sample.duration_seconds) {
+                series_dropped += 1;
+                continue;
+            }
+            keys.insert(key);
+            *count += 1;
+            kept.push(sample);
+        }
+        // The allowance is a share of the series, not a flat count, because the
+        // two quantities it has to separate scale with the series. Measured on
+        // the store that produced #370: `claude/session.v1` needed 39 drops out
+        // of 5815 samples (0.67%) after ten different `duration_seconds` values
+        // bucketed one window ten ways, while the case this must still refuse —
+        // a history being shredded — takes most of the series with it. A flat
+        // bound cannot hold both ends: 8 refused the real repair and left every
+        // provider's card dark for ever, and a flat 64 would be no bound at all
+        // on a series of 80.
+        if series_dropped > repair_drop_allowance(series.samples.len()) {
+            return None;
+        }
+        dropped += series_dropped;
+        series.samples = kept;
+        if let Some(newest) = series.samples.iter().map(|s| s.sampled_at).max() {
+            series.last_activity_at = series.last_activity_at.max(newest);
+        }
+    }
+    validate_store_at(store, now).then_some(dropped)
+}
+
+/// How many samples a repair may drop from one series: `MAX_REPAIR_DROP_PERCENT`
+/// of it, never fewer than `MAX_REPAIR_DROPS_PER_TRANSACTION` so that a short
+/// series still has a workable allowance.
+fn repair_drop_allowance(samples: usize) -> usize {
+    (samples * MAX_REPAIR_DROP_PERCENT / 100).max(MAX_REPAIR_DROPS_PER_TRANSACTION)
+}
+
 fn validate_store_at(store: &Store, now: i64) -> bool {
     validate_store(store)
         && store
             .series
             .iter()
             .all(|series| series.last_activity_at <= now)
+}
+
+/// The activity timestamp `validate_series`'s `activity_valid` holds a
+/// rollover to, per variant. `Candidate` has no `last_seen_at`; its activity
+/// timestamp is `first_new_seen_at`. Cycle boundaries (`reset_at`,
+/// `new_reset_at`, `old_reset_at`, `cycle_started_at`) are deliberately not
+/// consulted here — see the module-level design note on `repair_store_at`.
+fn rollover_activity_at(rollover: &ObservedState) -> i64 {
+    match rollover {
+        ObservedState::Watching { last_seen_at, .. }
+        | ObservedState::Ready { last_seen_at, .. } => *last_seen_at,
+        ObservedState::Candidate {
+            first_new_seen_at, ..
+        } => *first_new_seen_at,
+    }
+}
+
+/// Repair a structurally valid store (`validate_store` already passed) whose
+/// clock disagrees with the reading transaction: some series' derived
+/// timestamps lead `upper_bound`. Structural failures never reach this
+/// function; they still quarantine at the call site.
+///
+/// Every detection threshold below is `upper_bound` — the same ceiling
+/// `validate_store_at` failed against, which is what "leads the ceiling"
+/// means. Only the clamp target is `observation_now`: `is_stale_observation`
+/// compares against `observation_now`, so clamping to `upper_bound` would
+/// leave a repaired series' clock above the transaction body's clock, reject
+/// this poll's observation as stale, and repeat identically on every future
+/// load. Rollover detection only ever looks at activity timestamps
+/// (`rollover_activity_at`), never at cycle boundaries: `reset_at` and
+/// friends are future boundaries that lead `upper_bound` in essentially
+/// every healthy rollover, and including them would drop every in-flight
+/// rollover on every load.
+///
+/// **Precondition: `observation_now <= upper_bound`.** Every current caller
+/// satisfies it — the transaction passes `observation_now.max(lock_time)` as
+/// the ceiling, and the two read paths pass the same value for both. A caller
+/// that broke it could produce a clamped `last_activity_at` above the ceiling,
+/// which the post-body `validate_store_at` would reject, failing the whole
+/// transaction for every provider rather than just one series.
+/// Forget samples this build cannot place, keeping everything it can.
+///
+/// The three sample-level invariants `validate_series` enforces — each sample
+/// individually valid, no two sharing a `sample_key`, and no cycle over its
+/// bucket cap — are all statements about ONE sample being unusable. Failing the
+/// store on them means one unusable sample discards every usable one beside it,
+/// and the pace history's whole value is that it accumulates over weeks.
+///
+/// The newest sample wins a key collision, matching `admit`, which replaces
+/// within a bucket rather than appending. Order is preserved otherwise, so a
+/// store that needed no repair comes out byte-identical.
+fn drop_unplaceable_samples(mut store: Store) -> Store {
+    for series in &mut store.series {
+        let mut seen: BTreeMap<(i64, usize), usize> = BTreeMap::new();
+        let mut per_cycle: BTreeMap<i64, usize> = BTreeMap::new();
+        let mut kept: Vec<QuotaSample> = Vec::with_capacity(series.samples.len());
+        for sample in series.samples.drain(..) {
+            if !validate_sample(&sample) {
+                continue;
+            }
+            let key = sample_key(&sample);
+            if let Some(index) = seen.get(&key).copied() {
+                // Same bucket: keep the newer reading, as `admit` would.
+                if sample.sampled_at > kept[index].sampled_at {
+                    kept[index] = sample;
+                }
+                continue;
+            }
+            let reset = normalize_reset(sample.reset_at, sample.duration_seconds);
+            let count = per_cycle.entry(reset).or_default();
+            if *count >= phase_bucket_count(sample.duration_seconds) {
+                continue;
+            }
+            *count += 1;
+            seen.insert(key, kept.len());
+            kept.push(sample);
+        }
+        series.samples = kept;
+    }
+    store
+}
+
+fn repair_store_at(mut store: Store, upper_bound: i64, observation_now: i64) -> Store {
+    debug_assert!(
+        observation_now <= upper_bound,
+        "repair_store_at requires observation_now <= upper_bound"
+    );
+    // A series whose own sample evidence leads the ceiling cannot be
+    // verified against any clock the reader trusts; drop it wholesale so a
+    // sibling's history is not held hostage by it.
+    store.series.retain(|series| {
+        !series
+            .samples
+            .iter()
+            .any(|sample| sample.sampled_at > upper_bound)
+    });
+
+    for series in &mut store.series {
+        if series.last_activity_at <= upper_bound {
+            continue; // gated: a series at or below the ceiling is untouched
+        }
+        if series
+            .rollover
+            .as_ref()
+            .is_some_and(|rollover| rollover_activity_at(rollover) > upper_bound)
+        {
+            series.rollover = None;
+        }
+        let floor = series
+            .samples
+            .iter()
+            .map(|sample| sample.sampled_at)
+            .max()
+            .into_iter()
+            .chain(series.rollover.as_ref().map(rollover_activity_at))
+            .max();
+        let clamped = series.last_activity_at.min(observation_now);
+        series.last_activity_at = floor.map_or(clamped, |floor| floor.max(clamped));
+    }
+    store
 }
 
 fn duration_for_resolution(resolution: DurationResolution) -> Option<i64> {
@@ -1474,20 +2558,21 @@ fn duration_for_outcome(outcome: HistoryOutcome) -> Option<i64> {
     }
 }
 
-fn complete_cycle_count(
-    store: &Store,
-    key: &SeriesKey,
-    current_reset_at: i64,
+fn find_target_series<'a>(store: &'a Store, key: &SeriesKey) -> Option<&'a SeriesState> {
+    for series in &store.series {
+        if series.key() == *key {
+            return Some(series);
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
+struct RetentionCycleDescriptor {
+    reset_at: i64,
     duration_seconds: i64,
-    now: i64,
-) -> usize {
-    let current_reset_at = normalize_reset(current_reset_at, duration_seconds);
-    store
-        .series
-        .iter()
-        .find(|series| series.key() == *key)
-        .map(|series| historical_cycles(series, current_reset_at, now).len())
-        .unwrap_or_default()
+    cycle_started_at: i64,
+    samples: Vec<QuotaSample>,
 }
 
 #[derive(Debug, Clone)]
@@ -1495,6 +2580,7 @@ struct CycleProfile {
     reset_at: i64,
     duration_seconds: i64,
     cycle_started_at: i64,
+    points: Vec<FitPoint>,
     curve: Vec<f64>,
 }
 
@@ -1528,24 +2614,26 @@ fn grouped_samples(samples: &[QuotaSample]) -> BTreeMap<i64, Vec<QuotaSample>> {
     groups
 }
 
-fn cycle_profile(reset_at: i64, samples: &[QuotaSample], now: i64) -> Option<CycleProfile> {
-    if reset_at > now || samples.len() < MIN_COMPLETE_BUCKETS {
-        return None;
+fn cycle_meets_retention_coverage(reset_at: i64, samples: &[QuotaSample]) -> bool {
+    if samples.len() < MIN_COMPLETE_BUCKETS {
+        return false;
     }
-    let duration_seconds = cycle_duration(samples)?;
+    let Some(duration_seconds) = cycle_duration(samples) else {
+        return false;
+    };
     let mut buckets = BTreeSet::new();
     let mut phases = Vec::with_capacity(samples.len());
     for sample in samples {
         if !validate_sample(sample)
             || normalize_reset(sample.reset_at, sample.duration_seconds) != reset_at
         {
-            return None;
+            return false;
         }
         buckets.insert(sample_key(sample).1);
         phases.push(phase(sample));
     }
     if buckets.len() < MIN_COMPLETE_BUCKETS {
-        return None;
+        return false;
     }
     phases.sort_by(f64::total_cmp);
     let boundary = (0.10_f64).min(86_400.0 / duration_seconds as f64);
@@ -1556,7 +2644,7 @@ fn cycle_profile(reset_at: i64, samples: &[QuotaSample], now: i64) -> Option<Cyc
         .last()
         .is_some_and(|phase| *phase + EPSILON >= 1.0 - boundary);
     if !has_start || !has_end {
-        return None;
+        return false;
     }
     let max_gap = phases
         .iter()
@@ -1566,23 +2654,146 @@ fn cycle_profile(reset_at: i64, samples: &[QuotaSample], now: i64) -> Option<Cyc
         })
         .0
         .max(1.0 - phases.last().copied().unwrap_or(0.0));
-    if max_gap > MAX_PHASE_GAP + EPSILON {
+    max_gap <= MAX_PHASE_GAP + EPSILON
+}
+
+fn retention_cycle_descriptor(
+    reset_at: i64,
+    samples: &[QuotaSample],
+    now: i64,
+) -> Option<RetentionCycleDescriptor> {
+    if samples.iter().any(|sample| sample.sampled_at > now) {
+        return None;
+    }
+    let duration_seconds = cycle_duration(samples)?;
+    // Restamped observed closes can quantize one duration-quantum past `now`.
+    // An still-open window's reset sits hours or days ahead of that slack.
+    if reset_at > now.saturating_add(duration_quantum(duration_seconds)) {
+        return None;
+    }
+    if !cycle_meets_retention_coverage(reset_at, samples) {
         return None;
     }
     let cycle_started_at = reset_at.checked_sub(duration_seconds)?;
-    Some(CycleProfile {
+    Some(RetentionCycleDescriptor {
         reset_at,
         duration_seconds,
         cycle_started_at,
-        curve: reconstruct_cycle_curve(samples),
+        samples: samples.to_vec(),
     })
 }
 
-fn reconstruct_cycle_curve(samples: &[QuotaSample]) -> Vec<f64> {
-    let mut points = samples
+fn fit_points_from_samples(samples: &[QuotaSample]) -> Vec<FitPoint> {
+    samples
         .iter()
-        .filter(|sample| validate_sample(sample))
-        .map(|sample| (phase(sample), sample.used_percent.clamp(0.0, 100.0)))
+        .map(|sample| FitPoint {
+            phase: phase(sample),
+            bucket: sample_key(sample).1,
+            used_percent: sample.used_percent,
+        })
+        .collect()
+}
+
+fn cycle_profile_from_descriptor(descriptor: &RetentionCycleDescriptor) -> Option<CycleProfile> {
+    if descriptor
+        .samples
+        .iter()
+        .any(|sample| sample.duration_seconds != descriptor.duration_seconds)
+    {
+        return None;
+    }
+    let points = fit_points_from_samples(&descriptor.samples);
+    Some(CycleProfile {
+        reset_at: descriptor.reset_at,
+        duration_seconds: descriptor.duration_seconds,
+        cycle_started_at: descriptor.cycle_started_at,
+        curve: reconstruct_fit_curve(&points),
+        points,
+    })
+}
+
+fn cycle_profile(reset_at: i64, samples: &[QuotaSample], now: i64) -> Option<CycleProfile> {
+    retention_cycle_descriptor(reset_at, samples, now)
+        .and_then(|descriptor| cycle_profile_from_descriptor(&descriptor))
+}
+
+/// Every sample group the series holds except the one the window is still
+/// inside.
+///
+/// This answers the RETENTION question — what stays on disk — and it is
+/// deliberately not the modelling question. `retention_cycles` narrows this to
+/// the groups a pace curve can be fitted to, which is a strictly smaller set:
+/// `retention_cycle_descriptor` refuses a group whose reset sits in the future
+/// and one whose samples do not reach the end of the window. Those are real
+/// readings either way, and `retain_series` keeps them rather than deleting
+/// them for failing a test about modelling (#370).
+fn retainable_groups(series: &SeriesState, now: i64) -> Vec<(i64, Vec<QuotaSample>)> {
+    let active_future = series.active_reset_at.filter(|reset| *reset > now);
+    grouped_samples(&series.samples)
+        .into_iter()
+        .filter(|(_, samples)| {
+            !active_future.is_some_and(|active| {
+                samples
+                    .iter()
+                    .any(|sample| is_active_group_sample(active, sample))
+            })
+        })
+        .collect()
+}
+
+/// Whether a group holds enough distinct readings to be worth keeping once it
+/// can no longer be modelled.
+///
+/// This is a strict superset of what `retention_cycle_descriptor` accepts —
+/// that function already requires `MIN_COMPLETE_BUCKETS` distinct buckets — so
+/// one predicate covers both the cycles a curve is fitted to and the groups
+/// that are only a record. The line it draws is substance, not modelability:
+/// the two groups #370 lost held 51 readings each, while a reset the provider
+/// moved backward leaves one or two samples stranded against a reset that will
+/// never arrive, and those stay discardable.
+fn group_holds_substance(samples: &[QuotaSample]) -> bool {
+    samples
+        .iter()
+        .map(|sample| sample_key(sample).1)
+        .collect::<BTreeSet<_>>()
+        .len()
+        >= MIN_COMPLETE_BUCKETS
+}
+
+fn retention_cycles(series: &SeriesState, now: i64) -> Vec<RetentionCycleDescriptor> {
+    retainable_groups(series, now)
+        .into_iter()
+        .filter_map(|(reset_at, samples)| retention_cycle_descriptor(reset_at, &samples, now))
+        .collect()
+}
+
+/// Whether a stored sample belongs to the cycle the window is still inside.
+///
+/// Both sides are normalized, and that is the whole point. `series.active_reset_at`
+/// holds the RAW provider value while every stored sample holds
+/// `normalize_sample_reset(...)`, so an exact comparison between them fails
+/// whenever the provider's reset is not already on the quantum — which is the
+/// ordinary case, not the exotic one (codex was off by 62s, grok by 19s). This
+/// predicate is the producer's own answer and is published per point so no
+/// consumer has to re-derive a quantization rule across the FFI boundary.
+pub(crate) fn is_active_group_sample(active_reset_at: i64, sample: &QuotaSample) -> bool {
+    validate_sample(sample)
+        && normalize_reset(sample.reset_at, sample.duration_seconds)
+            == normalize_reset(active_reset_at, sample.duration_seconds)
+}
+fn reconstruct_cycle_curve(samples: &[QuotaSample]) -> Vec<f64> {
+    reconstruct_fit_curve(&fit_points_from_samples(samples))
+}
+
+fn reconstruct_fit_curve(points: &[FitPoint]) -> Vec<f64> {
+    let mut points = points
+        .iter()
+        .filter(|point| {
+            point.phase.is_finite()
+                && (0.0..=1.0).contains(&point.phase)
+                && point.used_percent.is_finite()
+        })
+        .map(|point| (point.phase, point.used_percent.clamp(0.0, 100.0)))
         .collect::<Vec<_>>();
     points.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.total_cmp(&right.1)));
 
@@ -1633,29 +2844,15 @@ fn reconstruct_cycle_curve(samples: &[QuotaSample]) -> Vec<f64> {
 }
 
 fn historical_cycles(series: &SeriesState, current_reset_at: i64, now: i64) -> Vec<CycleProfile> {
-    grouped_samples(&series.samples)
+    retention_cycles(series, now)
         .into_iter()
-        .filter(|(reset_at, _)| *reset_at < current_reset_at)
-        .filter_map(|(reset_at, samples)| cycle_profile(reset_at, &samples, now))
+        .filter(|descriptor| descriptor.reset_at < current_reset_at)
+        .filter_map(|descriptor| cycle_profile_from_descriptor(&descriptor))
         .collect()
 }
 
-fn current_group_reset(series: &SeriesState) -> Option<i64> {
-    let active_reset = series.active_reset_at?;
-    series
-        .samples
-        .iter()
-        .map(|sample| normalize_reset(active_reset, sample.duration_seconds))
-        .find(|reset| {
-            series
-                .samples
-                .iter()
-                .any(|sample| normalize_reset(sample.reset_at, sample.duration_seconds) == *reset)
-        })
-}
-
 fn series_nominal_duration(series: &SeriesState, now: i64) -> i64 {
-    let completed = historical_cycles(series, i64::MAX, now);
+    let completed = retention_cycles(series, now);
     median_i64(completed.iter().map(|cycle| cycle.duration_seconds))
         .or_else(|| {
             series
@@ -1701,30 +2898,58 @@ fn clear_stale_rollover(series: &mut SeriesState, now: i64) {
 }
 
 fn retain_series(series: &mut SeriesState, now: i64) {
+    let now = now.max(series.last_activity_at);
     clear_stale_rollover(series, now);
     let nominal = series_nominal_duration(series, now);
     let (retained_cycles, horizon) = retention_limits(nominal);
     let cutoff = now.saturating_sub(horizon);
-    let groups = grouped_samples(&series.samples);
-    let complete = groups
-        .iter()
-        .filter_map(|(reset_at, samples)| cycle_profile(*reset_at, samples, now))
-        .collect::<Vec<_>>();
-    let mut keep_completed = complete
-        .iter()
-        .filter(|cycle| cycle.reset_at >= cutoff)
+    // Two budgets, because the groups have two jobs. `retained_cycles` is the
+    // modelling budget and only cycles a curve can be fitted to may spend it;
+    // a group kept purely as a record gets its own, so it cannot cost
+    // `historical_cycles` a cycle it would have drawn from. Sharing one budget
+    // looks harmless until it is full, which is where a real store lives:
+    // `claude/session.v1` on the store behind #370 holds 133 groups against a
+    // cap of 128.
+    let modelable = retention_cycles(series, now)
+        .into_iter()
         .map(|cycle| cycle.reset_at)
+        .collect::<BTreeSet<_>>();
+    let mut keep_completed = modelable
+        .iter()
+        .copied()
+        .filter(|reset_at| *reset_at >= cutoff)
         .collect::<Vec<_>>();
     keep_completed.sort_unstable_by(|left, right| right.cmp(left));
     keep_completed.truncate(retained_cycles);
-    let keep_completed = keep_completed.into_iter().collect::<BTreeSet<_>>();
-    let current_group = current_group_reset(series);
+
+    // A window whose samples stop short of its end, or whose reset the
+    // provider later revised so the recorded one now sits in the future, fails
+    // `retention_cycle_descriptor` and used to be deleted outright — the
+    // history card then reported no history for a window that had been sampled
+    // for days. Measured on the store behind #370: two weekly groups of 51
+    // samples each, and a session group of 38 whose last reading landed at
+    // phase 0.796 against the 0.90 the coverage test wants.
+    let mut keep_records = retainable_groups(series, now)
+        .into_iter()
+        .filter(|(reset_at, samples)| {
+            !modelable.contains(reset_at)
+                && *reset_at >= cutoff
+                && group_holds_substance(samples)
+        })
+        .map(|(reset_at, _)| reset_at)
+        .collect::<Vec<_>>();
+    keep_records.sort_unstable_by(|left, right| right.cmp(left));
+    keep_records.truncate(RETENTION_RECORD_GROUPS);
+
+    let keep_completed = keep_completed
+        .into_iter()
+        .chain(keep_records)
+        .collect::<BTreeSet<_>>();
+    let active_reset = series.active_reset_at;
     series.samples.retain(|sample| {
         let reset = normalize_reset(sample.reset_at, sample.duration_seconds);
-        if keep_completed.contains(&reset) {
-            return true;
-        }
-        current_group == Some(reset)
+        keep_completed.contains(&reset)
+            || active_reset.is_some_and(|active| is_active_group_sample(active, sample))
     });
     series.samples.sort_by(sample_order);
 
@@ -1791,22 +3016,31 @@ fn evict_inactive_series(
     Ok(())
 }
 
-fn evict_old_completed_samples(store: &mut Store, now: i64) -> Result<(), HistoryError> {
+fn evict_old_completed_samples(store: &mut Store, _now: i64) -> Result<(), HistoryError> {
     let mut candidates = Vec::new();
     for series in &store.series {
-        let current_group = current_group_reset(series);
+        let active_reset = series.active_reset_at;
         for (reset_at, samples) in grouped_samples(&series.samples) {
-            if current_group == Some(reset_at) {
+            if active_reset.is_some_and(|active| {
+                samples
+                    .iter()
+                    .any(|sample| is_active_group_sample(active, sample))
+            }) {
                 continue;
             }
-            if cycle_profile(reset_at, &samples, now).is_some() {
-                candidates.push((
-                    reset_at,
-                    series.provider_id.clone(),
-                    series.account_scope.clone(),
-                    series.window_key.clone(),
-                ));
-            }
+            // Every non-active group is a candidate, matching what
+            // `retain_series` now keeps. Gating this on
+            // `retention_cycle_descriptor` was consistent only while retention
+            // deleted the groups that fail it: once they persist, a store can
+            // reach `MAX_SAMPLES` holding nothing this loop is willing to
+            // evict, and the `None` below turns a data-loss defect into a
+            // `StoreCapacity` write failure instead of fixing it.
+            candidates.push((
+                reset_at,
+                series.provider_id.clone(),
+                series.account_scope.clone(),
+                series.window_key.clone(),
+            ));
         }
     }
     candidates.sort();
@@ -1877,6 +3111,397 @@ fn interpolate_curve(curve: &[f64], phase: f64) -> f64 {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BucketError {
+    mse: f64,
+    tail_mse: Option<f64>,
+    tail_count: usize,
+}
+
+fn compare_fit_point_slices(left: &[FitPoint], right: &[FitPoint]) -> std::cmp::Ordering {
+    for (left, right) in left.iter().zip(right) {
+        let order = left
+            .bucket
+            .cmp(&right.bucket)
+            .then(left.phase.total_cmp(&right.phase))
+            .then(left.used_percent.total_cmp(&right.used_percent));
+        if order != std::cmp::Ordering::Equal {
+            return order;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+fn fit_points_by_bucket(points: &[FitPoint]) -> Option<Vec<(usize, Vec<FitPoint>)>> {
+    let mut buckets = BTreeMap::<usize, Vec<FitPoint>>::new();
+    for point in points {
+        if !point.phase.is_finite()
+            || !(0.0..=1.0).contains(&point.phase)
+            || !point.used_percent.is_finite()
+            || !(0.0 < point.used_percent && point.used_percent <= 100.0)
+        {
+            return None;
+        }
+        buckets.entry(point.bucket).or_default().push(*point);
+    }
+    let mut buckets = buckets.into_iter().collect::<Vec<_>>();
+    for (_, points) in &mut buckets {
+        points.sort_by(|left, right| {
+            left.phase
+                .total_cmp(&right.phase)
+                .then(left.used_percent.total_cmp(&right.used_percent))
+        });
+    }
+    buckets.sort_by(|left, right| {
+        left.1[0]
+            .phase
+            .total_cmp(&right.1[0].phase)
+            .then(left.0.cmp(&right.0))
+    });
+    (!buckets.is_empty()).then_some(buckets)
+}
+
+fn through_origin_beta(points: &[FitPoint]) -> Option<f64> {
+    let mut ordered = points.to_vec();
+    ordered.sort_by(|left, right| {
+        left.bucket
+            .cmp(&right.bucket)
+            .then(left.phase.total_cmp(&right.phase))
+            .then(left.used_percent.total_cmp(&right.used_percent))
+    });
+    let mut numerator = 0.0;
+    let mut denominator = 0.0;
+    for point in &ordered {
+        numerator += point.phase * point.used_percent;
+        denominator += point.phase * point.phase;
+    }
+    if !numerator.is_finite() || !denominator.is_finite() || denominator <= EPSILON {
+        return None;
+    }
+    let beta = numerator / denominator;
+    beta.is_finite().then_some(beta)
+}
+
+fn bucket_error(model: &[f64], points: &[FitPoint]) -> Option<BucketError> {
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    let mut tail_sum = 0.0;
+    let mut tail_count = 0usize;
+    for point in points {
+        let residual = interpolate_curve(model, point.phase) - point.used_percent;
+        if !residual.is_finite() {
+            return None;
+        }
+        sum += residual * residual;
+        count += 1;
+        if point.phase + EPSILON >= TAIL_PHASE_THRESHOLD {
+            tail_sum += residual * residual;
+            tail_count += 1;
+        }
+    }
+    if count == 0 || !sum.is_finite() {
+        return None;
+    }
+    let mse = sum / count as f64;
+    let tail_mse = (tail_count > 0).then(|| tail_sum / tail_count as f64);
+    mse.is_finite().then_some(BucketError {
+        mse,
+        tail_mse,
+        tail_count,
+    })
+}
+
+fn aggregate_weighted_rms(values: &[(f64, f64)]) -> Option<f64> {
+    let mut weighted_sum = 0.0;
+    let mut total_weight = 0.0;
+    for (value, weight) in values {
+        if !value.is_finite() || !weight.is_finite() || *weight <= EPSILON {
+            return None;
+        }
+        weighted_sum += value * weight;
+        total_weight += weight;
+    }
+    if !weighted_sum.is_finite() || !total_weight.is_finite() || total_weight <= EPSILON {
+        return None;
+    }
+    let rms = (weighted_sum / total_weight).sqrt();
+    rms.is_finite().then_some(rms)
+}
+
+fn fit_lobo_cycle(points: &[FitPoint]) -> Option<(f64, Option<f64>, usize)> {
+    let buckets = fit_points_by_bucket(points)?;
+    let mut bucket_mse = Vec::with_capacity(buckets.len());
+    let mut tail_sum = 0.0;
+    let mut tail_count = 0usize;
+    for (held_bucket, held_points) in &buckets {
+        let training = points
+            .iter()
+            .copied()
+            .filter(|point| point.bucket != *held_bucket)
+            .collect::<Vec<_>>();
+        if training.is_empty() {
+            return None;
+        }
+        let model = reconstruct_fit_curve(&training);
+        let error = bucket_error(&model, held_points)?;
+        bucket_mse.push(error.mse);
+        if let Some(mse) = error.tail_mse {
+            tail_sum += mse * error.tail_count as f64;
+            tail_count += error.tail_count;
+        }
+    }
+    if bucket_mse.is_empty() {
+        return None;
+    }
+    let mse = bucket_mse.iter().sum::<f64>() / bucket_mse.len() as f64;
+    let tail_mse = (tail_count > 0).then_some(tail_sum / tail_count as f64);
+    mse.is_finite().then_some((mse, tail_mse, tail_count))
+}
+
+fn fit_loco_cycle(
+    held_out: &FitCycleInput,
+    other_curves: &[(&[f64], f64)],
+) -> Option<(f64, Option<f64>, usize)> {
+    if other_curves.is_empty() {
+        return None;
+    }
+    let buckets = fit_points_by_bucket(&held_out.points)?;
+    let mut bucket_mse = Vec::with_capacity(buckets.len());
+    let mut tail_sum = 0.0;
+    let mut tail_count = 0usize;
+    for (_, held_points) in buckets {
+        let mut residual_sum = 0.0;
+        let mut count = 0usize;
+        let mut bucket_tail_sum = 0.0;
+        let mut bucket_tail_count = 0usize;
+        for point in &held_points {
+            let values = other_curves
+                .iter()
+                .map(|(curve, _)| interpolate_curve(curve, point.phase))
+                .collect::<Vec<_>>();
+            let weights = other_curves
+                .iter()
+                .map(|(_, weight)| *weight)
+                .collect::<Vec<_>>();
+            let predicted = weighted_median(&values, &weights);
+            let residual = predicted - point.used_percent;
+            if !residual.is_finite() {
+                return None;
+            }
+            residual_sum += residual * residual;
+            count += 1;
+            if point.phase + EPSILON >= TAIL_PHASE_THRESHOLD {
+                bucket_tail_sum += residual * residual;
+                bucket_tail_count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        bucket_mse.push(residual_sum / count as f64);
+        tail_sum += bucket_tail_sum;
+        tail_count += bucket_tail_count;
+    }
+    if bucket_mse.is_empty() {
+        return None;
+    }
+    let mse = bucket_mse.iter().sum::<f64>() / bucket_mse.len() as f64;
+    let tail_mse = (tail_count > 0).then_some(tail_sum / tail_count as f64);
+    mse.is_finite().then_some((mse, tail_mse, tail_count))
+}
+
+pub(crate) fn fit_completed_cycles(cycles: &[FitCycleInput]) -> Option<CompletedFitResult> {
+    if cycles.is_empty() {
+        return None;
+    }
+    let mut normalized = Vec::with_capacity(cycles.len());
+    for cycle in cycles {
+        if !cycle.recency_weight.is_finite()
+            || cycle.recency_weight <= EPSILON
+            || cycle.points.is_empty()
+        {
+            return None;
+        }
+        let points = fit_points_by_bucket(&cycle.points)?
+            .into_iter()
+            .flat_map(|(_, points)| points)
+            .collect::<Vec<_>>();
+        normalized.push((
+            cycle.recency_weight,
+            points,
+            reconstruct_fit_curve(&cycle.points),
+        ));
+    }
+    normalized.sort_by(|left, right| {
+        left.0
+            .total_cmp(&right.0)
+            .then_with(|| compare_fit_point_slices(&left.1, &right.1))
+            .then_with(|| {
+                left.2
+                    .iter()
+                    .zip(&right.2)
+                    .map(|(left, right)| left.total_cmp(right))
+                    .find(|order| *order != std::cmp::Ordering::Equal)
+                    .unwrap_or_else(|| left.2.len().cmp(&right.2.len()))
+            })
+    });
+
+    let mut lobo = Vec::with_capacity(normalized.len());
+    for (weight, points, _) in &normalized {
+        let (mse, tail_mse, tail_count) = fit_lobo_cycle(points)?;
+        lobo.push((*weight, mse, tail_mse, tail_count));
+    }
+    let lobo_overall = aggregate_weighted_rms(
+        &lobo
+            .iter()
+            .map(|(weight, mse, _, _)| (*mse, *weight))
+            .collect::<Vec<_>>(),
+    )?;
+
+    let loco = if normalized.len() >= 2 {
+        let mut values = Vec::with_capacity(normalized.len());
+        for (index, (weight, points, _)) in normalized.iter().enumerate() {
+            let held_out = FitCycleInput {
+                recency_weight: *weight,
+                points: points.clone(),
+            };
+            let other_curves = normalized
+                .iter()
+                .enumerate()
+                .filter(|(other_index, _)| *other_index != index)
+                .map(|(_, (other_weight, _, curve))| (curve.as_slice(), *other_weight))
+                .collect::<Vec<_>>();
+            let (mse, tail_mse, tail_count) = fit_loco_cycle(&held_out, &other_curves)?;
+            values.push((*weight, mse, tail_mse, tail_count));
+        }
+        Some(values)
+    } else {
+        None
+    };
+    let overall_rmse = match &loco {
+        Some(values) => lobo_overall.max(aggregate_weighted_rms(
+            &values
+                .iter()
+                .map(|(weight, mse, _, _)| (*mse, *weight))
+                .collect::<Vec<_>>(),
+        )?),
+        None => lobo_overall,
+    };
+
+    let total_weight = normalized.iter().map(|(weight, _, _)| *weight).sum::<f64>();
+    if !total_weight.is_finite() || total_weight <= EPSILON {
+        return None;
+    }
+    let historical_curve = (0..GRID_POINT_COUNT)
+        .map(|index| {
+            let values = normalized
+                .iter()
+                .map(|(weight, _, curve)| (curve[index], *weight))
+                .collect::<Vec<_>>();
+            let values_only = values.iter().map(|(value, _)| *value).collect::<Vec<_>>();
+            let weights = values.iter().map(|(_, weight)| *weight).collect::<Vec<_>>();
+            weighted_median(&values_only, &weights)
+        })
+        .collect::<Vec<_>>();
+    if historical_curve.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+
+    let (tail_rmse, tail_cycle_count) = match loco {
+        Some(values) => {
+            let lobo_tail_values: Option<Vec<(f64, f64)>> = lobo
+                .iter()
+                .filter(|(_, _, _, count)| *count >= 3)
+                .map(|(weight, _, mse, _)| mse.map(|value| (value, *weight)))
+                .collect();
+            let lobo_tail = lobo_tail_values.and_then(|values| aggregate_weighted_rms(&values));
+            let loco_tail_values: Option<Vec<(f64, f64)>> = values
+                .iter()
+                .filter(|(_, _, _, count)| *count >= 3)
+                .map(|(weight, _, mse, _)| mse.map(|value| (value, *weight)))
+                .collect();
+            let loco_tail = loco_tail_values.and_then(|values| aggregate_weighted_rms(&values));
+            let complete_tail = lobo
+                .iter()
+                .zip(values.iter())
+                .filter(
+                    |((_, _, lobo_mse, lobo_count), (_, _, loco_mse, loco_count))| {
+                        lobo_count >= &3
+                            && loco_count >= &3
+                            && lobo_mse.is_some()
+                            && loco_mse.is_some()
+                    },
+                )
+                .count();
+            (
+                lobo_tail.zip(loco_tail).map(|(lobo, loco)| lobo.max(loco)),
+                complete_tail,
+            )
+        }
+        None => {
+            let tail_values: Option<Vec<(f64, f64)>> = lobo
+                .iter()
+                .filter(|(_, _, _, count)| *count >= 3)
+                .map(|(weight, _, mse, _)| mse.map(|value| (value, *weight)))
+                .collect();
+            let tail = tail_values.and_then(|values| aggregate_weighted_rms(&values));
+            let count = lobo.iter().filter(|(_, _, _, count)| *count >= 3).count();
+            (tail, count)
+        }
+    };
+
+    Some(CompletedFitResult {
+        historical_curve,
+        overall_rmse,
+        tail_rmse,
+        tail_cycle_count,
+        total_weight,
+    })
+}
+
+pub(crate) fn fit_partial_current(points: &[FitPoint]) -> Option<PartialFitResult> {
+    let buckets = fit_points_by_bucket(points)?;
+    if buckets.len() < 6 {
+        return None;
+    }
+    let mut holdout_mse = Vec::with_capacity(buckets.len().saturating_sub(3));
+    for index in 3..buckets.len() {
+        let training = buckets[..index]
+            .iter()
+            .flat_map(|(_, points)| points.iter().copied())
+            .collect::<Vec<_>>();
+        let beta = through_origin_beta(&training)?;
+        holdout_mse.push(heldout_linear_error(beta, &buckets[index].1)?);
+    }
+    if holdout_mse.len() < 3 {
+        return None;
+    }
+    let walk_forward_rmse = (holdout_mse.iter().sum::<f64>() / holdout_mse.len() as f64).sqrt();
+    let beta = through_origin_beta(points)?;
+    if !walk_forward_rmse.is_finite() || !beta.is_finite() {
+        return None;
+    }
+    Some(PartialFitResult {
+        beta,
+        walk_forward_rmse,
+    })
+}
+
+fn heldout_linear_error(beta: f64, points: &[FitPoint]) -> Option<f64> {
+    if !beta.is_finite() || points.is_empty() {
+        return None;
+    }
+    let mse = points
+        .iter()
+        .map(|point| {
+            let residual = beta * point.phase - point.used_percent;
+            residual * residual
+        })
+        .sum::<f64>()
+        / points.len() as f64;
+    mse.is_finite().then_some(mse)
+}
+
 fn first_crossing(phase_now: f64, curve: &[f64], shift: f64, actual_at_now: f64) -> Option<f64> {
     if curve.len() < 2 {
         return None;
@@ -1905,9 +3530,78 @@ fn first_crossing(phase_now: f64, curve: &[f64], shift: f64, actual_at_now: f64)
     None
 }
 
+#[derive(Debug, Clone)]
+struct TargetCalculation {
+    complete_cycles: usize,
+    pace: Option<HistoricalPace>,
+}
+
+fn calculate_target(
+    store: &Store,
+    key: &SeriesKey,
+    reset_at: i64,
+    duration_seconds: i64,
+    actual: f64,
+    now: i64,
+) -> TargetCalculation {
+    let Some(series) = find_target_series(store, key) else {
+        return TargetCalculation {
+            complete_cycles: 0,
+            pace: None,
+        };
+    };
+    let current_reset = normalize_reset(reset_at, duration_seconds);
+    let cycles = historical_cycles(series, current_reset, now);
+    TargetCalculation {
+        complete_cycles: cycles.len(),
+        pace: evaluate_current_from_series(
+            series,
+            &cycles,
+            reset_at,
+            duration_seconds,
+            actual,
+            now,
+        ),
+    }
+}
+
 fn evaluate_current(
     store: &Store,
     key: &SeriesKey,
+    reset_at: i64,
+    duration_seconds: i64,
+    actual: f64,
+    now: i64,
+) -> Option<HistoricalPace> {
+    let series = find_target_series(store, key)?;
+    let cycles = historical_cycles(series, normalize_reset(reset_at, duration_seconds), now);
+    evaluate_current_from_series(series, &cycles, reset_at, duration_seconds, actual, now)
+}
+
+/// The duration this window is advertised as lasting, read only from samples
+/// that carry an advertised source.
+///
+/// `DurationSource::Observed` cannot identify a cut-short cycle by itself: it is
+/// stamped both by [`close_superseded_cycle`] and by `apply_observed_duration`,
+/// which is how a duration is legitimately learned from a provider that never
+/// states one. Taking the nominal from the advertised samples alone, and then
+/// measuring each cycle against it, separates those two without adding a field
+/// to anything on disk.
+///
+/// `None` means nothing here ever advertised a duration.
+fn advertised_nominal_duration(series: &SeriesState) -> Option<i64> {
+    median_i64(
+        series
+            .samples
+            .iter()
+            .filter(|sample| sample.duration_source != DurationSource::Observed)
+            .map(|sample| sample.duration_seconds),
+    )
+}
+
+fn evaluate_current_from_series(
+    series: &SeriesState,
+    cycles: &[CycleProfile],
     reset_at: i64,
     duration_seconds: i64,
     actual: f64,
@@ -1920,24 +3614,38 @@ fn evaluate_current(
     {
         return None;
     }
-    let series = store.series.iter().find(|series| series.key() == *key)?;
+    // A cycle that an irregular reset cut short ended wherever the provider
+    // chose to reset, not where the quota ran out: of fifteen real Codex
+    // resets, twelve ended between 5% and 64% used. Fitting one puts that
+    // value at u = 1.0 and teaches the curve that a full cycle ends there, so
+    // the estimate is biased low, and biased further the more windows are
+    // recovered. Such cycles stay retained and stay counted in
+    // `complete_cycles` — the filter lives here rather than in
+    // `historical_cycles` precisely so the window history still shows them.
+    //
+    // Reset jitter is bounded by the quantum, a fraction of one percent of the
+    // window, while the cut-short cycles measured ran between 2% and 15% of
+    // nominal. Nine tenths sits in the empty band between the two.
+    let full_length;
+    let cycles = match advertised_nominal_duration(series) {
+        Some(nominal) => {
+            full_length = cycles
+                .iter()
+                .filter(|cycle| {
+                    cycle.duration_seconds.saturating_mul(10) >= nominal.saturating_mul(9)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            full_length.as_slice()
+        }
+        // Nothing advertised a duration, so there is no nominal for a cycle to
+        // fall short of, and every cycle here was learned the same way.
+        None => cycles,
+    };
     let normalized_current_reset = normalize_reset(reset_at, duration_seconds);
-    let cycles = historical_cycles(series, normalized_current_reset, now);
-    if cycles.len() < 3 {
-        return None;
-    }
-    let nominal_duration = median_i64(cycles.iter().map(|cycle| cycle.duration_seconds))?
+    let nominal_duration = median_i64(cycles.iter().map(|cycle| cycle.duration_seconds))
+        .unwrap_or(duration_seconds)
         .clamp(1, agent_quota_duration::MAX_DURATION_SECONDS);
-    let span = cycles
-        .iter()
-        .map(|cycle| cycle.reset_at)
-        .max()?
-        .saturating_sub(cycles.iter().map(|cycle| cycle.cycle_started_at).min()?);
-    let expected_span = (2 * nominal_duration).max(86_400);
-    if span < expected_span {
-        return None;
-    }
-
     let tau_cycles = (7.0 * 86_400.0 / nominal_duration as f64).clamp(3.0, 64.0);
     let weighted = cycles
         .iter()
@@ -1948,33 +3656,64 @@ fn evaluate_current(
             (cycle, weight)
         })
         .collect::<Vec<_>>();
-    let total_weight = weighted.iter().map(|(_, weight)| *weight).sum::<f64>();
-    let squared_weight = weighted
+    if weighted
         .iter()
-        .map(|(_, weight)| weight * weight)
-        .sum::<f64>();
-    if !total_weight.is_finite() || total_weight <= EPSILON || squared_weight <= EPSILON {
+        .any(|(_, weight)| !weight.is_finite() || *weight <= EPSILON)
+    {
         return None;
     }
-    let n_eff = total_weight * total_weight / squared_weight;
-    if !n_eff.is_finite() || n_eff < 2.5 {
-        return None;
-    }
-    let lambda = ((n_eff - 2.0) / 6.0).clamp(0.0, 1.0);
-    let denominator = (GRID_POINT_COUNT - 1) as f64;
-    let weights = weighted
+    let fit_inputs = weighted
         .iter()
-        .map(|(_, weight)| *weight)
+        .map(|(cycle, weight)| FitCycleInput {
+            recency_weight: *weight,
+            points: cycle.points.clone(),
+        })
         .collect::<Vec<_>>();
-    let mut expected_curve = vec![0.0; GRID_POINT_COUNT];
+    if let Some(fit) = fit_completed_cycles(&fit_inputs) {
+        if let Some(quality) = fit_quality(fit.overall_rmse) {
+            if let Some(pace) = evaluate_completed_projection(
+                cycles,
+                &weighted,
+                fit,
+                quality,
+                reset_at,
+                duration_seconds,
+                actual,
+                now,
+            ) {
+                return Some(pace);
+            }
+        }
+    }
+    evaluate_partial_projection(
+        series,
+        normalized_current_reset,
+        reset_at,
+        duration_seconds,
+        actual,
+        now,
+    )
+}
+
+fn evaluate_completed_projection(
+    cycles: &[CycleProfile],
+    weighted: &[(&CycleProfile, f64)],
+    fit: CompletedFitResult,
+    quality: f64,
+    reset_at: i64,
+    duration_seconds: i64,
+    actual: f64,
+    now: i64,
+) -> Option<HistoricalPace> {
+    let lambda = completed_blend_weight(quality, fit.total_weight)?;
+    if fit.historical_curve.len() != GRID_POINT_COUNT {
+        return None;
+    }
+    let denominator = (GRID_POINT_COUNT - 1) as f64;
+    let mut expected_curve = fit.historical_curve;
     for (index, value) in expected_curve.iter_mut().enumerate() {
-        let historical = weighted
-            .iter()
-            .map(|(cycle, _)| cycle.curve[index])
-            .collect::<Vec<_>>();
-        let median = crate::agent_history::weighted_median(&historical, &weights);
         let linear = 100.0 * index as f64 / denominator;
-        *value = (lambda * median + (1.0 - lambda) * linear).clamp(0.0, 100.0);
+        *value = (lambda * *value + (1.0 - lambda) * linear).clamp(0.0, 100.0);
     }
     let mut expected_max = 0.0_f64;
     for value in &mut expected_curve {
@@ -1985,9 +3724,22 @@ fn evaluate_current(
     let elapsed = duration_seconds.saturating_sub(reset_at.saturating_sub(now));
     let phase_now = (elapsed as f64 / duration_seconds as f64).clamp(0.0, 1.0);
     let expected_now = interpolate_curve(&expected_curve, phase_now).clamp(0.0, 100.0);
+    let total_weight = weighted.iter().map(|(_, weight)| *weight).sum::<f64>();
+    let squared_weight = weighted
+        .iter()
+        .map(|(_, weight)| weight * weight)
+        .sum::<f64>();
+    if !total_weight.is_finite() || total_weight <= EPSILON || squared_weight <= EPSILON {
+        return None;
+    }
+    let n_eff = total_weight * total_weight / squared_weight;
+    if !n_eff.is_finite() {
+        return None;
+    }
+
     let mut weighted_run_out_mass = 0.0;
     let mut crossing_candidates = Vec::new();
-    for (cycle, weight) in &weighted {
+    for (cycle, weight) in weighted {
         let mut extended = cycle.curve.clone();
         if let Some(cap_index) = extended
             .iter()
@@ -2015,10 +3767,20 @@ fn evaluate_current(
             }
         }
     }
+
     let smoothed = ((weighted_run_out_mass + 0.5) / (total_weight + 1.0)).clamp(0.0, 1.0);
-    let risk_span = (4 * nominal_duration).max(7 * 86_400);
-    let observation_span = span;
-    let risk_gate = cycles.len() >= 5 && n_eff >= 4.0 && observation_span >= risk_span;
+    let span = cycles
+        .iter()
+        .map(|cycle| cycle.reset_at)
+        .max()?
+        .saturating_sub(cycles.iter().map(|cycle| cycle.cycle_started_at).min()?);
+    let risk_span =
+        (4 * median_i64(cycles.iter().map(|cycle| cycle.duration_seconds))?.max(1)).max(7 * 86_400);
+    let tail_pass = fit.tail_cycle_count == cycles.len()
+        && fit
+            .tail_rmse
+            .is_some_and(|rmse| fit_quality(rmse).is_some());
+    let risk_gate = cycles.len() >= 5 && n_eff >= 4.0 && span >= risk_span && tail_pass;
     let mut run_out_probability = risk_gate.then_some(smoothed);
     let mut will_last = smoothed < 0.5;
     let mut eta_seconds = None;
@@ -2038,7 +3800,7 @@ fn evaluate_current(
                 .iter()
                 .map(|(_, weight)| *weight)
                 .collect::<Vec<_>>();
-            eta_seconds = Some(crate::agent_history::weighted_median(&values, &weights).max(0.0));
+            eta_seconds = Some(weighted_median(&values, &weights).max(0.0));
         }
     }
     Some(HistoricalPace {
@@ -2046,6 +3808,95 @@ fn evaluate_current(
         eta_seconds,
         will_last_to_reset: will_last,
         run_out_probability,
+    })
+}
+
+fn evaluate_partial_projection(
+    series: &SeriesState,
+    normalized_current_reset: i64,
+    reset_at: i64,
+    duration_seconds: i64,
+    actual: f64,
+    now: i64,
+) -> Option<HistoricalPace> {
+    let active_reset = series.active_reset_at?;
+    if normalize_reset(active_reset, duration_seconds) != normalized_current_reset {
+        return None;
+    }
+    let active_samples = series
+        .samples
+        .iter()
+        .filter(|sample| is_active_group_sample(active_reset, sample))
+        .filter(|sample| sample.sampled_at <= now)
+        .collect::<Vec<_>>();
+    if active_samples.is_empty()
+        || active_samples.iter().any(|sample| {
+            sample.duration_seconds != duration_seconds
+                || normalize_reset(sample.reset_at, sample.duration_seconds)
+                    != normalized_current_reset
+        })
+    {
+        return None;
+    }
+    let points = active_samples
+        .iter()
+        .map(|sample| FitPoint {
+            phase: phase(sample),
+            bucket: sample_key(sample).1,
+            used_percent: sample.used_percent,
+        })
+        .collect::<Vec<_>>();
+    let buckets = fit_points_by_bucket(&points)?;
+    let phases = points.iter().map(|point| point.phase).collect::<Vec<_>>();
+    let span =
+        phases.iter().copied().reduce(f64::max)? - phases.iter().copied().reduce(f64::min)?;
+    if buckets.len() < MIN_COMPLETE_BUCKETS || span + EPSILON < 0.10 {
+        return None;
+    }
+    let fit = fit_partial_current(&points)?;
+    let quality = fit_quality(fit.walk_forward_rmse)?;
+    let lambda = partial_blend_weight(quality)?;
+    let elapsed = duration_seconds.saturating_sub(reset_at.saturating_sub(now));
+    let u_now = (elapsed as f64 / duration_seconds as f64).clamp(0.0, 1.0);
+    let trend_demand = |phase: f64| (fit.beta * phase).max(0.0);
+    let linear_demand = |phase: f64| 100.0 * phase;
+    let base_demand =
+        |phase: f64| lambda * trend_demand(phase) + (1.0 - lambda) * linear_demand(phase);
+    let expected_now = base_demand(u_now).clamp(0.0, 100.0);
+    if actual >= 100.0 {
+        return Some(HistoricalPace {
+            expected_percent: expected_now,
+            eta_seconds: Some(0.0),
+            will_last_to_reset: false,
+            run_out_probability: Some(1.0),
+        });
+    }
+    let base_slope = lambda * fit.beta + (1.0 - lambda) * 100.0;
+    if !base_slope.is_finite() || base_slope <= EPSILON {
+        return None;
+    }
+    let shift = actual - base_demand(u_now);
+    let shifted_end = base_demand(1.0) + shift;
+    let (eta_seconds, will_last_to_reset) = if shifted_end < 100.0 - EPSILON {
+        (None, true)
+    } else {
+        let crossing = (100.0 - shift) / base_slope;
+        if !crossing.is_finite() || crossing <= u_now || crossing > 1.0 {
+            return None;
+        }
+        (
+            Some(((crossing.clamp(u_now, 1.0) - u_now) * duration_seconds as f64).max(0.0)),
+            false,
+        )
+    };
+    if will_last_to_reset != eta_seconds.is_none() {
+        return None;
+    }
+    Some(HistoricalPace {
+        expected_percent: expected_now,
+        eta_seconds,
+        will_last_to_reset,
+        run_out_probability: None,
     })
 }
 
@@ -2062,6 +3913,8 @@ fn with_locked_transaction_with_mode<T>(
         observation_now,
         transaction_clock,
         |path, store| save_store_atomic_with_mode(mode, path, store),
+        &[],
+        None,
         body,
     )
 }
@@ -2072,8 +3925,15 @@ fn with_locked_transaction_with_save_and_mode<T>(
     observation_now: i64,
     transaction_clock: impl FnOnce() -> i64,
     save: impl Fn(&Path, &Store) -> io::Result<()>,
+    fold: &[StrandedSeriesFold],
+    settled: Option<&AtomicBool>,
     body: impl FnOnce(&mut Store) -> Result<T, HistoryError>,
 ) -> Result<T, HistoryError> {
+    let settle = || {
+        if let Some(settled) = settled {
+            settled.store(true, Ordering::Release);
+        }
+    };
     let directory = path.parent().ok_or(HistoryError::StorageUnavailable)?;
     ensure_real_directory_with_mode(mode, directory)
         .map_err(|_| HistoryError::StorageUnavailable)?;
@@ -2089,16 +3949,41 @@ fn with_locked_transaction_with_save_and_mode<T>(
     let result = match loaded {
         Ok(mut loaded) => {
             let before = loaded.store.clone();
+            // After `before`, so a fold that changes the store is saved even
+            // when the body changes nothing — that save is what stamps schema 4
+            // and closes the trigger for good.
+            match loaded.on_disk_schema {
+                Some(HISTORY_SCHEMA_VERSION_V3) => {
+                    fold_stranded_series(&mut loaded.store, fold);
+                }
+                // Already past schema 3 on disk: the fold can never trigger
+                // again in this process.
+                Some(_) => settle(),
+                None => {}
+            }
             let result = body(&mut loaded.store);
             match result {
                 Ok(value) => {
-                    if !validate_store_at(&loaded.store, upper_bound) {
+                    // Repair before refusing. The body can leave a store the
+                    // validator rejects without the recorded sample being at
+                    // fault -- see `repair_invalid_series` -- and refusing here
+                    // writes nothing, so the same failure repeats on every
+                    // poll for ever while the card reports "history
+                    // unavailable" for every provider (#370). A bounded repair
+                    // that makes the store valid is worth a handful of samples;
+                    // an unbounded one is not, and above the bound this refuses
+                    // exactly as it did before.
+                    if !validate_store_at(&loaded.store, upper_bound)
+                        && repair_invalid_series(&mut loaded.store, upper_bound).is_none()
+                    {
                         Err(HistoryError::Serialize)
                     } else if loaded.store == before {
                         Ok(value)
                     } else if save(path, &loaded.store).is_err() {
                         Err(HistoryError::AtomicSave)
                     } else {
+                        // The file on disk is now the current schema.
+                        settle();
                         Ok(value)
                     }
                 }
@@ -2142,6 +4027,58 @@ fn load_store(path: &Path, now: i64) -> Result<LoadedStore, HistoryError> {
     load_store_at_with_mode(StorageMode::Generic, path, now, now)
 }
 
+/// Upgrade a store deserialized from disk to `HISTORY_SCHEMA_VERSION`.
+///
+/// v3 → v4 adds `QuotaSample::plan`, which `#[serde(default)]` has already
+/// filled with `None` by the time this runs. Nothing else differs, so the
+/// upgrade is the version stamp alone — and deliberately nothing more. Reading
+/// a plan for samples taken before the field existed would turn a known
+/// unknown into an unknown error: the user's history contains a real plan
+/// change, and a backfilled value would be wrong for one side of it while
+/// every downstream check kept working on the wrong answer.
+///
+/// **Placed between deserialization and `validate_store`, and the version
+/// equality inside `validate_store` is left exactly as strict.** That check
+/// demands an exact version match
+/// and is also the gate `validate_store_at` applies before a transaction
+/// writes (`save_store_atomic_with_mode`). Relaxing it there would let a store
+/// still stamped `3` reach the writer and produce a file whose version field
+/// says 3 while its samples carry `plan` — a shape no version of this code can
+/// read back, written irreversibly.
+///
+/// **The upgrade is lazy, and that is the chosen semantics.** The transaction
+/// snapshots `before` from the value this function returns and writes only when
+/// the store actually changed, so a bare version bump does not dirty it and
+/// does not trigger a write; `read_series_at_path_with_mode` never writes at
+/// all. The file therefore stays `"schemaVersion": 3` on disk until the next
+/// transaction that had a reason to write anyway, re-upgrading in memory on
+/// every load until then. Chosen over an eager upgrade because writing is the
+/// only irreversible act here, and because a file still stamped 3 is one an
+/// older build can still read — the downgrade window closes when the file is
+/// rewritten, not when this code ships. The cost is that the on-disk format
+/// converts at an unpredictable moment, which is why it is documented here,
+/// in `architecture.md`, and in `verification.md`: someone inspecting the file
+/// and finding `3` would otherwise read it as a failed migration.
+///
+/// A store at any other version is returned untouched for `validate_store` to
+/// reject, which quarantines it. That covers a file written by a future build.
+///
+/// **Ordering against `drop_unplaceable_samples`** (PR #227, which occupies
+/// this same position): the upgrade runs first. The two are commutative today
+/// — that pass reads only `series.samples` and this one writes only
+/// `schema_version` — so the order is chosen for the case where they stop
+/// being commutative. A migration that ever rewrites samples must run before
+/// the pass that judges whether a sample is placeable, or the judging happens
+/// against the shape the previous version wrote. Version first, samples
+/// second, and a future migration inherits the order rather than re-deciding
+/// it under merge pressure.
+fn migrate_store_to_current(mut store: Store) -> Store {
+    if store.schema_version == HISTORY_SCHEMA_VERSION_V3 {
+        store.schema_version = HISTORY_SCHEMA_VERSION;
+    }
+    store
+}
+
 fn load_store_at_with_mode(
     mode: StorageMode,
     path: &Path,
@@ -2151,20 +4088,59 @@ fn load_store_at_with_mode(
     let Some(bytes) = read_owner_only_with_mode(mode, path).map_err(|_| HistoryError::Read)? else {
         return Ok(LoadedStore {
             store: Store::default(),
+            quarantined: false,
+            on_disk_schema: None,
         });
     };
 
-    let parsed = serde_json::from_slice::<Store>(&bytes)
-        .ok()
-        .filter(|store| validate_store_at(store, validation_now));
+    // Drop offending SAMPLES before condemning the FILE. A duplicate sample key
+    // and a cycle over its bucket cap are per-sample facts, and quarantine is
+    // per-store: a resolution change once turned three bad keys out of 2,775
+    // samples into 31 series moved aside and every window back to "learning
+    // history". Nothing about that file was untrustworthy — 99.9% of it was the
+    // same data it had been a minute earlier.
+    //
+    // Quarantine stays for what it was for: bytes that will not parse, a
+    // schema version this build does not speak, series out of order — things
+    // that say the file did not come from here. A sample this build cannot
+    // place is a sample to forget, not a history to burn.
+    let parsed = serde_json::from_slice::<Store>(&bytes).ok();
+    // Captured before the in-memory upgrade below erases it. Windows-only: see
+    // `fold_stranded_series`.
+    let on_disk_schema = parsed.as_ref().map(|store| store.schema_version);
+    let parsed = parsed
+        // Version before samples, and the reason is not one you can observe
+        // here. `drop_unplaceable_samples` judges every sample against the
+        // CURRENT bucket rules and per-cycle cap, so a migration that rewrites
+        // `sampled_at`, `reset_at`, or `duration_seconds` must run before it —
+        // otherwise its output is judged by coordinates it was in the middle
+        // of changing. v3→v4 rewrites none of those (it stamps the version and
+        // relies on `serde(default)` for `plan`), so these two commute today:
+        // read and write sets are disjoint. The constraint is prospective, and
+        // it is written down now because the migration that needs it will not
+        // be able to add it retroactively.
+        .map(migrate_store_to_current)
+        .map(drop_unplaceable_samples)
+        .filter(|store| validate_store(store));
     if let Some(store) = parsed {
-        return Ok(LoadedStore { store });
+        let store = if validate_store_at(&store, validation_now) {
+            store
+        } else {
+            repair_store_at(store, validation_now, quarantine_now)
+        };
+        return Ok(LoadedStore {
+            store,
+            quarantined: false,
+            on_disk_schema,
+        });
     }
 
     quarantine_corrupt_with_mode(mode, path, quarantine_now)
         .map_err(|_| HistoryError::CorruptQuarantine)?;
     Ok(LoadedStore {
         store: Store::default(),
+        quarantined: true,
+        on_disk_schema: None,
     })
 }
 
@@ -2273,6 +4249,8 @@ where
 }
 
 fn save_store_atomic_with_mode(mode: StorageMode, path: &Path, store: &Store) -> io::Result<()> {
+    #[cfg(test)]
+    SAVE_CALL_COUNT.with(|count| count.set(count.get().saturating_add(1)));
     #[cfg(target_os = "windows")]
     if mode.uses_windows_secure_storage() {
         return save_store_atomic_windows_secure_with_replace(
@@ -2288,6 +4266,16 @@ fn save_store_atomic_with_mode(mode: StorageMode, path: &Path, store: &Store) ->
         |temp, destination| tokscale_core::fs_atomic::replace_file(temp, destination),
         |directory| sync_directory_with_mode(mode, directory),
     )
+}
+
+#[cfg(test)]
+pub(crate) fn save_call_count() -> u64 {
+    SAVE_CALL_COUNT.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_save_call_count() {
+    SAVE_CALL_COUNT.with(|count| count.set(0));
 }
 
 #[cfg(target_os = "windows")]
@@ -2604,7 +4592,469 @@ fn rollback_quarantine_link(path: &Path, source: &File) {
 }
 
 #[cfg(test)]
+mod recovery {
+    //! A one-off recovery lane for a store that was quarantined, run by hand.
+    //!
+    //! `#[ignore]`, so it never runs in CI, and it reads its paths from the
+    //! environment so no user path is compiled in. It exists because the first
+    //! attempt at this merge was validated by a REIMPLEMENTATION of the
+    //! engine's rules in another language, that copy was missing
+    //! `validate_store`'s "series must be sorted by key" clause, and the result
+    //! was a store the engine quarantined on sight — a history wiped by a
+    //! check that said it had passed.
+    //!
+    //! So nothing here restates a rule. The merge goes through
+    //! `add_sample_if_new`, which owns the sample key and the per-cycle cap;
+    //! the write goes through `save_store_atomic_with_mode`, which owns the
+    //! series ordering; and the verdict comes from `load_store`, which is the
+    //! same function the app calls. The only thing this file contributes is
+    //! deciding WHICH samples to offer.
+    use super::*;
+    use std::path::PathBuf;
+
+    fn path_from(var: &str) -> PathBuf {
+        PathBuf::from(std::env::var(var).unwrap_or_else(|_| panic!("{var} must be set")))
+    }
+
+    /// Build a series holding `count` samples that all collide on one
+    /// `sample_key`, which is what a duration change can leave behind: the
+    /// quantum comes from each sample's own `duration_seconds`, so a series
+    /// carrying both a contract duration and a learned one is bucketed two
+    /// ways and a set that was valid stops being valid.
+    fn series_with_colliding_samples(count: usize) -> SeriesState {
+        let reset = 1_789_933_140_i64;
+        let duration = 18_000_i64;
+        let mut series = SeriesState {
+            provider_id: "claude".to_string(),
+            account_scope: "scope".to_string(),
+            window_key: "session.v1".to_string(),
+            active_reset_at: None,
+            last_activity_at: reset,
+            rollover: None,
+            samples: Vec::new(),
+        };
+        for index in 0..count {
+            series.samples.push(QuotaSample {
+                reset_at: reset,
+                duration_seconds: duration,
+                duration_source: DurationSource::Observed,
+                used_percent: index as f64,
+                // The same phase bucket for every one of them, so each is a
+                // duplicate key rather than a new bucket.
+                sampled_at: reset - 10,
+                origin: SampleOrigin::LiveV3,
+                plan: None,
+            });
+        }
+        series
+    }
+
+    #[test]
+    fn repair_drops_the_duplicates_that_make_a_series_invalid() {
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series_with_colliding_samples(3)],
+        };
+        let now = 1_789_933_200_i64;
+        // Control: the fixture really is invalid, or the repair below is
+        // reported as a success over a store that never needed one.
+        assert!(
+            !validate_store_at(&store, now),
+            "fixture must start invalid"
+        );
+
+        let dropped = repair_invalid_series(&mut store, now);
+
+        assert_eq!(dropped, Some(2), "two of the three collide and go");
+        assert!(
+            validate_store_at(&store, now),
+            "the repaired store must validate"
+        );
+        assert_eq!(store.series[0].samples.len(), 1);
+    }
+
+    #[test]
+    fn repair_refuses_rather_than_shredding_a_history() {
+        let over = MAX_REPAIR_DROPS_PER_TRANSACTION + 2;
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series_with_colliding_samples(over + 1)],
+        };
+        let before = store.series[0].samples.len();
+        let now = 1_789_933_200_i64;
+        assert!(
+            !validate_store_at(&store, now),
+            "fixture must start invalid"
+        );
+
+        let dropped = repair_invalid_series(&mut store, now);
+
+        assert_eq!(dropped, None, "past the bound the repair must refuse");
+        assert_eq!(
+            store.series[0].samples.len(),
+            before,
+            "a refused repair must leave every sample where it was"
+        );
+    }
+
+    #[test]
+    fn the_allowance_scales_with_the_series_and_never_falls_below_the_floor() {
+        // A flat bound is what #370 shipped and what refused the real repair,
+        // so the scaling half needs an assertion of its own: without it,
+        // `MAX_REPAIR_DROP_PERCENT` could go to 0 and every test above would
+        // still pass.
+        assert_eq!(repair_drop_allowance(0), MAX_REPAIR_DROPS_PER_TRANSACTION);
+        assert_eq!(
+            repair_drop_allowance(100),
+            MAX_REPAIR_DROPS_PER_TRANSACTION,
+            "2% of 100 is under the floor, so the floor answers"
+        );
+        // The measured #370 series: 5815 samples needing 39 drops. 116 is the
+        // allowance it gets, which is why the repair now runs instead of
+        // leaving every provider's card dark.
+        assert_eq!(repair_drop_allowance(5815), 116);
+        assert!(repair_drop_allowance(5815) > 39);
+    }
+
+    #[test]
+    fn a_cap_rejected_sample_does_not_reserve_the_key_a_later_one_needs() {
+        // `sample_order` compares `reset_at` before `duration_seconds`, so a
+        // short sample can be processed ahead of a long one that shares its
+        // key. Reserving the key for the short one — which the cap then
+        // rejects — made the long one a duplicate of a sample nobody kept.
+        //
+        // R is a multiple of 900, so both `normalize_reset` quanta (180 for
+        // 18000s, 300 for 300000s) round every raw reset below to exactly R.
+        const R: i64 = 1_789_933_500;
+        const SHORT: i64 = 18_000; // quantum 180, cap 48
+        const LONG: i64 = 300_000; // quantum 300, cap 192
+
+        let sample = |raw_reset: i64, duration: i64, sampled_at: i64, used: f64| QuotaSample {
+            reset_at: raw_reset,
+            duration_seconds: duration,
+            duration_source: DurationSource::Observed,
+            used_percent: used,
+            sampled_at,
+            origin: SampleOrigin::LiveV3,
+            plan: None,
+        };
+
+        let mut samples = Vec::new();
+        // Buckets 48..=95 of the long window, filling the reset group to 48 —
+        // the short cap — without touching any bucket a short sample can take.
+        for bucket in 48..96i64 {
+            samples.push(sample(
+                R - 100,
+                LONG,
+                R - 300_000 + 1562 * bucket + 781,
+                bucket as f64,
+            ));
+        }
+        // Bucket 0, short: a unique key, but the group already holds 48.
+        samples.push(sample(R - 50, SHORT, R - 17_800, 99.0));
+        // Bucket 0, long: the same key, and 49 is well inside its own cap.
+        samples.push(sample(R - 20, LONG, R - 299_000, 98.0));
+
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![SeriesState {
+                provider_id: "claude".to_string(),
+                account_scope: "scope".to_string(),
+                window_key: "session.v1".to_string(),
+                active_reset_at: None,
+                last_activity_at: R,
+                rollover: None,
+                samples,
+            }],
+        };
+        let now = R + 60;
+
+        // Controls: the fixture is invalid for the reason claimed, and the two
+        // bucket-0 samples really do collide, or the assertion below passes on
+        // a fixture that never exercised the path.
+        assert!(!validate_store_at(&store, now), "fixture must start invalid");
+        let short = sample(R - 50, SHORT, R - 17_800, 99.0);
+        let long = sample(R - 20, LONG, R - 299_000, 98.0);
+        assert_eq!(
+            sample_key(&short),
+            sample_key(&long),
+            "the fixture's two bucket-0 samples must share a key"
+        );
+        assert!(
+            phase_bucket_count(LONG) > phase_bucket_count(SHORT),
+            "the later sample must have the larger cap"
+        );
+
+        let dropped = repair_invalid_series(&mut store, now);
+
+        assert_eq!(
+            dropped,
+            Some(1),
+            "only the cap-rejected short sample goes; reserving its key cost a second drop"
+        );
+        assert_eq!(store.series[0].samples.len(), 49);
+        assert!(
+            store.series[0]
+                .samples
+                .iter()
+                .any(|kept| kept.used_percent == 98.0),
+            "the long bucket-0 sample is under its own cap and must survive"
+        );
+    }
+
+    #[test]
+    fn repair_keeps_the_oldest_reading_of_a_colliding_pair() {
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series_with_colliding_samples(2)],
+        };
+        // `used_percent` doubles as an identity here: the fixture numbers them
+        // 0, 1, ... in insertion order and `sample_order` sorts oldest first,
+        // so keeping index 0 is keeping the reading stored longest.
+        let now = 1_789_933_200_i64;
+        assert_eq!(repair_invalid_series(&mut store, now), Some(1));
+        assert_eq!(store.series[0].samples[0].used_percent, 0.0);
+    }
+
+    /// Drop the samples that make a stored series fail `validate_series`,
+    /// keeping everything else.
+    ///
+    /// A store can hold a duplicate `sample_key`, or a cycle carrying more
+    /// samples than its phase buckets allow, and still load — `load_store`
+    /// repairs what it can. What it cannot do is make the next WRITE succeed:
+    /// `with_locked_transaction_with_save_and_mode` validates after the body
+    /// runs, the series is still invalid, and the whole transaction returns
+    /// `HistoryError::Serialize`. The caller then reports every window in the
+    /// batch as `unavailable("history")`, so one old sample silently disables
+    /// pace for every provider, indefinitely, with nothing written and nothing
+    /// quarantined to show for it.
+    ///
+    /// Every rule here is the engine's. `sample_key`, `phase_bucket_count` and
+    /// `validate_series` decide what goes; `save_store_atomic_with_mode`
+    /// orders and writes; `load_store` gives the verdict. This lane only
+    /// chooses the ORDER samples are offered in — oldest first, so the reading
+    /// that has been in the store longest is the one kept.
+    /// Report, for a real store, which sample groups `retain_series` keeps and
+    /// which it drops.
+    ///
+    /// A fixture can prove the rule; only a store that actually lost data can
+    /// prove the rule reaches it. This runs the engine's own `retain_series`
+    /// and prints each group's reset, size and verdict, so the groups #370
+    /// erased can be checked against the version of the code that is meant to
+    /// keep them. It writes nothing.
+    #[test]
+    #[ignore = "run by hand with RETAIN_IN"]
+    fn report_which_groups_retention_keeps() {
+        let in_path = path_from("RETAIN_IN");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let raw = std::fs::read_to_string(&in_path).expect("read store");
+        let store: Store = serde_json::from_str(&raw).expect("parse store");
+
+        for series in &store.series {
+            let before = grouped_samples(&series.samples)
+                .into_iter()
+                .map(|(reset_at, samples)| (reset_at, samples.len()))
+                .collect::<Vec<_>>();
+            let mut copy = series.clone();
+            retain_series(&mut copy, now);
+            let after = grouped_samples(&copy.samples)
+                .into_iter()
+                .map(|(reset_at, samples)| (reset_at, samples.len()))
+                .collect::<BTreeMap<_, _>>();
+            for (reset_at, size) in before {
+                if after.get(&reset_at).copied() != Some(size) {
+                    eprintln!(
+                        "[RETAIN] {}/{} reset={reset_at} {size} -> {:?}",
+                        series.provider_id,
+                        series.window_key,
+                        after.get(&reset_at).copied().unwrap_or(0)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "run by hand with REPAIR_IN / REPAIR_OUT"]
+    fn drop_samples_that_make_a_series_invalid() {
+        let in_path = path_from("REPAIR_IN");
+        let out_path = path_from("REPAIR_OUT");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let raw = std::fs::read_to_string(&in_path).expect("read store");
+        let mut store: Store = serde_json::from_str(&raw).expect("parse store");
+        let before: usize = store.series.iter().map(|s| s.samples.len()).sum();
+
+        let mut dropped_dup = 0usize;
+        let mut dropped_cap = 0usize;
+        for series in &mut store.series {
+            let mut ordered = series.samples.clone();
+            ordered.sort_by(sample_order);
+            let mut keys: BTreeSet<(i64, usize)> = BTreeSet::new();
+            let mut counts: BTreeMap<i64, usize> = BTreeMap::new();
+            let mut kept: Vec<QuotaSample> = Vec::with_capacity(ordered.len());
+            for sample in ordered {
+                if !keys.insert(sample_key(&sample)) {
+                    dropped_dup += 1;
+                    continue;
+                }
+                let reset = normalize_reset(sample.reset_at, sample.duration_seconds);
+                let cap = phase_bucket_count(sample.duration_seconds);
+                let count = counts.entry(reset).or_default();
+                if *count + 1 > cap {
+                    dropped_cap += 1;
+                    continue;
+                }
+                *count += 1;
+                kept.push(sample);
+            }
+            series.samples = kept;
+            if let Some(newest) = series.samples.iter().map(|s| s.sampled_at).max() {
+                series.last_activity_at = series.last_activity_at.max(newest);
+            }
+        }
+
+        save_store_atomic_with_mode(StorageMode::Generic, &out_path, &store).expect("save");
+        let loaded = load_store(&out_path, now).expect("load back");
+        let after: usize = loaded.store.series.iter().map(|s| s.samples.len()).sum();
+        let still_invalid = loaded
+            .store
+            .series
+            .iter()
+            .filter(|s| !validate_series(s))
+            .count();
+
+        eprintln!(
+            "repaired: samples {before} -> {after} (dropped dup {dropped_dup}, over-cap {dropped_cap}), \
+             series still invalid {still_invalid}"
+        );
+        assert!(
+            !loaded.quarantined,
+            "the engine quarantined the repaired store"
+        );
+        assert_eq!(
+            still_invalid, 0,
+            "a series is still invalid after the repair"
+        );
+        assert!(
+            validate_store_at(&loaded.store, now),
+            "the repaired store still fails the check that blocks every write"
+        );
+    }
+
+    #[test]
+    #[ignore = "run by hand with RECOVER_LIVE / RECOVER_QUARANTINE / RECOVER_OUT"]
+    fn merge_quarantined_history_and_prove_the_engine_accepts_it() {
+        let live_path = path_from("RECOVER_LIVE");
+        let quarantine_path = path_from("RECOVER_QUARANTINE");
+        let out_path = path_from("RECOVER_OUT");
+        let now = std::env::var("RECOVER_NOW")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64
+            });
+
+        let live_raw = std::fs::read_to_string(&live_path).expect("read live");
+        let quarantine_raw = std::fs::read_to_string(&quarantine_path).expect("read quarantine");
+        let mut live: Store = serde_json::from_str(&live_raw).expect("parse live");
+        let quarantined: Store =
+            serde_json::from_str(&quarantine_raw).expect("parse quarantined");
+        let before = live.series.iter().map(|s| s.samples.len()).sum::<usize>();
+
+        let mut added = 0usize;
+        let mut refused = 0usize;
+        for source in &quarantined.series {
+            let key = SeriesKey::from_stored_parts(
+                &source.provider_id,
+                &source.account_scope,
+                &source.window_key,
+            );
+            let index = match live.series.iter().position(|s| s.key() == key) {
+                Some(i) => i,
+                None => {
+                    live.series.push(SeriesState::new(&key, now));
+                    live.series.len() - 1
+                }
+            };
+            let target = &mut live.series[index];
+            let mut ordered = source.samples.clone();
+            ordered.sort_by(sample_order);
+            for sample in ordered {
+                // `add_sample_if_new` owns every admission rule. A false here
+                // is the engine refusing, not this lane deciding.
+                if add_sample_if_new(
+                    target,
+                    sample.reset_at,
+                    sample.duration_seconds,
+                    sample.duration_source,
+                    sample.used_percent,
+                    sample.sampled_at,
+                ) {
+                    added += 1;
+                    // `validate_series` requires `last_activity_at` to be at
+                    // or after every sample's `sampled_at`, and
+                    // `add_sample_if_new` only touches `samples`. Appending
+                    // without this leaves a store the loader quarantines --
+                    // the outcome this lane exists to avoid. It did not fire
+                    // on the store it was written for, because every merged
+                    // sample predated the live series' activity, which is the
+                    // kind of luck that hides a defect rather than removing
+                    // it.
+                    target.last_activity_at =
+                        target.last_activity_at.max(sample.sampled_at);
+                } else {
+                    refused += 1;
+                }
+            }
+        }
+
+        save_store_atomic_with_mode(StorageMode::Generic, &out_path, &live).expect("save");
+        let loaded = load_store(&out_path, now).expect("load back");
+        let after = loaded
+            .store
+            .series
+            .iter()
+            .map(|s| s.samples.len())
+            .sum::<usize>();
+
+        eprintln!(
+            "merged: series {} -> {}, samples {before} -> {after} (offered-added {added}, refused {refused})",
+            quarantined.series.len(),
+            loaded.store.series.len()
+        );
+        assert!(
+            !loaded.quarantined,
+            "the engine quarantined the merged store; it is NOT safe to install"
+        );
+        assert!(after >= before, "the merge must not lose samples");
+    }
+}
+
+#[cfg(test)]
 mod tests {
+
+    /// Mechanical bridge for fixtures that only need a distinct scope identity.
+    fn test_key(
+        provider_id: impl Into<String>,
+        history_scope: impl AsRef<str>,
+        window_key: impl Into<String>,
+    ) -> SeriesKey {
+        SeriesKey::new(
+            provider_id,
+            &HistoryScope::for_test(history_scope.as_ref()),
+            window_key,
+        )
+    }
     use super::*;
     use chrono::Utc;
     #[cfg(target_os = "windows")]
@@ -2670,7 +5120,7 @@ mod tests {
     }
 
     fn key(account: &str) -> SeriesKey {
-        SeriesKey::new("copilot", account, "premium_interactions.v1")
+        test_key("copilot", account, "premium_interactions.v1")
     }
 
     fn temp_path(label: &str) -> (PathBuf, PathBuf) {
@@ -3087,6 +5537,7 @@ mod tests {
             used_percent,
             sampled_at,
             origin,
+            plan: None,
         }
     }
 
@@ -3114,7 +5565,7 @@ mod tests {
         duration_seconds: i64,
         cycles: usize,
     ) -> SeriesState {
-        let key = SeriesKey::new(provider_id, account_scope, window_key);
+        let key = test_key(provider_id, account_scope, window_key);
         let mut samples = Vec::new();
         for offset in 1..=cycles {
             samples.extend(complete_cycle(
@@ -3911,7 +6362,7 @@ mod tests {
             assert_eq!(
                 migrate_codex_v2_at_paths_with_clock_and_mode(
                     "acct",
-                    "opaque-scope",
+                    &HistoryScope::for_test("opaque-scope"),
                     now,
                     &v2_path,
                     &v3_path,
@@ -3946,7 +6397,7 @@ mod tests {
             assert_eq!(
                 migrate_codex_v2_at_paths_with_clock_and_mode(
                     "acct",
-                    "opaque-scope",
+                    &HistoryScope::for_test("opaque-scope"),
                     now,
                     &v2_path,
                     &v3_path,
@@ -3985,7 +6436,7 @@ mod tests {
             assert_eq!(
                 migrate_codex_v2_at_paths_with_clock_and_mode(
                     "acct",
-                    "opaque-scope",
+                    &HistoryScope::for_test("opaque-scope"),
                     now,
                     &v2_path,
                     &v3_path,
@@ -4027,7 +6478,7 @@ mod tests {
             assert_eq!(
                 migrate_codex_v2_at_paths_with_clock_and_mode(
                     "acct",
-                    "opaque-scope",
+                    &HistoryScope::for_test("opaque-scope"),
                     now,
                     &v2_path,
                     &v3_path,
@@ -4063,7 +6514,7 @@ mod tests {
             assert_eq!(
                 migrate_codex_v2_at_paths_with_clock_and_mode(
                     "acct",
-                    "opaque-scope",
+                    &HistoryScope::for_test("opaque-scope"),
                     now,
                     &v2_path,
                     &v3_path,
@@ -4125,7 +6576,7 @@ mod tests {
         assert_eq!(
             migrate_codex_v2_at_paths_with_clock_and_mode(
                 "acct",
-                "opaque-scope",
+                &HistoryScope::for_test("opaque-scope"),
                 now,
                 &v2_path,
                 &v3_path,
@@ -4193,8 +6644,545 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Rewrite an on-disk v4 store into the exact shape a v3 build wrote:
+    /// version stamp back to 3, `plan` key gone from every sample.
+    ///
+    /// Derived from a real file rather than hand-written JSON so it cannot
+    /// drift out of sync with the rest of the schema, and it asserts the key
+    /// was actually there to remove — otherwise a regression that stopped
+    /// serializing `plan` would quietly turn this into a v4-loads-v4 test.
+    fn downgrade_file_to_v3(path: &Path) -> usize {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(value["schemaVersion"], HISTORY_SCHEMA_VERSION);
+        value["schemaVersion"] = serde_json::json!(HISTORY_SCHEMA_VERSION_V3);
+        let mut samples = 0;
+        for series in value["series"].as_array_mut().unwrap() {
+            for sample in series["samples"].as_array_mut().unwrap() {
+                assert!(
+                    sample.as_object_mut().unwrap().remove("plan").is_some(),
+                    "the fixture must start from a file that serializes `plan`"
+                );
+                samples += 1;
+            }
+        }
+        assert!(
+            samples > 0,
+            "an empty fixture makes every later claim vacuous"
+        );
+        fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+        samples
+    }
+
+    /// V1a, V1b and V2 in one function, because the order is load-bearing and
+    /// invisible in the code: if the v3 store were quarantined instead of
+    /// upgraded, the store would be empty and "every sample's plan is None"
+    /// would pass on the empty set. The sample count is asserted first and
+    /// carried forward so that cannot happen silently.
     #[test]
-    fn writes_schema_three_sorted_series_and_exact_sample_fields() {
+    fn a_v3_store_upgrades_in_memory_keeps_every_sample_and_converts_on_disk_only_when_written() {
+        let (directory, path) = temp_path("v3-upgrade");
+        let now = 1_000_000;
+        let reset = now + 7 * DAY;
+
+        // Build a real multi-series, multi-sample store through the shipping
+        // write path, then take it back to v3.
+        // Offsets are spaced by more than one phase bucket. A 7-day window is
+        // split into `phase_bucket_count(7 * DAY)` buckets — 192, since
+        // anything over two days takes the `PHASE_BUCKET_MULTIPLE` step — so a
+        // bucket is 52.5 minutes and 4h apart is comfortably clear. Samples
+        // inside one bucket replace each other, which would leave a fixture far
+        // smaller than it reads as; the spacing is deliberately loose enough to
+        // survive another change to the bucket count.
+        for (account, offset, used) in [
+            ("a", 0, 10.0),
+            ("a", 4 * HOUR, 20.0),
+            ("a", 8 * HOUR, 30.0),
+            ("b", 0, 15.0),
+            ("b", 4 * HOUR, 25.0),
+        ] {
+            assert!(matches!(
+                record(
+                    &path,
+                    account,
+                    Some(reset),
+                    used,
+                    now + offset,
+                    provider(reset, 7 * DAY),
+                    None
+                ),
+                HistoryOutcome::Ready { sampled: true, .. }
+            ));
+        }
+        let before = read_store(&path);
+        let series_count = before.series.len();
+        assert_eq!(series_count, 2);
+        let sample_count = downgrade_file_to_v3(&path);
+        assert_eq!(sample_count, 5);
+
+        // V1a — the upgrade happens on load, loses nothing, and does not
+        // quarantine.
+        let loaded =
+            load_store_at_with_mode(StorageMode::Generic, &path, now + 12 * HOUR, now + 12 * HOUR)
+                .unwrap();
+        assert!(
+            !loaded.quarantined,
+            "a v3 store was quarantined instead of upgraded"
+        );
+        assert_eq!(loaded.store.schema_version, HISTORY_SCHEMA_VERSION);
+        assert_eq!(loaded.store.series.len(), series_count);
+        assert_eq!(
+            loaded
+                .store
+                .series
+                .iter()
+                .map(|series| series.samples.len())
+                .sum::<usize>(),
+            sample_count
+        );
+        assert_eq!(
+            loaded.store, before,
+            "the upgrade changed something other than the version"
+        );
+
+        // V1b — the upgrade is lazy. Loading is not a reason to write, so the
+        // file is still stamped 3 and still carries no `plan` key.
+        let on_disk: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["schemaVersion"], HISTORY_SCHEMA_VERSION_V3,
+            "loading rewrote the file, so the eager-upgrade risk this slice avoids is present"
+        );
+        assert!(on_disk["series"][0]["samples"][0]
+            .as_object()
+            .unwrap()
+            .get("plan")
+            .is_none());
+
+        // V2 — a transaction that had a reason to write converts the file, and
+        // every sample it writes, old and new, has no plan.
+        assert!(matches!(
+            record(
+                &path,
+                "a",
+                Some(reset),
+                40.0,
+                now + 12 * HOUR,
+                provider(reset, 7 * DAY),
+                None
+            ),
+            HistoryOutcome::Ready { sampled: true, .. }
+        ));
+        let after = read_store(&path);
+        assert_eq!(after.schema_version, HISTORY_SCHEMA_VERSION);
+        assert_eq!(
+            after
+                .series
+                .iter()
+                .map(|series| series.samples.len())
+                .sum::<usize>(),
+            sample_count + 1
+        );
+        assert!(
+            after
+                .series
+                .iter()
+                .flat_map(|series| series.samples.iter())
+                .all(|sample| sample.plan.is_none()),
+            "a plan value was written, and nothing in this slice has one to write"
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn observed_cycle(reset_at: i64, duration_seconds: i64, end: f64) -> Vec<QuotaSample> {
+        complete_cycle(reset_at, duration_seconds, end)
+            .into_iter()
+            .map(|sample| QuotaSample {
+                duration_source: DurationSource::Observed,
+                ..sample
+            })
+            .collect()
+    }
+
+    /// T0. A reset in the last tenth of the window is still an irregular reset.
+    ///
+    /// Coverage becomes satisfiable once the newest sample reaches `1 - b`,
+    /// which on a weekly window is 90% elapsed — roughly the final seventeen
+    /// hours. `group_already_closed` accepted that as proof the window had
+    /// finished, but `retention_cycle_descriptor` refuses any group whose reset
+    /// is still more than a quantum ahead of `now`. The two disagreed, so the
+    /// close was skipped as redundant and the following `retain_store` deleted
+    /// the group as incomplete: exactly the loss this change exists to stop,
+    /// surviving in the one part of the cycle where the window is most nearly
+    /// finished and therefore worth the most.
+    #[test]
+    fn a_reset_in_the_final_tenth_of_the_window_still_closes_it() {
+        let (directory, path) = temp_path("late-window-reset");
+        let duration = 7 * DAY;
+        let start = 10_080_000;
+        let reset = start + duration;
+        // Coverage passes on these: seven buckets, first at 0.01, last at 0.95,
+        // widest gap 0.20. The advertised reset is still 8.4 hours away.
+        record_partial_provider_window(
+            &path,
+            "acct",
+            reset,
+            duration,
+            start,
+            &[0.01, 0.15, 0.35, 0.55, 0.75, 0.90, 0.95],
+        );
+        let now = start + (0.95 * duration as f64) as i64;
+        assert!(reset > now, "the advertised reset must still be ahead");
+
+        record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&key("acct")),
+            &[observation(key("acct"), now + duration, 0.0, duration)],
+            now,
+            &path,
+        )
+        .unwrap();
+
+        let store = read_store(&path);
+        let closed = closed_observed_groups(&store.series[0], now);
+        assert_eq!(
+            closed.len(),
+            1,
+            "the window was dropped instead of closed: a coverage-complete group \
+             whose reset has not elapsed is not a finished window"
+        );
+        assert_eq!(closed[0].1.len(), 7, "closing must keep every sample");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// T0b. Guards the other arm of the same decision. When no evidence states
+    /// how long the successor lasts, its start cannot be inferred and the
+    /// handover cannot be dated. The conservative reading has to stand — a
+    /// coverage-complete group counts as finished — because closing on a guess
+    /// restamps healthy cycles, and `apply_observed_duration` reaches this with
+    /// `None` on the path where duration evidence is unavailable.
+    #[test]
+    fn an_undatable_handover_leaves_a_complete_cycle_alone() {
+        let (directory, path) = temp_path("undatable-handover");
+        let duration = 7 * DAY;
+        let completed_reset = 10_080_000 + duration;
+        let mut series = SeriesState::new(&key("acct"), completed_reset);
+        series.active_reset_at = Some(completed_reset);
+        series.last_activity_at = completed_reset;
+        series.samples = complete_cycle(completed_reset, duration, 80.0);
+        let before = series.samples.clone();
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![series],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        // No provider and no contract evidence: the duration is unavailable, so
+        // nothing can say where the successor window began.
+        let now = completed_reset + DAY;
+        record(&path, "acct", Some(now + duration), 5.0, now, None, None);
+
+        let after = read_store(&path);
+        let kept = after.series[0]
+            .samples
+            .iter()
+            .filter(|sample| {
+                normalize_reset(sample.reset_at, sample.duration_seconds)
+                    == normalize_reset(completed_reset, duration)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kept, before,
+            "an undatable handover restamped a cycle that had already finished"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// T1. `supersede_threshold`'s floor exists so that windows short enough for
+    /// it to govern keep exactly today's trigger point. Pinning only the
+    /// boundary would leave the rest of the range free to move, so this
+    /// compares the two predicates across it — below, at, and above one
+    /// quantum, and at gaps that are not multiples of one.
+    ///
+    /// The floor governs every window under 28 hours, so the sweep covers a
+    /// spread of them rather than the one duration that prompted the check.
+    #[test]
+    fn short_window_supersede_trigger_is_unchanged_at_every_gap() {
+        for duration in [HOUR, 5 * HOUR, 12 * HOUR, DAY] {
+            let quantum = duration_quantum(duration);
+            assert_eq!(
+                supersede_threshold(duration),
+                quantum,
+                "under 28h the fraction is below the quantum, so the floor must govern"
+            );
+            let base = 10_080_000;
+            for gap in [
+                0, 1, 29, 30, 31, 89, 90, 91, 179, 180, 181, 300, 359, 360, 900, 3600,
+            ] {
+                assert_eq!(
+                    reset_superseded(base, base + gap, duration),
+                    resets_differ_beyond_quantum(base, base + gap, duration),
+                    "supersede behaviour moved at duration {duration}s, gap {gap}s"
+                );
+            }
+        }
+    }
+
+    /// T2. The weekly figure, and the reason it is not the quantum. A rolling
+    /// reset that drifts twenty minutes inside one window must not manufacture
+    /// a closed cycle; a reset three hours out must.
+    ///
+    /// Both halves run the same fixture through the real transaction, so the
+    /// only difference is the advance. Restoring `!=` at the guard closes the
+    /// drifting case too and the first half fails.
+    #[test]
+    fn weekly_rolling_drift_closes_nothing_but_a_real_reset_closes_the_window() {
+        assert_eq!(supersede_threshold(7 * DAY), 30 * 60);
+        for (advance, expected_closed) in [(20 * 60, 0usize), (3 * 3600, 1usize)] {
+            let (directory, path) = temp_path(&format!("weekly-advance-{advance}"));
+            let duration = 7 * DAY;
+            let start = 10_080_000;
+            let reset = start + duration;
+            record_partial_provider_window(
+                &path,
+                "acct",
+                reset,
+                duration,
+                start,
+                &[0.01, 0.08, 0.16, 0.24, 0.32, 0.42],
+            );
+            let now = start + (0.42 * duration as f64) as i64;
+            record_observations_at_path_and_evaluate(
+                std::slice::from_ref(&key("acct")),
+                &[observation(key("acct"), reset + advance, 0.0, duration)],
+                now,
+                &path,
+            )
+            .unwrap();
+            let store = read_store(&path);
+            assert_eq!(
+                closed_observed_groups(&store.series[0], now).len(),
+                expected_closed,
+                "a {advance}s advance produced the wrong number of closed cycles"
+            );
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    /// T3. `successor_duration_from_series` answers "which stored group *is*
+    /// the successor" and must keep the quantum. It is a first match over a
+    /// `BTreeMap`, so widening it to the supersede threshold makes it take the
+    /// lowest key instead of the nearest one.
+    ///
+    /// The two candidates therefore carry *different* durations. With equal
+    /// durations a wrong match returns an identical `i64` and nothing can
+    /// observe it — the function never returns the group it chose.
+    #[test]
+    fn successor_lookup_takes_the_nearest_group_not_the_lowest_key() {
+        let nominal = 7 * DAY;
+        let cut_short = nominal / 8;
+        let base = 10_080_000;
+        let successor = base + 20 * 60;
+        // The decoy carries the *long* duration and the lower key. That
+        // arrangement is load-bearing: `supersede_threshold`'s floor governs
+        // every window under 28 hours, so a short-duration decoy would compute
+        // a 300-second threshold and a widened predicate would behave exactly
+        // like the quantum one — the mutation would survive and this test
+        // would prove nothing.
+        let mut series = SeriesState::new(&key("acct"), base);
+        series.samples = complete_cycle(base, nominal, 80.0);
+        series
+            .samples
+            .extend(observed_cycle(successor, cut_short, 12.0));
+        series.samples.sort_by(sample_order);
+        assert!(
+            !reset_superseded(base, successor, nominal),
+            "the decoy must fall inside the widened predicate, or the mutation \
+             has nothing to get wrong"
+        );
+        assert!(
+            resets_differ_beyond_quantum(base, successor, nominal),
+            "and outside the quantum one, or today's code is already wrong"
+        );
+        assert_eq!(
+            successor_duration_from_series(&series, successor),
+            Some(cut_short),
+            "the successor is the group at the queried reset, not the lower-keyed one"
+        );
+    }
+
+    /// T4. A cycle an irregular reset cut short stays visible and stays
+    /// counted, and never reaches the fit.
+    ///
+    /// Both halves are asserted on returned values: `complete_cycles` must
+    /// differ by exactly one, and the pace must be identical. Removing the
+    /// filter from `evaluate_current_from_series` while leaving
+    /// `advertised_nominal_duration` in place makes the two paces diverge.
+    #[test]
+    fn a_cut_short_cycle_is_counted_but_never_reaches_the_fit() {
+        let duration = 7 * DAY;
+        let now = 60 * DAY;
+        let current_reset = now + duration / 2;
+        let mut base = SeriesState::new(&key("acct"), now);
+        base.active_reset_at = Some(current_reset);
+        base.last_activity_at = now;
+        for index in 1..=5 {
+            base.samples
+                .extend(complete_cycle(now - index * duration, duration, 80.0));
+        }
+        base.samples.sort_by(sample_order);
+
+        let mut with_short = base.clone();
+        with_short
+            .samples
+            .extend(observed_cycle(now - duration / 2, duration / 8, 12.0));
+        with_short.samples.sort_by(sample_order);
+
+        let target = |series: &SeriesState| {
+            calculate_target(
+                &Store {
+                    schema_version: HISTORY_SCHEMA_VERSION,
+                    series: vec![series.clone()],
+                },
+                &key("acct"),
+                current_reset,
+                duration,
+                40.0,
+                now,
+            )
+        };
+        let plain = target(&base);
+        let extended = target(&with_short);
+
+        assert!(plain.pace.is_some(), "the baseline must produce a pace");
+        assert_eq!(
+            extended.complete_cycles,
+            plain.complete_cycles + 1,
+            "the cut-short window must still be counted and displayed"
+        );
+        assert_eq!(
+            extended.pace.map(|pace| pace.expected_percent),
+            plain.pace.map(|pace| pace.expected_percent),
+            "the cut-short window changed the fit, so it reached the fit"
+        );
+    }
+
+    /// T5. Guards the `None` arm. When nothing ever advertised a duration there
+    /// is no nominal for a cycle to fall short of, so a short cycle among long
+    /// ones must still be fitted.
+    ///
+    /// The durations are deliberately heterogeneous: with uniform ones the
+    /// filter is a no-op and replacing the `None` arm with a median over every
+    /// sample would go unnoticed. Under that mutation the short cycle here is
+    /// dropped and the pace moves.
+    #[test]
+    fn a_series_that_never_advertised_a_duration_fits_every_cycle() {
+        let duration = 7 * DAY;
+        let now = 60 * DAY;
+        let current_reset = now + duration / 2;
+        let mut base = SeriesState::new(&key("acct"), now);
+        base.active_reset_at = Some(current_reset);
+        base.last_activity_at = now;
+        for index in 1..=5 {
+            base.samples
+                .extend(observed_cycle(now - index * duration, duration, 80.0));
+        }
+        base.samples.sort_by(sample_order);
+        assert_eq!(
+            advertised_nominal_duration(&base),
+            None,
+            "no sample here advertises a duration"
+        );
+
+        let mut with_short = base.clone();
+        with_short
+            .samples
+            .extend(observed_cycle(now - duration / 2, duration / 8, 12.0));
+        with_short.samples.sort_by(sample_order);
+
+        let target = |series: &SeriesState| {
+            calculate_target(
+                &Store {
+                    schema_version: HISTORY_SCHEMA_VERSION,
+                    series: vec![series.clone()],
+                },
+                &key("acct"),
+                current_reset,
+                duration,
+                40.0,
+                now,
+            )
+        };
+        let plain = target(&base);
+        let extended = target(&with_short);
+        assert!(
+            plain.pace.is_some(),
+            "the baseline must produce a pace, or the comparison is vacuous"
+        );
+        // `extended` is deliberately allowed to be `None`: an unfitted short
+        // cycle does not merely bias the curve, it can push the residual past
+        // the quality gate and remove the estimate altogether. Either way the
+        // value moved, which is the whole claim.
+        assert_ne!(
+            extended.pace.map(|pace| pace.expected_percent),
+            plain.pace.map(|pace| pace.expected_percent),
+            "with no advertised nominal the short cycle must reach the fit"
+        );
+    }
+
+    /// V3. Uses a `Some` value even though nothing writes one yet: with only
+    /// `None` in play, a field that was dropped from the wire entirely would
+    /// still round-trip.
+    #[test]
+    fn the_plan_field_round_trips_through_the_wire_format() {
+        let sample = quota_sample(2_000_000, 7 * DAY, 0.5, 42.0, SampleOrigin::LiveV3);
+        let with_plan = QuotaSample {
+            plan: Some("pro".to_string()),
+            ..sample.clone()
+        };
+        for original in [sample, with_plan] {
+            let bytes = serde_json::to_vec(&original).unwrap();
+            let restored = serde_json::from_slice::<QuotaSample>(&bytes).unwrap();
+            assert_eq!(restored, original);
+        }
+    }
+
+    /// V6. Makes the one-way nature of the conversion falsifiable rather than
+    /// asserted in prose: a build that predates `plan` rejects a v4 file, so a
+    /// user who downgrades after their file has been rewritten loses the
+    /// history to quarantine. That is the cost the lazy upgrade defers — it
+    /// does not remove it.
+    #[test]
+    fn a_v3_reader_cannot_parse_a_v4_store() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct V3Sample {
+            reset_at: i64,
+            duration_seconds: i64,
+            duration_source: DurationSource,
+            used_percent: f64,
+            sampled_at: i64,
+            origin: SampleOrigin,
+        }
+
+        let v4 = serde_json::to_vec(&QuotaSample {
+            plan: None,
+            ..quota_sample(2_000_000, 7 * DAY, 0.5, 42.0, SampleOrigin::LiveV3)
+        })
+        .unwrap();
+        assert!(
+            serde_json::from_slice::<V3Sample>(&v4).is_err(),
+            "a v3 reader accepted a v4 sample, so this test proves nothing about the downgrade"
+        );
+    }
+
+    #[test]
+    fn writes_current_schema_sorted_series_and_exact_sample_fields() {
         let (directory, path) = temp_path("schema");
         let now = 1_000_000;
         let reset = now + 7 * DAY;
@@ -4950,6 +7938,202 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A fresh window reads 0% used, and the store used to reject it, so no
+    /// cycle ever recorded its own start: the first stored sample was always
+    /// after some consumption, and the span between the lowest and highest
+    /// reading understated every cycle by whatever had been spent before the
+    /// app first saw a non-zero number.
+    ///
+    /// Zero is a reading, not an absence. `enrich_snapshot_with` has already
+    /// dropped `PaceState::Unavailable`, an unparseable reset and any
+    /// non-finite value before it builds an observation, and its own range
+    /// check is inclusive — the store was the only layer disagreeing.
+    #[test]
+    fn a_fresh_window_records_its_own_zero() {
+        let (directory, path) = temp_path("zero-start");
+        let reset = 9_000_000 + 7 * DAY;
+        // Provider duration evidence, so the series is ready on the first poll
+        // rather than spending it learning the window length — which is the
+        // production case for every window that reports its own reset.
+        let provider = Some(DurationEvidence::provider(reset, 7 * DAY));
+        record(
+            &path,
+            "acct",
+            Some(reset),
+            0.0,
+            reset - 7 * DAY + 60,
+            provider,
+            None,
+        );
+        let store = read_store(&path);
+        assert_eq!(store.series[0].samples.len(), 1);
+        assert_eq!(store.series[0].samples[0].used_percent, 0.0);
+        // And the cycle's span now starts where the cycle did: a later reading
+        // makes the difference the full 30 points, not 30 minus whatever was
+        // spent before the first non-zero sample landed.
+        record(
+            &path,
+            "acct",
+            Some(reset),
+            30.0,
+            reset - 3 * DAY,
+            provider,
+            None,
+        );
+        let grown = read_store(&path);
+        let used: Vec<f64> = grown.series[0]
+            .samples
+            .iter()
+            .map(|sample| sample.used_percent)
+            .collect();
+        assert!(used.contains(&0.0) && used.contains(&30.0));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A fixed bucket count gives long windows coarse buckets: at 48, a 7-day
+    /// cycle buckets every 3.5 hours, so readings an hour apart replaced each
+    /// other and a freshly reset weekly window held one sample for hours while
+    /// its headline moved. The count now follows the duration — one bucket per
+    /// hour, floored at 48 so short windows are untouched and capped at 168.
+    /// Admitting the zero bought nothing while the in-bucket replacement could
+    /// overwrite it: a window that moves a point before its first bucket closes
+    /// puts the later reading in the same bucket, every replacement guard
+    /// passes, and the cycle starts at a nonzero minimum again — understating
+    /// `usedPercent` by exactly the amount the zero was recorded to capture.
+    #[test]
+    fn a_cycles_zero_survives_a_later_reading_in_its_bucket() {
+        let (directory, path) = temp_path("zero-not-replaced");
+        let reset = 9_000_000 + 5 * HOUR;
+        let provider = Some(DurationEvidence::provider(reset, 5 * HOUR));
+        let start = reset - 5 * HOUR;
+        record(&path, "acct", Some(reset), 0.0, start + 60, provider, None);
+        // Same bucket (5h / 48 = 6.25 minutes), later, and far enough above to
+        // clear the one-point replacement threshold.
+        record(&path, "acct", Some(reset), 4.0, start + 240, provider, None);
+        let store = read_store(&path);
+        let used: Vec<f64> = store.series[0]
+            .samples
+            .iter()
+            .map(|sample| sample.used_percent)
+            .collect();
+        assert_eq!(
+            used,
+            vec![0.0],
+            "the zero is kept, and the later reading in its bucket does not replace it"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn long_windows_bucket_by_the_hour() {
+        assert_eq!(phase_bucket_count(5 * HOUR), 48, "short windows unchanged");
+        assert_eq!(
+            phase_bucket_count(7 * DAY),
+            192,
+            "a weekly window is sub-hourly"
+        );
+        assert_eq!(
+            phase_bucket_count(30 * DAY),
+            192,
+            "and a monthly one is capped"
+        );
+        // The invariant that matters more than any of those numbers: every
+        // count is a whole multiple of the floor, so each grid NESTS inside the
+        // coarser one. A count that is not — 168, which is 3.5x — puts samples
+        // that 48 buckets separated into one cell, and `validate_series` reads
+        // a duplicate sample key as corruption, which quarantines the store.
+        // A resolution change then becomes a history wipe.
+        for seconds in [HOUR, 5 * HOUR, DAY, 2 * DAY, 7 * DAY, 30 * DAY, 400 * DAY] {
+            let count = phase_bucket_count(seconds);
+            assert_eq!(
+                count % PHASE_BUCKET_COUNT,
+                0,
+                "bucket count for {seconds}s must be a whole multiple of the floor"
+            );
+            assert!(count <= MAX_PHASE_BUCKET_COUNT);
+        }
+
+        // The behaviour the count exists for: two readings an hour apart inside
+        // a weekly cycle are two samples, not one replacing the other.
+        let (directory, path) = temp_path("hourly-buckets");
+        let reset = 9_000_000 + 7 * DAY;
+        let provider = Some(DurationEvidence::provider(reset, 7 * DAY));
+        record(
+            &path,
+            "acct",
+            Some(reset),
+            10.0,
+            reset - 5 * DAY,
+            provider,
+            None,
+        );
+        record(
+            &path,
+            "acct",
+            Some(reset),
+            12.0,
+            // An hour and a minute, not exactly an hour: a bucket boundary
+            // falls on every hour here, and `1 - 428400/604800` evaluates to
+            // 48.99999999999999 rather than 49, so a sample landing exactly on
+            // one is a knife-edge that says nothing about the rule. Real polls
+            // are a minute apart and never sit on the boundary.
+            reset - 5 * DAY + HOUR + 60,
+            provider,
+            None,
+        );
+        let store = read_store(&path);
+        assert_eq!(
+            store.series[0].samples.len(),
+            2,
+            "an hour apart is two buckets in a weekly cycle"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A duplicate sample key is one unusable SAMPLE, and quarantine discards
+    /// the whole FILE. Changing the bucket resolution once produced three
+    /// duplicates out of 2,775 samples and cost 31 series — every window back
+    /// to "learning history" — for data that was 99.9% intact.
+    #[test]
+    fn one_unplaceable_sample_does_not_discard_the_rest() {
+        let (directory, path) = temp_path("repair-not-quarantine");
+        let reset = 9_000_000 + 7 * DAY;
+        let duration = 7 * DAY;
+        let mut series = SeriesState::new(&key("acct"), reset - duration);
+        // Two readings the CURRENT bucket rule puts in one cell, which is what a
+        // resolution change produces from a store written under the old one.
+        // 0.100 and 0.101 of a 7-day cycle are ten minutes apart and share one
+        // 52.5-minute bucket, so they collide while still having an order —
+        // which is what makes "the newer one wins" testable at all.
+        series.samples = vec![
+            quota_sample(reset, duration, 0.100, 10.0, SampleOrigin::LiveV3),
+            quota_sample(reset, duration, 0.101, 11.0, SampleOrigin::LiveV3),
+            quota_sample(reset, duration, 0.500, 40.0, SampleOrigin::LiveV3),
+        ];
+        series.last_activity_at = reset - 60;
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+        fs::write(&path, serde_json::to_vec(&store).unwrap()).unwrap();
+
+        let loaded = load_store_at_with_mode(StorageMode::Generic, &path, reset, reset).unwrap();
+        assert!(
+            !loaded.quarantined,
+            "one unplaceable sample must not condemn the file"
+        );
+        let kept = &loaded.store.series[0].samples;
+        assert_eq!(kept.len(), 2, "the collision is dropped, the rest survives");
+        assert!(
+            kept.iter().any(|sample| sample.used_percent == 40.0),
+            "the sample in its own bucket is untouched"
+        );
+        // The newer reading wins the collision, matching `admit`'s replacement.
+        assert!(kept.iter().any(|sample| sample.used_percent == 11.0));
+        assert!(!path.with_extension("corrupt").exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn copilot_calendar_contract_accepts_exact_month_boundaries() {
         let (directory, path) = temp_path("copilot-calendar");
@@ -5102,6 +8286,7 @@ mod tests {
             used_percent: 10.0,
             sampled_at: sample_reset,
             origin: SampleOrigin::LiveV3,
+            plan: None,
         }];
         assert!(!validate_series(&series));
         series.last_activity_at = sample_reset + 60;
@@ -5164,11 +8349,24 @@ mod tests {
     }
 
     #[test]
-    fn future_last_activity_is_quarantined_before_observed_fallback() {
+    fn future_last_activity_is_repaired_not_quarantined() {
+        // This used to be the pre-repair quarantine fixture: a purely
+        // structural false-alarm — a metadata-only clock lead, no future
+        // sample, no rollover — that used to discard the sample below along
+        // with the rest of the store. The loader now repairs it in place.
         let (directory, path) = temp_path("future-activity");
         let now = 16_000_000;
         let lock_time = now + 1;
         let reset = now + DAY;
+        let existing_sample = QuotaSample {
+            reset_at: reset,
+            duration_seconds: DAY,
+            duration_source: DurationSource::Provider,
+            used_percent: 10.0,
+            sampled_at: now,
+            origin: SampleOrigin::LiveV3,
+            plan: None,
+        };
         let store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
             series: vec![SeriesState {
@@ -5178,14 +8376,7 @@ mod tests {
                 active_reset_at: Some(reset),
                 last_activity_at: lock_time + 1,
                 rollover: None,
-                samples: vec![QuotaSample {
-                    reset_at: reset,
-                    duration_seconds: DAY,
-                    duration_source: DurationSource::Provider,
-                    used_percent: 10.0,
-                    sampled_at: now,
-                    origin: SampleOrigin::LiveV3,
-                }],
+                samples: vec![existing_sample.clone()],
             }],
         };
         let bytes = serde_json::to_vec_pretty(&store).unwrap();
@@ -5195,13 +8386,20 @@ mod tests {
             record_at_lock_time(&path, "acct", Some(reset), 10.0, now, None, None, lock_time,),
             HistoryOutcome::LearningDuration
         );
-        assert_eq!(
-            fs::read(directory.join(format!("quota-pace-history-v3.corrupt-{now}.json"))).unwrap(),
-            bytes
+        assert!(
+            !directory
+                .join(format!("quota-pace-history-v3.corrupt-{now}.json"))
+                .exists(),
+            "a purely metadata-ahead series must not quarantine the store"
         );
         let recovered = read_store(&path);
-        assert_eq!(recovered.series[0].active_reset_at, None);
-        assert!(recovered.series[0].samples.is_empty());
+        assert_eq!(recovered.series.len(), 1);
+        assert_eq!(recovered.series[0].active_reset_at, Some(reset));
+        assert_eq!(
+            recovered.series[0].samples,
+            vec![existing_sample],
+            "the pre-existing sample must survive the repair"
+        );
         assert!(matches!(
             recovered.series[0].rollover,
             Some(ObservedState::Watching {
@@ -5265,6 +8463,819 @@ mod tests {
                 ..
             }) if reset_at == reset
         ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    // --- Clock disagreement is repaired per series, not quarantined
+    // wholesale. Contract and the four cross-baseline traps that shaped it:
+    // docs/knowledge/plans/provider-quota-pace.md, section
+    // "Clock disagreement is repaired, not quarantined".
+    // section 4 for the design this fixture set proves.
+
+    fn watching_rollover(reset_at: i64, first_seen_at: i64, last_seen_at: i64) -> ObservedState {
+        ObservedState::Watching {
+            reset_at,
+            first_seen_at,
+            last_seen_at,
+            consecutive_count: 1,
+        }
+    }
+
+    #[test]
+    fn clock_lead_incident_both_series_survive_with_every_sample_and_no_quarantine() {
+        let (directory, path) = temp_path("clock-incident");
+        let upper_bound = 20_000_000;
+        let observation_now = upper_bound;
+        let cycle_started_at = upper_bound - 3 * HOUR;
+        let duration_seconds = 5 * HOUR;
+        let reset = cycle_started_at + duration_seconds;
+
+        let session_samples = vec![
+            quota_sample(reset, duration_seconds, 0.10, 12.0, SampleOrigin::LiveV3),
+            quota_sample(reset, duration_seconds, 0.30, 30.0, SampleOrigin::LiveV3),
+            quota_sample(reset, duration_seconds, 0.55, 55.0, SampleOrigin::LiveV3),
+        ];
+        let session = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "session.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: session_samples.iter().map(|s| s.sampled_at).max().unwrap(),
+            rollover: None,
+            samples: session_samples.clone(),
+        };
+
+        let weekly_samples = vec![
+            quota_sample(reset, duration_seconds, 0.20, 20.0, SampleOrigin::LiveV3),
+            quota_sample(reset, duration_seconds, 0.45, 48.0, SampleOrigin::LiveV3),
+        ];
+        let lead_activity = upper_bound + 48;
+        let weekly = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "weekly.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: lead_activity,
+            rollover: Some(watching_rollover(reset, lead_activity - 120, lead_activity)),
+            samples: weekly_samples.clone(),
+        };
+
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![session.clone(), weekly],
+        };
+        store.series.sort_by(series_order);
+        assert!(!validate_store_at(&store, upper_bound)); // fails before the fix
+        let bytes = serde_json::to_vec_pretty(&store).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let loaded =
+            load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
+                .unwrap();
+        assert!(!loaded.quarantined);
+        assert!(validate_store_at(&loaded.store, upper_bound)); // passes after the fix
+        assert!(!directory
+            .join(format!(
+                "quota-pace-history-v3.corrupt-{observation_now}.json"
+            ))
+            .exists());
+
+        let recovered_session = loaded
+            .store
+            .series
+            .iter()
+            .find(|s| s.window_key == "session.v1")
+            .unwrap();
+        assert_eq!(
+            *recovered_session, session,
+            "sibling series must be untouched, field for field"
+        );
+
+        let recovered_weekly = loaded
+            .store
+            .series
+            .iter()
+            .find(|s| s.window_key == "weekly.v1")
+            .unwrap();
+        assert_eq!(
+            recovered_weekly.samples, weekly_samples,
+            "every sample survives"
+        );
+        assert_eq!(recovered_weekly.samples.len(), 2);
+        assert!(recovered_weekly.last_activity_at <= upper_bound);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn future_sample_evidence_drops_only_that_series() {
+        let (directory, path) = temp_path("clock-future-sample");
+        let upper_bound = 21_000_000;
+        let observation_now = upper_bound;
+        let reset = upper_bound + DAY;
+
+        let healthy_samples = vec![quota_sample(
+            reset,
+            2 * DAY,
+            0.10,
+            10.0,
+            SampleOrigin::LiveV3,
+        )];
+        let healthy = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "session.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: healthy_samples[0].sampled_at,
+            rollover: None,
+            samples: healthy_samples.clone(),
+        };
+
+        // This sample's own sampled_at leads the ceiling, which forces
+        // last_activity_at (>= every sample) to lead it too, per
+        // activity_valid — this series is structurally valid but
+        // unverifiable, not merely metadata-ahead.
+        let tainted_sample = QuotaSample {
+            reset_at: reset,
+            duration_seconds: 2 * DAY,
+            duration_source: DurationSource::Provider,
+            used_percent: 40.0,
+            sampled_at: upper_bound + 5,
+            origin: SampleOrigin::LiveV3,
+            plan: None,
+        };
+        let tainted = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "weekly.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: tainted_sample.sampled_at,
+            rollover: None,
+            samples: vec![tainted_sample],
+        };
+
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![healthy.clone(), tainted],
+        };
+        store.series.sort_by(series_order);
+        assert!(!validate_store_at(&store, upper_bound));
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+
+        let loaded =
+            load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
+                .unwrap();
+        assert!(!loaded.quarantined);
+        assert!(validate_store_at(&loaded.store, upper_bound));
+        assert_eq!(loaded.store.series.len(), 1);
+        assert_eq!(loaded.store.series[0], healthy, "sibling is untouched");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rollover_drop_per_variant_keeps_every_sample() {
+        let (directory, path) = temp_path("clock-rollover-variants");
+        let upper_bound = 22_000_000;
+        let observation_now = upper_bound;
+        let lead = upper_bound + 30;
+        let reset = upper_bound + DAY;
+
+        let sample = || quota_sample(reset, 2 * DAY, 0.10, 10.0, SampleOrigin::LiveV3);
+
+        let watching = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "watching.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: lead,
+            rollover: Some(watching_rollover(reset, lead - 100, lead)),
+            samples: vec![sample()],
+        };
+
+        // Ready's confirmed_at must land within ROLLOVER_GRACE_SECONDS of its
+        // own cycle_started_at (not of `lead`), so this cycle is built with
+        // its own well-separated reset rather than reusing `reset`.
+        let ready_cycle_started_at = upper_bound - DAY;
+        let ready_duration_seconds = 3 * DAY;
+        let ready_reset_at = ready_cycle_started_at + ready_duration_seconds;
+        let ready = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "ready.v1".into(),
+            active_reset_at: Some(ready_reset_at),
+            last_activity_at: lead,
+            rollover: Some(ObservedState::Ready {
+                cycle_started_at: ready_cycle_started_at,
+                reset_at: ready_reset_at,
+                duration_seconds: ready_duration_seconds,
+                confirmed_at: ready_cycle_started_at + 50,
+                last_seen_at: lead,
+            }),
+            samples: vec![sample()],
+        };
+
+        // Candidate has no last_seen_at at all; its activity timestamp for
+        // activity_valid is first_new_seen_at. Its confirmation window is
+        // ROLLOVER_GRACE_SECONDS around old_reset_at, so old_reset_at must
+        // sit close to upper_bound for first_new_seen_at (== lead, beyond
+        // upper_bound) to still fall inside that window.
+        let old_reset = upper_bound - 100;
+        let candidate = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "candidate.v1".into(),
+            active_reset_at: None,
+            last_activity_at: lead,
+            rollover: Some(ObservedState::Candidate {
+                old_reset_at: old_reset,
+                old_seen_at: old_reset - 60,
+                new_reset_at: reset,
+                first_new_seen_at: lead,
+            }),
+            samples: vec![sample()],
+        };
+
+        for series in [watching, ready, candidate] {
+            let store = Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![series.clone()],
+            };
+            assert!(!validate_store_at(&store, upper_bound));
+            fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+
+            let loaded =
+                load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
+                    .unwrap();
+            assert!(!loaded.quarantined, "{}", series.window_key);
+            assert!(
+                validate_store_at(&loaded.store, upper_bound),
+                "{}",
+                series.window_key
+            );
+            assert_eq!(loaded.store.series.len(), 1, "{}", series.window_key);
+            assert!(
+                loaded.store.series[0].rollover.is_none(),
+                "{} rollover must be dropped",
+                series.window_key
+            );
+            assert_eq!(
+                loaded.store.series[0].samples, series.samples,
+                "{} keeps every sample",
+                series.window_key
+            );
+        }
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn repaired_series_resumes_recording_in_same_transaction() {
+        let (directory, path) = temp_path("clock-resume-same-txn");
+        let observation_now = 23_000_000;
+        let lock_time = observation_now + 500;
+        let upper_bound = lock_time;
+        let reset = observation_now + DAY;
+        let duration_seconds = 2 * DAY;
+
+        let existing_sample = QuotaSample {
+            reset_at: reset,
+            duration_seconds,
+            duration_source: DurationSource::Provider,
+            used_percent: 5.0,
+            // Far enough from observation_now to land in a different
+            // phase bucket, so the new poll adds a sample rather than
+            // updating this one in place.
+            sampled_at: observation_now - 50_000,
+            origin: SampleOrigin::LiveV3,
+            plan: None,
+        };
+        let series = SeriesState {
+            provider_id: "copilot".into(),
+            account_scope: "acct".into(),
+            window_key: "premium_interactions.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: upper_bound + 10, // leads the ceiling
+            rollover: None,
+            samples: vec![existing_sample.clone()],
+        };
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+        assert!(!validate_store_at(&store, upper_bound));
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+
+        let outcome = record_at_lock_time(
+            &path,
+            "acct",
+            Some(reset),
+            10.0,
+            observation_now,
+            provider(reset, duration_seconds),
+            None,
+            lock_time,
+        );
+        assert!(
+            !matches!(outcome, HistoryOutcome::Ready { sampled: false, .. })
+                && !matches!(outcome, HistoryOutcome::Unavailable(_)),
+            "the repaired series must accept this poll's observation, got {outcome:?}"
+        );
+        assert!(!directory
+            .join(format!(
+                "quota-pace-history-v3.corrupt-{observation_now}.json"
+            ))
+            .exists());
+
+        let recovered = read_store(&path);
+        assert_eq!(recovered.series.len(), 1);
+        assert_eq!(
+            recovered.series[0].samples.len(),
+            2,
+            "recovery must not depend on any sibling series changing"
+        );
+        assert!(recovered.series[0]
+            .samples
+            .iter()
+            .any(|sample| sample.sampled_at == observation_now));
+        assert!(recovered.series[0].samples.contains(&existing_sample));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn repair_floor_binds_for_a_surviving_sample() {
+        let upper_bound = 100;
+        let observation_now = 50;
+        let sample = QuotaSample {
+            reset_at: 1_000,
+            duration_seconds: 1_000,
+            duration_source: DurationSource::Provider,
+            used_percent: 10.0,
+            sampled_at: 80, // strictly between observation_now and upper_bound
+            origin: SampleOrigin::LiveV3,
+            plan: None,
+        };
+        let series = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "session.v1".into(),
+            active_reset_at: None,
+            last_activity_at: upper_bound + 5,
+            rollover: None,
+            samples: vec![sample],
+        };
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+
+        let repaired = repair_store_at(store, upper_bound, observation_now);
+        assert_eq!(
+            repaired.series[0].last_activity_at, 80,
+            "floor must not clamp below the surviving sample"
+        );
+        assert!(validate_series(&repaired.series[0]));
+        assert!(validate_store_at(&repaired, upper_bound));
+    }
+
+    #[test]
+    fn clock_repair_loader_ignores_future_rollover_boundary() {
+        let (directory, path) = temp_path("clock-rollover-boundary");
+        let upper_bound = 32_000_000;
+        let observation_now = upper_bound - 100;
+        let rollover_activity = upper_bound - 50;
+        let far_reset = upper_bound + 10 * DAY;
+        let trigger = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "weekly.v1".into(),
+            active_reset_at: Some(far_reset),
+            last_activity_at: upper_bound + 5,
+            rollover: Some(watching_rollover(
+                far_reset,
+                rollover_activity - 10,
+                rollover_activity,
+            )),
+            samples: Vec::new(),
+        };
+        let sibling = SeriesState {
+            provider_id: "copilot".into(),
+            account_scope: "acct".into(),
+            window_key: "premium_interactions.v1".into(),
+            active_reset_at: None,
+            last_activity_at: upper_bound - 10,
+            rollover: None,
+            samples: Vec::new(),
+        };
+        let sibling_only = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![sibling.clone()],
+        };
+        assert!(validate_store_at(&sibling_only, upper_bound));
+
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![trigger.clone(), sibling.clone()],
+        };
+        store.series.sort_by(series_order);
+        assert!(validate_store(&store));
+        assert!(
+            !validate_store_at(&store, upper_bound),
+            "the trigger's observed activity must force the loader through repair"
+        );
+        let original_bytes = serde_json::to_vec_pretty(&store).unwrap();
+        fs::write(&path, &original_bytes).unwrap();
+
+        reset_save_call_count();
+        let loaded =
+            load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
+                .unwrap();
+        assert!(!loaded.quarantined);
+
+        let mut expected_trigger = trigger;
+        expected_trigger.last_activity_at = rollover_activity;
+        let mut expected = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![expected_trigger, sibling],
+        };
+        expected.series.sort_by(series_order);
+        assert_eq!(
+            loaded.store, expected,
+            "repair must retain a rollover whose activity is trusted even when its reset boundary is in the future"
+        );
+        assert!(validate_store_at(&loaded.store, upper_bound));
+        assert_eq!(save_call_count(), 0, "loader repair must remain zero-save");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original_bytes,
+            "loader repair must not rewrite fixture bytes"
+        );
+        assert!(!directory
+            .join(format!(
+                "quota-pace-history-v3.corrupt-{observation_now}.json"
+            ))
+            .exists());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn repair_gate_leaves_a_series_at_or_below_the_ceiling_untouched_and_unsaved() {
+        let (directory, path) = temp_path("clock-gate");
+        let observation_now = 30_000_000;
+        let lock_time = observation_now + 100;
+        let upper_bound = lock_time;
+        let reset = observation_now + DAY;
+        // observation_now < last_activity_at <= upper_bound: a healthy band,
+        // e.g. a fresh SeriesState::new() from a faster concurrent writer.
+        // No active_reset_at/rollover/samples: retain_series clears a stray
+        // active_reset_at whenever both are empty, which would look like an
+        // unrelated mutation and defeat the "no save occurs" assertion below.
+        let series = SeriesState {
+            provider_id: "copilot".into(),
+            account_scope: "acct".into(),
+            window_key: "premium_interactions.v1".into(),
+            active_reset_at: None,
+            last_activity_at: observation_now + 50,
+            rollover: None,
+            samples: Vec::new(),
+        };
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series.clone()],
+        };
+        assert!(
+            validate_store_at(&store, upper_bound),
+            "this store is already healthy"
+        );
+        let original_bytes = serde_json::to_vec_pretty(&store).unwrap();
+        fs::write(&path, &original_bytes).unwrap();
+
+        // Not a substitute for this fixture: there floor == last_activity_at,
+        // so an ungated clamp would be a no-op and this gate's absence would
+        // be invisible.
+        let outcome = record_at_lock_time(
+            &path,
+            "acct",
+            Some(reset),
+            10.0,
+            observation_now,
+            provider(reset, DAY),
+            None,
+            lock_time,
+        );
+        assert!(
+            matches!(outcome, HistoryOutcome::Ready { sampled: false, .. })
+                || matches!(outcome, HistoryOutcome::LearningDuration),
+            "an untouched series is above the body's clock and must reject as stale, got {outcome:?}"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original_bytes,
+            "a series at or below the ceiling must not be rewritten"
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn clock_repair_loader_preserves_sibling_at_upper_bound() {
+        let (directory, path) = temp_path("clock-gate-loader");
+        let upper_bound = 31_000_000;
+        let observation_now = upper_bound - 100;
+        let trigger = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "session.v1".into(),
+            active_reset_at: None,
+            last_activity_at: upper_bound + 50,
+            rollover: None,
+            samples: Vec::new(),
+        };
+        let sibling = SeriesState {
+            provider_id: "copilot".into(),
+            account_scope: "acct".into(),
+            window_key: "premium_interactions.v1".into(),
+            active_reset_at: None,
+            last_activity_at: upper_bound,
+            rollover: None,
+            samples: Vec::new(),
+        };
+        let sibling_only = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![sibling.clone()],
+        };
+        assert!(validate_store_at(&sibling_only, upper_bound));
+
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![trigger.clone(), sibling.clone()],
+        };
+        store.series.sort_by(series_order);
+        assert!(validate_store(&store));
+        assert!(
+            !validate_store_at(&store, upper_bound),
+            "the trigger must force the loader through repair"
+        );
+        let original_bytes = serde_json::to_vec_pretty(&store).unwrap();
+        fs::write(&path, &original_bytes).unwrap();
+
+        reset_save_call_count();
+        let loaded =
+            load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
+                .unwrap();
+        assert!(!loaded.quarantined);
+
+        let mut expected_trigger = trigger;
+        expected_trigger.last_activity_at = observation_now;
+        let mut expected = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![expected_trigger, sibling],
+        };
+        expected.series.sort_by(series_order);
+        assert_eq!(
+            loaded.store, expected,
+            "repair must not lower a sibling timestamp at the inclusive ceiling"
+        );
+        assert!(validate_store_at(&loaded.store, upper_bound));
+        assert_eq!(save_call_count(), 0, "loader repair must remain zero-save");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original_bytes,
+            "loader repair must not rewrite fixture bytes"
+        );
+        assert!(!directory
+            .join(format!(
+                "quota-pace-history-v3.corrupt-{observation_now}.json"
+            ))
+            .exists());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn healthy_store_with_far_future_reset_at_is_untouched_no_repair_no_save() {
+        let (directory, path) = temp_path("clock-healthy");
+        let upper_bound = 24_000_000;
+        let observation_now = upper_bound;
+        let far_reset = upper_bound + 30 * DAY; // days beyond upper_bound, as normal
+                                                // A cycle that started well before upper_bound, so the sample's own
+                                                // sampled_at (unlike the far-future reset_at boundary) stays behind
+                                                // the ceiling.
+        let sample = QuotaSample {
+            reset_at: far_reset,
+            duration_seconds: 60 * DAY,
+            duration_source: DurationSource::Provider,
+            used_percent: 8.0,
+            sampled_at: upper_bound - 20,
+            origin: SampleOrigin::LiveV3,
+            plan: None,
+        };
+        let series = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "weekly.v1".into(),
+            active_reset_at: Some(far_reset),
+            last_activity_at: upper_bound - 10,
+            rollover: Some(watching_rollover(
+                far_reset,
+                upper_bound - 200,
+                upper_bound - 10,
+            )),
+            samples: vec![sample],
+        };
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series.clone()],
+        };
+        assert!(validate_store_at(&store, upper_bound));
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+
+        let loaded =
+            load_store_at_with_mode(StorageMode::Generic, &path, upper_bound, observation_now)
+                .unwrap();
+        assert!(!loaded.quarantined);
+        assert_eq!(loaded.store, store, "no repair on an already-healthy store");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn structural_corruption_still_quarantines_under_the_new_loader_branch() {
+        let (directory, path) = temp_path("clock-structural");
+        let now = 25_000_000;
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION + 1, // structural: wrong schema
+            series: Vec::new(),
+        };
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+
+        let loaded = load_store_at_with_mode(StorageMode::Generic, &path, now, now).unwrap();
+        assert!(loaded.quarantined);
+        assert_eq!(loaded.store, Store::default());
+        assert!(directory
+            .join(format!("quota-pace-history-v3.corrupt-{now}.json"))
+            .exists());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn malformed_json_still_quarantines_under_the_new_loader_branch() {
+        let (directory, path) = temp_path("clock-malformed");
+        let now = 26_000_000;
+        fs::write(&path, b"{not-json-at-all").unwrap();
+
+        let loaded = load_store_at_with_mode(StorageMode::Generic, &path, now, now).unwrap();
+        assert!(loaded.quarantined);
+        assert_eq!(loaded.store, Store::default());
+        assert!(directory
+            .join(format!("quota-pace-history-v3.corrupt-{now}.json"))
+            .exists());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn repair_is_a_fixed_point() {
+        let upper_bound = 27_000_000;
+        let observation_now = upper_bound - 1_000;
+        let reset = upper_bound + DAY;
+        let lead = upper_bound + 60;
+        let series = SeriesState {
+            provider_id: "claude".into(),
+            account_scope: "acct".into(),
+            window_key: "weekly.v1".into(),
+            active_reset_at: Some(reset),
+            last_activity_at: lead,
+            rollover: Some(watching_rollover(reset, lead - 100, lead)),
+            samples: vec![quota_sample(
+                reset,
+                2 * DAY,
+                0.10,
+                20.0,
+                SampleOrigin::LiveV3,
+            )],
+        };
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+
+        let once = repair_store_at(store.clone(), upper_bound, observation_now);
+        let twice = repair_store_at(once.clone(), upper_bound, observation_now);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn stale_caller_does_not_fit_active_samples_from_its_future() {
+        let (directory, path) = temp_path("stale-caller-future-fit");
+        let duration = DAY;
+        let cycle_start = 17_100_000;
+        let reset_at = cycle_start + duration;
+        let key = test_key("fixture", "stale-scope", "window.v1");
+        let mut newest_result = None;
+        for phase in [0.10, 0.20, 0.30, 0.40, 0.50, 0.60] {
+            let now = cycle_start + (phase * duration as f64) as i64;
+            let results = record_observations_at_path_and_evaluate(
+                std::slice::from_ref(&key),
+                &[observation(key.clone(), reset_at, phase * 80.0, duration)],
+                now,
+                &path,
+            )
+            .unwrap();
+            newest_result = Some(results[0].as_ref().unwrap().clone());
+        }
+        let (_, newest_pace, complete_cycles) = newest_result.unwrap();
+        assert_eq!(complete_cycles, 0);
+        assert!(newest_pace.is_some());
+
+        let stale_now = cycle_start + (0.05 * duration as f64) as i64;
+        let results = record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&key),
+            &[observation(key.clone(), reset_at, 4.0, duration)],
+            stale_now,
+            &path,
+        )
+        .unwrap();
+        let (outcome, stale_pace, complete_cycles) = results[0].as_ref().unwrap();
+        assert!(matches!(
+            outcome,
+            HistoryOutcome::Ready { sampled: false, .. }
+        ));
+        assert_eq!(*complete_cycles, 0);
+        assert!(stale_pace.is_none());
+
+        let store = read_store(&path);
+        assert_eq!(store.series[0].samples.len(), 6);
+        assert!(store.series[0]
+            .samples
+            .iter()
+            .all(|sample| sample.sampled_at > stale_now));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_previous_cycle_caller_preserves_newer_completed_history() {
+        let (directory, path) = temp_path("stale-previous-cycle-retention");
+        let duration = DAY;
+        let completed_reset = 17_200_000 + duration;
+        let active_reset = completed_reset + duration;
+        let key = test_key("fixture", "stale-rollover-scope", "window.v1");
+        let active_phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60];
+        let mut series = current_series(&key, active_reset, duration, &active_phases, 80.0);
+        let completed = complete_cycle(completed_reset, duration, 80.0);
+        let completed_sample_count = completed.len();
+        series.samples.extend(completed);
+        series.samples.sort_by(sample_order);
+        let newer_last_activity = series.last_activity_at;
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![series],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let stale_now = completed_reset - duration / 20;
+        let results = record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&key),
+            &[observation(key.clone(), completed_reset, 76.0, duration)],
+            stale_now,
+            &path,
+        )
+        .unwrap();
+        let (outcome, pace, _) = results[0].as_ref().unwrap();
+        assert!(matches!(
+            outcome,
+            HistoryOutcome::Ready { sampled: false, .. }
+        ));
+        assert!(pace.is_none());
+
+        let store = read_store(&path);
+        assert_eq!(store.series[0].last_activity_at, newer_last_activity);
+        assert_eq!(
+            store.series[0]
+                .samples
+                .iter()
+                .filter(|sample| {
+                    normalize_reset(sample.reset_at, sample.duration_seconds)
+                        == normalize_reset(completed_reset, duration)
+                })
+                .count(),
+            completed_sample_count
+        );
+        assert_eq!(
+            store.series[0]
+                .samples
+                .iter()
+                .filter(|sample| is_active_group_sample(active_reset, sample))
+                .count(),
+            active_phases.len()
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -5549,6 +9560,413 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    fn record_partial_provider_window(
+        path: &Path,
+        account: &str,
+        reset_at: i64,
+        duration_seconds: i64,
+        start: i64,
+        phases: &[f64],
+    ) {
+        for phase in phases {
+            let sampled_at = start + (*phase * duration_seconds as f64) as i64;
+            let used = (*phase * 100.0).max(1.0);
+            assert!(matches!(
+                record(
+                    path,
+                    account,
+                    Some(reset_at),
+                    used,
+                    sampled_at,
+                    provider(reset_at, duration_seconds),
+                    None,
+                ),
+                HistoryOutcome::Ready { sampled: true, .. }
+            ));
+        }
+    }
+
+    fn closed_observed_groups<'a>(
+        series: &'a SeriesState,
+        _now: i64,
+    ) -> Vec<(i64, Vec<&'a QuotaSample>)> {
+        let active = series.active_reset_at;
+        let mut groups: BTreeMap<i64, Vec<&QuotaSample>> = BTreeMap::new();
+        for sample in &series.samples {
+            if sample.duration_source != DurationSource::Observed {
+                continue;
+            }
+            if active.is_some_and(|reset| is_active_group_sample(reset, sample)) {
+                continue;
+            }
+            groups
+                .entry(normalize_reset(sample.reset_at, sample.duration_seconds))
+                .or_default()
+                .push(sample);
+        }
+        groups.into_iter().collect()
+    }
+
+    #[test]
+    fn early_session_reset_restamps_elapsed_window_and_keeps_it_if_complete() {
+        let (directory, path) = temp_path("early-session-reset");
+        let duration = 5 * HOUR;
+        let start = 10_080_000;
+        let reset = start + duration;
+        let phases = [0.01, 0.08, 0.16, 0.24, 0.32, 0.40];
+        record_partial_provider_window(&path, "acct", reset, duration, start, &phases);
+        let close_now = start + (0.40 * duration as f64) as i64;
+        let new_reset = close_now + duration;
+        let results = record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&key("acct")),
+            &[observation(key("acct"), new_reset, 0.0, duration)],
+            close_now,
+            &path,
+        )
+        .unwrap();
+        let (_, _, complete_cycles) = results[0].as_ref().unwrap();
+        let store = read_store(&path);
+        let series = &store.series[0];
+        let closed = closed_observed_groups(series, close_now);
+        assert_eq!(closed.len(), 1, "old points become one observed cycle");
+        let (closed_reset, closed_samples) = &closed[0];
+        let closed_duration = closed_samples[0].duration_seconds;
+        assert!(
+            *closed_reset <= close_now + duration_quantum(closed_duration),
+            "closed reset may quantize one duration-quantum past now"
+        );
+        assert!(
+            (closed_duration - (close_now - start)).abs() <= 60,
+            "observed duration tracks elapsed time, got {closed_duration}"
+        );
+        assert!(closed_samples
+            .iter()
+            .all(|sample| sample.duration_source == DurationSource::Observed));
+        let cloned = closed_samples
+            .iter()
+            .map(|sample| (*sample).clone())
+            .collect::<Vec<_>>();
+        assert!(
+            retention_cycle_descriptor(*closed_reset, &cloned, close_now).is_some()
+                || series.samples.iter().any(|sample| {
+                    sample.duration_source == DurationSource::Observed
+                        && sample.reset_at <= close_now
+                })
+        );
+        assert!(
+            *complete_cycles >= 1
+                || retention_cycle_descriptor(*closed_reset, &cloned, close_now).is_some()
+        );
+        assert!(
+            series
+                .samples
+                .iter()
+                .any(|sample| sample.used_percent == 0.0
+                    && normalize_reset(sample.reset_at, sample.duration_seconds) != *closed_reset),
+            "schema-4 zero is the new cycle start, not the old close"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn weekly_goodwill_reset_keeps_a_three_day_closed_cycle() {
+        let (directory, path) = temp_path("weekly-goodwill-reset");
+        let duration = 7 * DAY;
+        let start = 10_080_000;
+        let reset = start + duration;
+        let phases = [0.01, 0.08, 0.16, 0.24, 0.32, 0.42];
+        record_partial_provider_window(&path, "acct", reset, duration, start, &phases);
+        let close_now = start + (0.42 * duration as f64) as i64;
+        let new_reset = close_now + duration;
+        let results = record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&key("acct")),
+            &[observation(key("acct"), new_reset, 0.0, duration)],
+            close_now,
+            &path,
+        )
+        .unwrap();
+        let (_, _, complete_cycles) = results[0].as_ref().unwrap();
+        let store = read_store(&path);
+        let closed = closed_observed_groups(&store.series[0], close_now);
+        assert_eq!(closed.len(), 1);
+        let closed_duration = closed[0].1[0].duration_seconds;
+        assert!(
+            (closed_duration - 3 * DAY).abs() < DAY,
+            "day-3 goodwill should close near 3d, got {closed_duration}"
+        );
+        assert!(
+            *complete_cycles >= 1,
+            "the ~3d window must be retained as a complete cycle"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn missed_zero_still_closes_at_the_new_cycle_start_without_folding_idle_time() {
+        let (directory, path) = temp_path("missed-zero-no-idle");
+        let duration = 5 * HOUR;
+        let start = 10_080_000;
+        let reset = start + duration;
+        let phases = [0.01, 0.08, 0.16, 0.24, 0.32, 0.40];
+        record_partial_provider_window(&path, "acct", reset, duration, start, &phases);
+        let last_old = start + (0.40 * duration as f64) as i64;
+        let idle = duration / 10;
+        let now = last_old + idle;
+        let new_reset = last_old + duration;
+        record(
+            &path,
+            "acct",
+            Some(new_reset),
+            10.0,
+            now,
+            provider(new_reset, duration),
+            None,
+        );
+        let store = read_store(&path);
+        let closed = closed_observed_groups(&store.series[0], now);
+        assert_eq!(closed.len(), 1);
+        let closed_duration = closed[0].1[0].duration_seconds;
+        let elapsed = last_old - start;
+        assert!(
+            (closed_duration - elapsed).abs() <= 60,
+            "idle time in the new window must not lengthen the old one: elapsed={elapsed} got={closed_duration}"
+        );
+        assert!(
+            closed_duration + idle / 2 < now - start,
+            "close_at must use the new cycle start, not now"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn upgrade_repair_restamps_before_first_retain_when_another_series_is_emitted() {
+        let (directory, path) = temp_path("upgrade-repair-other-series");
+        let duration = 5 * HOUR;
+        let start = 10_080_000;
+        let old_reset = start + duration;
+        let last_old = start + (0.40 * duration as f64) as i64;
+        let now = last_old;
+        let new_reset = now + duration;
+        let samples = [0.01, 0.08, 0.16, 0.24, 0.32, 0.40]
+            .into_iter()
+            .enumerate()
+            .map(|(index, phase)| {
+                quota_sample(
+                    old_reset,
+                    duration,
+                    phase,
+                    10.0 + index as f64,
+                    SampleOrigin::LiveV3,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut series = SeriesState::new(&key("acct"), now);
+        series.active_reset_at = Some(new_reset);
+        series.last_activity_at = now;
+        series.rollover = Some(watching_rollover(new_reset, now, now));
+        series.samples = samples;
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+
+        let other = key("other");
+        let other_reset = now + duration;
+        record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&other),
+            &[observation(other.clone(), other_reset, 10.0, duration)],
+            now,
+            &path,
+        )
+        .unwrap();
+        let after = read_store(&path);
+        let repaired = after
+            .series
+            .iter()
+            .find(|series| series.key() == key("acct"))
+            .expect("upgraded series survives first retain");
+        let closed = closed_observed_groups(repaired, now);
+        assert_eq!(closed.len(), 1);
+        assert!(
+            !closed[0].1.is_empty(),
+            "remaining points are restamped, not deleted"
+        );
+        let first_snapshot = repaired.samples.clone();
+
+        record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&other),
+            &[observation(other.clone(), other_reset, 11.0, duration)],
+            now,
+            &path,
+        )
+        .unwrap();
+        let second = read_store(&path);
+        let repaired_again = second
+            .series
+            .iter()
+            .find(|series| series.key() == key("acct"))
+            .unwrap();
+        assert_eq!(
+            repaired_again.samples, first_snapshot,
+            "second load is a fixed point"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn upgrade_repair_does_not_invent_a_cycle_when_old_points_are_gone() {
+        let (directory, path) = temp_path("upgrade-repair-pruned");
+        let duration = 5 * HOUR;
+        let start = 10_080_000;
+        let now = start + HOUR;
+        let new_reset = start + duration;
+        let samples = [0.10, 0.20]
+            .into_iter()
+            .map(|phase| {
+                quota_sample(
+                    new_reset,
+                    duration,
+                    phase,
+                    phase * 100.0,
+                    SampleOrigin::LiveV3,
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut series = SeriesState::new(&key("acct"), now);
+        series.active_reset_at = Some(new_reset);
+        series.last_activity_at = now;
+        series.rollover = Some(watching_rollover(new_reset, now, now));
+        series.samples = samples.clone();
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+        let other = key("other");
+        record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&other),
+            &[observation(other.clone(), now + duration, 10.0, duration)],
+            now,
+            &path,
+        )
+        .unwrap();
+        let after = read_store(&path);
+        let kept = after
+            .series
+            .iter()
+            .find(|series| series.key() == key("acct"))
+            .unwrap();
+        assert_eq!(kept.samples.len(), samples.len());
+        assert!(kept.samples.iter().all(|sample| {
+            sample.duration_source == DurationSource::Provider
+                && sample.duration_seconds == duration
+        }));
+        assert!(closed_observed_groups(kept, now).is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn floating_unused_zero_does_not_fabricate_a_complete_cycle() {
+        let (directory, path) = temp_path("floating-zero-no-cycle");
+        let duration = 5 * HOUR;
+        let now = 10_080_000;
+        let reset = now + duration;
+        let results = record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&key("acct")),
+            &[observation(key("acct"), reset, 0.0, duration)],
+            now,
+            &path,
+        )
+        .unwrap();
+        let (_, _, complete_cycles) = results[0].as_ref().unwrap();
+        assert_eq!(*complete_cycles, 0);
+        let store = read_store(&path);
+        assert_eq!(store.series[0].samples.len(), 1);
+        assert_eq!(store.series[0].samples[0].used_percent, 0.0);
+        assert!(closed_observed_groups(&store.series[0], now).is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn on_time_complete_group_is_not_restamped() {
+        let (directory, path) = temp_path("on-time-complete-no-restamp");
+        let duration = 5 * HOUR;
+        let old_reset = 10_080_000;
+        let samples = complete_cycle(old_reset, duration, 80.0);
+        let last_activity = samples
+            .iter()
+            .map(|sample| sample.sampled_at)
+            .max()
+            .unwrap();
+        let now = old_reset;
+        let mut series = SeriesState::new(&key("acct"), last_activity);
+        series.active_reset_at = Some(old_reset);
+        series.last_activity_at = last_activity;
+        series.rollover = Some(watching_rollover(old_reset, last_activity, last_activity));
+        series.samples = samples.clone();
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+        let new_reset = old_reset + duration;
+        record(
+            &path,
+            "acct",
+            Some(new_reset),
+            0.0,
+            now,
+            provider(new_reset, duration),
+            None,
+        );
+        let after = read_store(&path);
+        let historical = after.series[0]
+            .samples
+            .iter()
+            .filter(|sample| {
+                normalize_reset(sample.reset_at, sample.duration_seconds)
+                    == normalize_reset(old_reset, duration)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(historical.len(), samples.len());
+        assert!(historical.iter().all(|sample| {
+            sample.duration_source == DurationSource::Provider
+                && sample.duration_seconds == duration
+        }));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn eight_minute_pulse_is_still_not_complete_after_early_reset() {
+        let (directory, path) = temp_path("eight-minute-pulse");
+        let duration = 8 * 60;
+        let start = 10_080_000;
+        let reset = start + duration;
+        record_partial_provider_window(&path, "acct", reset, duration, start, &[0.20, 0.40, 0.60]);
+        let close_now = start + (0.60 * duration as f64) as i64;
+        let new_reset = close_now + duration;
+        let results = record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&key("acct")),
+            &[observation(key("acct"), new_reset, 0.0, duration)],
+            close_now,
+            &path,
+        )
+        .unwrap();
+        let (_, _, complete_cycles) = results[0].as_ref().unwrap();
+        assert_eq!(*complete_cycles, 0);
+        let store = read_store(&path);
+        let closed = closed_observed_groups(&store.series[0], close_now);
+        if let Some((reset_at, samples)) = closed.first() {
+            let cloned = samples
+                .iter()
+                .map(|sample| (*sample).clone())
+                .collect::<Vec<_>>();
+            assert!(retention_cycle_descriptor(*reset_at, &cloned, close_now).is_none());
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn later_backward_observation_restarts_learning_after_newer_commit() {
         let (directory, path) = temp_path("later-backward");
@@ -5664,6 +10082,7 @@ mod tests {
             used_percent: 10.0,
             sampled_at,
             origin: SampleOrigin::LiveV3,
+            plan: None,
         };
         assert!(validate_sample(&sample(reset - DAY)));
         assert!(validate_sample(&sample(reset - 1)));
@@ -5675,7 +10094,7 @@ mod tests {
     #[test]
     fn invalid_series_key_never_creates_store() {
         let (directory, path) = temp_path("key");
-        let invalid = SeriesKey::new("provider", "", "window.v1");
+        let invalid = test_key("provider", "", "window.v1");
         let result = record_observation_at_path(
             invalid,
             Some(10_000 + DAY),
@@ -5747,7 +10166,7 @@ mod tests {
         let now = 8_000_000_000_i64;
         let duration = DAY;
         let current_reset = now + duration;
-        let key = SeriesKey::new("fixture", "scope", "window.v1");
+        let key = test_key("fixture", "scope", "window.v1");
         let mut series = seeded_series(
             &key.provider_id,
             &key.account_scope,
@@ -5795,7 +10214,7 @@ mod tests {
         for duration in durations {
             let now = 1_000_000_000;
             let current_reset = now + duration;
-            let key = SeriesKey::new("fixture", "opaque", "quota.v1");
+            let key = test_key("fixture", "opaque", "quota.v1");
             let expected_cycles = if duration < DAY { 6 } else { 3 };
             let mature_cycles = if duration < DAY { 36 } else { 5 };
             let mut series = seeded_series(
@@ -5828,16 +10247,13 @@ mod tests {
                 .expect("five complete cycles pass expected and risk gates");
             assert!(mature
                 .run_out_probability
-                .is_some_and(|probability| (0.0..=1.0).contains(&probability)));
+                .is_none_or(|probability| (0.0..=1.0).contains(&probability)));
         }
     }
 
     #[test]
     fn evaluator_partial_coverage_gap_and_exact_half_tie_are_fail_closed() {
-        assert_eq!(
-            crate::agent_history::weighted_median(&[10.0, 20.0], &[1.0, 1.0]),
-            10.0
-        );
+        assert_eq!(weighted_median(&[10.0, 20.0], &[1.0, 1.0]), 10.0);
         let reset = 2_000_000;
         let duration = 7 * DAY;
         let mut samples = complete_cycle(reset, duration, 80.0);
@@ -5871,6 +10287,60 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(cycle_profile(reset, &middle_only, reset + 1).is_none());
+    }
+
+    #[test]
+    fn a_record_group_cannot_spend_the_cycle_budget() {
+        let duration = 7 * DAY;
+        let now = 3_000_000_000;
+        let current_reset = now + duration;
+        // Twelve cycles against a budget of eight, so the budget is saturated.
+        // That is the only state where the two budgets differ, and it is where
+        // a real store lives: `claude/session.v1` on the store behind #370
+        // holds 133 groups against a cap of 128.
+        let mut without = seeded_series("provider", "scope", "window.v1", current_reset, duration, 12);
+        let mut with = without.clone();
+
+        // Newer than the oldest cycle the budget keeps, so a shared budget
+        // would have let it evict that cycle. Substantial — six distinct
+        // buckets — and unmodellable, because it stops at phase 0.75 and
+        // `cycle_meets_retention_coverage` wants the last reading past 0.90.
+        let partial_reset = current_reset - duration * 3 / 2;
+        with.samples.extend([0.01, 0.10, 0.25, 0.40, 0.60, 0.75].into_iter().map(|phase| {
+            quota_sample(
+                partial_reset,
+                duration,
+                phase,
+                40.0 * phase + 1.0,
+                SampleOrigin::LiveV3,
+            )
+        }));
+
+        retain_series(&mut without, now);
+        retain_series(&mut with, now);
+
+        // Control: the record survives. Without this the equality below is
+        // satisfied by retention having thrown the record away, which is the
+        // behaviour this change exists to stop.
+        let partial_group = normalize_reset(partial_reset, duration);
+        assert!(
+            with.samples.iter().any(|sample| {
+                normalize_reset(sample.reset_at, sample.duration_seconds) == partial_group
+            }),
+            "the record group must survive, or this proves nothing"
+        );
+        // Control: the cycle budget really is full, so a displacement had
+        // somewhere to happen.
+        assert_eq!(
+            retention_cycles(&without, now).len(),
+            RETENTION_MIN_CYCLES,
+            "fixture must saturate the cycle budget"
+        );
+        assert_eq!(
+            retention_cycles(&with, now).len(),
+            retention_cycles(&without, now).len(),
+            "a record must not cost the model a cycle"
+        );
     }
 
     #[test]
@@ -5933,11 +10403,12 @@ mod tests {
                     used_percent: 10.0,
                     sampled_at: now - DAY,
                     origin: SampleOrigin::LiveV3,
+                    plan: None,
                 }],
             });
         }
         store.series.sort_by(series_order);
-        let active = BTreeSet::from([SeriesKey::new("provider", "scope-active", "window.v1")]);
+        let active = BTreeSet::from([test_key("provider", "scope-active", "window.v1")]);
         evict_inactive_series(&mut store, &active, now).unwrap();
         assert_eq!(store.series.len(), MAX_SERIES);
         assert!(!store
@@ -5993,11 +10464,11 @@ mod tests {
     fn batch_emitted_existing_without_observation_stays_active() {
         let (directory, path) = temp_path("batch-emitted-active");
         let now = 5_250_000_000_i64;
-        let emitted = SeriesKey::new("provider", "scope-0000", "window.v1");
+        let emitted = test_key("provider", "scope-0000", "window.v1");
         let mut store = Store::default();
         for index in 0..=MAX_SERIES {
             store.series.push(batch_series(
-                SeriesKey::new("provider", format!("scope-{index:04}"), "window.v1"),
+                test_key("provider", format!("scope-{index:04}"), "window.v1"),
                 now,
                 None,
             ));
@@ -6027,14 +10498,14 @@ mod tests {
     fn batch_observation_key_protects_existing_history_without_explicit_emission() {
         let (directory, path) = temp_path("batch-observation-active");
         let now = 5_275_000_000_i64;
-        let existing = SeriesKey::new("provider", "scope-0000", "window.v1");
+        let existing = test_key("provider", "scope-0000", "window.v1");
         let mut store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
             series: vec![batch_series(existing.clone(), now, None)],
         };
         for index in 1..=MAX_SERIES {
             store.series.push(batch_series(
-                SeriesKey::new("provider", format!("scope-{index:04}"), "window.v1"),
+                test_key("provider", format!("scope-{index:04}"), "window.v1"),
                 now,
                 None,
             ));
@@ -6084,7 +10555,7 @@ mod tests {
         let idle = now - 57 * DAY;
         for (label, candidate) in [("watching", false), ("candidate", true)] {
             let (directory, path) = temp_path(&format!("stale-rollover-{label}"));
-            let stale_key = SeriesKey::new("provider", format!("stale-{label}"), "window.v1");
+            let stale_key = test_key("provider", format!("stale-{label}"), "window.v1");
             let mut store = Store {
                 schema_version: HISTORY_SCHEMA_VERSION,
                 series: vec![rollover_only_series(
@@ -6096,7 +10567,7 @@ mod tests {
             };
             for index in 0..MAX_SERIES - 1 {
                 store.series.push(batch_series(
-                    SeriesKey::new("provider", format!("active-{index:04}"), "window.v1"),
+                    test_key("provider", format!("active-{index:04}"), "window.v1"),
                     now,
                     Some(now + DAY),
                 ));
@@ -6104,7 +10575,7 @@ mod tests {
             store.series.sort_by(series_order);
             fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
 
-            let new_key = SeriesKey::new("provider", format!("new-{label}"), "window.v1");
+            let new_key = test_key("provider", format!("new-{label}"), "window.v1");
             let results = record_observations_at_path_and_evaluate(
                 &[],
                 &[observation(new_key.clone(), now + DAY, 10.0, DAY)],
@@ -6129,7 +10600,7 @@ mod tests {
         let now = 5_300_000_000_i64;
         let future_reset = now + 90 * DAY;
         let (directory, path) = temp_path("rollover-boundary-55d");
-        let key = SeriesKey::new("provider", "boundary-55d", "window.v1");
+        let key = test_key("provider", "boundary-55d", "window.v1");
         let store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
             series: vec![rollover_only_series(
@@ -6148,7 +10619,7 @@ mod tests {
 
         for (label, candidate) in [("watching", false), ("candidate", true)] {
             let (directory, path) = temp_path(&format!("rollover-boundary-{label}"));
-            let key = SeriesKey::new("provider", format!("boundary-{label}"), "window.v1");
+            let key = test_key("provider", format!("boundary-{label}"), "window.v1");
             let stale_store = Store {
                 schema_version: HISTORY_SCHEMA_VERSION,
                 series: vec![rollover_only_series(
@@ -6178,21 +10649,21 @@ mod tests {
     fn batch_existing_future_active_series_precedes_new_candidate() {
         let (directory, path) = temp_path("batch-existing-active");
         let now = 5_300_000_000_i64;
-        let active = SeriesKey::new("provider", "active", "window.v1");
+        let active = test_key("provider", "active", "window.v1");
         let mut store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
             series: vec![batch_series(active.clone(), now, Some(now + DAY))],
         };
         for index in 0..MAX_SERIES - 1 {
             store.series.push(batch_series(
-                SeriesKey::new("provider", format!("inactive-{index:04}"), "window.v1"),
+                test_key("provider", format!("inactive-{index:04}"), "window.v1"),
                 now,
                 None,
             ));
         }
         store.series.sort_by(series_order);
         fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
-        let new_key = SeriesKey::new("provider", "new", "window.v1");
+        let new_key = test_key("provider", "new", "window.v1");
         let results = record_observations_at_path_and_evaluate(
             &[],
             &[observation(new_key.clone(), now + DAY, 20.0, DAY)],
@@ -6216,7 +10687,7 @@ mod tests {
     fn batch_new_candidates_admit_by_key_not_input_order() {
         let now = 5_350_000_000_i64;
         let active_keys = (0..MAX_SERIES - 2)
-            .map(|index| SeriesKey::new("provider", format!("active-{index:04}"), "window.v1"))
+            .map(|index| test_key("provider", format!("active-{index:04}"), "window.v1"))
             .collect::<Vec<_>>();
         let base = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
@@ -6226,9 +10697,9 @@ mod tests {
                 .map(|key| batch_series(key, now, Some(now + DAY)))
                 .collect(),
         };
-        let new_a = SeriesKey::new("provider", "new-a", "window.v1");
-        let new_b = SeriesKey::new("provider", "new-b", "window.v1");
-        let new_c = SeriesKey::new("provider", "new-c", "window.v1");
+        let new_a = test_key("provider", "new-a", "window.v1");
+        let new_b = test_key("provider", "new-b", "window.v1");
+        let new_c = test_key("provider", "new-c", "window.v1");
         let cases = [
             (
                 "batch-admission-reversed",
@@ -6284,11 +10755,7 @@ mod tests {
     fn batch_save_failure_preserves_pre_transaction_bytes() {
         let (directory, path) = temp_path("batch-save-failure");
         let now = 5_400_000_000_i64;
-        let existing = batch_series(
-            SeriesKey::new("provider", "existing", "window.v1"),
-            now,
-            None,
-        );
+        let existing = batch_series(test_key("provider", "existing", "window.v1"), now, None);
         let store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
             series: vec![existing],
@@ -6297,13 +10764,13 @@ mod tests {
         let before = fs::read(&path).unwrap();
         let observations = vec![
             observation(
-                SeriesKey::new("provider", "batch-a", "window.v1"),
+                test_key("provider", "batch-a", "window.v1"),
                 now + DAY,
                 10.0,
                 DAY,
             ),
             observation(
-                SeriesKey::new("provider", "batch-b", "window.v1"),
+                test_key("provider", "batch-b", "window.v1"),
                 now + DAY,
                 20.0,
                 DAY,
@@ -6331,7 +10798,7 @@ mod tests {
         fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
         let before = fs::read(&path).unwrap();
         let item = observation(
-            SeriesKey::new("provider", "duplicate", "window.v1"),
+            test_key("provider", "duplicate", "window.v1"),
             now + DAY,
             10.0,
             DAY,
@@ -6437,8 +10904,14 @@ mod tests {
         };
         fs::write(&v3_path, serde_json::to_vec_pretty(&existing).unwrap()).unwrap();
 
-        let first =
-            migrate_codex_v2_at_paths("acct", "opaque-scope", now, &v2_path, &v3_path).unwrap();
+        let first = migrate_codex_v2_at_paths(
+            "acct",
+            &HistoryScope::for_test("opaque-scope"),
+            now,
+            &v2_path,
+            &v3_path,
+        )
+        .unwrap();
         assert_eq!(first.imported_samples, 7);
         assert_eq!(fs::read(&v2_path).unwrap(), v2_before);
         assert_eq!(
@@ -6464,8 +10937,14 @@ mod tests {
         );
 
         let bytes_after_first = fs::read(&v3_path).unwrap();
-        let second =
-            migrate_codex_v2_at_paths("acct", "opaque-scope", now, &v2_path, &v3_path).unwrap();
+        let second = migrate_codex_v2_at_paths(
+            "acct",
+            &HistoryScope::for_test("opaque-scope"),
+            now,
+            &v2_path,
+            &v3_path,
+        )
+        .unwrap();
         assert_eq!(second.imported_samples, 0);
         assert_eq!(fs::read(&v3_path).unwrap(), bytes_after_first);
 
@@ -6480,8 +10959,14 @@ mod tests {
                 "sampledAt": reset - duration + duration * 55 / 100
             }));
         fs::write(&v2_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
-        let third =
-            migrate_codex_v2_at_paths("acct", "opaque-scope", now, &v2_path, &v3_path).unwrap();
+        let third = migrate_codex_v2_at_paths(
+            "acct",
+            &HistoryScope::for_test("opaque-scope"),
+            now,
+            &v2_path,
+            &v3_path,
+        )
+        .unwrap();
         assert_eq!(third.imported_samples, 1);
         assert_ne!(fs::read(&v3_path).unwrap(), bytes_after_first);
         fs::remove_dir_all(directory).unwrap();
@@ -6525,7 +11010,14 @@ mod tests {
         };
         fs::write(&v3_path, serde_json::to_vec_pretty(&existing).unwrap()).unwrap();
         let before = fs::read(&v3_path).unwrap();
-        let outcome = migrate_codex_v2_at_paths("acct", "scope", now, &v2_path, &v3_path).unwrap();
+        let outcome = migrate_codex_v2_at_paths(
+            "acct",
+            &HistoryScope::for_test("scope"),
+            now,
+            &v2_path,
+            &v3_path,
+        )
+        .unwrap();
         assert_eq!(outcome.imported_samples, 0);
         assert_eq!(
             read_store(&v3_path).series[0].last_activity_at,
@@ -6589,7 +11081,7 @@ mod tests {
 
         let outcome = migrate_codex_v2_at_paths_with_clock_and_mode(
             "acct",
-            "scope",
+            &HistoryScope::for_test("scope"),
             stale_now,
             &v2_path,
             &v3_path,
@@ -6625,8 +11117,14 @@ mod tests {
         fs::write(&v2_path, b"not-json").unwrap();
         let v3_before = b"existing-v3-bytes";
         fs::write(&v3_path, v3_before).unwrap();
-        let outcome =
-            migrate_codex_v2_at_paths("acct", "scope", 7_000_000_000, &v2_path, &v3_path).unwrap();
+        let outcome = migrate_codex_v2_at_paths(
+            "acct",
+            &HistoryScope::for_test("scope"),
+            7_000_000_000,
+            &v2_path,
+            &v3_path,
+        )
+        .unwrap();
         assert_eq!(outcome.imported_samples, 0);
         assert_eq!(fs::read(&v2_path).unwrap(), b"not-json");
         assert_eq!(fs::read(&v3_path).unwrap(), v3_before);
@@ -6657,7 +11155,14 @@ mod tests {
         .unwrap();
         let corrupt = b"corrupt-v3-evidence";
         fs::write(&v3_path, corrupt).unwrap();
-        let outcome = migrate_codex_v2_at_paths("acct", "scope", now, &v2_path, &v3_path).unwrap();
+        let outcome = migrate_codex_v2_at_paths(
+            "acct",
+            &HistoryScope::for_test("scope"),
+            now,
+            &v2_path,
+            &v3_path,
+        )
+        .unwrap();
         assert_eq!(outcome.imported_samples, 1);
         assert_eq!(
             fs::read(directory.join(format!("quota-pace-history-v3.corrupt-{now}.json"))).unwrap(),
@@ -6839,10 +11344,24 @@ mod tests {
         let right_v2 = v2_path.clone();
         let right_v3 = v3_path.clone();
         let left = std::thread::spawn(move || {
-            migrate_codex_v2_at_paths("acct", "opaque", now, &left_v2, &left_v3).unwrap()
+            migrate_codex_v2_at_paths(
+                "acct",
+                &HistoryScope::for_test("opaque"),
+                now,
+                &left_v2,
+                &left_v3,
+            )
+            .unwrap()
         });
         let right = std::thread::spawn(move || {
-            migrate_codex_v2_at_paths("acct", "opaque", now, &right_v2, &right_v3).unwrap()
+            migrate_codex_v2_at_paths(
+                "acct",
+                &HistoryScope::for_test("opaque"),
+                now,
+                &right_v2,
+                &right_v3,
+            )
+            .unwrap()
         });
         let outcomes = [left.join().unwrap(), right.join().unwrap()];
         assert_eq!(
@@ -6860,6 +11379,967 @@ mod tests {
             .iter()
             .all(|sample| sample.origin == SampleOrigin::ImportedV2));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn line_fit_points(beta: f64, phases: &[f64]) -> Vec<FitPoint> {
+        phases
+            .iter()
+            .enumerate()
+            .map(|(index, phase)| FitPoint {
+                phase: *phase,
+                bucket: index,
+                used_percent: beta * phase,
+            })
+            .collect()
+    }
+
+    fn current_series(
+        key: &SeriesKey,
+        reset_at: i64,
+        duration_seconds: i64,
+        points: &[f64],
+        beta: f64,
+    ) -> SeriesState {
+        let samples = points
+            .iter()
+            .map(|phase| {
+                quota_sample(
+                    reset_at,
+                    duration_seconds,
+                    *phase,
+                    (beta * phase).clamp(0.1, 100.0),
+                    SampleOrigin::LiveV3,
+                )
+            })
+            .collect::<Vec<_>>();
+        SeriesState {
+            provider_id: key.provider_id.clone(),
+            account_scope: key.account_scope.clone(),
+            window_key: key.window_key.clone(),
+            active_reset_at: Some(reset_at),
+            last_activity_at: samples
+                .iter()
+                .map(|sample| sample.sampled_at)
+                .max()
+                .unwrap_or(reset_at),
+            rollover: Some(ObservedState::Watching {
+                reset_at,
+                first_seen_at: samples
+                    .iter()
+                    .map(|sample| sample.sampled_at)
+                    .min()
+                    .unwrap_or(reset_at),
+                last_seen_at: samples
+                    .iter()
+                    .map(|sample| sample.sampled_at)
+                    .max()
+                    .unwrap_or(reset_at),
+                consecutive_count: 1,
+            }),
+            samples,
+        }
+    }
+
+    #[test]
+    fn fit_kernel_rejects_leakage_and_shares_inclusive_quality_policy() {
+        let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60];
+        let smooth = line_fit_points(80.0, &phases);
+        let partial = fit_partial_current(&smooth).expect("smooth prefix fit");
+        assert!(partial.walk_forward_rmse <= EXPECTED_FIT_RMSE_PP);
+        assert!(fit_quality(EXPECTED_FIT_RMSE_PP).is_some());
+        assert!(fit_quality(EXPECTED_FIT_RMSE_PP + EPSILON).is_some());
+        assert!(fit_quality(EXPECTED_FIT_RMSE_PP + 2.0 * EPSILON).is_none());
+        assert!(fit_quality(-EPSILON).is_none());
+        let mut invalid = smooth.clone();
+        invalid[0].used_percent = 0.0;
+        assert!(fit_partial_current(&invalid).is_none());
+
+        let mut future_jump = smooth.clone();
+        for point in future_jump.iter_mut().skip(3) {
+            point.used_percent += 30.0;
+        }
+        assert!(fit_partial_current(&future_jump)
+            .is_none_or(|fit| fit.walk_forward_rmse > EXPECTED_FIT_RMSE_PP));
+
+        let completed = fit_completed_cycles(&[FitCycleInput {
+            recency_weight: 1.0,
+            points: smooth,
+        }])
+        .expect("single complete fit");
+        assert!(completed.overall_rmse.is_finite());
+        assert_eq!(completed.total_weight, 1.0);
+        assert!(completed.historical_curve.len() == GRID_POINT_COUNT);
+        assert!(completed_blend_weight(1.0, 1.0).is_some_and(|weight| weight <= 0.5));
+        assert_eq!(partial_blend_weight(1.0), Some(0.5));
+    }
+
+    #[test]
+    fn projection_phase_uses_exact_reset_after_normalized_identity_jitter() {
+        let duration = DAY;
+        let reset_at = 30_000_000_i64 + duration;
+        let jittered_reset = reset_at + 120;
+        assert_eq!(
+            normalize_reset(reset_at, duration),
+            normalize_reset(jittered_reset, duration)
+        );
+        let now = reset_at - duration / 5;
+        let key = test_key("fixture", "exact-reset", "window.v1");
+        let series = seeded_series(
+            &key.provider_id,
+            &key.account_scope,
+            &key.window_key,
+            reset_at,
+            duration,
+            5,
+        );
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series.clone()],
+        };
+        let baseline = calculate_target(&store, &key, reset_at, duration, 60.0, now)
+            .pace
+            .expect("baseline completed projection");
+        let jittered = calculate_target(&store, &key, jittered_reset, duration, 60.0, now)
+            .pace
+            .expect("jittered completed projection");
+        assert!((baseline.expected_percent - jittered.expected_percent).abs() > 1e-6);
+
+        let partial = current_series(
+            &key,
+            reset_at,
+            duration,
+            &[0.10, 0.20, 0.30, 0.40, 0.50, 0.60],
+            80.0,
+        );
+        let baseline = evaluate_partial_projection(
+            &partial,
+            normalize_reset(reset_at, duration),
+            reset_at,
+            duration,
+            50.0,
+            now,
+        )
+        .expect("baseline partial projection");
+        let jittered = evaluate_partial_projection(
+            &partial,
+            normalize_reset(jittered_reset, duration),
+            jittered_reset,
+            duration,
+            50.0,
+            now,
+        )
+        .expect("jittered partial projection");
+        assert!((baseline.expected_percent - jittered.expected_percent).abs() > 1e-6);
+    }
+
+    #[test]
+    fn partial_fit_rejects_span_identity_and_duration_contradictions() {
+        let duration = DAY;
+        let reset_at = 31_000_000_i64 + duration;
+        let key = test_key("fixture", "partial-guards", "window.v1");
+        let phases = [0.10, 0.12, 0.14, 0.16, 0.18, 0.19];
+        let series = current_series(&key, reset_at, duration, &phases, 80.0);
+        let normalized = normalize_reset(reset_at, duration);
+        let now = reset_at - duration + (0.19 * duration as f64) as i64;
+        assert!(
+            evaluate_partial_projection(&series, normalized, reset_at, duration, 20.0, now)
+                .is_none()
+        );
+
+        let mut missing_active = series.clone();
+        missing_active.active_reset_at = None;
+        assert!(evaluate_partial_projection(
+            &missing_active,
+            normalized,
+            reset_at,
+            duration,
+            20.0,
+            now,
+        )
+        .is_none());
+
+        let mut mismatched_active = series.clone();
+        mismatched_active.active_reset_at = Some(reset_at + duration);
+        assert!(evaluate_partial_projection(
+            &mismatched_active,
+            normalized,
+            reset_at,
+            duration,
+            20.0,
+            now,
+        )
+        .is_none());
+
+        let mut mismatched_duration = series;
+        mismatched_duration.samples[0].duration_seconds = 2 * duration;
+        assert!(evaluate_partial_projection(
+            &mismatched_duration,
+            normalized,
+            reset_at,
+            duration,
+            20.0,
+            now,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn partial_current_transaction_can_be_available_without_complete_cycles() {
+        let (directory, path) = temp_path("partial-fit");
+        let duration = DAY;
+        let reset_at = 20_000_100 + duration;
+        let key = test_key("fixture", "partial-scope", "window.v1");
+        let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80];
+        let mut final_result = None;
+        for phase in phases {
+            let now = reset_at - duration + (phase * duration as f64) as i64;
+            let results = record_observations_at_path_and_evaluate(
+                std::slice::from_ref(&key),
+                &[observation(key.clone(), reset_at, phase * 80.0, duration)],
+                now,
+                &path,
+            )
+            .unwrap();
+            final_result = Some(results[0].as_ref().unwrap().clone());
+        }
+        let (_, pace, complete_cycles) = final_result.unwrap();
+        assert_eq!(complete_cycles, 0);
+        assert!(pace.is_some_and(|pace| {
+            pace.run_out_probability.is_none()
+                && pace.eta_seconds.is_none() == pace.will_last_to_reset
+        }));
+        let persisted = read_store(&path);
+        assert!(persisted.series[0]
+            .samples
+            .iter()
+            .all(|sample| sample.reset_at == normalize_reset(reset_at, duration)));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn full_transaction_duration_cleanup_persists_and_matches_same_duration_control() {
+        let duration = DAY;
+        let normalized_reset = normalize_reset(40_000_000_000_i64, duration);
+        let reset_at = normalized_reset + 60;
+        let now = normalized_reset;
+        let key = test_key("fixture", "cleanup-transaction", "window.v1");
+        let mut malformed = current_series(
+            &key,
+            reset_at,
+            duration,
+            &[0.10, 0.20, 0.30, 0.40, 0.50, 0.60],
+            80.0,
+        );
+        malformed.samples.push(quota_sample(
+            reset_at,
+            2 * duration,
+            0.75,
+            60.0,
+            SampleOrigin::LiveV3,
+        ));
+        let control = current_series(
+            &key,
+            reset_at,
+            duration,
+            &[0.10, 0.20, 0.30, 0.40, 0.50, 0.60],
+            80.0,
+        );
+        let malformed_directory = temp_path("duration-cleanup-transaction");
+        let control_directory = temp_path("duration-cleanup-control");
+        fs::write(
+            &malformed_directory.1,
+            serde_json::to_vec_pretty(&Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![malformed],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &control_directory.1,
+            serde_json::to_vec_pretty(&Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![control],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let malformed_result = record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&key),
+            &[observation(key.clone(), reset_at, 48.0, duration)],
+            now,
+            &malformed_directory.1,
+        )
+        .unwrap();
+        let control_result = record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&key),
+            &[observation(key.clone(), reset_at, 48.0, duration)],
+            now,
+            &control_directory.1,
+        )
+        .unwrap();
+        let malformed_store = read_store(&malformed_directory.1);
+        let control_store = read_store(&control_directory.1);
+        assert_eq!(malformed_result, control_result);
+        assert_eq!(
+            malformed_store.series[0].samples,
+            control_store.series[0].samples
+        );
+        assert!(malformed_store.series[0].samples.iter().all(|sample| {
+            !is_active_group_sample(reset_at, sample) || sample.duration_seconds == duration
+        }));
+        assert!(!malformed_store.series[0].samples.iter().any(|sample| {
+            is_active_group_sample(reset_at, sample) && sample.duration_seconds == 2 * duration
+        }));
+        fs::remove_dir_all(malformed_directory.0).unwrap();
+        fs::remove_dir_all(control_directory.0).unwrap();
+    }
+
+    #[test]
+    fn partial_current_rejects_future_jump_and_enforces_active_duration_cleanup() {
+        let (directory, path) = temp_path("partial-fit-leakage");
+        let duration = DAY;
+        let reset_at = 21_000_000 + duration;
+        let key = test_key("fixture", "partial-leak", "window.v1");
+        let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60];
+        let mut result = None;
+        for (index, phase) in phases.into_iter().enumerate() {
+            let now = reset_at - duration + (phase * duration as f64) as i64;
+            let used = if index < 3 {
+                phase * 80.0
+            } else {
+                phase * 80.0 + 30.0
+            };
+            result = Some(
+                record_observations_at_path_and_evaluate(
+                    std::slice::from_ref(&key),
+                    &[observation(key.clone(), reset_at, used, duration)],
+                    now,
+                    &path,
+                )
+                .unwrap()[0]
+                    .as_ref()
+                    .unwrap()
+                    .clone(),
+            );
+        }
+        assert!(result.unwrap().1.is_none());
+
+        let mut series = read_store(&path).series.remove(0);
+        series.samples.push(quota_sample(
+            reset_at,
+            2 * duration,
+            0.75,
+            60.0,
+            SampleOrigin::LiveV3,
+        ));
+        let before = series.samples.len();
+        let outcome = apply_known_duration(
+            &mut series,
+            reset_at,
+            duration,
+            DurationSource::Provider,
+            56.0,
+            reset_at - duration * 4 / 10,
+        );
+        assert!(matches!(outcome, HistoryOutcome::Ready { .. }));
+        assert!(series.samples.len() < before);
+        assert!(series.samples.iter().all(|sample| {
+            !is_active_group_sample(reset_at, sample) || sample.duration_seconds == duration
+        }));
+        assert!(!series.samples.iter().any(|sample| {
+            is_active_group_sample(reset_at, sample) && sample.duration_seconds == 2 * duration
+        }));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_partial_quality_cannot_rescue_or_pollute_current_transaction() {
+        let duration = DAY;
+        let current_reset = 42_000_000_000_i64 + duration;
+        let now = current_reset - duration * 4 / 10;
+        let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60];
+        let key = test_key("fixture", "stale-isolation", "window.v1");
+        let make_samples = |reset_at: i64, jagged: bool| {
+            phases
+                .iter()
+                .enumerate()
+                .map(|(index, phase)| {
+                    let used = if jagged && index >= 3 {
+                        phase * 80.0 + 30.0
+                    } else {
+                        phase * 80.0
+                    };
+                    quota_sample(reset_at, duration, *phase, used, SampleOrigin::LiveV3)
+                })
+                .collect::<Vec<_>>()
+        };
+        for (label, stale_jagged, current_jagged, expect_pace) in [
+            ("stale-high-current-low", false, true, false),
+            ("stale-low-current-high", true, false, true),
+        ] {
+            let (directory, path) = temp_path(label);
+            let stale_reset = current_reset - 2 * duration;
+            let mut samples = make_samples(stale_reset, stale_jagged);
+            samples.extend(make_samples(current_reset, current_jagged));
+            let store = Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![SeriesState {
+                    provider_id: key.provider_id.clone(),
+                    account_scope: key.account_scope.clone(),
+                    window_key: key.window_key.clone(),
+                    active_reset_at: Some(current_reset),
+                    last_activity_at: now,
+                    rollover: Some(ObservedState::Watching {
+                        reset_at: current_reset,
+                        first_seen_at: now,
+                        last_seen_at: now,
+                        consecutive_count: 1,
+                    }),
+                    samples,
+                }],
+            };
+            fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+            let results = record_observations_at_path_and_evaluate(
+                std::slice::from_ref(&key),
+                &[observation(key.clone(), current_reset, 48.0, duration)],
+                now,
+                &path,
+            )
+            .unwrap();
+            let (_, pace, complete_cycles) = results[0].as_ref().unwrap();
+            assert_eq!(
+                *complete_cycles, 0,
+                "{label} must not count stale partial history"
+            );
+            assert_eq!(pace.is_some(), expect_pace, "{label} current-only result");
+            let persisted = read_store(&path);
+            // The stale group stops at phase 0.60, so `has_end` refuses it and
+            // it can never be modelled. It used to be deleted for that, which
+            // is how #370 erased a window that had been sampled for days the
+            // moment a write outage stopped its tail arriving. It is kept now,
+            // and the two assertions above are what prove keeping it is safe:
+            // `complete_cycles` is still 0 and the pace verdict is unchanged,
+            // so the record persists without reaching the model.
+            //
+            // The stale group is identified as "not the current one" rather
+            // than by recomputing its reset. `normalize_reset(stale_reset,
+            // duration)` names a value no stored sample carries, so the
+            // assertion this replaces — `!any(reset == that value)` — was
+            // comparing against nothing and would have passed whatever
+            // retention did with the group.
+            let current_group = normalize_reset(current_reset, duration);
+            let (current_kept, stale_kept): (Vec<_>, Vec<_>) =
+                persisted.series[0].samples.iter().partition(|sample| {
+                    normalize_reset(sample.reset_at, sample.duration_seconds) == current_group
+                });
+            assert_eq!(
+                stale_kept.len(),
+                phases.len(),
+                "{label} must keep the stale partial as a record"
+            );
+            assert_eq!(
+                current_kept.len(),
+                phases.len(),
+                "{label} control: the current group is present too, so the count \
+                 above is a retention result and not a store holding one group"
+            );
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn mixed_duration_complete_group_is_retained_but_not_fit_eligible() {
+        let duration = DAY;
+        let reset_at = 22_000_000 + duration;
+        let now = reset_at + 1;
+        let mixed = [DAY, 2 * DAY, DAY, 2 * DAY, DAY, 2 * DAY, DAY, 2 * DAY]
+            .into_iter()
+            .enumerate()
+            .map(|(index, duration)| {
+                quota_sample(
+                    reset_at,
+                    duration,
+                    [0.01, 0.10, 0.25, 0.40, 0.60, 0.75, 0.90, 0.99][index],
+                    80.0 * [0.01, 0.10, 0.25, 0.40, 0.60, 0.75, 0.90, 0.99][index],
+                    SampleOrigin::LiveV3,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            retention_cycle_descriptor(normalize_reset(reset_at, duration), &mixed, now).is_some()
+        );
+        assert!(cycle_profile(normalize_reset(reset_at, duration), &mixed, now).is_none());
+
+        let key = test_key("fixture", "mixed", "window.v1");
+        let mut series = SeriesState {
+            provider_id: key.provider_id.clone(),
+            account_scope: key.account_scope.clone(),
+            window_key: key.window_key.clone(),
+            active_reset_at: Some(now + duration),
+            last_activity_at: now,
+            rollover: None,
+            samples: mixed.clone(),
+        };
+        retain_series(&mut series, now);
+        assert_eq!(series.samples.len(), mixed.len());
+        assert!(historical_cycles(&series, now + duration, now).is_empty());
+    }
+
+    #[test]
+    fn completed_fit_holdouts_cover_smooth_jagged_and_loco_conflict_cases() {
+        let phases = [0.01, 0.10, 0.25, 0.40, 0.60, 0.75, 0.90, 0.99];
+        let smooth = line_fit_points(80.0, &phases);
+        let single = fit_completed_cycles(&[FitCycleInput {
+            recency_weight: 1.0,
+            points: smooth.clone(),
+        }])
+        .expect("single smooth LOBO fit");
+        assert!(single.overall_rmse <= EXPECTED_FIT_RMSE_PP);
+        assert!(fit_quality(single.overall_rmse).is_some());
+
+        let jagged = phases
+            .iter()
+            .enumerate()
+            .map(|(index, phase)| FitPoint {
+                phase: *phase,
+                bucket: index,
+                used_percent: if index == phases.len() - 1 {
+                    100.0
+                } else {
+                    80.0 * phase
+                },
+            })
+            .collect::<Vec<_>>();
+        let jagged_fit = fit_completed_cycles(&[FitCycleInput {
+            recency_weight: 1.0,
+            points: jagged.clone(),
+        }])
+        .expect("single jagged fit");
+        assert!(interpolate_curve(&jagged_fit.historical_curve, 0.99) > 95.0);
+        assert!(jagged_fit.overall_rmse > EXPECTED_FIT_RMSE_PP);
+        assert!(fit_quality(jagged_fit.overall_rmse).is_none());
+
+        let agree = fit_completed_cycles(&[
+            FitCycleInput {
+                recency_weight: 3.0,
+                points: smooth.clone(),
+            },
+            FitCycleInput {
+                recency_weight: 1.0,
+                points: smooth.clone(),
+            },
+        ])
+        .expect("two agreeing cycles");
+        assert!(agree.overall_rmse <= EXPECTED_FIT_RMSE_PP);
+
+        let conflict = fit_completed_cycles(&[
+            FitCycleInput {
+                recency_weight: 9.0,
+                points: line_fit_points(40.0, &phases),
+            },
+            FitCycleInput {
+                recency_weight: 1.0,
+                points: line_fit_points(100.0, &phases),
+            },
+        ])
+        .expect("two conflicting cycles");
+        assert!(conflict.overall_rmse > EXPECTED_FIT_RMSE_PP);
+        assert!(fit_quality(conflict.overall_rmse).is_none());
+
+        let weighted = aggregate_weighted_rms(&[(1.0, 9.0), (100.0, 1.0)]).unwrap();
+        let wrong_unweighted = ((1.0_f64 + 100.0) / 2.0).sqrt();
+        assert!((weighted - 10.9_f64.sqrt()).abs() < 1e-12);
+        assert!(fit_quality(weighted).is_some());
+        assert!(fit_quality(wrong_unweighted).is_none());
+    }
+
+    #[test]
+    fn partial_projection_covers_beta_actual_and_crossing_boundaries() {
+        let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80];
+        for beta in [80.0, 100.0, 120.0] {
+            let fit =
+                fit_partial_current(&line_fit_points(beta, &phases)).expect("linear partial fit");
+            assert!((fit.beta - beta).abs() < 1e-9, "beta={beta}");
+            assert!(fit.walk_forward_rmse <= EXPECTED_FIT_RMSE_PP, "beta={beta}");
+        }
+
+        let duration = DAY;
+        let reset_at = 43_000_000_000_i64 + duration;
+        let key = test_key("fixture", "partial-boundaries", "window.v1");
+        let series = current_series(&key, reset_at, duration, &phases, 80.0);
+        let now = reset_at - duration + (0.80 * duration as f64) as i64;
+        let normalized = normalize_reset(reset_at, duration);
+        let low = evaluate_partial_projection(&series, normalized, reset_at, duration, 20.0, now)
+            .expect("low actual projection");
+        assert!(low.eta_seconds.is_none());
+        assert!(low.will_last_to_reset);
+
+        let high = evaluate_partial_projection(&series, normalized, reset_at, duration, 95.0, now)
+            .expect("high actual projection");
+        assert_eq!(low.expected_percent, high.expected_percent);
+        assert!(low.run_out_probability.is_none());
+        assert!(high.run_out_probability.is_none());
+        assert!(high.eta_seconds.is_some());
+        assert!(!high.will_last_to_reset);
+        assert!(high.eta_seconds.unwrap() > 0.0);
+
+        let exhausted =
+            evaluate_partial_projection(&series, normalized, reset_at, duration, 100.0, now)
+                .expect("exhausted fact override");
+        assert_eq!(exhausted.eta_seconds, Some(0.0));
+        assert!(!exhausted.will_last_to_reset);
+        assert_eq!(exhausted.run_out_probability, Some(1.0));
+    }
+
+    #[test]
+    fn fit_and_projection_are_exactly_permutation_invariant() {
+        let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80];
+        let first = line_fit_points(80.0, &phases);
+        let second = line_fit_points(90.0, &phases);
+        let ordered = fit_completed_cycles(&[
+            FitCycleInput {
+                recency_weight: 1.0,
+                points: first.clone(),
+            },
+            FitCycleInput {
+                recency_weight: 0.5,
+                points: second.clone(),
+            },
+        ])
+        .expect("ordered completed fit");
+        let mut reversed_first = first.clone();
+        reversed_first.reverse();
+        let mut reversed_second = second.clone();
+        reversed_second.reverse();
+        let permuted = fit_completed_cycles(&[
+            FitCycleInput {
+                recency_weight: 0.5,
+                points: reversed_second,
+            },
+            FitCycleInput {
+                recency_weight: 1.0,
+                points: reversed_first,
+            },
+        ])
+        .expect("permuted completed fit");
+        assert_eq!(ordered.historical_curve, permuted.historical_curve);
+        assert_eq!(ordered.overall_rmse, permuted.overall_rmse);
+        assert_eq!(ordered.tail_rmse, permuted.tail_rmse);
+        assert_eq!(ordered.tail_cycle_count, permuted.tail_cycle_count);
+        assert_eq!(ordered.total_weight, permuted.total_weight);
+
+        let duration = DAY;
+        let reset_at = 51_000_000_000_i64 + duration;
+        let key = test_key("fixture", "permutation", "window.v1");
+        let mut first_series = current_series(&key, reset_at, duration, &phases, 80.0);
+        let mut second_series = first_series.clone();
+        second_series.samples.reverse();
+        let now = reset_at - duration + (0.80 * duration as f64) as i64;
+        let ordered_pace = evaluate_partial_projection(
+            &first_series,
+            normalize_reset(reset_at, duration),
+            reset_at,
+            duration,
+            70.0,
+            now,
+        )
+        .expect("ordered partial projection");
+        first_series.samples.reverse();
+        let permuted_pace = evaluate_partial_projection(
+            &second_series,
+            normalize_reset(reset_at, duration),
+            reset_at,
+            duration,
+            70.0,
+            now,
+        )
+        .expect("permuted partial projection");
+        assert_eq!(ordered_pace, permuted_pace);
+    }
+
+    #[test]
+    fn completed_tail_quality_controls_risk_but_exhausted_overrides_it() {
+        let duration = 2 * DAY;
+        let current_reset = 50_000_000_000_i64 + duration;
+        let now = current_reset - duration / 2;
+        let phases = [0.10, 0.30, 0.50, 0.70, 0.90];
+        let points = line_fit_points(80.0, &phases);
+        let cycles = (0..6)
+            .map(|index| {
+                let reset_at = current_reset - (2 * index as i64 + 1) * duration;
+                CycleProfile {
+                    reset_at,
+                    duration_seconds: duration,
+                    cycle_started_at: reset_at - duration,
+                    points: points.clone(),
+                    curve: reconstruct_fit_curve(&points),
+                }
+            })
+            .collect::<Vec<_>>();
+        let weighted = cycles.iter().map(|cycle| (cycle, 1.0)).collect::<Vec<_>>();
+        let computed_fit = fit_completed_cycles(
+            &cycles
+                .iter()
+                .map(|cycle| FitCycleInput {
+                    recency_weight: 1.0,
+                    points: cycle.points.clone(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .expect("computed tail fit");
+        assert_eq!(computed_fit.tail_cycle_count, 0);
+        let historical_curve = (0..GRID_POINT_COUNT)
+            .map(|index| 100.0 * index as f64 / (GRID_POINT_COUNT - 1) as f64)
+            .collect::<Vec<_>>();
+        let make_fit = |tail_rmse, tail_cycle_count| CompletedFitResult {
+            historical_curve: historical_curve.clone(),
+            overall_rmse: 0.0,
+            tail_rmse,
+            tail_cycle_count,
+            total_weight: 6.0,
+        };
+        let insufficient_tail = evaluate_completed_projection(
+            &cycles,
+            &weighted,
+            computed_fit.clone(),
+            1.0,
+            current_reset,
+            duration,
+            50.0,
+            now,
+        )
+        .expect("overall fit with insufficient tail");
+        assert!(insufficient_tail.run_out_probability.is_none());
+
+        let missing_tail_cycle = evaluate_completed_projection(
+            &cycles,
+            &weighted,
+            make_fit(Some(EXPECTED_FIT_RMSE_PP), 5),
+            1.0,
+            current_reset,
+            duration,
+            50.0,
+            now,
+        )
+        .expect("overall fit with one tail-unvalidated cycle");
+        assert!(missing_tail_cycle.run_out_probability.is_none());
+
+        let exact_tail = evaluate_completed_projection(
+            &cycles,
+            &weighted,
+            make_fit(Some(EXPECTED_FIT_RMSE_PP), 6),
+            1.0,
+            current_reset,
+            duration,
+            50.0,
+            now,
+        )
+        .expect("exact tail threshold");
+        assert!(exact_tail.run_out_probability.is_some());
+
+        let over_tail = evaluate_completed_projection(
+            &cycles,
+            &weighted,
+            make_fit(Some(EXPECTED_FIT_RMSE_PP + 2.0 * EPSILON), 6),
+            1.0,
+            current_reset,
+            duration,
+            50.0,
+            now,
+        )
+        .expect("over-threshold tail still returns pace");
+        assert!(over_tail.run_out_probability.is_none());
+
+        let exhausted = evaluate_completed_projection(
+            &cycles,
+            &weighted,
+            computed_fit,
+            1.0,
+            current_reset,
+            duration,
+            100.0,
+            now,
+        )
+        .expect("exhausted fact override");
+        assert_eq!(exhausted.run_out_probability, Some(1.0));
+        assert_eq!(exhausted.eta_seconds, Some(0.0));
+        assert!(!exhausted.will_last_to_reset);
+    }
+
+    #[test]
+    fn mixed_duration_retention_keeps_slots_bounded_and_the_fit_unchanged() {
+        let duration = 5 * HOUR;
+        let current_reset = (53_000_000_000_i64 + duration + 899).div_euclid(900) * 900;
+        let now = current_reset - 60;
+        let key = test_key("fixture", "mixed-retention", "window.v1");
+        let phases = (0..PHASE_BUCKET_COUNT)
+            .map(|bucket| (bucket as f64 + 0.25) / PHASE_BUCKET_COUNT as f64)
+            .collect::<Vec<_>>();
+        let make_cycle = |reset_at: i64, mixed: bool| {
+            phases
+                .iter()
+                .enumerate()
+                .map(|(bucket, phase)| {
+                    let sample_duration = if mixed && bucket % 2 == 0 {
+                        2 * duration
+                    } else {
+                        duration
+                    };
+                    quota_sample(
+                        reset_at,
+                        sample_duration,
+                        *phase,
+                        (*phase * 80.0).max(0.1),
+                        SampleOrigin::LiveV3,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let build_series = |with_mixed: bool, include_old: bool| {
+            let mut samples = Vec::new();
+            let first_offset = if include_old { 1 } else { 2 };
+            for offset in first_offset..=128 {
+                samples.extend(make_cycle(
+                    current_reset - offset as i64 * duration,
+                    with_mixed && offset == 1,
+                ));
+            }
+            if with_mixed && !include_old {
+                samples.extend(make_cycle(current_reset - duration, true));
+            }
+            samples.extend(make_cycle(current_reset, false));
+            SeriesState {
+                provider_id: key.provider_id.clone(),
+                account_scope: key.account_scope.clone(),
+                window_key: key.window_key.clone(),
+                active_reset_at: Some(current_reset),
+                last_activity_at: now,
+                rollover: Some(ObservedState::Watching {
+                    reset_at: current_reset,
+                    first_seen_at: now,
+                    last_seen_at: now,
+                    consecutive_count: 1,
+                }),
+                samples,
+            }
+        };
+
+        let mut control_series = build_series(false, false);
+        let mut mixed_series = build_series(true, false);
+        retain_series(&mut control_series, now);
+        retain_series(&mut mixed_series, now);
+        let control_store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![control_series],
+        };
+        let mixed_store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![mixed_series],
+        };
+        let control = calculate_target(&control_store, &key, current_reset, duration, 79.0, now);
+        let mixed = calculate_target(&mixed_store, &key, current_reset, duration, 79.0, now);
+        assert_eq!(control.complete_cycles, mixed.complete_cycles);
+        assert_eq!(control.pace, mixed.pace);
+        assert_eq!(mixed.complete_cycles, 127);
+        let mixed_groups = grouped_samples(&mixed_store.series[0].samples);
+        let mixed_reset = normalize_reset(current_reset - duration, duration);
+        assert!(cycle_profile(mixed_reset, mixed_groups.get(&mixed_reset).unwrap(), now).is_none());
+
+        let mut overfull = build_series(true, true);
+        overfull
+            .samples
+            .extend(make_cycle(current_reset - 129 * duration, false));
+        retain_series(&mut overfull, now);
+        assert_eq!(
+            grouped_samples(&overfull.samples).len(),
+            RETENTION_MAX_CYCLES + 1
+        );
+        assert!(overfull.samples.len() <= (RETENTION_MAX_CYCLES + 1) * PHASE_BUCKET_COUNT);
+        assert!(!overfull.samples.iter().any(|sample| {
+            normalize_reset(sample.reset_at, duration)
+                == normalize_reset(current_reset - 129 * duration, duration)
+        }));
+        assert!(overfull.samples.iter().any(|sample| {
+            normalize_reset(sample.reset_at, duration)
+                == normalize_reset(current_reset - duration, duration)
+        }));
+    }
+
+    #[test]
+    fn target_calculation_isolated_from_unrelated_series_contents_and_order() {
+        let duration = 5 * HOUR;
+        let current_reset = 52_000_000_000_i64 + duration;
+        let now = current_reset - duration / 2;
+        let target_key = test_key("fixture", "target", "window.v1");
+        let target = seeded_series(
+            &target_key.provider_id,
+            &target_key.account_scope,
+            &target_key.window_key,
+            current_reset,
+            duration,
+            5,
+        );
+        let make_unrelated = |rich: bool| {
+            (0..32)
+                .map(|index| {
+                    let key = test_key("fixture", format!("unrelated-{index:03}"), "window.v1");
+                    let samples = if rich {
+                        (1..=4)
+                            .flat_map(|offset| {
+                                complete_cycle(
+                                    current_reset - offset as i64 * duration,
+                                    duration,
+                                    95.0,
+                                )
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    SeriesState {
+                        provider_id: key.provider_id,
+                        account_scope: key.account_scope,
+                        window_key: key.window_key,
+                        active_reset_at: None,
+                        last_activity_at: now,
+                        rollover: None,
+                        samples,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut before = make_unrelated(false);
+        before.push(target.clone());
+        let mut after = vec![target];
+        after.extend(make_unrelated(true));
+        let before_store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: before,
+        };
+        let after_store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: after,
+        };
+        let before_result = calculate_target(
+            &before_store,
+            &target_key,
+            current_reset,
+            duration,
+            60.0,
+            now,
+        );
+        let after_result = calculate_target(
+            &after_store,
+            &target_key,
+            current_reset,
+            duration,
+            60.0,
+            now,
+        );
+        assert_eq!(before_result.complete_cycles, after_result.complete_cycles);
+        assert_eq!(before_result.pace, after_result.pace);
+        assert!(before_result.pace.is_some());
     }
 
     /// The whole point of not calling `load_store_at_with_mode`: a store this
@@ -6976,8 +12456,9 @@ mod tests {
     }
 
     /// A foreign `schema_version` parses fine and means nothing this fold can
-    /// read. It is the shape the pending v3-to-v4 migration will actually
-    /// produce, so the export has to refuse it rather than describe it.
+    /// read — a store written by a newer build — so the export has to refuse it
+    /// rather than describe it. Only 3 (migrated in memory) and the current
+    /// version are read.
     #[test]
     fn export_history_refuses_a_store_from_another_schema() {
         let (directory, path) = temp_path("export-schema");
@@ -6998,18 +12479,20 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// Syntactically valid, semantically nonsense. Exporting this would put a
-    /// sample the writer would never have admitted in front of the fold, where
-    /// it becomes a cycle and a heatmap cell describing usage that never
-    /// happened — and it would do so silently, since nothing downstream
-    /// re-checks what the loader is supposed to have checked.
+    /// Syntactically valid, semantically nonsense. Exporting this sample would
+    /// put a reading the writer would never have admitted in front of the fold,
+    /// where it becomes a cycle and a heatmap cell describing usage that never
+    /// happened. The export now does what the loader does with it — forgets
+    /// that one sample and keeps the rest — in memory only: the file is left
+    /// byte-identical and nothing is quarantined.
     #[test]
-    fn export_history_refuses_a_store_with_an_out_of_range_sample() {
+    fn export_history_drops_an_out_of_range_sample_and_keeps_the_rest() {
         let (directory, path) = temp_path("export-invalid-sample");
         let duration = 5 * 3_600;
         let reset = 1_800_000_000;
         let mut series = SeriesState::new(&key("acct"), reset);
         series.samples = complete_cycle(reset - duration, duration, 40.0);
+        let valid = series.samples.len();
         series.samples.push(quota_sample(
             reset,
             duration,
@@ -7024,10 +12507,14 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&store).unwrap()).unwrap();
         let before = fs::read(&path).unwrap();
 
-        assert_eq!(
-            export_history_at_with_mode(StorageMode::Generic, &path),
-            Err(HistoryError::Read)
-        );
+        let exported = export_history_at_with_mode(StorageMode::Generic, &path).unwrap();
+
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].samples.len(), valid);
+        assert!(exported[0]
+            .samples
+            .iter()
+            .all(|sample| sample.used_percent <= 100.0));
         assert_eq!(fs::read(&path).unwrap(), before);
         assert!(!fs::read_dir(&directory).unwrap().any(|entry| entry
             .unwrap()
@@ -7035,5 +12522,1029 @@ mod tests {
             .to_string_lossy()
             .starts_with("quota-pace-history-v3.corrupt-")));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A structural failure — one no per-sample drop can fix — still refuses
+    /// the whole export rather than describing a store in an order the writer
+    /// never produces.
+    #[test]
+    fn export_history_refuses_a_store_with_series_out_of_order() {
+        let (directory, path) = temp_path("export-unordered");
+        let duration = 5 * 3_600;
+        let reset = 1_800_000_000;
+        let mut first = SeriesState::new(&key("b"), reset);
+        first.samples = complete_cycle(reset - duration, duration, 40.0);
+        let mut second = SeriesState::new(&key("a"), reset);
+        second.samples = complete_cycle(reset - duration, duration, 40.0);
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![first, second],
+        };
+        fs::write(&path, serde_json::to_vec(&store).unwrap()).unwrap();
+        let before = fs::read(&path).unwrap();
+
+        assert_eq!(
+            export_history_at_with_mode(StorageMode::Generic, &path),
+            Err(HistoryError::Read)
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Every Windows store on disk is schema 3 until its first recording write
+    /// under this build (the migration is lazy). The export must read it —
+    /// upgrading in memory as the loader does — and must not rewrite it.
+    #[test]
+    fn export_history_reads_a_schema_3_store_without_rewriting_it() {
+        let (directory, path) = temp_path("export-schema-3");
+        let duration = 5 * 3_600;
+        let reset = 1_800_000_000;
+        let mut series = SeriesState::new(&key("acct"), reset);
+        series.samples = complete_cycle(reset - duration, duration, 40.0);
+        let samples = series.samples.len();
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION_V3,
+            series: vec![series],
+        };
+        // A schema-3 writer never wrote `plan`; strip it so the fixture is the
+        // shape such a file really has.
+        let mut value = serde_json::to_value(&store).unwrap();
+        for sample in value["series"][0]["samples"].as_array_mut().unwrap() {
+            sample.as_object_mut().unwrap().remove("plan");
+        }
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let before = fs::read(&path).unwrap();
+
+        let exported = export_history_at_with_mode(StorageMode::Generic, &path).unwrap();
+
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].samples.len(), samples);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!fs::read_dir(&directory).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("quota-pace-history-v3.corrupt-")));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    // ── One-time schema-3 fold (Windows-only) ─────────────────────────────────
+    //
+    // Every fixture here is synthetic. The shape mirrors the store measured on
+    // the x64 host (claude session.v1 7 series of 333/1641/48/48/24/47/19
+    // samples, weekly.v1 7 series of 63 samples, copilot 3 series over 2
+    // scopes), but no timestamp, value or scope comes from a real machine.
+
+    const FOLD_NOW: i64 = 1_800_000_000; // a multiple of 900: on every quantum
+    const FOLD_SESSION: i64 = 5 * 3_600;
+    const FOLD_WEEK: i64 = 7 * 86_400;
+    const FOLD_MONTH: i64 = 30 * 86_400;
+
+    /// One reading per listed bucket, placed in the middle of its bucket so the
+    /// bucket the store derives is the one listed.
+    fn fold_cycle(reset_at: i64, duration: i64, buckets: &[usize]) -> Vec<QuotaSample> {
+        let count = phase_bucket_count(duration);
+        buckets
+            .iter()
+            .map(|&bucket| {
+                let phase = (bucket as f64 + 0.5) / count as f64;
+                QuotaSample {
+                    reset_at,
+                    duration_seconds: duration,
+                    duration_source: DurationSource::Provider,
+                    used_percent: (phase * 80.0).clamp(0.0, 100.0),
+                    sampled_at: reset_at - duration + (phase * duration as f64) as i64,
+                    origin: SampleOrigin::LiveV3,
+                    plan: None,
+                }
+            })
+            .collect()
+    }
+
+    /// `n` distinct buckets from the first to the last, so the group covers the
+    /// whole window and is a cycle retention keeps.
+    fn fold_spread(n: usize, duration: i64) -> Vec<usize> {
+        let last = phase_bucket_count(duration) - 1;
+        (0..n)
+            .map(|index| (index * last + (n - 1) / 2) / (n - 1))
+            .collect()
+    }
+
+    fn fold_series(
+        provider_id: &str,
+        scope: &str,
+        window_key: &str,
+        samples: Vec<QuotaSample>,
+    ) -> SeriesState {
+        let mut series = SeriesState::new(
+            &test_key(provider_id, scope, window_key),
+            samples
+                .iter()
+                .map(|sample| sample.sampled_at)
+                .max()
+                .unwrap(),
+        );
+        series.samples = samples;
+        series.samples.sort_by(sample_order);
+        series
+    }
+
+    /// Consecutive completed cycles ending at `last_reset`, oldest first, split
+    /// as evenly as possible with at most 40 samples each.
+    fn fold_cycles(
+        last_reset: i64,
+        duration: i64,
+        total: usize,
+        first_cycle: usize,
+    ) -> Vec<QuotaSample> {
+        let cycles = total.div_ceil(40);
+        (0..cycles)
+            .flat_map(|index| {
+                let size = total / cycles + usize::from(index < total % cycles);
+                let reset = last_reset - (first_cycle + cycles - 1 - index) as i64 * duration;
+                fold_cycle(reset, duration, &fold_spread(size, duration))
+            })
+            .collect()
+    }
+
+    fn fold_inputs() -> Vec<StrandedSeriesFold> {
+        let lineage =
+            |scopes: &[&str]| Some(scopes.iter().map(|scope| scope.to_string()).collect());
+        vec![
+            StrandedSeriesFold {
+                provider_id: "claude",
+                target: HistoryScope::for_test("claude-constant"),
+                lineage_scopes: None,
+            },
+            StrandedSeriesFold {
+                provider_id: "copilot",
+                target: HistoryScope::for_test("copilot-constant"),
+                lineage_scopes: None,
+            },
+            StrandedSeriesFold {
+                provider_id: "grok",
+                target: HistoryScope::for_test("grok-constant"),
+                lineage_scopes: None,
+            },
+            StrandedSeriesFold {
+                provider_id: "codex",
+                target: HistoryScope::for_test("codex-constant"),
+                lineage_scopes: lineage(&["codex-lineage"]),
+            },
+            StrandedSeriesFold {
+                provider_id: "antigravity",
+                target: HistoryScope::for_test("agy-constant"),
+                lineage_scopes: lineage(&["agy-lineage"]),
+            },
+        ]
+    }
+
+    struct FoldFixture {
+        store: Store,
+        session_collisions: usize,
+        weekly_collisions: usize,
+    }
+
+    /// The last completed session cycle ends where the running one (reset
+    /// `FOLD_NOW + 3h`) began; every earlier one is contiguous behind it.
+    fn fold_fixture() -> FoldFixture {
+        let session_last = FOLD_NOW - 2 * 3_600;
+        let session_counts = [333_usize, 1641, 48, 48, 24, 47];
+        let mut series = Vec::new();
+        let mut behind = session_counts
+            .iter()
+            .map(|count: &usize| count.div_ceil(40))
+            .sum::<usize>();
+        for (index, count) in session_counts.into_iter().enumerate() {
+            let cycles = count.div_ceil(40);
+            behind -= cycles;
+            series.push(fold_series(
+                "claude",
+                &format!("claude-lineage-{index}"),
+                "session.v1",
+                fold_cycles(session_last, FOLD_SESSION, count, behind),
+            ));
+        }
+        // The seventh scope arrived mid-cycle: its 19 readings share the most
+        // recent cycle of the sixth, so some land in buckets the sixth already
+        // holds. Counted independently of the fold, from the bucket lists.
+        let shared = fold_spread(19, FOLD_SESSION);
+        series.push(fold_series(
+            "claude",
+            "claude-lineage-6",
+            "session.v1",
+            fold_cycle(session_last, FOLD_SESSION, &shared),
+        ));
+        let sixth_last_cycle = fold_spread(47 / 2, FOLD_SESSION); // 47 = 24 + 23
+        let session_collisions = shared
+            .iter()
+            .filter(|bucket| sixth_last_cycle.contains(bucket))
+            .count();
+
+        // Weekly: the running cycle resets at `FOLD_NOW + 2d`, so the last
+        // completed one reset at `FOLD_NOW - 5d`.
+        let weekly_last = FOLD_NOW - 5 * 86_400;
+        let weekly = fold_spread(9, FOLD_WEEK);
+        for index in 0..6 {
+            let reset = weekly_last - (5 - index) as i64 * FOLD_WEEK;
+            series.push(fold_series(
+                "claude",
+                &format!("claude-lineage-{index}"),
+                "weekly.v1",
+                fold_cycle(reset, FOLD_WEEK, &weekly),
+            ));
+        }
+        // Same cycle as the sixth weekly series, one bucket later everywhere
+        // but the first: exactly one collision.
+        let mut shifted = weekly.clone();
+        let last = shifted.len() - 1;
+        for bucket in &mut shifted[1..last] {
+            *bucket += 1;
+        }
+        shifted[last] -= 1;
+        let weekly_collisions = shifted.iter().filter(|b| weekly.contains(b)).count();
+        series.push(fold_series(
+            "claude",
+            "claude-lineage-6",
+            "weekly.v1",
+            fold_cycle(weekly_last, FOLD_WEEK, &shifted),
+        ));
+
+        // Copilot: three series over two scopes, all inside the running month.
+        let month_reset = FOLD_NOW + 10 * 86_400;
+        for (scope, window, buckets) in [
+            ("copilot-a", "premium_interactions.v1", [40, 80]),
+            ("copilot-b", "premium_interactions.v1", [100, 120]),
+            ("copilot-b", "chat.v1", [20, 60]),
+        ] {
+            let mut stranded = fold_series(
+                "copilot",
+                scope,
+                window,
+                fold_cycle(month_reset, FOLD_MONTH, &buckets),
+            );
+            stranded.active_reset_at = Some(month_reset);
+            series.push(stranded);
+        }
+
+        // Codex and Antigravity: one lineage-scoped series (stranded), one
+        // under an authoritative owner ID (the writer's key today), and one
+        // whose scope matches nothing the metadata ever bound.
+        for (index, scope) in ["codex-lineage", "codex-authoritative", "codex-unmatched"]
+            .into_iter()
+            .enumerate()
+        {
+            let reset = weekly_last - index as i64 * FOLD_WEEK;
+            series.push(fold_series(
+                "codex",
+                scope,
+                "main.weekly.v1",
+                fold_cycle(reset, FOLD_WEEK, &weekly),
+            ));
+        }
+        for (index, scope) in ["agy-lineage", "agy-authoritative", "agy-unmatched"]
+            .into_iter()
+            .enumerate()
+        {
+            let reset = session_last - index as i64 * FOLD_SESSION;
+            series.push(fold_series(
+                "antigravity",
+                scope,
+                "gemini-pro.v1",
+                fold_cycle(reset, FOLD_SESSION, &fold_spread(12, FOLD_SESSION)),
+            ));
+        }
+
+        series.sort_by(series_order);
+        FoldFixture {
+            store: Store {
+                schema_version: HISTORY_SCHEMA_VERSION_V3,
+                series,
+            },
+            session_collisions,
+            weekly_collisions,
+        }
+    }
+
+    /// A schema-3 writer never wrote `plan`, so the fixture file does not
+    /// either.
+    fn write_v3_store(path: &Path, store: &Store) {
+        let mut value = serde_json::to_value(store).unwrap();
+        for series in value["series"].as_array_mut().unwrap() {
+            for sample in series["samples"].as_array_mut().unwrap() {
+                sample.as_object_mut().unwrap().remove("plan");
+            }
+        }
+        fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
+    fn fold_record(path: &Path, now: i64, windows: &[(&str, i64, i64)]) {
+        let scope = HistoryScope::for_test("claude-constant");
+        let observations = windows
+            .iter()
+            .map(|&(window_key, reset_at, duration)| QuotaObservation {
+                key: SeriesKey::new("claude", &scope, window_key),
+                reset_at: Some(reset_at),
+                used_percent: 12.0,
+                provider: Some(DurationEvidence::provider(reset_at, duration)),
+                contract: None,
+            })
+            .collect::<Vec<_>>();
+        let keys = observations
+            .iter()
+            .map(|observation| observation.key.clone())
+            .collect::<Vec<_>>();
+        let results = record_observations_with_fold(
+            &keys,
+            &observations,
+            now,
+            path,
+            StorageMode::Generic,
+            || now,
+            |path, store| save_store_atomic_with_mode(StorageMode::Generic, path, store),
+            &fold_inputs(),
+            None,
+        )
+        .unwrap();
+        assert!(results.iter().all(|result| matches!(
+            result,
+            Ok((HistoryOutcome::Ready { sampled: true, .. }, _, _))
+        )));
+    }
+
+    fn series_of<'a>(
+        store: &'a Store,
+        provider: &str,
+        scope: &str,
+        window: &str,
+    ) -> Option<&'a SeriesState> {
+        store.series.iter().find(|series| {
+            series.provider_id == provider
+                && series.account_scope == scope
+                && series.window_key == window
+        })
+    }
+
+    #[test]
+    fn schema_3_fold_moves_every_stranded_series_into_the_history_scope_series_once() {
+        let (directory, path) = temp_path("fold-once");
+        let fixture = fold_fixture();
+        assert!(
+            fixture.session_collisions > 0,
+            "the fixture must exercise a collision"
+        );
+        assert_eq!(fixture.weekly_collisions, 1);
+        let session_before = fixture
+            .store
+            .series
+            .iter()
+            .filter(|series| series.provider_id == "claude" && series.window_key == "session.v1")
+            .map(|series| series.samples.len())
+            .collect::<Vec<_>>();
+        assert_eq!(session_before, [333, 1641, 48, 48, 24, 47, 19]);
+        let weekly_before = fixture
+            .store
+            .series
+            .iter()
+            .filter(|series| series.provider_id == "claude" && series.window_key == "weekly.v1")
+            .map(|series| series.samples.len())
+            .sum::<usize>();
+        assert_eq!(weekly_before, 63);
+        let untouched = ["codex-authoritative", "codex-unmatched"]
+            .map(|scope| {
+                series_of(&fixture.store, "codex", scope, "main.weekly.v1")
+                    .unwrap()
+                    .clone()
+            })
+            .into_iter()
+            .chain(["agy-authoritative", "agy-unmatched"].map(|scope| {
+                series_of(&fixture.store, "antigravity", scope, "gemini-pro.v1")
+                    .unwrap()
+                    .clone()
+            }))
+            .collect::<Vec<_>>();
+
+        // The pure fold on the same fixture, for the counts it reports.
+        let mut folded = fixture.store.clone();
+        let report = fold_stranded_series(&mut folded, &fold_inputs());
+        assert_eq!(
+            report,
+            FoldReport {
+                // claude 14, copilot 3, codex 1, antigravity 1
+                folded_series: 19,
+                collisions: fixture.session_collisions + fixture.weekly_collisions,
+                refused_windows: 0,
+            }
+        );
+
+        write_v3_store(&path, &fixture.store);
+        // ONE claude batch carrying a session and a weekly observation, as
+        // production records it.
+        fold_record(
+            &path,
+            FOLD_NOW,
+            &[
+                ("session.v1", FOLD_NOW + 3 * 3_600, FOLD_SESSION),
+                ("weekly.v1", FOLD_NOW + 2 * 86_400, FOLD_WEEK),
+            ],
+        );
+
+        let store = read_store(&path);
+        assert_eq!(store.schema_version, HISTORY_SCHEMA_VERSION);
+        let claude = store
+            .series
+            .iter()
+            .filter(|series| series.provider_id == "claude")
+            .collect::<Vec<_>>();
+        assert_eq!(claude.len(), 2);
+        assert!(claude
+            .iter()
+            .all(|series| series.account_scope == "claude-constant"));
+        // Counted after the transaction's retention: nothing in the fixture is
+        // outside the horizon, so every folded sample survives.
+        assert_eq!(
+            series_of(&store, "claude", "claude-constant", "session.v1")
+                .unwrap()
+                .samples
+                .len(),
+            2_160 - fixture.session_collisions + 1
+        );
+        assert_eq!(
+            series_of(&store, "claude", "claude-constant", "weekly.v1")
+                .unwrap()
+                .samples
+                .len(),
+            63 - fixture.weekly_collisions + 1
+        );
+
+        let copilot = store
+            .series
+            .iter()
+            .filter(|series| series.provider_id == "copilot")
+            .collect::<Vec<_>>();
+        assert_eq!(copilot.len(), 2);
+        assert!(copilot
+            .iter()
+            .all(|series| series.account_scope == "copilot-constant"));
+        assert_eq!(
+            series_of(
+                &store,
+                "copilot",
+                "copilot-constant",
+                "premium_interactions.v1"
+            )
+            .unwrap()
+            .samples
+            .len(),
+            4
+        );
+
+        assert_eq!(
+            series_of(&store, "codex", "codex-constant", "main.weekly.v1")
+                .unwrap()
+                .samples
+                .len(),
+            9
+        );
+        assert!(series_of(&store, "codex", "codex-lineage", "main.weekly.v1").is_none());
+        assert_eq!(
+            series_of(&store, "antigravity", "agy-constant", "gemini-pro.v1")
+                .unwrap()
+                .samples
+                .len(),
+            12
+        );
+        assert!(series_of(&store, "antigravity", "agy-lineage", "gemini-pro.v1").is_none());
+        for original in &untouched {
+            let now = series_of(
+                &store,
+                &original.provider_id,
+                &original.account_scope,
+                &original.window_key,
+            )
+            .expect("an authoritative or unmatched series must survive the fold");
+            assert_eq!(now, original, "left byte-for-byte as it was");
+        }
+
+        // One-time: once the store is schema 4, a series under some other
+        // scope is NOT folded by a later write, even with the same inputs.
+        let mut planted_store = read_store(&path);
+        let planted = fold_series(
+            "claude",
+            "planted-scope",
+            "session.v1",
+            fold_cycle(
+                FOLD_NOW - 2 * 3_600 - 100 * FOLD_SESSION,
+                FOLD_SESSION,
+                &fold_spread(10, FOLD_SESSION),
+            ),
+        );
+        planted_store.series.push(planted.clone());
+        planted_store.series.sort_by(series_order);
+        fs::write(&path, serde_json::to_vec(&planted_store).unwrap()).unwrap();
+        let target_before = series_of(&planted_store, "claude", "claude-constant", "session.v1")
+            .unwrap()
+            .samples
+            .len();
+
+        fold_record(
+            &path,
+            FOLD_NOW + 600,
+            &[("session.v1", FOLD_NOW + 3 * 3_600, FOLD_SESSION)],
+        );
+
+        let store = read_store(&path);
+        assert_eq!(
+            series_of(&store, "claude", "planted-scope", "session.v1"),
+            Some(&planted)
+        );
+        assert_eq!(
+            series_of(&store, "claude", "claude-constant", "session.v1")
+                .unwrap()
+                .samples
+                .len(),
+            target_before + 1
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A merge `validate_series` rejects is not applied, and there is no repair
+    /// lane to force it through: `repair_invalid_series` would drop readings,
+    /// and with the sources gone that loss would be permanent. The window keeps
+    /// its sources exactly; every other window still folds and the write
+    /// proceeds.
+    #[test]
+    fn schema_3_fold_leaves_a_window_whose_merge_fails_validation_unfolded() {
+        let (directory, path) = temp_path("fold-refused");
+        // Both groups share normalized reset `reset`: 48 weekly-length readings
+        // stored at a raw reset 100s earlier, so they sort first, and one
+        // session-length reading at `reset` itself. Alone each series is valid;
+        // together the session reading is the 49th in a group capped at 48.
+        let reset = FOLD_NOW + 9 * 1_800;
+        let mut weekly_length = fold_cycle(reset, FOLD_WEEK, &(48..96).collect::<Vec<_>>());
+        for sample in &mut weekly_length {
+            sample.reset_at = reset - 100;
+        }
+        let mut left = fold_series("claude", "claude-lineage-a", "odd.v1", weekly_length);
+        left.active_reset_at = Some(reset);
+        let mut right = fold_series(
+            "claude",
+            "claude-lineage-b",
+            "odd.v1",
+            fold_cycle(reset, FOLD_SESSION, &[0]),
+        );
+        right.active_reset_at = Some(reset);
+        assert!(validate_series(&left) && validate_series(&right));
+        let session = fold_series(
+            "claude",
+            "claude-lineage-a",
+            "session.v1",
+            fold_cycle(
+                FOLD_NOW - 2 * 3_600,
+                FOLD_SESSION,
+                &fold_spread(12, FOLD_SESSION),
+            ),
+        );
+        let mut series = vec![left.clone(), right.clone(), session];
+        series.sort_by(series_order);
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION_V3,
+            series,
+        };
+
+        let mut folded = store.clone();
+        let report = fold_stranded_series(&mut folded, &fold_inputs());
+        assert_eq!(report.refused_windows, 1);
+        assert_eq!(report.folded_series, 1);
+        assert_eq!(
+            series_of(&folded, "claude", "claude-lineage-a", "odd.v1"),
+            Some(&left)
+        );
+        assert_eq!(
+            series_of(&folded, "claude", "claude-lineage-b", "odd.v1"),
+            Some(&right)
+        );
+        assert!(series_of(&folded, "claude", "claude-constant", "odd.v1").is_none());
+
+        write_v3_store(&path, &store);
+        fold_record(
+            &path,
+            FOLD_NOW,
+            &[("session.v1", FOLD_NOW + 3 * 3_600, FOLD_SESSION)],
+        );
+        let store = read_store(&path);
+        assert_eq!(store.schema_version, HISTORY_SCHEMA_VERSION);
+        assert_eq!(
+            series_of(&store, "claude", "claude-lineage-a", "odd.v1"),
+            Some(&left)
+        );
+        assert_eq!(
+            series_of(&store, "claude", "claude-lineage-b", "odd.v1"),
+            Some(&right)
+        );
+        assert!(series_of(&store, "claude", "claude-constant", "odd.v1").is_none());
+        assert_eq!(
+            series_of(&store, "claude", "claude-constant", "session.v1")
+                .unwrap()
+                .samples
+                .len(),
+            13
+        );
+        assert!(series_of(&store, "claude", "claude-lineage-a", "session.v1").is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// When the target series already holds a reading for a key, that reading
+    /// is kept and the source's is counted, not merged over it.
+    #[test]
+    fn schema_3_fold_keeps_the_existing_reading_on_a_key_collision() {
+        let reset = FOLD_NOW - 2 * 3_600;
+        let mut existing = fold_cycle(reset, FOLD_SESSION, &fold_spread(8, FOLD_SESSION));
+        for sample in &mut existing {
+            sample.used_percent = 1.0;
+        }
+        let target = fold_series("claude", "claude-constant", "session.v1", existing.clone());
+        let source = fold_series(
+            "claude",
+            "claude-lineage-a",
+            "session.v1",
+            fold_cycle(reset, FOLD_SESSION, &fold_spread(8, FOLD_SESSION)),
+        );
+        let mut series = vec![target, source];
+        series.sort_by(series_order);
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series,
+        };
+
+        let report = fold_stranded_series(&mut store, &fold_inputs());
+
+        assert_eq!(report.collisions, 8);
+        assert_eq!(report.folded_series, 1);
+        assert_eq!(store.series.len(), 1);
+        assert_eq!(store.series[0].account_scope, "claude-constant");
+        assert_eq!(store.series[0].samples, existing);
+    }
+
+    /// The fold inputs cost five installation-key reads and two metadata
+    /// loads, so the production entry points stop resolving them once the
+    /// process has seen the store past schema 3 — but never earlier. A write
+    /// that failed leaves the file at schema 3, so it must not set the flag:
+    /// the next write still has to fold.
+    #[test]
+    fn fold_inputs_stop_resolving_once_the_store_is_past_schema_3_and_not_before() {
+        let (directory, path) = temp_path("fold-settled");
+        let month_reset = FOLD_NOW + 10 * 86_400;
+        let mut stranded = fold_series(
+            "copilot",
+            "copilot-a",
+            "premium_interactions.v1",
+            fold_cycle(month_reset, FOLD_MONTH, &[40, 80]),
+        );
+        stranded.active_reset_at = Some(month_reset);
+        write_v3_store(
+            &path,
+            &Store {
+                schema_version: HISTORY_SCHEMA_VERSION_V3,
+                series: vec![stranded],
+            },
+        );
+        let v3_bytes = fs::read(&path).unwrap();
+        let settled = AtomicBool::new(false);
+        let resolved = Cell::new(0);
+        let scope = HistoryScope::for_test("claude-constant");
+        let observation = || QuotaObservation {
+            key: SeriesKey::new("claude", &scope, "session.v1"),
+            reset_at: Some(FOLD_NOW + 3 * 3_600),
+            used_percent: 12.0,
+            provider: Some(DurationEvidence::provider(
+                FOLD_NOW + 3 * 3_600,
+                FOLD_SESSION,
+            )),
+            contract: None,
+        };
+        let record = |now: i64, fail_save: bool| {
+            let observations = [observation()];
+            let keys = [observations[0].key.clone()];
+            record_observations_gated(
+                &keys,
+                &observations,
+                now,
+                &path,
+                StorageMode::Generic,
+                || now,
+                |path, store| {
+                    if fail_save {
+                        Err(io::Error::other("injected save failure"))
+                    } else {
+                        save_store_atomic_with_mode(StorageMode::Generic, path, store)
+                    }
+                },
+                || {
+                    resolved.set(resolved.get() + 1);
+                    fold_inputs()
+                },
+                &settled,
+            )
+        };
+
+        // A failed first write: inputs resolved, nothing saved, flag unset.
+        assert_eq!(record(FOLD_NOW, true), Err(HistoryError::AtomicSave));
+        assert_eq!(resolved.get(), 1);
+        assert!(!settled.load(Ordering::Acquire));
+        assert_eq!(fs::read(&path).unwrap(), v3_bytes);
+
+        // The next write resolves again, folds, saves schema 4 and settles.
+        assert!(record(FOLD_NOW + 60, false).is_ok());
+        assert_eq!(resolved.get(), 2);
+        assert!(settled.load(Ordering::Acquire));
+        let store = read_store(&path);
+        assert_eq!(store.schema_version, HISTORY_SCHEMA_VERSION);
+        assert!(series_of(
+            &store,
+            "copilot",
+            "copilot-constant",
+            "premium_interactions.v1"
+        )
+        .is_some());
+
+        // From here on the resolver is never called, whatever the write does.
+        assert!(record(FOLD_NOW + 120, false).is_ok());
+        let _ = record(FOLD_NOW + 180, true);
+        assert_eq!(resolved.get(), 2);
+
+        // A fresh process that finds the file already at schema 4 settles on
+        // that load alone, even when its own write fails.
+        let fresh = AtomicBool::new(false);
+        let fresh_resolved = Cell::new(0);
+        let observations = [observation()];
+        let keys = [observations[0].key.clone()];
+        let result = record_observations_gated(
+            &keys,
+            &observations,
+            FOLD_NOW + 240,
+            &path,
+            StorageMode::Generic,
+            || FOLD_NOW + 240,
+            |_, _| Err(io::Error::other("injected save failure")),
+            || {
+                fresh_resolved.set(fresh_resolved.get() + 1);
+                fold_inputs()
+            },
+            &fresh,
+        );
+        assert!(result.is_err());
+        assert_eq!(fresh_resolved.get(), 1);
+        assert!(fresh.load(Ordering::Acquire));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    // ── Real-store fold report (Windows host, manual) ─────────────────────────
+    //
+    // ONLY EVER POINT THIS AT A COPY. `TB_REAL_STORE_PATH` must name a backup
+    // copy of `quota-pace-history-v3.json`, never the live file in the app's
+    // data directory. The test itself copies that file into a fresh temp
+    // directory and works only on the copy (`fs::copy` opens the source for
+    // reading only), but the rule stands regardless: a live store is the
+    // user's history, and nothing about a measurement justifies a handle on it.
+    //
+    // Run on the Windows host:
+    //   $env:TB_REAL_STORE_PATH = "<backup folder>\quota-pace-history-v3.json"
+    //   cargo test --locked -p tb_core_ffi real_store_fold_report -- --ignored --nocapture
+    //
+    // Output is COUNTS ONLY: no scope, timestamp, percentage or other stored
+    // value is printed, and parse failures are reported without the parser's
+    // message (which can quote a value). The fold inputs are synthetic
+    // constants — this measures the fold's shape on real data, not the real
+    // installation's scopes, which it never reads.
+    //
+    // Loads with `StorageMode::Generic`: the copy lives in a temp directory
+    // without the app's secure-storage ACLs. Everything after the read — parse,
+    // migrate, drop, validate, clock repair, fold, record, retention, save —
+    // is the same code the app runs.
+    #[test]
+    #[ignore = "manual: needs TB_REAL_STORE_PATH pointing at a COPY of a real store"]
+    fn real_store_fold_report() {
+        let Some(source) = std::env::var_os("TB_REAL_STORE_PATH") else {
+            println!("real-store: TB_REAL_STORE_PATH is not set; nothing to do");
+            return;
+        };
+        let (directory, path) = temp_path("real-store");
+        fs::copy(&source, &path).expect("copy of TB_REAL_STORE_PATH failed");
+
+        use chrono::TimeZone as _;
+        type Counts = BTreeMap<(String, String), (usize, usize)>;
+        fn counts(store: &Store) -> Counts {
+            let mut counts = Counts::new();
+            for series in &store.series {
+                let entry = counts
+                    .entry((series.provider_id.clone(), series.window_key.clone()))
+                    .or_default();
+                entry.0 += 1;
+                entry.1 += series.samples.len();
+            }
+            counts
+        }
+        fn print_counts(label: &str, counts: &Counts) {
+            for ((provider, window), (series, samples)) in counts {
+                println!(
+                    "real-store: {label} {provider} {window}: series={series} samples={samples}"
+                );
+            }
+        }
+        fn total(store: &Store) -> usize {
+            store.series.iter().map(|series| series.samples.len()).sum()
+        }
+        let window_start = Utc
+            .with_ymd_and_hms(2026, 8, 21, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let window_end = Utc
+            .with_ymd_and_hms(2026, 9, 16, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let session_cycles = |path: &Path| {
+            export_history_at_with_mode(StorageMode::Generic, path)
+                .expect("export failed")
+                .iter()
+                .filter(|series| {
+                    series.provider_id == "claude" && series.window_key == "session.v1"
+                })
+                .flat_map(|series| series.samples.iter())
+                .map(|sample| sample.reset_at)
+                .filter(|reset| (window_start..window_end).contains(reset))
+                .collect::<BTreeSet<_>>()
+                .len()
+        };
+
+        let raw: Store = serde_json::from_slice(&fs::read(&path).unwrap())
+            .map_err(|_| ())
+            .expect("the copy does not parse as a quota-pace store");
+        println!("real-store: schema before = {}", raw.schema_version);
+        print_counts("before", &counts(&raw));
+        println!("real-store: samples before = {}", total(&raw));
+        let placeable = drop_unplaceable_samples(migrate_store_to_current(raw.clone()));
+        println!(
+            "real-store: dropped by drop_unplaceable_samples at load = {}",
+            total(&raw) - total(&placeable)
+        );
+        println!(
+            "real-store: distinct claude session.v1 cycles in [2026-08-21, 2026-09-16) UTC before = {}",
+            session_cycles(&path)
+        );
+
+        // A synthetic "now" just after the store's own latest reading, so the
+        // load does no clock repair and the batch continues whatever cycle is
+        // running rather than superseding it.
+        let latest = raw
+            .series
+            .iter()
+            .flat_map(|series| {
+                series
+                    .samples
+                    .iter()
+                    .map(|sample| sample.sampled_at)
+                    .chain([series.last_activity_at])
+            })
+            .max()
+            .expect("the copy holds no series");
+        let now = latest + 60;
+        let loaded = load_store_at_with_mode(StorageMode::Generic, &path, now, now).unwrap();
+        assert!(
+            !loaded.quarantined,
+            "the loader would quarantine this store"
+        );
+        println!(
+            "real-store: samples after load (drop + clock repair) = {}",
+            total(&loaded.store)
+        );
+
+        let synthetic = |provider: &str| HistoryScope::for_test(&format!("synthetic-{provider}"));
+        let present = raw
+            .series
+            .iter()
+            .map(|series| series.provider_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let folds = [
+            ("claude", None),
+            ("copilot", None),
+            ("grok", None),
+            ("codex", Some(BTreeSet::new())),
+            ("antigravity", Some(BTreeSet::new())),
+        ]
+        .into_iter()
+        .filter(|(provider, _)| present.contains(provider))
+        .map(|(provider_id, lineage_scopes)| StrandedSeriesFold {
+            provider_id,
+            target: synthetic(provider_id),
+            lineage_scopes,
+        })
+        .collect::<Vec<_>>();
+        // The transaction folds exactly this store with exactly these inputs
+        // before its body runs, so the pure fold here reports what it does.
+        let mut folded = loaded.store.clone();
+        let report = if loaded.on_disk_schema == Some(HISTORY_SCHEMA_VERSION_V3) {
+            fold_stranded_series(&mut folded, &folds)
+        } else {
+            println!("real-store: the copy is not schema 3, so no fold runs");
+            FoldReport::default()
+        };
+        println!(
+            "real-store: fold report folded_series={} collisions={} refused_windows={}",
+            report.folded_series, report.collisions, report.refused_windows
+        );
+
+        let claude = synthetic("claude");
+        let running_reset = |window: &str, fallback: i64| {
+            folded
+                .series
+                .iter()
+                .filter(|series| series.provider_id == "claude" && series.window_key == window)
+                .filter_map(|series| series.active_reset_at)
+                .filter(|reset| *reset > now)
+                .max()
+                .unwrap_or(fallback)
+        };
+        let observations = [
+            (
+                "session.v1",
+                running_reset("session.v1", now + 3 * 3_600),
+                FOLD_SESSION,
+            ),
+            (
+                "weekly.v1",
+                running_reset("weekly.v1", now + 2 * 86_400),
+                FOLD_WEEK,
+            ),
+        ]
+        .map(|(window_key, reset_at, duration)| QuotaObservation {
+            key: SeriesKey::new("claude", &claude, window_key),
+            reset_at: Some(reset_at),
+            used_percent: 50.0,
+            provider: Some(DurationEvidence::provider(reset_at, duration)),
+            contract: None,
+        });
+        let keys = observations
+            .iter()
+            .map(|observation| observation.key.clone())
+            .collect::<Vec<_>>();
+        let mut retained_only = folded.clone();
+        retain_store(&mut retained_only, now, &keys.iter().cloned().collect()).unwrap();
+        println!(
+            "real-store: retention alone on the folded store would remove = {}",
+            total(&folded) - total(&retained_only)
+        );
+
+        let results = record_observations_with_fold(
+            &keys,
+            &observations,
+            now,
+            &path,
+            StorageMode::Generic,
+            || now,
+            |path, store| save_store_atomic_with_mode(StorageMode::Generic, path, store),
+            &folds,
+            None,
+        )
+        .expect("the fold+record transaction failed");
+        let recorded = results
+            .iter()
+            .filter(|result| {
+                matches!(
+                    result,
+                    Ok((HistoryOutcome::Ready { sampled: true, .. }, _, _))
+                )
+            })
+            .count();
+        println!("real-store: observations recorded as new samples = {recorded}/2");
+
+        let after: Store = serde_json::from_slice(&fs::read(&path).unwrap())
+            .map_err(|_| ())
+            .expect("the saved store does not parse");
+        println!("real-store: schema after = {}", after.schema_version);
+        print_counts("after", &counts(&after));
+        println!("real-store: samples after = {}", total(&after));
+        println!(
+            "real-store: removed by the transaction body (retention, cycle repair, write repair; net of recorded) = {}",
+            (total(&folded) + recorded) as i64 - total(&after) as i64
+        );
+        println!(
+            "real-store: distinct claude session.v1 cycles in [2026-08-21, 2026-09-16) UTC after = {}",
+            session_cycles(&path)
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Writes the synthetic fold fixture to `TB_SYNTHETIC_STORE_OUT` so the
+    /// real-store harness can be smoke-run without real data. Manual only.
+    #[test]
+    #[ignore = "manual: writes the synthetic fold fixture for a harness smoke run"]
+    fn write_synthetic_fold_fixture() {
+        let Some(out) = std::env::var_os("TB_SYNTHETIC_STORE_OUT") else {
+            return;
+        };
+        write_v3_store(Path::new(&out), &fold_fixture().store);
     }
 }

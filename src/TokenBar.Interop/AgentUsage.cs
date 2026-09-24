@@ -11,12 +11,13 @@ public sealed record AgentIdentity(
     string? Plan = null);
 
 /// <summary>
-/// The Rust `account_scope: Result&lt;AccountScope, AccountScopeError&gt;` for one
-/// agent, exactly as the wire keeps its two cases apart: an object carrying
-/// EITHER <see cref="Scope"/> (the opaque HMAC of the authenticated identity —
-/// the same string a stored <c>QuotaHistorySeries.AccountScope</c> carries,
-/// so the two can be compared directly) OR <see cref="Error"/>, never both and
-/// never neither.
+/// The Rust `account_scope` / `history_scope`
+/// (<c>Result&lt;_, AccountScopeError&gt;</c>) for one agent, exactly as the
+/// wire keeps its two cases apart: an object carrying EITHER
+/// <see cref="Scope"/> (an opaque HMAC) OR <see cref="Error"/>, never both and
+/// never neither. Only the history scope is the string a stored
+/// <c>QuotaHistorySeries.AccountScope</c> carries — see
+/// <see cref="AgentUsageSnapshot.HistoryScope"/>.
 /// <para>
 /// Kept as two independent nullable fields rather than folding a resolution
 /// failure into an absent/null scope: that collapse is exactly what used to
@@ -732,10 +733,18 @@ public sealed record AgentUsageSnapshot(
     string? Error = null,
     [property: JsonConverter(typeof(AgentUsageTransportDiagnosticJsonConverter))]
     AgentUsageTransportDiagnostic? TransportDiagnostic = null,
-    /// <summary>Null only when this snapshot predates the field (an older
-    /// cdylib, or a hand-built test fixture) — a real payload always carries
-    /// one case or the other. See <see cref="AccountScopeStatus"/>.</summary>
-    AccountScopeStatus? AccountScope = null) : IJsonOnDeserialized
+    /// <summary>The live credential's identity. Null only when this snapshot
+    /// predates the field (an older cdylib, or a hand-built test fixture) — a
+    /// real payload always carries one case or the other. See
+    /// <see cref="AccountScopeStatus"/>. Not the key durable history is stored
+    /// under: for a provider with no authoritative owner ID it moves whenever
+    /// the credential rotates.</summary>
+    AccountScopeStatus? AccountScope = null,
+    /// <summary>The identity durable quota history is keyed on — the exact
+    /// string a stored <c>QuotaHistorySeries.AccountScope</c> carries, and so
+    /// the one to join a live agent to its stored series by. Null only when
+    /// this snapshot predates the field.</summary>
+    AccountScopeStatus? HistoryScope = null) : IJsonOnDeserialized
 {
     void IJsonOnDeserialized.OnDeserialized()
     {

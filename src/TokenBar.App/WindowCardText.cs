@@ -76,7 +76,7 @@ public static class WindowCardText
 
     /// <summary>The account scope a live window's tab carries when neither a
     /// stored series nor the live payload itself can supply one — the live
-    /// agent's own <see cref="AgentUsageSnapshot.AccountScope"/> resolution
+    /// agent's own <see cref="AgentUsageSnapshot.HistoryScope"/> resolution
     /// failed (or this snapshot predates the field), so there is no real HMAC
     /// to compare against and this placeholder is the only identity left to
     /// name the tab with. Last resort, not the common case: whenever the live
@@ -119,23 +119,43 @@ public static class WindowCardText
     /// second id space to drift.
     /// </para>
     /// <para>
-    /// The store legitimately holds two series under one
+    /// The store can hold several series under one
     /// <c>(providerId, windowKey)</c> that differ only in
-    /// <see cref="QuotaHistorySeries.AccountScope"/> — an account switch
-    /// leaves the PREVIOUS account's series in place and starts a new one for
-    /// the newly-signed-in identity. Joining by <c>WindowKey</c> alone (as
-    /// this used to) cannot tell them apart, so which one a tab bound to was
-    /// decided by dictionary iteration order — silently binding the old
-    /// account's chart, running-cycle placement and window history to the new
-    /// account's tab. The live agent's own resolved
-    /// <see cref="AgentUsageSnapshot.AccountScope"/> is the one signal that
-    /// says which account is CURRENTLY signed in, so a series is only
-    /// eligible for this join when its <c>AccountScope</c> equals the live
-    /// one — the previous account's series are excluded outright, not merely
-    /// deprioritised. When the live scope itself could not be resolved (an
-    /// <see cref="AccountScopeStatus.Error"/>, or an older payload that
-    /// predates the field) there is no account signal to filter by at all, so
-    /// every scope-matching series is kept rather than filtered by scope.
+    /// <see cref="QuotaHistorySeries.AccountScope"/>. The live agent's
+    /// <see cref="AgentUsageSnapshot.HistoryScope"/> is the exact key the
+    /// writer is recording under right now, so a series is only eligible for
+    /// this join when its <c>AccountScope</c> equals it; any other series is
+    /// excluded outright, not merely deprioritised. Joining by
+    /// <c>WindowKey</c> alone would leave the choice to dictionary iteration
+    /// order.
+    /// </para>
+    /// <para>
+    /// What that filter isolates depends on the provider, because the history
+    /// scope does (Rust <c>resolve_history_scope</c>). Codex and the
+    /// Antigravity local IDE key history on an authoritative owner ID (the
+    /// ChatGPT account ID; the signed-in email), so two accounts there keep
+    /// two series and the previous account's series stays out of the new
+    /// one's tab. Claude, Copilot, Grok and Antigravity's remote OAuth route
+    /// have no owner ID in anything fetched, so their history scope is one
+    /// constant per installation and provider: every account signed in on
+    /// this installation records into, and is shown, the same series. That
+    /// is macOS's trade, accepted for Windows on 2026-09-25 — the curve
+    /// models the operator, not the billing account — and it is what stops a
+    /// credential rotation from starting the history over. Before it, those
+    /// providers keyed history on the credential lineage and this filter
+    /// isolated accounts for them too; the series that rule left behind are
+    /// merged into the history-scope series once, by the Rust store's
+    /// one-time schema-3 fold (a window whose merge fails validation keeps
+    /// its old series, which this filter then no longer shows).
+    /// </para>
+    /// <para>
+    /// <see cref="AgentUsageSnapshot.AccountScope"/> is deliberately not used
+    /// here: for a provider without an owner ID it is the credential lineage,
+    /// which no longer names any stored series. When the history scope itself
+    /// could not be resolved (an <see cref="AccountScopeStatus.Error"/>, or an
+    /// older payload that predates the field) there is no signal to filter by
+    /// at all, so every series is kept and the live join below falls back to
+    /// first-wins.
     /// </para>
     /// <para>
     /// Round 19's finding: that "no account signal" case still went through
@@ -191,11 +211,11 @@ public static class WindowCardText
     /// logged out of would present retired history as if it were still an
     /// active subscription. Pre-existing behaviour (zero tabs, same as
     /// before round 16) is left as is.</item>
-    /// <item>A provider present with windows but none matching this owner's
-    /// account scope — already excluded by the <c>liveScope</c> filter
-    /// above <c>byWindowKey</c> is built from; not a new shape, and not
-    /// unavailability, it is a different account's data being correctly
-    /// kept out.</item>
+    /// <item>A provider present with windows but no stored series matching
+    /// its live history scope — already excluded by the <c>liveScope</c>
+    /// filter above <c>byWindowKey</c> is built from; not a new shape, and not
+    /// unavailability, it is data recorded under a different key being
+    /// correctly kept out.</item>
     /// </list>
     /// <para>
     /// The <c>Error</c> string on the true-unavailable shapes is not
@@ -213,10 +233,10 @@ public static class WindowCardText
         string clientId)
     {
         var agent = quota?.Agents.FirstOrDefault(a => a.ClientId == clientId);
-        var liveScope = agent?.AccountScope?.Scope;
+        var liveScope = agent?.HistoryScope?.Scope;
 
         // Every stored series this client's own scope-filtered set contains —
-        // restricted to the live account's own scope first (see the doc
+        // restricted to the live history scope first (see the doc
         // comment above), but every (AccountScope, WindowKey) pair inside
         // that filtered set kept, not collapsed. The fallback loop below
         // needs exactly this: with no live window to join against, it has no
