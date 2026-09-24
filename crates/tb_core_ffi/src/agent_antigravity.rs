@@ -2099,6 +2099,43 @@ fn discover_client_from_app() -> Option<(String, String)> {
     None
 }
 
+/// Where the installed IDE's own binaries carry the OAuth client id and secret.
+///
+/// Windows: the IDE installs per user under
+/// `%LOCALAPPDATA%\Programs\Antigravity` (measured on the x64 test host,
+/// 2026-09-25: the id and secret are in `resources\bin\language_server.exe`;
+/// no `main.js` carries them), or machine-wide under `%ProgramFiles%`. This
+/// list used to hold only the macOS `.app` paths, so on Windows the scan never
+/// read a file and an expired `oauth_creds.json` access token could not be
+/// refreshed.
+#[cfg(windows)]
+fn client_artifact_candidates() -> Vec<PathBuf> {
+    windows_client_artifact_candidates(
+        std::env::var_os("LOCALAPPDATA").as_deref(),
+        std::env::var_os("ProgramFiles").as_deref(),
+    )
+}
+
+#[cfg(any(windows, test))]
+fn windows_client_artifact_candidates(
+    local_app_data: Option<&std::ffi::OsStr>,
+    program_files: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
+    const RELATIVE: &str = "resources/bin/language_server.exe";
+    [
+        local_app_data.map(|root| Path::new(root).join("Programs").join("Antigravity")),
+        program_files.map(|root| Path::new(root).join("Antigravity")),
+    ]
+    .into_iter()
+    .flatten()
+    // A relative root would resolve against whatever directory the app was
+    // started from.
+    .filter(|root| root.is_absolute())
+    .map(|root| root.join(RELATIVE))
+    .collect()
+}
+
+#[cfg(not(windows))]
 fn client_artifact_candidates() -> Vec<PathBuf> {
     let relative = [
         "Contents/Resources/bin/language_server",
@@ -2477,6 +2514,64 @@ mod tests {
         let client = preferred_client(&ids, &secrets).unwrap();
         assert_eq!(client.0, "123-abcDEF_g.apps.googleusercontent.com");
         assert!(client.1.starts_with("GOCSPX-"));
+    }
+
+    #[test]
+    fn windows_client_candidates_cover_the_per_user_and_machine_installs() {
+        let (local, program_files) = if cfg!(windows) {
+            (r"C:\Users\u\AppData\Local", r"C:\Program Files")
+        } else {
+            ("/users/u/local", "/program files")
+        };
+        let candidates = windows_client_artifact_candidates(
+            Some(std::ffi::OsStr::new(local)),
+            Some(std::ffi::OsStr::new(program_files)),
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                Path::new(local)
+                    .join("Programs")
+                    .join("Antigravity")
+                    .join("resources/bin/language_server.exe"),
+                Path::new(program_files)
+                    .join("Antigravity")
+                    .join("resources/bin/language_server.exe"),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_client_candidates_skip_missing_and_relative_roots() {
+        assert!(windows_client_artifact_candidates(None, None).is_empty());
+        assert!(windows_client_artifact_candidates(
+            Some(std::ffi::OsStr::new("relative")),
+            Some(std::ffi::OsStr::new("")),
+        )
+        .is_empty());
+    }
+
+    /// Manual check on a Windows host with the Antigravity IDE installed:
+    /// `cargo test -p tb_core_ffi real_antigravity_client_discovery -- --ignored --nocapture`.
+    /// Prints only whether a client pair was found and how many ids and
+    /// secrets the scan saw — never the values.
+    #[test]
+    #[ignore]
+    fn real_antigravity_client_discovery() {
+        for path in client_artifact_candidates() {
+            match std::fs::read(&path) {
+                Ok(data) => println!(
+                    "candidate {}: ids={} secrets={} pair={}",
+                    path.display(),
+                    scan_client_ids(&data).len(),
+                    scan_client_secrets(&data).len(),
+                    preferred_client(&scan_client_ids(&data), &scan_client_secrets(&data))
+                        .is_some()
+                ),
+                Err(_) => println!("candidate {}: not readable", path.display()),
+            }
+        }
+        println!("discovered={}", discover_client_from_app().is_some());
     }
 
     #[test]
