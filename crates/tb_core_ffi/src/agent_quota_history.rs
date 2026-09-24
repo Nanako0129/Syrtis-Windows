@@ -12,9 +12,6 @@
 #![allow(dead_code)]
 
 use crate::agent_account_scope::HistoryScope;
-// Windows keeps sourcing this from `agent_history` (macOS inlined an identical
-// copy when it retired that module; Windows retires it in its own slice).
-use crate::agent_history::weighted_median;
 use crate::agent_quota_duration::{
     self, observe_reset, valid_duration, DurationEvidence, DurationResolution, DurationSource,
     DurationUnavailableReason, ObservedState,
@@ -376,6 +373,34 @@ pub(crate) fn partial_blend_weight(fit_quality: f64) -> Option<f64> {
         return None;
     }
     Some((0.5 * fit_quality).clamp(0.0, 0.5))
+}
+
+fn weighted_median(values: &[f64], weights: &[f64]) -> f64 {
+    if values.len() != weights.len() || values.is_empty() {
+        return 0.0;
+    }
+    let mut pairs = values
+        .iter()
+        .copied()
+        .zip(weights.iter().copied().map(|weight| weight.max(0.0)))
+        .collect::<Vec<_>>();
+    pairs.sort_by(|lhs, rhs| lhs.0.total_cmp(&rhs.0));
+    let total_weight = pairs.iter().map(|(_, weight)| *weight).sum::<f64>();
+    if total_weight <= EPSILON {
+        let mut sorted = values.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        return sorted[sorted.len() / 2];
+    }
+    let threshold = total_weight / 2.0;
+    let mut cumulative = 0.0;
+    let fallback = pairs.last().map(|(value, _)| *value).unwrap_or(0.0);
+    for (value, weight) in pairs {
+        cumulative += weight;
+        if cumulative >= threshold {
+            return value;
+        }
+    }
+    fallback
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
