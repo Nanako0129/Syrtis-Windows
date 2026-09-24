@@ -365,6 +365,21 @@ where
     request(binding?).await
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefreshTargetError {
+    TargetMissing,
+    TargetChanged,
+    TargetMalformed,
+    TargetUnverified,
+    Persistence,
+}
+
+impl RefreshTargetError {
+    pub(crate) fn is_persistence(self) -> bool {
+        matches!(self, Self::Persistence)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum ProviderFetchFailure {
     Transient {

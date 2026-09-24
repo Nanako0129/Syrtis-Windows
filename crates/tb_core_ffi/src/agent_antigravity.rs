@@ -42,6 +42,16 @@ const CODE_ASSIST_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const REFRESH_SAFETY_SECS: i64 = 60;
 
+const ANTIGRAVITY_UNCONFIGURED_ERROR: &str =
+    "Antigravity is not logged in. Re-login in Antigravity.";
+/// A credential that exists but cannot be used (permission error, corrupt
+/// JSON, ...). Distinct from `ANTIGRAVITY_UNCONFIGURED_ERROR`: a genuinely
+/// absent file means nothing is configured, but a file that exists and can't
+/// be read belongs to a configured account with a broken credential and must
+/// say so rather than reading as "you never set this up".
+const ANTIGRAVITY_UNREADABLE_ERROR: &str =
+    "Antigravity credentials could not be read. Re-login in Antigravity.";
+
 #[derive(Debug)]
 pub(crate) struct Fetched {
     pub source: String,
@@ -1270,9 +1280,7 @@ async fn prepare_remote_context(now: DateTime<Utc>) -> Result<RemoteContext, Pro
         .ok_or_else(|| {
             ProviderFetchFailure::terminal("Antigravity credential location could not be resolved.")
         })?;
-    let creds = load_remote_credentials(&creds_path).map_err(|_| {
-        ProviderFetchFailure::terminal("Antigravity is not logged in. Re-login in Antigravity.")
-    })?;
+    let creds = remote_credentials_or_unconfigured(&creds_path)?;
     let verified = if remote_credentials_need_refresh(&creds, now) {
         refresh_access_token(&creds_path, now).await.map(
             |(_, access_token, account_scope, cache_binding)| {
@@ -1349,10 +1357,38 @@ fn remote_identity(plan: Option<String>) -> AgentIdentity {
     AgentIdentity { email: None, plan }
 }
 
-fn load_remote_credentials(path: &Path) -> Result<Value, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|_| "Antigravity not logged in (no ~/.gemini/oauth_creds.json)".to_string())?;
-    serde_json::from_str(&raw).map_err(|e| format!("decode oauth_creds.json: {e}"))
+/// Why the shared Google credential could not be loaded. Only a genuinely
+/// absent file means "nothing is configured"; a file that exists but can't be
+/// read or parsed belongs to a configured account with a broken credential.
+#[derive(Debug, PartialEq, Eq)]
+enum RemoteCredentialError {
+    Absent,
+    Unreadable,
+}
+
+/// The credential step of `prepare_remote_context`, split out so the pairing
+/// of "no credential at all" with `ANTIGRAVITY_UNCONFIGURED_ERROR` is
+/// reachable from a test without a Gemini home, a running IDE or the network.
+fn remote_credentials_or_unconfigured(path: &Path) -> Result<Value, ProviderFetchFailure> {
+    load_remote_credentials(path).map_err(|error| match error {
+        RemoteCredentialError::Absent => {
+            ProviderFetchFailure::terminal(ANTIGRAVITY_UNCONFIGURED_ERROR)
+        }
+        RemoteCredentialError::Unreadable => {
+            ProviderFetchFailure::terminal(ANTIGRAVITY_UNREADABLE_ERROR)
+        }
+    })
+}
+
+fn load_remote_credentials(path: &Path) -> Result<Value, RemoteCredentialError> {
+    let raw = std::fs::read_to_string(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RemoteCredentialError::Absent
+        } else {
+            RemoteCredentialError::Unreadable
+        }
+    })?;
+    serde_json::from_str(&raw).map_err(|_| RemoteCredentialError::Unreadable)
 }
 
 fn remote_access_token(creds: &Value) -> Result<String, String> {
@@ -2103,6 +2139,23 @@ fn scan_client_ids(data: &[u8]) -> Vec<String> {
         while start > 0 && is_token_byte(data[start - 1]) {
             start -= 1;
         }
+        // The walk-back is greedy over `-` and `_` as well as alphanumerics, and
+        // in a packed binary the bytes in front of a client id belong to whichever
+        // string was laid down next to it. A Google client id is `<digits>-<token>`
+        // with a single hyphen — the token and the `.apps.googleusercontent.com`
+        // suffix carry none — so the id's delimiter is the LAST hyphen in the
+        // segment. Re-anchor there and keep only the digit run immediately before
+        // it. Anchoring on the first hyphen instead would keep a neighbour's own
+        // `…letters<digits>-` tail in the head, and because `valid_client_id` only
+        // checks the digits before the first hyphen it would accept the fabricated
+        // id (e.g. `123-beta456-real.apps…` instead of `456-real.apps…`).
+        if let Some(dash) = data[start..end].iter().rposition(|b| *b == b'-') {
+            let mut head = start + dash;
+            while head > start && data[head - 1].is_ascii_digit() {
+                head -= 1;
+            }
+            start = head;
+        }
         if let Ok(candidate) = std::str::from_utf8(&data[start..end]) {
             if valid_client_id(candidate) && !out.contains(&candidate.to_string()) {
                 out.push(candidate.to_string());
@@ -2182,6 +2235,63 @@ fn gemini_home_from(
 mod tests {
     use super::*;
     use crate::agent_account_scope::test_support::TestRefreshScope;
+
+    /// An **absent** credential file must report the marker verbatim.
+    ///
+    /// Absent, not unreadable — the two are now different verdicts.
+    /// `RemoteCredentialError::Unreadable` deliberately does NOT reach this
+    /// marker, and `malformed_remote_credentials_are_unreadable_not_absent`
+    /// below is the assertion that keeps it out.
+    #[test]
+    fn absent_remote_credentials_report_the_unconfigured_marker() {
+        let missing = std::env::temp_dir()
+            .join("tokenbar-antigravity-unconfigured-probe")
+            .join("oauth_creds.json");
+        assert!(!missing.exists(), "the probe path must not exist");
+        let failure = remote_credentials_or_unconfigured(&missing).unwrap_err();
+        assert!(
+            matches!(
+                failure,
+                ProviderFetchFailure::Terminal { ref display }
+                    if display == ANTIGRAVITY_UNCONFIGURED_ERROR
+            ),
+            "absent credentials must carry the unconfigured marker, got {failure:?}"
+        );
+    }
+
+    /// A credential that exists but cannot be parsed belongs to a configured
+    /// account, so it must NOT reach the absence marker. Before the split it
+    /// did: every `load_remote_credentials` failure became
+    /// `ANTIGRAVITY_UNCONFIGURED_ERROR`, so a corrupt `oauth_creds.json` read
+    /// as "never set up".
+    #[test]
+    fn malformed_remote_credentials_are_unreadable_not_absent() {
+        let dir = std::env::temp_dir().join("tokenbar-antigravity-malformed-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("oauth_creds.json");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+
+        assert_eq!(
+            load_remote_credentials(&path),
+            Err(RemoteCredentialError::Unreadable)
+        );
+        let failure = remote_credentials_or_unconfigured(&path).unwrap_err();
+        assert!(
+            matches!(
+                failure,
+                ProviderFetchFailure::Terminal { ref display }
+                    if display == ANTIGRAVITY_UNREADABLE_ERROR
+            ),
+            "a corrupt credential must not read as an absent one, got {failure:?}"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            load_remote_credentials(&path),
+            Err(RemoteCredentialError::Absent),
+            "control: the same path with the file gone IS absent, so the case above \
+             is the parse and not the path"
+        );
+    }
 
     #[test]
     fn gemini_home_uses_nonempty_configured_root_unchanged() {
@@ -2367,6 +2477,44 @@ mod tests {
         let client = preferred_client(&ids, &secrets).unwrap();
         assert_eq!(client.0, "123-abcDEF_g.apps.googleusercontent.com");
         assert!(client.1.starts_with("GOCSPX-"));
+    }
+
+    #[test]
+    fn scans_client_id_glued_to_a_neighbouring_string() {
+        // The fixture above separates the id with NUL, which is not a token byte,
+        // so the walk-back stops on its own. A real language_server packs strings
+        // with no separator: the neighbour's tail is token bytes and gets absorbed
+        // into the head, which must be all digits. Observed on Antigravity 1.x —
+        // both ids in the shipped binary were rejected this way, which took the
+        // whole OAuth route down whenever the IDE was not running.
+        let blob = b"someNeighbourKey123-abcDEF_g.apps.googleusercontent.com\x00tail";
+        assert_eq!(
+            scan_client_ids(blob),
+            vec!["123-abcDEF_g.apps.googleusercontent.com".to_string()]
+        );
+
+        // A neighbour whose own tail is `…<letters><digits>-` puts a second hyphen
+        // in the segment. The id's delimiter is the last one (its token carries
+        // none), so anchoring there recovers the real id; anchoring on the first
+        // hyphen would keep the neighbour's `123-beta` and `valid_client_id` — which
+        // only checks the digits before the first hyphen — would accept it.
+        let two_hyphens = b"label123-beta456-real.apps.googleusercontent.com\x00tail";
+        assert_eq!(
+            scan_client_ids(two_hyphens),
+            vec!["456-real.apps.googleusercontent.com".to_string()]
+        );
+
+        // ponytail: a neighbour whose tail is digits glued straight onto the id's
+        // project number (no intervening hyphen) is indistinguishable from the head,
+        // so the longest digit run wins and those digits are kept. Nothing in the
+        // byte stream marks that boundary; the only stronger fix would be reading
+        // Mach-O string sections instead of scanning bytes, which is a lot of
+        // machinery for a case Google's 12-digit ids make rare.
+        let glued_digits = b"prefix99000123-abcDEF_g.apps.googleusercontent.com\x00tail";
+        assert_eq!(
+            scan_client_ids(glued_digits),
+            vec!["99000123-abcDEF_g.apps.googleusercontent.com".to_string()]
+        );
     }
 
     #[test]
