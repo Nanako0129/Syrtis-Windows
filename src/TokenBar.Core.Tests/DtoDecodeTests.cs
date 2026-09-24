@@ -134,6 +134,34 @@ public class DtoDecodeTests
         Assert.Null(failedScope.Scope);
     }
 
+    // `historyScope` is the key `WindowCardText.Tabs` joins a live agent to its
+    // stored series by, so it has the same failure mode as `accountScope`
+    // above: an unrecognised shape decodes to null and the join silently falls
+    // back to first-wins. Asserted against the bytes Rust emits
+    // (`account_and_history_scopes_serialize_as_two_case_objects`), with the
+    // two fields carrying different values so a decoder reading one into the
+    // other fails here.
+    [Fact]
+    public void AHistoryScopeDecodesFromTheShapeRustSerializes()
+    {
+        var ok = DecodeAgentUsagePayload(
+            agentsJson: """[{"clientId":"claude","source":"oauth","updatedAt":"now","windows":[],"accountScope":{"scope":"lineage-a"},"historyScope":{"scope":"history-a"}}]""");
+        var agent = Assert.Single(ok.Agents);
+        Assert.Equal("lineage-a", agent.AccountScope!.Scope);
+        Assert.NotNull(agent.HistoryScope);
+        Assert.Equal("history-a", agent.HistoryScope!.Scope);
+        Assert.Null(agent.HistoryScope.Error);
+
+        var failed = DecodeAgentUsagePayload(
+            agentsJson: """[{"clientId":"claude","source":"oauth","updatedAt":"now","windows":[],"accountScope":{"scope":"lineage-a"},"historyScope":{"error":"installation key failed validation"}}]""");
+        var failedScope = Assert.Single(failed.Agents).HistoryScope;
+        Assert.NotNull(failedScope);
+        Assert.Equal("installation key failed validation", failedScope!.Error);
+        Assert.Null(failedScope.Scope);
+
+        Assert.Null(Assert.Single(DecodeAgentUsagePayload().Agents).HistoryScope);
+    }
+
     // An older cdylib emits no field at all. That is a third state and it must
     // stay distinguishable from both: a resolved scope, a resolution that
     // failed, and a producer that predates the field entirely.

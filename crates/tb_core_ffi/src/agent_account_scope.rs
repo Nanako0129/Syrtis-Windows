@@ -52,6 +52,36 @@ impl std::fmt::Debug for AccountScope {
     }
 }
 
+/// Identity for the durable quota-pace history store, deliberately *not* an
+/// `AccountScope`.
+///
+/// An `AccountScope` is derived from the live credential when no authoritative
+/// owner ID exists, so a sibling application rotating the shared refresh token
+/// mints a new one. That is correct for a cache binding, whose whole job is to
+/// refuse another account's data, and destructive for a series that has to span
+/// weeks. There is deliberately no conversion in either direction: passing an
+/// `AccountScope` to a durable-history writer must not compile.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct HistoryScope(String);
+
+impl HistoryScope {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Distinct scopes for tests that only need identity, not a real derivation.
+    #[cfg(test)]
+    pub(crate) fn for_test(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl std::fmt::Debug for HistoryScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("HistoryScope(<opaque>)")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuthoritativeIdKind {
     Email,
@@ -223,6 +253,38 @@ pub(crate) fn resolve_authoritative(
     )
 }
 
+/// History identity for one provider: the authoritative owner ID when the caller
+/// has one, otherwise a per-installation, per-provider constant.
+///
+/// The constant reads only the installation key and never loads metadata, so a
+/// credential rotation cannot move it. The authoritative branch delegates to
+/// `resolve_authoritative` unchanged, which keeps its metadata load, its MAC
+/// verification and its quarantine contract.
+pub(crate) fn resolve_history_scope(
+    provider: &str,
+    authoritative: Option<(AuthoritativeIdKind, &str)>,
+) -> Result<HistoryScope, AccountScopeError> {
+    resolve_history_scope_with(
+        &SystemBackend,
+        &ACCOUNT_SCOPE_PROCESS_LOCK,
+        provider,
+        authoritative,
+    )
+}
+
+/// Every credential-lineage scope this installation has ever bound for
+/// `provider`, recomputed from the authenticated metadata — the scopes the
+/// durable history was keyed on before `HistoryScope` existed. Windows-only:
+/// the one-time schema-3 fold uses it to tell a series stranded by a credential
+/// rotation from one keyed on an authoritative owner ID, which it must leave
+/// alone. Callers resolve this before taking the history lock; it takes the
+/// metadata lock itself.
+pub(crate) fn resolve_lineage_scopes(
+    provider: &str,
+) -> Result<Vec<AccountScope>, AccountScopeError> {
+    resolve_lineage_scopes_with(&SystemBackend, &ACCOUNT_SCOPE_PROCESS_LOCK, provider)
+}
+
 pub(crate) fn resolve_credential(
     provider: &str,
     semantic_source: &str,
@@ -277,6 +339,44 @@ fn resolve_authoritative_with<B: Backend>(
         Ok(())
     })?;
     scope_from_authoritative(&key, provider, kind, normalized.as_bytes())
+}
+
+fn resolve_history_scope_with<B: Backend>(
+    backend: &B,
+    process_lock: &Mutex<()>,
+    provider: &str,
+    authoritative: Option<(AuthoritativeIdKind, &str)>,
+) -> Result<HistoryScope, AccountScopeError> {
+    if let Some((kind, identifier)) = authoritative {
+        return resolve_authoritative_with(backend, process_lock, provider, kind, identifier)
+            .map(|scope| HistoryScope(scope.0));
+    }
+    let provider = validate_text(provider)?;
+    let key = ensure_installation_key(backend, process_lock)?;
+    scope_from_history_constant(&key, provider)
+}
+
+fn resolve_lineage_scopes_with<B: Backend>(
+    backend: &B,
+    process_lock: &Mutex<()>,
+    provider: &str,
+) -> Result<Vec<AccountScope>, AccountScopeError> {
+    let provider = validate_text(provider)?;
+    let key = ensure_installation_key(backend, process_lock)?;
+    let directory = ensure_storage_dir(backend)?;
+    let payload = with_metadata_lock(backend, process_lock, &directory, || {
+        load_metadata(backend, &directory, &key)
+    })?;
+    let lineages = payload
+        .bindings
+        .iter()
+        .filter(|binding| binding.provider == provider)
+        .map(|binding| binding.random_lineage_id.as_str())
+        .collect::<BTreeSet<_>>();
+    lineages
+        .into_iter()
+        .map(|lineage| scope_from_lineage(&key, provider, lineage))
+        .collect()
 }
 
 fn resolve_credential_with<B: Backend>(
@@ -1322,6 +1422,17 @@ fn scope_from_authoritative(
     Ok(AccountScope(encode_digest(&digest)))
 }
 
+/// The history identity for a provider with no authoritative owner ID. Its only
+/// inputs are the installation key and the provider name, so nothing a sibling
+/// application does to the credential can move it.
+fn scope_from_history_constant(
+    key: &[u8; INSTALLATION_KEY_BYTES],
+    provider: &str,
+) -> Result<HistoryScope, AccountScopeError> {
+    let digest = hmac_digest(key, &[b"scope-history-v1", provider.as_bytes()])?;
+    Ok(HistoryScope(encode_digest(&digest)))
+}
+
 fn credential_fingerprint(
     key: &[u8; INSTALLATION_KEY_BYTES],
     provider: &str,
@@ -1740,6 +1851,43 @@ pub(crate) mod test_support {
             self.backend.fail_fs(FsOperation::ReplaceFile);
         }
 
+        /// Hermetic mirror of `resolve_history_scope`. The provider is a
+        /// parameter rather than `self.provider` so a caller can drive the exact
+        /// production expression under a temporary storage root.
+        pub(crate) fn resolve_history(
+            &self,
+            provider: &str,
+            authoritative: Option<(AuthoritativeIdKind, &str)>,
+        ) -> Result<HistoryScope, AccountScopeError> {
+            resolve_history_scope_with(&self.backend, &self.process_lock, provider, authoritative)
+        }
+
+        /// Hermetic mirror of `resolve_authoritative`, so a fixture can assert
+        /// that a history scope is byte-equal to the account scope a route
+        /// already resolves today.
+        pub(crate) fn resolve_authoritative(
+            &self,
+            provider: &str,
+            kind: AuthoritativeIdKind,
+            identifier: &str,
+        ) -> Result<AccountScope, AccountScopeError> {
+            resolve_authoritative_with(
+                &self.backend,
+                &self.process_lock,
+                provider,
+                kind,
+                identifier,
+            )
+        }
+
+        /// Hermetic mirror of `resolve_lineage_scopes`.
+        pub(crate) fn resolve_lineage(
+            &self,
+            provider: &str,
+        ) -> Result<Vec<AccountScope>, AccountScopeError> {
+            resolve_lineage_scopes_with(&self.backend, &self.process_lock, provider)
+        }
+
         pub(crate) fn cleanup(&self) {
             self.backend.cleanup();
         }
@@ -1966,6 +2114,173 @@ mod tests {
             credential_fingerprint(&key, "claude", b"fixture-token").unwrap(),
             encode_digest(&hmac_digest(&key, &[b"slot-v1", b"claude", b"fixture-token"]).unwrap())
         );
+    }
+
+    #[test]
+    fn history_constant_known_vector_is_stable_and_domain_separated() {
+        let key: [u8; INSTALLATION_KEY_BYTES] = std::array::from_fn(|index| index as u8);
+        // Independently derived: HMAC-SHA256(key, encode_fields(["scope-history-v1", provider])).
+        // Same vectors as macOS eab7d6a2, so both platforms derive one identity.
+        assert_eq!(
+            scope_from_history_constant(&key, "claude")
+                .unwrap()
+                .as_str(),
+            "yPQyLoK4QzpZjG5p_fIxQVkvgRY6mGC9CKn4NMzyqmA"
+        );
+        assert_eq!(
+            scope_from_history_constant(&key, "codex").unwrap().as_str(),
+            "aiwiKwI-dRUWa0g2x2M7afRU5AiQYm3jCePREw7w_z4"
+        );
+        assert_ne!(
+            scope_from_history_constant(&key, "claude")
+                .unwrap()
+                .as_str(),
+            scope_from_history_constant(&key, "codex").unwrap().as_str()
+        );
+        // The five frozen domains stay frozen: the new tag must not collide with
+        // any of them for the same provider, and a different installation key
+        // must not produce the same constant.
+        for existing in [
+            scope_from_authoritative(&key, "claude", AuthoritativeIdKind::OpaqueId, b"claude")
+                .unwrap()
+                .as_str()
+                .to_string(),
+            scope_from_authoritative(&key, "claude", AuthoritativeIdKind::Email, b"claude")
+                .unwrap()
+                .as_str()
+                .to_string(),
+            scope_from_lineage(
+                &key,
+                "claude",
+                &URL_SAFE_NO_PAD.encode([0xA5; LINEAGE_ID_BYTES]),
+            )
+            .unwrap()
+            .as_str()
+            .to_string(),
+            credential_fingerprint(&key, "claude", b"claude").unwrap(),
+            slot_digest(&key, "claude", "claude", "claude").unwrap(),
+            encode_digest(&metadata_mac_key(&key).unwrap()),
+        ] {
+            assert_ne!(
+                scope_from_history_constant(&key, "claude")
+                    .unwrap()
+                    .as_str(),
+                existing
+            );
+        }
+        assert_ne!(
+            scope_from_history_constant(&key, "claude")
+                .unwrap()
+                .as_str(),
+            scope_from_history_constant(&[0xFF; INSTALLATION_KEY_BYTES], "claude")
+                .unwrap()
+                .as_str()
+        );
+    }
+
+    #[test]
+    fn history_scope_is_constant_across_credential_rotation_and_authoritative_when_supplied() {
+        let backend = TestBackend::new("history-scope");
+        let lock = Mutex::new(());
+        let first = resolve_test(&backend, &lock, b"marker-one").unwrap();
+        let constant_one = resolve_history_scope_with(&backend, &lock, "claude", None).unwrap();
+        let second = resolve_test(&backend, &lock, b"marker-two").unwrap();
+        let constant_two = resolve_history_scope_with(&backend, &lock, "claude", None).unwrap();
+        // Precondition: the rotation really did fragment the account scope.
+        assert_ne!(first, second);
+        assert_eq!(constant_one, constant_two);
+        assert_ne!(constant_one.as_str(), first.as_str());
+        assert_ne!(constant_one.as_str(), second.as_str());
+
+        let authoritative = resolve_history_scope_with(
+            &backend,
+            &lock,
+            "codex",
+            Some((AuthoritativeIdKind::OpaqueId, "acct-123")),
+        )
+        .unwrap();
+        let expected = resolve_authoritative_with(
+            &backend,
+            &lock,
+            "codex",
+            AuthoritativeIdKind::OpaqueId,
+            "acct-123",
+        )
+        .unwrap();
+        assert_eq!(authoritative.as_str(), expected.as_str());
+        assert_ne!(
+            authoritative.as_str(),
+            resolve_history_scope_with(&backend, &lock, "codex", None)
+                .unwrap()
+                .as_str()
+        );
+        backend.cleanup();
+    }
+
+    #[test]
+    fn history_scope_does_not_load_metadata_and_fails_closed_without_a_key() {
+        let backend = TestBackend::new("history-scope-no-metadata");
+        let lock = Mutex::new(());
+        resolve_history_scope_with(&backend, &lock, "claude", None).unwrap();
+        // The constant needs the installation key only; no metadata file is
+        // created, read or authenticated on its behalf.
+        assert!(!backend.directory.join(METADATA_FILE).exists());
+
+        let unusable = TestBackend::new("history-scope-no-key").with_installation_key(vec![
+            0x11;
+            INSTALLATION_KEY_BYTES
+                - 1
+        ]);
+        assert_eq!(
+            resolve_history_scope_with(&unusable, &Mutex::new(()), "claude", None),
+            Err(AccountScopeError::InvalidInstallationKey)
+        );
+        assert_eq!(
+            resolve_history_scope_with(&backend, &lock, "", None),
+            Err(AccountScopeError::InvalidEvidence)
+        );
+        unusable.cleanup();
+        backend.cleanup();
+    }
+
+    /// The fold's lineage set must be exactly the scopes `resolve_credential`
+    /// handed out for that provider — every rotation's, and no other
+    /// provider's — or the fold either strands a series or swallows one.
+    #[test]
+    fn lineage_scopes_are_every_scope_the_provider_was_bound_to_and_nothing_else() {
+        let backend = TestBackend::new("lineage-scopes");
+        let lock = Mutex::new(());
+        assert_eq!(
+            resolve_lineage_scopes_with(&backend, &lock, "claude").unwrap(),
+            Vec::<AccountScope>::new()
+        );
+        let first = resolve_test(&backend, &lock, b"marker-one").unwrap();
+        let second = resolve_test(&backend, &lock, b"marker-two").unwrap();
+        let other = resolve_credential_with(
+            &backend,
+            &lock,
+            "codex",
+            "file",
+            "slot-codex",
+            b"marker-codex",
+        )
+        .unwrap();
+        let authoritative = resolve_authoritative_with(
+            &backend,
+            &lock,
+            "claude",
+            AuthoritativeIdKind::OpaqueId,
+            "acct-123",
+        )
+        .unwrap();
+
+        let lineage = resolve_lineage_scopes_with(&backend, &lock, "claude").unwrap();
+
+        assert_eq!(lineage.len(), 2);
+        assert!(lineage.contains(&first) && lineage.contains(&second));
+        assert!(!lineage.contains(&other));
+        assert!(!lineage.contains(&authoritative));
+        backend.cleanup();
     }
 
     #[test]
@@ -3502,11 +3817,22 @@ mod tests {
             raw_values[4],
         )
         .unwrap();
+        let constant_history_scope =
+            resolve_history_scope_with(&backend, &lock, "grok", None).unwrap();
+        let authoritative_history_scope = resolve_history_scope_with(
+            &backend,
+            &lock,
+            "codex",
+            Some((AuthoritativeIdKind::OpaqueId, raw_values[4])),
+        )
+        .unwrap();
         let history = format!(
-            r#"{{"accountScopes":["{}","{}","{}"]}}"#,
+            r#"{{"accountScopes":["{}","{}","{}"],"historyScopes":["{}","{}"]}}"#,
             credential_scope.as_str(),
             email_scope.as_str(),
-            id_scope.as_str()
+            id_scope.as_str(),
+            constant_history_scope.as_str(),
+            authoritative_history_scope.as_str()
         );
         fs::write(backend.directory.join(V3_HISTORY_FILE), history).unwrap();
         let metadata = metadata_bytes(&backend);

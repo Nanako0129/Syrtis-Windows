@@ -17,7 +17,7 @@
 //! Both yield per-model "remaining fraction + reset" which map to `UsageWindow`s.
 
 use crate::agent_account_scope::{
-    self, AccountScope, AccountScopeError, AuthoritativeIdKind, RefreshCheckpoint,
+    self, AccountScope, AccountScopeError, AuthoritativeIdKind, HistoryScope, RefreshCheckpoint,
     RefreshScopeTransaction,
 };
 use crate::agent_usage::{
@@ -47,6 +47,7 @@ pub(crate) struct Fetched {
     pub source: String,
     pub identity: Option<AgentIdentity>,
     pub account_scope: Result<AccountScope, AccountScopeError>,
+    pub history_scope: Result<HistoryScope, AccountScopeError>,
     pub cache_binding: Option<ProviderCacheBinding>,
     pub windows: Vec<UsageWindow>,
 }
@@ -532,6 +533,7 @@ async fn fetch_local_ide(now: DateTime<Utc>) -> Result<Fetched, String> {
         match parse_user_status(&text, now) {
             Ok(mut fetched) if !fetched.windows.is_empty() => {
                 fetched.account_scope = resolve_local_account_scope(fetched.identity.as_ref());
+                fetched.history_scope = resolve_local_history_scope(fetched.identity.as_ref());
                 fetched.cache_binding = fetched
                     .account_scope
                     .as_ref()
@@ -1029,6 +1031,7 @@ fn parse_agy_usage(body: &[u8], now: DateTime<Utc>) -> Result<Fetched, String> {
         source: "agy".to_string(),
         identity: None,
         account_scope: Err(AccountScopeError::NoTrustedEvidence),
+        history_scope: Err(AccountScopeError::NoTrustedEvidence),
         cache_binding: None,
         windows,
     })
@@ -1146,6 +1149,7 @@ fn parse_user_status(body: &str, now: DateTime<Utc>) -> Result<Fetched, String> 
         // Parsing remains pure and hermetic. fetch_local_ide resolves this only
         // after the authenticated loopback response has been accepted.
         account_scope: Err(AccountScopeError::NoTrustedEvidence),
+        history_scope: Err(AccountScopeError::NoTrustedEvidence),
         cache_binding: None,
         windows,
     })
@@ -1158,6 +1162,33 @@ fn resolve_local_account_scope(
         .and_then(|identity| identity.email.as_deref())
         .ok_or(AccountScopeError::NoTrustedEvidence)?;
     agent_account_scope::resolve_authoritative("antigravity", AuthoritativeIdKind::Email, email)
+}
+
+/// The local IDE route is one of the two routes with an authoritative owner ID
+/// today: `GetUserStatus` returns the authenticated account's email. The history
+/// scope must consume it, so two accounts keep two series — and so the series
+/// this route recorded before `HistoryScope` keep their exact keys.
+fn resolve_local_history_scope(
+    identity: Option<&AgentIdentity>,
+) -> Result<HistoryScope, AccountScopeError> {
+    resolve_local_history_scope_with(identity, agent_account_scope::resolve_history_scope)
+}
+
+fn resolve_local_history_scope_with<R>(
+    identity: Option<&AgentIdentity>,
+    resolve: R,
+) -> Result<HistoryScope, AccountScopeError>
+where
+    R: FnOnce(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>,
+{
+    resolve(
+        "antigravity",
+        identity
+            .and_then(|identity| identity.email.as_deref())
+            .map(str::trim)
+            .filter(|email| !email.is_empty())
+            .map(|email| (AuthoritativeIdKind::Email, email)),
+    )
 }
 
 fn local_plan_name(info: LocalPlanInfo) -> Option<String> {
@@ -1192,6 +1223,9 @@ impl RemoteContext {
             // by the credential that fetched these quotas.
             identity: Some(remote_identity(self.plan)),
             account_scope: Ok(self.account_scope),
+            // Remote OAuth carries no authoritative owner ID today: the stored
+            // Google `id_token` is not read yet (macOS HISTID-B, not ported).
+            history_scope: agent_account_scope::resolve_history_scope("antigravity", None),
             cache_binding: self.cache_binding,
             windows,
         }
@@ -2768,6 +2802,56 @@ mod tests {
             fetched.account_scope,
             Err(AccountScopeError::NoTrustedEvidence)
         );
+        assert_eq!(
+            fetched.history_scope,
+            Err(AccountScopeError::NoTrustedEvidence)
+        );
+    }
+
+    /// The local IDE route resolves authoritatively by the authenticated
+    /// `GetUserStatus` email. Its history scope must consume the same email, or
+    /// two accounts on one installation would share one series — and the
+    /// series this route recorded before `HistoryScope` would lose their key.
+    #[test]
+    fn histid_a_local_history_scope_consumes_the_authenticated_email() {
+        let scope = TestRefreshScope::new("antigravity", "histid-antigravity");
+        let resolve = |provider: &str, authoritative: Option<(AuthoritativeIdKind, &str)>| {
+            scope.resolve_history(provider, authoritative)
+        };
+        let identity = |email: Option<&str>| AgentIdentity {
+            email: email.map(str::to_string),
+            plan: None,
+        };
+
+        let one =
+            resolve_local_history_scope_with(Some(&identity(Some("one@example.invalid"))), resolve)
+                .expect("authoritative history scope");
+        let expected = scope
+            .resolve_authoritative(
+                "antigravity",
+                AuthoritativeIdKind::Email,
+                "one@example.invalid",
+            )
+            .unwrap();
+        assert_eq!(one.as_str(), expected.as_str());
+
+        let two =
+            resolve_local_history_scope_with(Some(&identity(Some("two@example.invalid"))), resolve)
+                .expect("second authoritative history scope");
+        assert_ne!(
+            crate::agent_quota_history::SeriesKey::new("antigravity", &one, "model.v1"),
+            crate::agent_quota_history::SeriesKey::new("antigravity", &two, "model.v1")
+        );
+
+        let constant = scope.resolve_history("antigravity", None).unwrap();
+        for absent in [None, Some(identity(None)), Some(identity(Some("  ")))] {
+            let fallback = resolve_local_history_scope_with(absent.as_ref(), resolve)
+                .expect("email-less local route must fall back to the constant, not error");
+            assert_eq!(fallback.as_str(), constant.as_str());
+            assert_ne!(fallback.as_str(), one.as_str());
+            assert_ne!(fallback.as_str(), two.as_str());
+        }
+        scope.cleanup();
     }
 
     #[test]
@@ -2787,6 +2871,7 @@ mod tests {
             source: source.to_string(),
             identity: None,
             account_scope: Err(AccountScopeError::NoTrustedEvidence),
+            history_scope: Err(AccountScopeError::NoTrustedEvidence),
             cache_binding: None,
             windows: Vec::new(),
         }

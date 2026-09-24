@@ -55,15 +55,15 @@ public class WindowCardTextTests
         new("2026-01-01T00:00:00Z",
             [new AgentUsageSnapshot(clientId, "source", "2026-01-01T00:00:00Z", windows)]);
 
-    /// <summary>The live agent's own resolved account scope — the HMAC a
+    /// <summary>The live agent's own resolved history scope — the HMAC a
     /// stored <see cref="QuotaHistorySeries.AccountScope"/> is compared
     /// against, per <see cref="WindowCardText.Tabs"/>.</summary>
     private static AgentUsagePayload Quota(
-        string clientId, string accountScope, params UsageWindow[] windows) =>
+        string clientId, string historyScope, params UsageWindow[] windows) =>
         new("2026-01-01T00:00:00Z",
             [new AgentUsageSnapshot(
                 clientId, "source", "2026-01-01T00:00:00Z", windows,
-                AccountScope: new AccountScopeStatus(Scope: accountScope))]);
+                HistoryScope: new AccountScopeStatus(Scope: historyScope))]);
 
     // ---- the live-window enumeration -------------------------------------
 
@@ -257,12 +257,13 @@ public class WindowCardTextTests
 
     // The account dimension (PR #81 structural review, P2): the store can
     // hold two series under one (providerId, windowKey) that differ only in
-    // AccountScope — an account switch leaves the previous account's series
-    // in place and starts a new one. Joining by WindowKey alone cannot tell
-    // them apart, so which one a tab bound to used to be decided by
-    // dictionary iteration order (TryAdd, first wins) rather than by which
-    // account is actually signed in. The live agent's own resolved
-    // AccountScope is the signal that says which one that is; a series
+    // AccountScope — for a provider keyed on an authoritative owner ID, an
+    // account switch leaves the previous account's series in place and
+    // starts a new one. Joining by WindowKey alone cannot tell them apart, so
+    // which one a tab bound to used to be decided by dictionary iteration
+    // order (TryAdd, first wins) rather than by which account is actually
+    // signed in. The live agent's own resolved HistoryScope is the signal
+    // that says which one that is; a series
     // belonging to any other account must be excluded outright, not merely
     // deprioritised — the account-b series is listed FIRST here specifically
     // so a first-wins join would pick the wrong one.
@@ -270,7 +271,7 @@ public class WindowCardTextTests
     public void TabsBindToTheLiveAccountsOwnSeriesNotWhicheverComesFirst()
     {
         var quota = Quota(
-            "claude", accountScope: "account-a",
+            "claude", historyScope: "account-a",
             Window("claude|session.v1", "Session", "session.v1"));
 
         var tabs = WindowCardText.Tabs(
@@ -311,6 +312,66 @@ public class WindowCardTextTests
 
         var tab = Assert.Single(tabs);
         Assert.Equal("account-a", tab.Id.AccountScope);
+    }
+
+    // The history-identity split: for a provider with no authoritative owner
+    // ID the live AccountScope is the credential lineage, which rotates, and
+    // the store is keyed on the HistoryScope, which does not. The two differ
+    // on the wire, and the tab must bind the series the writer is recording
+    // into — the HistoryScope one — even when a series under the live
+    // AccountScope exists too and is listed first.
+    [Fact]
+    public void TabsBindTheHistoryScopeSeriesWhenItDiffersFromTheAccountScope()
+    {
+        var quota = new AgentUsagePayload(
+            "2026-01-01T00:00:00Z",
+            [new AgentUsageSnapshot(
+                "claude", "oauth", "2026-01-01T00:00:00Z",
+                [Window("claude|session.v1", "Session", "session.v1")],
+                AccountScope: new AccountScopeStatus(Scope: "lineage-scope"),
+                HistoryScope: new AccountScopeStatus(Scope: "history-scope"))]);
+
+        var tabs = WindowCardText.Tabs(
+            [
+                Series("claude", "lineage-scope", "session.v1", Sample(90, ResetAt - 600)),
+                Series("claude", "history-scope", "session.v1", Sample(40, ResetAt - 600)),
+            ],
+            quota,
+            clientId: "claude");
+
+        var tab = Assert.Single(tabs);
+        Assert.Equal("history-scope", tab.Id.AccountScope);
+        Assert.NotNull(tab.Active);
+        Assert.Equal(40, tab.Active!.Samples[^1].UsedPercent);
+    }
+
+    // A payload from a producer that predates `historyScope` still carries
+    // `accountScope`, and that must NOT be used as the join key any more —
+    // it no longer names the series the store records under. With no history
+    // scope there is no signal to filter by, so the join is the first-wins
+    // fallback: account-a (listed first) wins even though the live
+    // AccountScope names account-b.
+    [Fact]
+    public void APayloadWithoutAHistoryScopeKeepsFirstWinsEvenWithAnAccountScope()
+    {
+        var quota = new AgentUsagePayload(
+            "2026-01-01T00:00:00Z",
+            [new AgentUsageSnapshot(
+                "claude", "oauth", "2026-01-01T00:00:00Z",
+                [Window("claude|session.v1", "Session", "session.v1")],
+                AccountScope: new AccountScopeStatus(Scope: "account-b"))]);
+
+        var tabs = WindowCardText.Tabs(
+            [
+                Series("claude", "account-a", "session.v1", Sample(40, ResetAt - 600)),
+                Series("claude", "account-b", "session.v1", Sample(90, ResetAt - 600)),
+            ],
+            quota,
+            clientId: "claude");
+
+        var tab = Assert.Single(tabs);
+        Assert.Equal("account-a", tab.Id.AccountScope);
+        Assert.Equal(40, tab.Active!.Samples[^1].UsedPercent);
     }
 
     // Round 19's finding: the store-only fallback (no live windows to
