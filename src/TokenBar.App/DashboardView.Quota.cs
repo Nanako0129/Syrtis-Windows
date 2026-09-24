@@ -883,9 +883,10 @@ public sealed partial class DashboardView
         // one number is a target you have to find, and the row already has a
         // hit-test background for its expand tap.
         var cycle = historyRow.Cycle;
-        HoverTip.AttachRich(head, () => BreakdownTip(
+        var headHost = WithRowGlow(head);
+        HoverTip.AttachRich(headHost, () => BreakdownTip(
             WindowHistoryText.HoverHeading(cycle.StartMs, cycle.ResetAtMs), historyRow.MineBreakdown));
-        block.Children.Add(head);
+        block.Children.Add(headHost);
 
         if (open)
         {
@@ -941,7 +942,7 @@ public sealed partial class DashboardView
         return block;
     }
 
-    private static FrameworkElement ModelDetailRow(QuotaHistoryModel model)
+    private FrameworkElement ModelDetailRow(QuotaHistoryModel model)
     {
         var grid = new Grid
         {
@@ -967,8 +968,42 @@ public sealed partial class DashboardView
         // Its own hover target, not the row's: the row's covers the whole
         // line above it, and would otherwise leave the per-model split
         // reachable nowhere.
-        HoverTip.AttachRich(grid, () => BreakdownTip(model.ModelId, model.Breakdown));
-        return grid;
+        var host = WithRowGlow(grid);
+        HoverTip.AttachRich(host, () => BreakdownTip(model.ModelId, model.Breakdown));
+        return host;
+    }
+
+    /// <summary>Outline strength on a hovered history row or model line — the
+    /// value the Daily/Monthly model stripes use (ModelStripeRow), so every
+    /// hoverable row in the flyout lights the same way.</summary>
+    private const double HistoryRowGlowOpacity = 0.55;
+
+    /// <summary>The row outline every other hoverable list row draws while the
+    /// pointer is over it (see ModelStripeRow): an accent border laid over the
+    /// row, outside layout so it cannot move the row or the tooltip.</summary>
+    private FrameworkElement WithRowGlow(FrameworkElement row)
+    {
+        var glow = new Border
+        {
+            BorderBrush = new SolidColorBrush(Colors.Transparent),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(3),
+            IsHitTestVisible = false,
+            Opacity = 0,
+        };
+        var host = new Grid();
+        host.Children.Add(row);
+        host.Children.Add(glow);
+        AttachHoverOutline(host, hovered =>
+        {
+            if (hovered)
+            {
+                glow.BorderBrush = HoverOutlineBrush();
+            }
+
+            glow.Opacity = hovered ? HistoryRowGlowOpacity : 0;
+        });
+        return host;
     }
 
     /// <summary>The hover breakdown shared by a history row and one of its
