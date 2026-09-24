@@ -1455,7 +1455,18 @@ async fn request_access_token(
     refresh_token: String,
     attempt_binding: ProviderCacheBinding,
 ) -> Result<Value, ProviderFetchFailure> {
-    let client = resolve_oauth_client().ok_or_else(|| {
+    // Off the async poll: the first call reads and scans the installed IDE's
+    // binary — 130 MB for the Windows `language_server.exe`; the manual check
+    // that read it twice and scanned it three times took 11 s on the x64
+    // host — and `agent_usage::run` polls every provider in one
+    // `tokio::join!`, so a synchronous scan here would hold every provider's
+    // result, not just this one. Later calls hit the `OnceLock` and return
+    // at once.
+    let client = tokio::task::spawn_blocking(resolve_oauth_client)
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
         ProviderFetchFailure::terminal(
             "Antigravity OAuth client was not found. Install Antigravity.app or configure its OAuth client.",
         )
