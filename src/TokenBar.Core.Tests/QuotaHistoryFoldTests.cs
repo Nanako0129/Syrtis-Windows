@@ -576,4 +576,81 @@ public class QuotaHistoryFoldTests
         Assert.Equal(2, cycle.RisingRuns);
         Assert.Equal(40, cycle.PeakUsedPercent); // peak is untouched by this change
     }
+
+    // ---- the hover breakdown: MineBreakdown / QuotaHistoryModel.Breakdown ---
+
+    // Five DISTINCT non-zero values, so a fold that reads one field twice (or
+    // swaps two lanes) cannot pass by arithmetic coincidence.
+    private static WindowMessage FullMessage(
+        long timestampMs, string client, string provider, string model,
+        long input, long output, long cacheRead, long cacheWrite, long reasoning, double cost) =>
+        new(
+            Timestamp: timestampMs,
+            Client: client,
+            ProviderId: provider,
+            ModelId: model,
+            Input: input,
+            Output: output,
+            CacheRead: cacheRead,
+            CacheWrite: cacheWrite,
+            Reasoning: reasoning,
+            Cost: cost,
+            IsTurnStart: true);
+
+    [Fact]
+    public void MineBreakdownAccumulatesEachClassIntoItsOwnLane()
+    {
+        var confirmed = new List<UsageAttribution.Record>
+        {
+            new("mine", "anthropic", UsageAttribution.State.Assigned("claude")),
+        };
+        var cycles = new[] { HistoryCycle(1000, 2000, 40) };
+        var messages = new[]
+        {
+            FullMessage(1200, "mine", "anthropic", "m1", 1, 20, 300, 4_000, 50_000, 1.0),
+            FullMessage(1600, "mine", "anthropic", "m1", 2, 30, 400, 5_000, 60_000, 2.0),
+        };
+
+        var row = Assert.Single(QuotaHistoryFold.Rows(cycles, messages, "claude", null, confirmed));
+
+        Assert.Equal(3, row.MineBreakdown.Input);
+        Assert.Equal(50, row.MineBreakdown.Output);
+        Assert.Equal(700, row.MineBreakdown.CacheRead);
+        Assert.Equal(9_000, row.MineBreakdown.CacheWrite);
+        Assert.Equal(110_000, row.MineBreakdown.Reasoning);
+
+        // The five lanes sum to the row's own printed total — the identity
+        // the breakdown exists to reconcile with, not two derived values
+        // agreeing with each other by construction.
+        Assert.Equal(row.MineTokens, row.MineBreakdown.Total);
+        Assert.Equal(119_753, row.MineTokens); // literal, so the identity above
+                                                // is not two derived values.
+
+        var model = Assert.Single(row.Models);
+        Assert.Equal(row.MineBreakdown, model.Breakdown);
+        Assert.Equal(model.Tokens, model.Breakdown.Total);
+    }
+
+    [Fact]
+    public void PerModelBreakdownSumsToTheModelsOwnTokenTotal()
+    {
+        var confirmed = new List<UsageAttribution.Record>
+        {
+            new("mine", "anthropic", UsageAttribution.State.Assigned("claude")),
+        };
+        var cycles = new[] { HistoryCycle(1000, 2000, 40) };
+        var messages = new[]
+        {
+            FullMessage(1200, "mine", "anthropic", "model-a", 1, 20, 300, 4_000, 50_000, 1.0),
+            FullMessage(1300, "mine", "anthropic", "model-b", 9, 8, 7, 6, 5, 0.5),
+        };
+
+        var row = Assert.Single(QuotaHistoryFold.Rows(cycles, messages, "claude", null, confirmed));
+
+        Assert.Equal(2, row.Models.Count);
+        foreach (var model in row.Models)
+        {
+            Assert.Equal(model.Tokens, model.Breakdown.Total);
+        }
+    }
 }

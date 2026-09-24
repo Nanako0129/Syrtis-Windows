@@ -113,7 +113,13 @@ public sealed record QuotaActiveCycle(
 /// here would be coloured by a different rule than the same models in the
 /// model breakdown and the usage chart, and one model would be two colours
 /// depending on which card you were looking at.</param>
-public sealed record QuotaHistoryModel(string ProviderId, string ModelId, long Tokens, double Cost)
+/// <param name="Breakdown"><paramref name="Tokens"/> split by class, on the
+/// same five lanes the row's own <see cref="QuotaHistoryRow.MineBreakdown"/>
+/// uses — a model line and the row above it are the same question at two
+/// scopes, so a reader who can break one down and not the other is being told
+/// the detail exists only sometimes.</param>
+public sealed record QuotaHistoryModel(
+    string ProviderId, string ModelId, long Tokens, TokenBreakdown Breakdown, double Cost)
 {
     public string Id => $"{ProviderId}|{ModelId}";
 }
@@ -192,10 +198,27 @@ public sealed record QuotaHistoryModel(string ProviderId, string ModelId, long T
 /// </para>
 /// </param>
 /// <param name="Models">This subscription's models, largest first.</param>
+/// <param name="MineBreakdown">
+/// <see cref="MineTokens"/> split by class, for the row's hover breakdown.
+/// <para>
+/// Five classes, because <see cref="WindowMessage.Tokens"/> sums exactly five
+/// and <see cref="MineTokens"/> is its running total: a four-way split would
+/// not add up to the number printed beside it, and a breakdown that does not
+/// reconcile with the figure it explains is worse than none.
+/// <see cref="TokenBreakdown.Total"/> exists so that identity can be asserted
+/// rather than assumed.
+/// </para>
+/// <para>
+/// Accumulated alongside <see cref="MineTokens"/> in the same loop, not
+/// recovered from it by subtraction — the mistake <see cref="MineTokensExCacheRead"/>'s
+/// own comment documents on a saturated row.
+/// </para>
+/// </param>
 public sealed record QuotaHistoryRow(
     QuotaCycle Cycle,
     long MineTokens,
     long MineTokensExCacheRead,
+    TokenBreakdown MineBreakdown,
     double MineCost,
     long SpanTokens,
     double SpanCost,
@@ -560,10 +583,11 @@ public static class QuotaHistoryFold
             var hi = LowerBound(stamps, cycle.ResetAtMs);
 
             long mineTokens = 0, mineExCacheRead = 0, otherTokens = 0;
+            long mineInput = 0, mineOutput = 0, mineCacheRead = 0, mineCacheWrite = 0, mineReasoning = 0;
             var mineCost = 0.0;
             var otherCost = 0.0;
             bool otherHasAssigned = false, otherHasExcluded = false, otherHasUnattributed = false;
-            var byModel = new Dictionary<ModelKey, (long Tokens, double Cost)>();
+            var byModel = new Dictionary<ModelKey, (long Tokens, double Cost, TokenBreakdown Breakdown)>();
 
             for (var index = lo; index < Math.Max(lo, hi); index++)
             {
@@ -578,10 +602,28 @@ public static class QuotaHistoryFold
                     // accumulator is where a corrupt transcript would land.
                     mineTokens = mineTokens.SaturatingAdd(message.Tokens);
                     mineExCacheRead = mineExCacheRead.SaturatingAdd(message.TokensExCacheRead);
+                    // Per class, alongside the totals rather than derived
+                    // from them: message.Tokens is already a sum, and a split
+                    // recovered by subtraction is the mistake
+                    // MineTokensExCacheRead's own comment documents.
+                    mineInput = mineInput.SaturatingAdd(message.Input);
+                    mineOutput = mineOutput.SaturatingAdd(message.Output);
+                    mineCacheRead = mineCacheRead.SaturatingAdd(message.CacheRead);
+                    mineCacheWrite = mineCacheWrite.SaturatingAdd(message.CacheWrite);
+                    mineReasoning = mineReasoning.SaturatingAdd(message.Reasoning);
                     mineCost += message.Cost;
                     var key = new ModelKey(message.ProviderId, message.ModelId);
-                    var current = byModel.GetValueOrDefault(key);
-                    byModel[key] = (current.Tokens.SaturatingAdd(message.Tokens), current.Cost + message.Cost);
+                    var current = byModel.GetValueOrDefault(
+                        key, (Tokens: 0L, Cost: 0.0, Breakdown: new TokenBreakdown(0, 0, 0, 0, 0)));
+                    byModel[key] = (
+                        current.Tokens.SaturatingAdd(message.Tokens),
+                        current.Cost + message.Cost,
+                        new TokenBreakdown(
+                            current.Breakdown.Input.SaturatingAdd(message.Input),
+                            current.Breakdown.Output.SaturatingAdd(message.Output),
+                            current.Breakdown.CacheRead.SaturatingAdd(message.CacheRead),
+                            current.Breakdown.CacheWrite.SaturatingAdd(message.CacheWrite),
+                            current.Breakdown.Reasoning.SaturatingAdd(message.Reasoning)));
                 }
                 else
                 {
@@ -611,6 +653,8 @@ public static class QuotaHistoryFold
                 Cycle: cycle,
                 MineTokens: mineTokens,
                 MineTokensExCacheRead: mineExCacheRead,
+                MineBreakdown: new TokenBreakdown(
+                    mineInput, mineOutput, mineCacheRead, mineCacheWrite, mineReasoning),
                 MineCost: mineCost,
                 SpanTokens: span.Tokens,
                 SpanCost: span.Cost,
@@ -621,7 +665,8 @@ public static class QuotaHistoryFold
                 OtherHasUnattributed: otherHasUnattributed,
                 Models: byModel
                     .Select(entry => new QuotaHistoryModel(
-                        entry.Key.ProviderId, entry.Key.ModelId, entry.Value.Tokens, entry.Value.Cost))
+                        entry.Key.ProviderId, entry.Key.ModelId, entry.Value.Tokens,
+                        entry.Value.Breakdown, entry.Value.Cost))
                     // Tokens, then cost, then the model key. Ordering on tokens
                     // alone leaves every cost-only model tied at zero, so their
                     // order came from dictionary iteration while the card
