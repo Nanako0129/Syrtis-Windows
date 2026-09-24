@@ -3,7 +3,7 @@
 > **已作廢（2026-09-17）。** macOS 自本文的對照基準 `5b894b63` 起前進了 240 個
 > commit、四個小版本，到 v1.18.0；Windows 這側切片 3、4 與用量歸因整頁也都已完成。
 > 兩個方向都已失真。現行清單見
-> [`macos-parity-v1180.md`](macos-parity-v1180.md)。本文保留，因為它記錄的是
+> [`macos-parity.md`](macos-parity.md)。本文保留，因為它記錄的是
 > 當時的調查方法與幾個仍然成立的結論（Rust 側已有一半、`tb_core_ffi` 的
 > ownership、托盤已對等）。
 
