@@ -422,25 +422,40 @@ public class WindowCardTextTests
         Assert.All(tabs, tab => Assert.Equal("claude", tab.Id.ProviderId));
     }
 
-    // A running window leads: on a client with a session and a weekly window
-    // the weekly one is routinely the idle half, and it must not be what the
-    // card opens on.
+    // Tab order is the provider's own order, never re-sorted — the defect
+    // this replaces used to move a running tab to the front, which is what
+    // let "每週" jump ahead of "工作階段" whenever the session window had no
+    // running cycle. Which tab OPENS first is QuotaLensProjection's decision,
+    // not this method's, even when only the weekly window is running.
     [Fact]
-    public void ARunningWindowLeadsTheTabs()
+    public void TabOrderIsTheProvidersOrderEvenWhenOnlyTheWeeklyWindowIsRunning()
     {
         var tabs = WindowCardText.Tabs(
             [
-                Series("claude", "weekly.v1", Sample(12, ResetAt - 600, active: false)),
-                Series("claude", "session.v1", Sample(40, ResetAt - 600)),
+                Series("claude", "session.v1", Sample(40, ResetAt - 600, active: false)),
+                Series("claude", "weekly.v1", Sample(12, ResetAt - 600)),
             ],
             Quota(
                 "claude",
-                Window("claude|weekly.v1", "Weekly", "weekly.v1"),
-                Window("claude|session.v1", "Session", "session.v1")),
+                Window("claude|session.v1", "Session", "session.v1"),
+                Window("claude|weekly.v1", "Weekly", "weekly.v1")),
             clientId: "claude");
 
-        Assert.Equal("Session", tabs[0].Label);
+        Assert.Equal(["Session", "Weekly"], tabs.Select(tab => tab.Label));
     }
+
+    // A key with a session-labelled dot COMPONENT is session-class, whether
+    // or not it is the first component.
+    [Fact]
+    public void ADotComponentNamedSessionIsSessionClass() =>
+        Assert.True(WindowCardText.IsSessionClass("main.session.v1"));
+
+    // weekly_scoped.fable.v1 is macOS's own worked example of a key that is
+    // NOT session-class — its components are "weekly_scoped", "fable", "v1",
+    // none of them the exact word "session".
+    [Fact]
+    public void AWeeklyScopedKeyIsNotSessionClass() =>
+        Assert.False(WindowCardText.IsSessionClass("weekly_scoped.fable.v1"));
 
     // Bars under the quota line are a claim about which subscription paid, so
     // only the user's own confirmed classification admits a message.

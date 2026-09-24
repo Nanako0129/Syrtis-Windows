@@ -52,10 +52,14 @@ public class QuotaLensProjectionTests
             []);
 
     private static UsageWindow Window(string cardId, string label, string? windowKey) =>
+        Window(cardId, label, windowKey, remainingPercent: 90);
+
+    private static UsageWindow Window(
+        string cardId, string label, string? windowKey, double remainingPercent) =>
         new(
             Label: label,
-            UsedPercent: 10,
-            RemainingPercent: 90,
+            UsedPercent: 100 - remainingPercent,
+            RemainingPercent: remainingPercent,
             CardId: cardId,
             PaceStatus: windowKey is null
                 ? new PaceStatus(UsagePaceState.Unavailable)
@@ -384,6 +388,74 @@ public class QuotaLensProjectionTests
         Assert.Equal("antigravity", model.Client!.Owner);
         Assert.Equal(2, model.Client.Tabs.Count);
         Assert.Equal("session.v1", model.Client.Selected?.Id.WindowKey);
+    }
+
+    // ---- default tab selection (the tab-order bug this fix replaces) ------
+
+    // The bug report itself: on a client with a session and a weekly window,
+    // when the session window has no running cycle, the session tab must
+    // still open first — not the weekly one, even though weekly is the
+    // window that is actually running. Tab order (WindowCardText.Tabs) is no
+    // longer what decides this; the default-selection rule in
+    // QuotaLensProjection.DefaultTab is.
+    [Fact]
+    public void DefaultSelectionPrefersTheSessionTabEvenWhenItIsIdleAndWeeklyIsRunning()
+    {
+        var weekly = TwoCycleSeries("claude", "primary", "weekly.v1");
+        var session = Series("claude", "primary", "session.v1", Sample(40, 1_500, 2_000, active: false));
+        var quota = Quota(
+            "claude",
+            Window("claude|weekly.v1", "Weekly", "weekly.v1"),
+            Window("claude|session.v1", "Session", "session.v1"));
+
+        var model = QuotaLensProjection.Build(
+            [weekly, session], quota, EmptyGraph(), windowUsage: null,
+            WindowEquivalence.FetchOutcome.NotAttempted, quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            UsageAttribution.Table.Empty, year: null,
+            // No stored preference — the default-selection arm is what runs.
+            new QuotaLensProjection.Selection("claude", string.Empty));
+
+        Assert.Equal("session.v1", model.Client!.Selected?.Id.WindowKey);
+    }
+
+    // With no session-class window at all, the default falls back to the most
+    // depleted tab — the lowest finite RemainingPercent — mirroring macOS's
+    // own fallback in WindowCardLoader.pick.
+    [Fact]
+    public void DefaultSelectionPicksTheMostDepletedTabWhenNoneAreSessionClass()
+    {
+        var quota = Quota(
+            "claude",
+            Window("claude|weekly.v1", "Weekly", "weekly.v1", remainingPercent: 80),
+            Window("claude|chat.v1", "Chat", "chat.v1", remainingPercent: 15));
+
+        var model = QuotaLensProjection.Build(
+            null, quota, EmptyGraph(), windowUsage: null,
+            WindowEquivalence.FetchOutcome.NotAttempted, quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            UsageAttribution.Table.Empty, year: null,
+            new QuotaLensProjection.Selection("claude", string.Empty));
+
+        Assert.Equal("chat.v1", model.Client!.Selected?.Id.WindowKey);
+    }
+
+    // An explicit stored pick still wins over the default rule, even when it
+    // names the tab the default rule would NOT have picked (weekly, not the
+    // session-class tab).
+    [Fact]
+    public void AnExplicitPickStillWinsOverTheSessionDefault()
+    {
+        var quota = Quota(
+            "claude",
+            Window("claude|weekly.v1", "Weekly", "weekly.v1"),
+            Window("claude|session.v1", "Session", "session.v1"));
+
+        var model = QuotaLensProjection.Build(
+            null, quota, EmptyGraph(), windowUsage: null,
+            WindowEquivalence.FetchOutcome.NotAttempted, quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            UsageAttribution.Table.Empty, year: null,
+            new QuotaLensProjection.Selection("claude", "claude|primary|weekly.v1"));
+
+        Assert.Equal("weekly.v1", model.Client!.Selected?.Id.WindowKey);
     }
 
     // ---- site 6: growing the history card (parity with macOS #334) ---------
