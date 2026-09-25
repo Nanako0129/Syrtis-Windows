@@ -3,11 +3,9 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Shapes;
 using System.Reflection;
 using TokenBar.Core;
 using TokenBar.Interop;
-using Windows.UI;
 // TokenBar.Core.Grid (the contribution-grid builder) collides with the XAML
 // Grid — same clash DashboardView notes.
 using Grid = Microsoft.UI.Xaml.Controls.Grid;
@@ -1539,7 +1537,7 @@ public sealed class SettingsWindow : Window
             var (name, presetHex) = MenuBarTextColor.Presets[i];
             var preset = new Button
             {
-                Content = new Ellipse
+                Content = new Microsoft.UI.Xaml.Shapes.Ellipse
                 {
                     Width = 18,
                     Height = 18,
