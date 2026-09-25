@@ -59,7 +59,12 @@ public static class LimitsChartFold
             return null;
         }
 
-        var inside = samples.Count(sample => sample.AtMs >= start && sample.AtMs <= nowMs);
+        // Capped at the window end as well as now: the renderer draws through
+        // Math.Min(nowMs, end), so a sample after a reset that has already
+        // passed must not count here, or the gate admits a curve with fewer
+        // than two points and the row shows neither curve nor bar.
+        var upper = Math.Min(nowMs, end);
+        var inside = samples.Count(sample => sample.AtMs >= start && sample.AtMs <= upper);
         return inside >= MinimumSamples ? (start, end) : null;
     }
 }

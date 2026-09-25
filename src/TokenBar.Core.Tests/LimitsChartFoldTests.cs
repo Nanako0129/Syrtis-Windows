@@ -69,6 +69,18 @@ public class LimitsChartFoldTests
             samples: [new QuotaSample(Hour, 20), new QuotaSample(3 * Hour, 40)]));
     }
 
+    // A reset that has already passed: the curve is drawn only up to the
+    // window end, so a sample after it must not make up the two points.
+    [Fact]
+    public void SamplesAfterAPassedWindowEndDoNotCount()
+    {
+        Assert.Null(LimitsChartFold.SparklineInterval(
+            windowStartMs: Start,
+            windowEndMs: End,
+            nowMs: End + Hour,
+            samples: [new QuotaSample(Hour, 20), new QuotaSample(End + Hour / 2, 40)]));
+    }
+
     [Fact]
     public void AnUnplaceableWindowHasNoInterval()
     {
