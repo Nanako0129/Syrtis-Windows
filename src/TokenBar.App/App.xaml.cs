@@ -256,7 +256,7 @@ public partial class App : Application
         {
             LogUpdateFailure("update-check", ex);
             _lastCandidate = null;
-            return UpdateCheckResult.Failed;
+            return UpdateCheckResult.FromFailure(ex);
         }
     }
 

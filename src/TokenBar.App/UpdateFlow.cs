@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Net;
 using System.Xml;
 using System.Xml.Linq;
 using TokenBar.Core;
@@ -37,6 +38,12 @@ internal enum UpdateCheckState
     /// looking for a network or permissions problem that is not there.
     /// </summary>
     Unmanaged,
+
+    /// <summary>GitHub refused the release query because the caller's IP ran
+    /// out of unauthenticated API requests (60 an hour, shared by every
+    /// machine behind the same address). Distinct from <see cref="Failed"/>
+    /// because it clears on its own and needs nothing fixed.</summary>
+    RateLimited,
 }
 
 /// <summary>Raised when the running copy was not installed by the in-app
@@ -56,6 +63,22 @@ internal readonly record struct UpdateCheckResult(UpdateCheckState State, string
 
     internal static UpdateCheckResult Unmanaged => new(UpdateCheckState.Unmanaged, null);
 
+    internal static UpdateCheckResult RateLimited => new(UpdateCheckState.RateLimited, null);
+
+    /// <summary>Maps a failed check to what the user is told. Velopack 1.2.0's
+    /// GithubSource fetches the release list with HttpClient.GetStringAsync,
+    /// which throws HttpRequestException carrying the status code; GitHub
+    /// answers an exhausted unauthenticated quota with 403 (observed
+    /// 2026-09-25, X-RateLimit-Remaining: 0) or 429. A 403 for another reason
+    /// is not expected on a public repository's release list.</summary>
+    internal static UpdateCheckResult FromFailure(Exception exception) =>
+        exception is HttpRequestException
+        {
+            StatusCode: HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests,
+        }
+            ? RateLimited
+            : Failed;
+
     /// <summary>The only intended way to reach <see cref="UpdateCheckState
     /// .Available"/>, and it refuses an empty version: ValidateTarget has
     /// already rejected those, so an empty string here means a caller bypassed
@@ -74,6 +97,8 @@ internal readonly record struct UpdateCheckResult(UpdateCheckState State, string
             "Update available: v{0}".Localized(Version ?? string.Empty),
         UpdateCheckState.Unmanaged =>
             "Updates are handled by whatever installed this copy.".Localized(),
+        UpdateCheckState.RateLimited =>
+            "GitHub is limiting update checks. Try again later.".Localized(),
         _ => "Could not check for updates.".Localized(),
     };
 }
