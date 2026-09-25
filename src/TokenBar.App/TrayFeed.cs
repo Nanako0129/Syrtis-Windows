@@ -317,7 +317,11 @@ public sealed class TrayFeed : IDisposable
 
     private void RecomputeVisibleUsage()
     {
-        var hidden = ClientRegistry.HiddenClients(AppSettings.Store);
+        // Client ids, not tab ids: a stored hide of the "antigravity" tab
+        // must still exclude "antigravity-cli"'s tokens from these usage
+        // totals, and a legacy "antigravity-cli" hide must still exclude
+        // "antigravity". HiddenTabClients folds both directions.
+        var hidden = ClientRegistry.HiddenTabClients(AppSettings.Store);
         VisibleTotals = Graph?.TrayTotals(hidden, Format.TodayKey());
         TokensPerMin = _hasTrace ? TraceCollapse.TotalRate(Trace, hidden) : null;
     }

@@ -1008,18 +1008,26 @@ public sealed class SettingsWindow : Window
     {
         var panel = new StackPanel { Spacing = 6 };
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        var present = (_graph()?.Summary.Clients ?? [])
+        var usagePresent = (_graph()?.Summary.Clients ?? [])
             .Select(ClientRegistry.CanonicalClient)
             .Where(seen.Add)
             .ToList();
-        var ordered = ClientRegistry.OrderedClients(present, store);
+        // The tab row includes configured quota-only providers (e.g.
+        // Copilot) alongside local-usage clients, and folds the Antigravity
+        // IDE + CLI pair into one "Antigravity" row — the same TabClients
+        // helper the app's tab bar and its selection both use, so this list
+        // and the live tab bar can never derive different rows.
+        var quotaIds = _quota()?.ConfiguredClientIds ?? [];
+        var present = ClientRegistry.TabClients(usagePresent, quotaIds);
+        var orderRaw = store.GetString(ClientRegistry.TabOrderKey) ?? "";
+        var ordered = ClientRegistry.OrderedClients(present, ClientRegistry.TabOrder(orderRaw));
         if (ordered.Count == 0)
         {
             panel.Children.Add(Hint("No usage clients discovered yet.".Localized()));
             return panel;
         }
 
-        var hidden = ClientRegistry.HiddenClients(store);
+        var hidden = ClientRegistry.HiddenTabClients(store);
         for (var i = 0; i < ordered.Count; i++)
         {
             var id = ordered[i];
@@ -1039,7 +1047,7 @@ public sealed class SettingsWindow : Window
                 VerticalAlignment = VerticalAlignment.Center,
             };
             name.Children.Add(Ui.Disc(ClientRegistry.Style(id).Color));
-            name.Children.Add(Ui.Text(ClientRegistry.Style(id).DisplayName, 12));
+            name.Children.Add(Ui.Text(ClientRegistry.TabDisplayName(id), 12));
             row.Children.Add(name);
 
             var up = new Button
@@ -1089,8 +1097,8 @@ public sealed class SettingsWindow : Window
             shown.Toggled += (_, _) => SetClientTabVisible(store, id, shown.IsOn);
             Grid.SetColumn(shown, 3);
             row.Children.Add(shown);
-            HoverTip.Attach(up, () => "Move {0} up".Localized(ClientRegistry.ShortName(id)));
-            HoverTip.Attach(down, () => "Move {0} down".Localized(ClientRegistry.ShortName(id)));
+            HoverTip.Attach(up, () => "Move {0} up".Localized(ClientRegistry.TabLabel(id)));
+            HoverTip.Attach(down, () => "Move {0} down".Localized(ClientRegistry.TabLabel(id)));
             HoverTip.Attach(shown, () => (shown.IsOn
                 ? "Shown in client tabs"
                 : "Hidden from client tabs").Localized());
@@ -1106,28 +1114,37 @@ public sealed class SettingsWindow : Window
     private static void MoveClientTab(
         SettingsStore store, IReadOnlyList<string> present, string from, string to)
     {
+        // `present` is already TAB ids (TabClients folds group members). The
+        // saved order can still hold a legacy member id (e.g.
+        // `antigravity-cli`) from before the fold existed, so `TabOrder`
+        // folds it to its tab id and dedupes before this reorder runs — a
+        // raw compare would leave that legacy entry unmatched by `visible`
+        // and let it drift to the end of `full` on every move.
         var orderRaw = store.GetString(ClientRegistry.TabOrderKey) ?? "";
-        var visible = ClientRegistry.OrderedClients(present, orderRaw);
+        var order = ClientRegistry.TabOrder(orderRaw);
+        var visible = ClientRegistry.OrderedClients(present, order);
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        var full = ClientRegistry.ParseIdList(orderRaw)
-            .Select(ClientRegistry.CanonicalClient)
-            .Concat(visible)
-            .Where(seen.Add)
-            .ToList();
+        var full = order.Concat(visible).Where(seen.Add).ToList();
         var merged = ClientRegistry.MergeReorder(full, visible, from, to);
         store.SetString(ClientRegistry.TabOrderKey, string.Join(',', merged));
     }
 
     private static void SetClientTabVisible(SettingsStore store, string id, bool visible)
     {
+        // Toggling a grouped tab (e.g. "antigravity") must hide/show every
+        // member (its quota-only IDE id and its usage-carrying CLI id)
+        // together, and must clear out any legacy member-only entry left
+        // from before the fold existed — TabSlice(id) is exactly that
+        // member set (the tab id itself for an ungrouped client).
+        var group = ClientRegistry.TabSlice(id).ToHashSet(StringComparer.Ordinal);
         var hidden = ClientRegistry.ParseIdList(
                 store.GetString(ClientRegistry.TabHiddenKey) ?? "")
             .Select(ClientRegistry.CanonicalClient)
             .ToList();
-        hidden.RemoveAll(value => value == id);
+        hidden.RemoveAll(group.Contains);
         if (!visible)
         {
-            hidden.Add(id);
+            hidden.AddRange(group);
         }
 
         store.SetString(ClientRegistry.TabHiddenKey, string.Join(',', hidden));

@@ -791,6 +791,19 @@ public sealed record AgentUsageSnapshot(
             return unique;
         }
     }
+
+    /// <summary>Whether this card is a prompt for the user rather than a
+    /// malfunction — the required-card marker Rust's
+    /// <c>required_card_source</c> stamps on <see cref="Source"/> when the
+    /// underlying provider has never had a credential ("unconfigured"), plus
+    /// Claude's keychain-consent states. Ported from macOS
+    /// <c>AgentUsageSnapshot.isSetupPlaceholder</c> (AgentUsage.swift
+    /// :574-598). A setup placeholder does not earn a tab in
+    /// <see cref="AgentUsagePayload.ConfiguredClientIds"/> purely for lacking
+    /// a credential; an error-only snapshot (transient failure) is not a
+    /// placeholder and keeps its tab.</summary>
+    [JsonIgnore]
+    public bool IsSetupPlaceholder => Source is "unconfigured" or "keychain-consent" or "keychain-denied";
 }
 
 public sealed record AgentUsagePayload(
@@ -800,6 +813,29 @@ public sealed record AgentUsagePayload(
     // Omitted from the JSON entirely when empty.
     IReadOnlyList<string>? OpencodeSubscriptions = null) : IJsonOnDeserialized
 {
+    /// <summary>Configured quota sources also belong in navigation without
+    /// session logs. Error-only snapshots stay reachable; setup placeholders
+    /// do not add tabs. Ported from macOS
+    /// <c>AgentUsagePayload.configuredClientIds</c> (AgentUsage.swift
+    /// :788-792).</summary>
+    [JsonIgnore]
+    public IReadOnlyList<string> ConfiguredClientIds
+    {
+        get
+        {
+            var seen = new HashSet<string>();
+            var ids = new List<string>();
+            foreach (var agent in Agents)
+            {
+                if (!agent.IsSetupPlaceholder && seen.Add(agent.ClientId))
+                {
+                    ids.Add(agent.ClientId);
+                }
+            }
+            return ids;
+        }
+    }
+
     void IJsonOnDeserialized.OnDeserialized()
     {
         if (GeneratedAt is null || Agents is null)

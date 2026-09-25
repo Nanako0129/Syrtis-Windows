@@ -170,6 +170,127 @@ public static class ClientRegistry
     public static string ClientIdForSubscriptionLabel(string label) =>
         SubscriptionLabelAliases.TryGetValue(label, out var alias) ? alias : label.ToLowerInvariant();
 
+    // MARK: - Grouped tabs
+
+    /// <summary>Tabs that group more than one client id under a single top
+    /// tab: one member carries local session usage (antigravity-cli), the
+    /// other only a cloud quota with no usage of its own (antigravity, the
+    /// IDE client). Ported from macOS ClientRegistry.swift's <c>tabGroups</c>
+    /// (:194-207); Windows has no grok-bot provider, so only the Antigravity
+    /// group exists here.</summary>
+    private static readonly Dictionary<string, (string[] Members, string Label)> TabGroups = new()
+    {
+        ["antigravity"] = (["antigravity", "antigravity-cli"], "Antigravity"),
+    };
+
+    /// <summary>Reverse lookup built once: a group member's id -> the tab id
+    /// it folds into. A group's own tab id is absent here — callers fall back
+    /// to the id itself, which is exactly a no-op fold.</summary>
+    private static readonly IReadOnlyDictionary<string, string> MemberToTabId =
+        TabGroups
+            .SelectMany(entry => entry.Value.Members.Select(member => (member, tab: entry.Key)))
+            .ToDictionary(pair => pair.member, pair => pair.tab, StringComparer.Ordinal);
+
+    private static string FoldToTabId(string id) =>
+        MemberToTabId.TryGetValue(id, out var tab) ? tab : id;
+
+    /// <summary>Client ids behind a top tab. "antigravity": the CLI carries
+    /// the usage, the IDE client carries the quota — shown as two sections
+    /// under one tab rather than two tabs.</summary>
+    public static IReadOnlyList<string> TabSlice(string id) =>
+        TabGroups.TryGetValue(id, out var group) ? group.Members : [id];
+
+    /// <summary>Navigation includes configured quota sources even without
+    /// local usage. Group members share one tab but retain their provider
+    /// identities below it. Ported from macOS <c>tabClients(present:quotaIds:)</c>
+    /// (ClientRegistry.swift :219-224).</summary>
+    public static IReadOnlyList<string> TabClients(
+        IReadOnlyList<string> present, IReadOnlyList<string> quotaIds)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<string>();
+        foreach (var id in present.Concat(quotaIds))
+        {
+            var tabId = FoldToTabId(id);
+            if (seen.Add(tabId))
+            {
+                result.Add(tabId);
+            }
+        }
+        return result;
+    }
+
+    /// <summary>Tab-bar and single-client-title label. Only a grouped tab
+    /// differs from its short name; every other tab keeps
+    /// <see cref="ShortName"/>.</summary>
+    public static string TabLabel(string id) =>
+        TabGroups.TryGetValue(id, out var group) ? group.Label : ShortName(id);
+
+    /// <summary>Card titles retain the full client name for ordinary
+    /// tabs.</summary>
+    public static string TabDisplayName(string id) =>
+        TabSlice(id).Count > 1 ? TabLabel(id) : Style(id).DisplayName;
+
+    /// <summary>Expand a set so group members follow their tab: naming the
+    /// "antigravity" tab also carries the quota-only "antigravity-cli" row
+    /// along (which has no tab of its own). Explicit member entries pass
+    /// through unchanged, so an independent limits-toggle on a member row
+    /// keeps working.</summary>
+    public static IReadOnlySet<string> WithGroupMembers(IReadOnlySet<string> ids)
+    {
+        var result = new HashSet<string>(ids, StringComparer.Ordinal);
+        foreach (var id in ids)
+        {
+            if (TabGroups.TryGetValue(id, out var group))
+            {
+                result.UnionWith(group.Members);
+            }
+        }
+        return result;
+    }
+
+    /// <summary>The one reading of <see cref="TabHiddenKey"/> every
+    /// tab-visibility consumer takes, closed over both directions of the
+    /// grouping: a raw comparison against TAB ids misses a legacy
+    /// `antigravity-cli` entry from when the CLI had its own tab, and a raw
+    /// comparison against CLIENT ids misses that a fresh hide of
+    /// "antigravity" should also exclude "antigravity-cli"'s usage. Folding
+    /// members to their group and then expanding back to all members
+    /// satisfies both. Tab visibility only — <see cref="HiddenLimitsClients"/>
+    /// stays member-specific in both directions, so hiding one member's quota
+    /// card never hides the other's. Ported from macOS
+    /// <c>hiddenTabClients</c> (ClientRegistry.swift :383-408).</summary>
+    public static IReadOnlySet<string> HiddenTabClients(IReadOnlySet<string> raw) =>
+        WithGroupMembers(new HashSet<string>(raw.Select(FoldToTabId), StringComparer.Ordinal));
+
+    public static IReadOnlySet<string> HiddenTabClients(SettingsStore store) =>
+        HiddenTabClients(HiddenClients(store));
+
+    /// <summary>Folds a saved order id list to tab ids, deduplicated (first
+    /// occurrence wins). The ordering counterpart of
+    /// <see cref="HiddenTabClients(IReadOnlySet{string})"/>, and for the same
+    /// reason: `tokenbar.tabs.order` can hold `antigravity-cli` from when the
+    /// CLI had a tab of its own. Deliberately NOT applied inside the raw
+    /// <see cref="OrderedClients(IReadOnlyList{string}, string)"/> overload —
+    /// several callers (the limits card's rows, the Settings client-tabs
+    /// list, the tray) order MEMBER ids, where both Antigravity members must
+    /// keep distinct positions; folding there would collapse them onto one
+    /// index. Ported from macOS <c>tabOrder(_:)</c> (ClientRegistry.swift
+    /// :315-330).</summary>
+    public static IReadOnlyList<string> TabOrder(string raw)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<string>();
+        foreach (var id in ParseIdList(raw).Select(FoldToTabId))
+        {
+            if (seen.Add(id))
+            {
+                result.Add(id);
+            }
+        }
+        return result;
+    }
+
     /// <summary>Parses the comma-separated id form persisted by the tab
     /// order/hidden defaults into a set, tolerating an empty string. Single
     /// source of the CSV split so callers all agree on the shape.</summary>
@@ -182,8 +303,12 @@ public static class ClientRegistry
     public static IReadOnlyList<string> ParseIdList(string raw) =>
         raw.Split(',', StringSplitOptions.RemoveEmptyEntries);
 
-    /// <summary>The set of client ids the user has hidden from the top tabs (and
-    /// now also from Agent limits cards).</summary>
+    /// <summary>The set of client ids the user has hidden from the top tabs
+    /// (and now also from Agent limits cards), RAW as stored. A caller
+    /// comparing against tab ids or expanding to every group member wants
+    /// <see cref="HiddenTabClients(SettingsStore)"/> instead — this raw form
+    /// remains for the Settings write path and callers that intentionally
+    /// operate on member ids.</summary>
     public static IReadOnlySet<string> HiddenClients(SettingsStore store) =>
         ParseIdSet(store.GetString(TabHiddenKey) ?? "");
 
@@ -192,12 +317,17 @@ public static class ClientRegistry
     public static IReadOnlySet<string> HiddenLimitsClients(SettingsStore store) =>
         ParseIdSet(store.GetString(LimitsHiddenKey) ?? "");
 
-    /// <summary>Clients excluded from the menu-bar quota AUTO pick: tab-hidden ∪
-    /// limits-hidden. A client hidden from either surface must not drive the tray
-    /// quota % (an explicit tray selection is honored separately).</summary>
+    /// <summary>Clients excluded from the menu-bar quota AUTO pick: tab-hidden
+    /// ∪ limits-hidden. A client hidden from either surface must not drive
+    /// the tray quota % (an explicit tray selection is honored separately).
+    /// Tab-hidden goes through <see cref="HiddenTabClients(SettingsStore)"/>
+    /// so a legacy `antigravity-cli` hide still excludes the `antigravity`
+    /// quota card and vice versa; limits-hidden stays member-specific (each
+    /// group member keeps its own quota card under the shared
+    /// tab).</summary>
     public static IReadOnlySet<string> QuotaExcludedClients(SettingsStore store)
     {
-        var excluded = new HashSet<string>(HiddenClients(store));
+        var excluded = new HashSet<string>(HiddenTabClients(store), StringComparer.Ordinal);
         excluded.UnionWith(HiddenLimitsClients(store));
         return excluded;
     }
@@ -228,10 +358,20 @@ public static class ClientRegistry
 
     /// <summary>Overload taking the saved order string directly, so a reactive
     /// caller re-sorts the instant the order changes without re-reading the
-    /// store.</summary>
-    public static IReadOnlyList<string> OrderedClients(IReadOnlyList<string> ids, string orderRaw)
+    /// store. Unfolded — orders MEMBER ids as stored. A caller ordering TAB
+    /// ids (the tab row) wants the grouped overload below, which folds via
+    /// <see cref="TabOrder"/> first.</summary>
+    public static IReadOnlyList<string> OrderedClients(IReadOnlyList<string> ids, string orderRaw) =>
+        OrderedClients(ids, ParseIdList(orderRaw));
+
+    /// <summary>The sort itself, over an already-parsed order. Split from the
+    /// string form so a caller (<see cref="DisplayClients(IReadOnlyList{string}, string, string)"/>)
+    /// can fold grouped members onto their tab id first without a re-parse.
+    /// Ids absent from <paramref name="order"/> sort last and keep their
+    /// incoming relative order, so a newly discovered client appears at the
+    /// end rather than at an arbitrary position.</summary>
+    public static IReadOnlyList<string> OrderedClients(IReadOnlyList<string> ids, IReadOnlyList<string> order)
     {
-        var order = ParseIdList(orderRaw);
         if (order.Count == 0)
         {
             return ids;
@@ -260,45 +400,65 @@ public static class ClientRegistry
     /// user's saved order. Clients not yet in the saved order are appended at the
     /// end (so newly discovered agents become visible without breaking existing
     /// custom order).</summary>
-    public static IReadOnlyList<string> DisplayClients(IReadOnlyList<string> present, SettingsStore store)
-    {
-        var hidden = HiddenClients(store);
-        return OrderedClients(present.Where(id => !hidden.Contains(id)).ToList(), store);
-    }
+    public static IReadOnlyList<string> DisplayClients(IReadOnlyList<string> present, SettingsStore store) =>
+        DisplayClients(present, store.GetString(TabHiddenKey) ?? "", store.GetString(TabOrderKey) ?? "");
 
     /// <summary>Overload taking the observed hidden/order raw strings, so a
-    /// reactive caller re-renders the instant the user toggles a tab or reorders
-    /// instead of waiting for the next poller tick to re-read the store.</summary>
+    /// reactive caller re-renders the instant the user toggles a tab or
+    /// reorders instead of waiting for the next poller tick to re-read the
+    /// store. Both the hidden filter and the sort go through the grouping
+    /// fold (<see cref="HiddenTabClients(IReadOnlySet{string})"/> /
+    /// <see cref="TabOrder"/>) — this is the one function shared by the tab
+    /// row (fed grouped tab ids via <see cref="TabClients"/>) and the
+    /// Overview usage selection (fed raw present client ids), matching macOS
+    /// <c>displayClients(present:hiddenRaw:orderRaw:)</c>
+    /// (ClientRegistry.swift :410-418).</summary>
     public static IReadOnlyList<string> DisplayClients(
         IReadOnlyList<string> present, string hiddenRaw, string orderRaw)
     {
-        var hidden = ParseIdSet(hiddenRaw);
-        return OrderedClients(present.Where(id => !hidden.Contains(id)).ToList(), orderRaw);
+        var hidden = HiddenTabClients(ParseIdSet(hiddenRaw));
+        return OrderedClients(present.Where(id => !hidden.Contains(id)).ToList(), TabOrder(orderRaw));
     }
 
+    /// <summary>Resolves the tab row, the active tab, and the selected client
+    /// set. The selected set for Overview is present usage clients minus
+    /// <see cref="HiddenTabClients(IReadOnlySet{string})"/> — NOT the tab
+    /// row's ids, so Overview keeps counting a group's usage-carrying
+    /// member's tokens and never selects a quota-only id (e.g. Copilot) that
+    /// has no usage lens of its own. A grouped tab's own selection is its
+    /// <see cref="TabSlice"/>, so a usage lens on the Antigravity tab
+    /// includes antigravity-cli's usage and the quota lens still resolves
+    /// antigravity via <see cref="QuotaOwner"/>. Ported from macOS
+    /// `PopoverView`'s `displayUsageClients` / `presentTabClients` /
+    /// `lensClientIds` split (:126-129, :137-140, :173).</summary>
     public static ClientSelection ResolveSelection(
-        IReadOnlyList<string> present, string hiddenRaw, string orderRaw, string? activeTab)
+        IReadOnlyList<string> present, IReadOnlyList<string> quotaIds,
+        string hiddenRaw, string orderRaw, string? activeTab)
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var canonicalPresent = present
             .Select(CanonicalClient)
             .Where(seen.Add)
             .ToList();
-        var display = DisplayClients(canonicalPresent, hiddenRaw, orderRaw);
+        var tabPresent = TabClients(canonicalPresent, quotaIds);
+        var display = DisplayClients(tabPresent, hiddenRaw, orderRaw);
         var requested = string.IsNullOrWhiteSpace(activeTab)
             ? OverviewTab
-            : CanonicalClient(activeTab.Trim());
+            : FoldToTabId(CanonicalClient(activeTab.Trim()));
         var normalized = requested != OverviewTab
             && display.Contains(requested, StringComparer.Ordinal)
                 ? requested
                 : OverviewTab;
-        IReadOnlyList<string> selected = normalized == OverviewTab ? display : [normalized];
+        var displayUsage = DisplayClients(canonicalPresent, hiddenRaw, orderRaw);
+        IReadOnlyList<string> selected = normalized == OverviewTab ? displayUsage : TabSlice(normalized);
         return new ClientSelection(display, selected, normalized);
     }
 
-    public static ClientSelection ResolveSelection(IReadOnlyList<string> present, SettingsStore store) =>
+    public static ClientSelection ResolveSelection(
+        IReadOnlyList<string> present, IReadOnlyList<string> quotaIds, SettingsStore store) =>
         ResolveSelection(
             present,
+            quotaIds,
             store.GetString(TabHiddenKey) ?? "",
             store.GetString(TabOrderKey) ?? "",
             store.GetString(ActiveTabKey));

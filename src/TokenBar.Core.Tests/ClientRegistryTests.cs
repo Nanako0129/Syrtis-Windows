@@ -158,6 +158,7 @@ public class ClientRegistryTests : IDisposable
     {
         var selection = ClientRegistry.ResolveSelection(
             present: ["claude-code", "claude", "codex-cli"],
+            quotaIds: [],
             hiddenRaw: "",
             orderRaw: "codex,claude",
             activeTab: null);
@@ -172,6 +173,7 @@ public class ClientRegistryTests : IDisposable
     {
         var selection = ClientRegistry.ResolveSelection(
             present: ["claude", "codex"],
+            quotaIds: [],
             hiddenRaw: "",
             orderRaw: "",
             activeTab: "codex-cli");
@@ -185,11 +187,13 @@ public class ClientRegistryTests : IDisposable
     {
         var hidden = ClientRegistry.ResolveSelection(
             present: ["claude", "codex"],
+            quotaIds: [],
             hiddenRaw: "codex",
             orderRaw: "",
             activeTab: "codex");
         var missing = ClientRegistry.ResolveSelection(
             present: ["claude", "codex"],
+            quotaIds: [],
             hiddenRaw: "",
             orderRaw: "",
             activeTab: "gemini");
@@ -205,6 +209,7 @@ public class ClientRegistryTests : IDisposable
     {
         var selection = ClientRegistry.ResolveSelection(
             present: ["claude", "codex"],
+            quotaIds: [],
             hiddenRaw: "claude,codex",
             orderRaw: "",
             activeTab: "codex");
@@ -219,6 +224,7 @@ public class ClientRegistryTests : IDisposable
     {
         var selection = ClientRegistry.ResolveSelection(
             present: ["claude", "codex", "gemini"],
+            quotaIds: [],
             hiddenRaw: "",
             orderRaw: "gemini,claude,codex",
             activeTab: "codex");
@@ -238,11 +244,173 @@ public class ClientRegistryTests : IDisposable
         store.SetString(ClientRegistry.LimitsHiddenKey, "codex");
 
         var selection = ClientRegistry.ResolveSelection(
-            ["gemini", "claude", "codex"], store);
+            ["gemini", "claude", "codex"], quotaIds: [], store);
 
         Assert.Equal(["codex", "claude"], selection.DisplayClients);
         Assert.Equal("codex", selection.ActiveTab);
         Assert.Equal(["codex"], selection.SelectedClients);
+    }
+
+    // --- Grouped tabs (Antigravity IDE + CLI) & quota-only tab sources ---
+
+    [Fact]
+    public void TabClientsAddsConfiguredQuotaOnlySourcesAndFoldsAntigravity()
+    {
+        // present carries local usage (claude, antigravity-cli); quotaIds adds
+        // a configured quota-only source (copilot) and antigravity's own
+        // quota card — the CLI and the IDE client fold onto one "antigravity"
+        // tab rather than emitting two.
+        var tabs = ClientRegistry.TabClients(
+            present: ["claude", "antigravity-cli"],
+            quotaIds: ["antigravity", "copilot"]);
+
+        Assert.Equal(["claude", "antigravity", "copilot"], tabs);
+    }
+
+    [Fact]
+    public void TabSliceAndLabelIdentifyOnlyTheAntigravityGroup()
+    {
+        Assert.Equal(["antigravity", "antigravity-cli"], ClientRegistry.TabSlice("antigravity"));
+        Assert.Equal(["claude"], ClientRegistry.TabSlice("claude"));
+        Assert.Equal("Antigravity", ClientRegistry.TabLabel("antigravity"));
+        Assert.Equal("Claude", ClientRegistry.TabLabel("claude")); // ShortName fallback
+        Assert.Equal("Antigravity", ClientRegistry.TabDisplayName("antigravity"));
+        Assert.Equal("Claude Code", ClientRegistry.TabDisplayName("claude")); // full Style name
+    }
+
+    [Fact]
+    public void HiddenTabClientsFoldsALegacyMemberEntryOntoTheGroupAndExpandsBack()
+    {
+        // Legacy: only "antigravity-cli" was ever stored (from before the
+        // fold existed). It must still exclude the group's tab id.
+        var fromMember = ClientRegistry.HiddenTabClients(
+            new HashSet<string> { "antigravity-cli" });
+        Assert.Equal(
+            new HashSet<string> { "antigravity", "antigravity-cli" }, fromMember);
+
+        // Fresh: the tab id was stored directly. It must still expand to
+        // cover the CLI's usage rows.
+        var fromTab = ClientRegistry.HiddenTabClients(new HashSet<string> { "antigravity" });
+        Assert.Equal(new HashSet<string> { "antigravity", "antigravity-cli" }, fromTab);
+
+        // An ungrouped id passes through unchanged in both directions.
+        Assert.Equal(new HashSet<string> { "claude" }, ClientRegistry.HiddenTabClients(
+            new HashSet<string> { "claude" }));
+    }
+
+    [Fact]
+    public void QuotaExcludedClientsFoldsTabHiddenMemberEntryOntoTheGroup()
+    {
+        var store = NewStore();
+        store.SetString(ClientRegistry.TabHiddenKey, "antigravity-cli");
+        Assert.Contains("antigravity", ClientRegistry.QuotaExcludedClients(store));
+    }
+
+    [Fact]
+    public void QuotaExcludedClientsKeepsLimitsHiddenMemberSpecific()
+    {
+        // Limits-hidden must NOT fold: hiding only the CLI's limits card must
+        // not also exclude the IDE client's quota card.
+        var store = NewStore();
+        store.SetString(ClientRegistry.LimitsHiddenKey, "antigravity-cli");
+        Assert.DoesNotContain("antigravity", ClientRegistry.QuotaExcludedClients(store));
+    }
+
+    [Fact]
+    public void TabOrderFoldsMemberIdsToTheGroupDeduped()
+    {
+        Assert.Equal(
+            ["claude", "antigravity", "codex"],
+            ClientRegistry.TabOrder("claude,antigravity-cli,antigravity,codex"));
+    }
+
+    [Fact]
+    public void UnhidingTheAntigravityTabRestoresItToTheRow()
+    {
+        var store = NewStore();
+        store.SetString(ClientRegistry.TabHiddenKey, "antigravity-cli");
+
+        // Still resolvable as hidden beforehand.
+        Assert.Contains("antigravity", ClientRegistry.HiddenTabClients(store));
+
+        // Un-hide by clearing every member of the group, as the Settings
+        // toggle does.
+        store.SetString(ClientRegistry.TabHiddenKey, "");
+        var tabs = ClientRegistry.DisplayClients(
+            ClientRegistry.TabClients(present: [], quotaIds: ["antigravity"]), store);
+        Assert.Contains("antigravity", tabs);
+    }
+
+    [Fact]
+    public void ResolveSelectionForOverviewIsPresentUsageMinusHiddenNotTheTabRow()
+    {
+        // present = local usage clients only (antigravity-cli carries usage,
+        // not the IDE's "antigravity"); configured = a quota-only source
+        // (copilot) with no usage lens of its own.
+        var selection = ClientRegistry.ResolveSelection(
+            present: ["claude", "antigravity-cli"],
+            quotaIds: ["copilot"],
+            hiddenRaw: "",
+            orderRaw: "",
+            activeTab: null);
+
+        Assert.Equal(ClientRegistry.OverviewTab, selection.ActiveTab);
+        // Tab row: usage ∪ configured, grouped.
+        Assert.Equal(["claude", "antigravity", "copilot"], selection.DisplayClients);
+        // Overview selection: present usage clients only — never a quota-only
+        // id with no usage lens.
+        Assert.Equal(["claude", "antigravity-cli"], selection.SelectedClients);
+        Assert.DoesNotContain("copilot", selection.SelectedClients);
+
+        // With the Antigravity tab hidden, Overview drops both members.
+        var withHiddenGroup = ClientRegistry.ResolveSelection(
+            present: ["claude", "antigravity-cli"],
+            quotaIds: ["copilot"],
+            hiddenRaw: "antigravity",
+            orderRaw: "",
+            activeTab: null);
+        Assert.DoesNotContain("antigravity-cli", withHiddenGroup.SelectedClients);
+        Assert.DoesNotContain("antigravity", withHiddenGroup.DisplayClients);
+    }
+
+    [Fact]
+    public void ResolveSelectionOnTheGroupedTabSelectsBothMembers()
+    {
+        var selection = ClientRegistry.ResolveSelection(
+            present: ["claude", "antigravity-cli"],
+            quotaIds: ["antigravity"],
+            hiddenRaw: "",
+            orderRaw: "",
+            activeTab: "antigravity-cli"); // legacy stored id still resolves
+
+        Assert.Equal("antigravity", selection.ActiveTab);
+        Assert.Equal(["antigravity", "antigravity-cli"], selection.SelectedClients);
+    }
+
+    [Fact]
+    public void ResolveSelectionQuotaOnlyActiveTabFallsBackToOverviewUntilConfigured()
+    {
+        // The active tab names a quota-only provider that has not been
+        // reported configured yet (quotaIds empty pre-attempt) — it cannot
+        // resolve, so the render falls back to Overview.
+        var beforeConfigured = ClientRegistry.ResolveSelection(
+            present: ["claude"],
+            quotaIds: [],
+            hiddenRaw: "",
+            orderRaw: "",
+            activeTab: "copilot");
+        Assert.Equal(ClientRegistry.OverviewTab, beforeConfigured.ActiveTab);
+
+        // Once the quota payload lists it configured, the same stored tab id
+        // resolves normally.
+        var afterConfigured = ClientRegistry.ResolveSelection(
+            present: ["claude"],
+            quotaIds: ["copilot"],
+            hiddenRaw: "",
+            orderRaw: "",
+            activeTab: "copilot");
+        Assert.Equal("copilot", afterConfigured.ActiveTab);
+        Assert.Equal(["copilot"], afterConfigured.SelectedClients);
     }
 
     [Theory]

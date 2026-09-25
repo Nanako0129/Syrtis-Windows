@@ -42,7 +42,7 @@ const CODE_ASSIST_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const REFRESH_SAFETY_SECS: i64 = 60;
 
-const ANTIGRAVITY_UNCONFIGURED_ERROR: &str =
+pub(crate) const ANTIGRAVITY_UNCONFIGURED_ERROR: &str =
     "Antigravity is not logged in. Re-login in Antigravity.";
 /// A credential that exists but cannot be used (permission error, corrupt
 /// JSON, ...). Distinct from `ANTIGRAVITY_UNCONFIGURED_ERROR`: a genuinely

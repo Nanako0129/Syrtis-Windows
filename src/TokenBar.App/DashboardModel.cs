@@ -106,7 +106,11 @@ public sealed class DashboardModel
             .Select(ClientRegistry.CanonicalClient)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
-        var hidden = ClientRegistry.HiddenClients(AppSettings.Store)
+        // Client ids: fold through HiddenTabClients so a stored tab-level
+        // hide (or a legacy member-level one) excludes every group member's
+        // activity from the year-visibility filter, not just the id as
+        // stored.
+        var hidden = ClientRegistry.HiddenTabClients(AppSettings.Store)
             .Select(ClientRegistry.CanonicalClient)
             .ToHashSet(StringComparer.Ordinal);
         bool changed;

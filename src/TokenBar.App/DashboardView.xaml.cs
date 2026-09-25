@@ -472,8 +472,15 @@ public sealed partial class DashboardView : UserControl
 
     private DashboardModel.Snapshot ApplyClientSelection(DashboardModel.Snapshot snapshot)
     {
+        // Configured quota-only providers (Copilot etc.) belong in the tab row
+        // even without local usage. Empty until the quota lane has answered
+        // at least once (snapshot.Quota is null pre-attempt) — see the
+        // persistence guard below for why that race is handled rather than
+        // ignored.
+        var quotaIds = snapshot.Quota?.ConfiguredClientIds ?? [];
+        var storedActiveTab = AppSettings.Store.GetString(ClientRegistry.ActiveTabKey);
         var selection = ClientRegistry.ResolveSelection(
-            snapshot.Graph.Summary.Clients, AppSettings.Store);
+            snapshot.Graph.Summary.Clients, quotaIds, AppSettings.Store);
         _displayClients = selection.DisplayClients;
         _selectedClients = selection.SelectedClients;
         _selectedSet = new HashSet<string>(selection.SelectedClients, StringComparer.Ordinal);
@@ -490,7 +497,19 @@ public sealed partial class DashboardView : UserControl
         }
 
         _snapshot = snapshot;
-        if (AppSettings.Store.GetString(ClientRegistry.ActiveTabKey) != selection.ActiveTab)
+
+        // A stored active tab naming a quota-only provider (e.g. "copilot")
+        // is unresolvable before the quota lane's first answer arrives —
+        // ConfiguredClientIds is empty, so ResolveSelection normalizes it to
+        // Overview. This frame still RENDERS Overview (_activeClientTab
+        // above), but must not persist that normalisation: once the quota
+        // payload lists the provider configured, the stored tab has to
+        // resolve to it again rather than having been overwritten to
+        // "overview" in the meantime. `selection.ActiveTab == storedActiveTab`
+        // lets through every case where normalisation didn't actually change
+        // anything (including the ordinary Overview-to-Overview no-op).
+        var persistable = snapshot.QuotaAttempted || selection.ActiveTab == storedActiveTab;
+        if (persistable && AppSettings.Store.GetString(ClientRegistry.ActiveTabKey) != selection.ActiveTab)
         {
             AppSettings.Store.SetString(ClientRegistry.ActiveTabKey, selection.ActiveTab);
         }
@@ -701,7 +720,7 @@ public sealed partial class DashboardView : UserControl
         AddClientTab(ClientRegistry.OverviewTab, "Overview".Localized());
         foreach (var id in _displayClients)
         {
-            AddClientTab(id, ClientRegistry.ShortName(id));
+            AddClientTab(id, ClientRegistry.TabLabel(id));
         }
     }
 

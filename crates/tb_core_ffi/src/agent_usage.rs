@@ -26,6 +26,12 @@ use tower_service::Service;
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+/// The terminal message `load_codex_credentials_from` produces for a missing
+/// `auth.json`, matched by `required_card_source` against nothing else — an
+/// unreadable-but-present file gets its own, different message and keeps its
+/// tab. Matches macOS's marker string exactly (agent_usage.rs :1826-1832 on
+/// TokenBar-Native), though the two are independent Rust crates.
+const CODEX_UNCONFIGURED_ERROR: &str = "Codex auth.json not found. Run `codex` to log in.";
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_REFRESH_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -1475,13 +1481,41 @@ async fn fetch_antigravity() -> AgentUsageSnapshot {
         },
         Err(failure) => ProviderFetchOutcome::Failure(failure),
     };
-    apply_provider_outcome("antigravity", "oauth", outcome)
+    let source = required_card_source(&outcome, agent_antigravity::ANTIGRAVITY_UNCONFIGURED_ERROR);
+    apply_provider_outcome("antigravity", source, outcome)
         .expect("Antigravity is a required provider card")
 }
 
 async fn fetch_codex() -> AgentUsageSnapshot {
-    apply_provider_outcome("codex", "oauth", fetch_codex_inner().await)
+    let outcome = fetch_codex_inner().await;
+    let source = required_card_source(&outcome, CODEX_UNCONFIGURED_ERROR);
+    apply_provider_outcome("codex", source, outcome)
         .expect("Codex is a required provider card")
+}
+
+/// The `source` a required provider card reports for a failed fetch.
+///
+/// Codex, Claude and Antigravity are pushed into `agents` whether or not the
+/// user has them — `run` only filters the optional providers by whether a
+/// login exists. So for these three, "a card is present" says nothing about
+/// whether anything is configured, and the payload has to carry the
+/// difference: the C# side reads `IsSetupPlaceholder`, and through it
+/// `ConfiguredClientIds`, to decide which quota sources earn a tab. Reporting
+/// `oauth` for a card that has never had a credential gave every install an
+/// Antigravity tab and a Codex tab purely from an unconfigured card.
+///
+/// Ported from macOS `required_card_source` (agent_usage.rs :1814-1823). A
+/// transient failure is never `unconfigured`: it means the credential could
+/// not be reached, not that it is absent.
+fn required_card_source(outcome: &ProviderFetchOutcome, unconfigured: &str) -> &'static str {
+    match outcome {
+        ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { display })
+            if display == unconfigured =>
+        {
+            "unconfigured"
+        }
+        _ => "oauth",
+    }
 }
 
 /// Claude's `/api/oauth/usage` rate-limits aggressively. The gate stores only
@@ -2329,7 +2363,7 @@ fn load_codex_credentials() -> Result<CodexCredentials, String> {
 
 fn load_codex_credentials_from(auth_path: &Path) -> Result<CodexCredentials, String> {
     let raw = fs::read_to_string(auth_path)
-        .map_err(|_| "Codex auth.json not found. Run `codex` to log in.".to_string())?;
+        .map_err(|_| CODEX_UNCONFIGURED_ERROR.to_string())?;
     let raw_json: Value =
         serde_json::from_str(&raw).map_err(|e| format!("decode Codex auth.json: {}", e))?;
 
@@ -4502,6 +4536,52 @@ where
 mod tests {
     use super::*;
     use crate::agent_account_scope::test_support::TestRefreshScope;
+
+    /// The control the `unconfigured` arm needs: everything that is not
+    /// "there is no credential" stays `oauth`, so a configured-but-failing
+    /// card keeps its tab. The transient case is the one that would hurt
+    /// most — a card that could not be reached must not read as one that was
+    /// never set up, and the display alone cannot tell them apart, which is
+    /// why the arm matches the variant too. Ported from macOS's
+    /// `required_card_source_keeps_oauth_for_everything_except_absence`.
+    #[test]
+    fn required_card_source_keeps_oauth_for_everything_except_absence() {
+        let marker = CODEX_UNCONFIGURED_ERROR;
+        let transient_with_marker = ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
+            marker,
+            None,
+            SafeTransportDiagnostic::server_error(503),
+        ));
+        let other_terminal = ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+            "Codex auth.json exists but contains no OAuth tokens.",
+        ));
+        for outcome in [
+            transient_with_marker,
+            other_terminal,
+            ProviderFetchOutcome::Absent,
+        ] {
+            assert_eq!(required_card_source(&outcome, marker), "oauth");
+        }
+    }
+
+    /// The two required cards must not share a marker: matching Antigravity's
+    /// absence against Codex's message (or the reverse) would hand one
+    /// provider the other's verdict. Ported from macOS's
+    /// `required_card_markers_are_not_interchangeable`.
+    #[test]
+    fn required_card_markers_are_not_interchangeable() {
+        let antigravity = ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+            agent_antigravity::ANTIGRAVITY_UNCONFIGURED_ERROR,
+        ));
+        assert_eq!(
+            required_card_source(&antigravity, agent_antigravity::ANTIGRAVITY_UNCONFIGURED_ERROR),
+            "unconfigured"
+        );
+        assert_eq!(
+            required_card_source(&antigravity, CODEX_UNCONFIGURED_ERROR),
+            "oauth"
+        );
+    }
 
     #[test]
     fn claude_user_agent_uses_first_version_token() {
