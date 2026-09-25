@@ -694,4 +694,26 @@ public class UsagePaceTests
     private static string Status(UsageWindow window, PaceMode mode = PaceMode.Historical) =>
         UsagePace.RowPresentation(window, mode, asUsed: false, classic: false, Now)
             .PaceText!;
+
+    // WindowBoundsMs: the Chart layout's sparkline gate needs the window's own
+    // clock bounds, not a duration/elapsed pair.
+    [Fact]
+    public void WindowBoundsMsPlacesTheWindowFromItsResetAndDuration()
+    {
+        var window = Window(used: 50, durationSeconds: 3_600, untilReset: 1_800);
+        var bounds = UsagePace.WindowBoundsMs(window);
+        Assert.NotNull(bounds);
+        var expectedEnd = Now.AddSeconds(1_800).ToUnixTimeMilliseconds();
+        Assert.Equal(expectedEnd, bounds!.Value.EndMs);
+        Assert.Equal(expectedEnd - (3_600 * 1000), bounds.Value.StartMs);
+    }
+
+    [Fact]
+    public void WindowBoundsMsIsNullWithNoParseableResetOrNoDuration()
+    {
+        Assert.Null(UsagePace.WindowBoundsMs(
+            Window(used: 50, durationSeconds: 3_600, resetsAt: "not-a-timestamp")));
+        Assert.Null(UsagePace.WindowBoundsMs(
+            Window(used: 50, state: UsagePaceState.LegacyMissing)));
+    }
 }
