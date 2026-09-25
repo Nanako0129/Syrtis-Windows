@@ -1092,7 +1092,7 @@ public sealed class SettingsWindow : Window
                 Spacing = 6,
                 VerticalAlignment = VerticalAlignment.Center,
             };
-            name.Children.Add(Ui.Disc(ClientRegistry.Style(id).Color));
+            name.Children.Add(AgentIcon.Create(id, 16));
             name.Children.Add(Ui.Text(ClientRegistry.TabDisplayName(id), 12));
             row.Children.Add(name);
 

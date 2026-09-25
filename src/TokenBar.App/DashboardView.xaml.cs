@@ -731,9 +731,24 @@ public sealed partial class DashboardView : UserControl
     private void AddClientTab(string id, string label)
     {
         var active = id == _activeClientTab;
+        // DashboardTabs.swift:91-96 — icon + label, icon omitted for the
+        // Overview tab (macOS's `color != nil` check).
+        UIElement content;
+        if (id == ClientRegistry.OverviewTab)
+        {
+            content = new TextBlock { Text = label };
+        }
+        else
+        {
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5 };
+            row.Children.Add(AgentIcon.Create(id, 14));
+            row.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center });
+            content = row;
+        }
+
         var button = new Button
         {
-            Content = label,
+            Content = content,
             FontSize = 11,
             Padding = new Thickness(9, 4, 9, 4),
             FontWeight = active
@@ -1329,7 +1344,7 @@ public sealed partial class DashboardView : UserControl
         {
             var section = new StackPanel { Spacing = 5 };
             var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-            header.Children.Add(Ui.Disc(ClientRegistry.Style(agent.ClientId).Color));
+            header.Children.Add(AgentIcon.Create(agent.ClientId, 14));
             header.Children.Add(Ui.Text(ClientRegistry.ShortName(agent.ClientId), 12, bold: true));
             if (agent.Identity?.Plan is { } plan)
             {

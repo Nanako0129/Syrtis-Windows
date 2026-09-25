@@ -76,6 +76,10 @@
          Resources (anim-cat2 48x48 ×5, anim-parrot 48x36 ×10, plus -light
          variants for a light taskbar). -->
     <Content Include="Assets\**\*.png" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Per-client brand icons (Slice C), copied verbatim from the macOS
+         repo's agent-icons bundle resources: SVG (vector) preferred, PNG for
+         marks that ship only as raster art. -->
+    <Content Include="Assets\agent-icons\*.svg" CopyToOutputDirectory="PreserveNewest" />
     <!-- UI string tables. A missing or unreadable file renders every key as its
          English source, so shipping one is an improvement rather than a
          dependency. -->
