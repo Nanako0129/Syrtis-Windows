@@ -123,6 +123,9 @@
     <None Include="..\TokenBar.App\Assets\strings-zh-Hant.json"
           Link="strings-zh-Hant.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\TokenBar.App\Assets\strings-zh-Hans.json"
+          Link="strings-zh-Hans.json"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

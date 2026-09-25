@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using TokenBar.App;
 using Xunit;
 
@@ -10,6 +12,10 @@ public class AppLanguageTests
     [InlineData("zh-Hant-TW", "zh-Hant")]
     [InlineData("zh-TW", "zh-Hant")]
     [InlineData("zh-HK", "zh-Hant")]
+    [InlineData("zh-Hans", "zh-Hans")]
+    [InlineData("zh-Hans-CN", "zh-Hans")]
+    [InlineData("zh-CN", "zh-Hans")]
+    [InlineData("zh-SG", "zh-Hans")]
     [InlineData("en", "en")]
     [InlineData("en-US", "en")]
     [InlineData("ja-JP", "en")]
@@ -27,6 +33,9 @@ public class AppLanguageTests
     [InlineData("en", "en", false)]
     [InlineData("zh-Hant", "zh-Hant", false)]
     [InlineData("zh-HK", "zh-Hant", false)]
+    [InlineData("zh-Hans", "en", true)]
+    [InlineData("zh-Hans", "zh-Hans", false)]
+    [InlineData("zh-CN", "zh-Hans", false)]
     [InlineData("fr", "en", false)]
     public void RelaunchIsNeededOnlyWhenTheResolvedTagDiffers(
         string stored, string activeTag, bool expected) =>
@@ -36,8 +45,63 @@ public class AppLanguageTests
     public void OptionsNameEachLanguageInItsOwnLanguage()
     {
         Assert.Equal("English", AppLanguage.Options.Single(o => o.Value == "en").Label);
+        Assert.Equal("简体中文",
+            AppLanguage.Options.Single(o => o.Value == "zh-Hans").Label);
         Assert.Equal("繁體中文",
             AppLanguage.Options.Single(o => o.Value == "zh-Hant").Label);
+    }
+}
+
+public class StringsTableTests
+{
+    // Both shipped translation tables must cover exactly the same English
+    // source keys — a key added for one language and forgotten for the other
+    // would silently render as its English source only in the language it
+    // was skipped for, which a reviewer scanning either file alone won't see.
+    private static readonly string HantPath =
+        Path.Combine(AppContext.BaseDirectory, "strings-zh-Hant.json");
+    private static readonly string HansPath =
+        Path.Combine(AppContext.BaseDirectory, "strings-zh-Hans.json");
+
+    private static Dictionary<string, string> Load(string path) =>
+        JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path))!;
+
+    [Fact]
+    public void HansAndHantCoverTheSameKeySet()
+    {
+        var hant = Load(HantPath);
+        var hans = Load(HansPath);
+
+        Assert.Equal(hant.Keys.OrderBy(k => k), hans.Keys.OrderBy(k => k));
+    }
+
+    [Fact]
+    public void EveryEntryInBothTablesIsNonEmpty()
+    {
+        foreach (var path in new[] { HantPath, HansPath })
+        {
+            foreach (var (key, value) in Load(path))
+            {
+                Assert.False(string.IsNullOrWhiteSpace(value), $"{path}: {key}");
+            }
+        }
+    }
+
+    // A translation that renumbers or drops a {n} placeholder crashes
+    // string.Format at the call site instead of just reading oddly.
+    [Fact]
+    public void PlaceholderSetsMatchBetweenHansAndHantPerKey()
+    {
+        var hant = Load(HantPath);
+        var hans = Load(HansPath);
+        var placeholder = new Regex(@"\{\d+\}");
+
+        foreach (var key in hant.Keys)
+        {
+            var hantPlaceholders = placeholder.Matches(hant[key]).Select(m => m.Value).OrderBy(x => x);
+            var hansPlaceholders = placeholder.Matches(hans[key]).Select(m => m.Value).OrderBy(x => x);
+            Assert.True(hantPlaceholders.SequenceEqual(hansPlaceholders), key);
+        }
     }
 }
 
