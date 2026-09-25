@@ -419,9 +419,19 @@ public sealed class SettingsWindow : Window
         var layoutRaw = store.GetString("tokenbar.limits.layout", "full") ?? "full";
         limits.Children.Add(RadioGroup(
             "limits.layout",
-            [("full", "Full (pace + run-out)".Localized()), ("classic", "Classic (compact)".Localized())],
+            [
+                ("full", "Layout: Full".Localized()),
+                ("classic", "Layout: Classic".Localized()),
+                ("chart", "Layout: Chart".Localized()),
+            ],
             layoutRaw,
             raw => store.SetString("tokenbar.limits.layout", raw)));
+        limits.Children.Add(Hint(
+            ("Full is the wide card with the pace bar; Classic is the original "
+                + "compact layout without pace; Chart draws each window's quota over "
+                + "time, with the pace estimate as a second line. Chart needs recorded "
+                + "quota history and falls back to a bar for windows that have none.")
+            .Localized()));
         if (layoutRaw != "classic")
         {
             limits.Children.Add(RadioGroup(
