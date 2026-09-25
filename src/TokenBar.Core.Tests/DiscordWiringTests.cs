@@ -560,8 +560,9 @@ public sealed class DiscordWiringTests : IDisposable
             Assert.DoesNotContain("TokenBar", windowsEnglish[i]);
         }
 
-        // The Discord activity title is the portal app's name, not ours.
-        Assert.Equal("TokenBar", DiscordCopy.PreviewTitle);
+        // The Discord activity title is the portal app's name (renamed to
+        // Syrtis on the portal, 2026-09-26).
+        Assert.Equal("Syrtis", DiscordCopy.PreviewTitle);
 
         Localization.Load("zh-Hant", AppContext.BaseDirectory);
         try

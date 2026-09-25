@@ -428,9 +428,11 @@ internal static class DiscordCopy
     /// a preview, never the user's figures (DiscordIntro.swift :76-95). The
     /// title is the Discord portal application's name, which is what Discord
     /// shows, so it is not translated.</summary>
-    // Not renamed: this is the Discord portal application's name, which is
-    // what Discord shows as the activity title.
-    internal const string PreviewTitle = "TokenBar";
+    // The Discord portal application's name, which is what Discord shows as
+    // the activity title. Renamed from TokenBar to Syrtis on the portal on
+    // 2026-09-26 (GET /api/v10/applications/1534085299163107348/rpc returned
+    // name "Syrtis" that day); keep the two in step.
+    internal const string PreviewTitle = "Syrtis";
 
     internal const string PreviewDetails = "1.2M tokens today";
 

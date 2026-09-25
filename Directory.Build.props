@@ -17,8 +17,8 @@
     <TbPublisher>Nyanako</TbPublisher>
     <Company>$(TbPublisher)</Company>
     <Authors>$(TbPublisher)</Authors>
-    <TbSemanticVersion>0.5.0</TbSemanticVersion>
-    <TbAssemblyVersion>0.5.0.0</TbAssemblyVersion>
+    <TbSemanticVersion>0.6.0</TbSemanticVersion>
+    <TbAssemblyVersion>0.6.0.0</TbAssemblyVersion>
     <Version>$(TbSemanticVersion)</Version>
     <PackageVersion>$(TbSemanticVersion)</PackageVersion>
     <InformationalVersion>$(TbSemanticVersion)</InformationalVersion>
