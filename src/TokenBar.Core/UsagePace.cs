@@ -415,6 +415,36 @@ public sealed record UsagePace(
             etaSeconds, willLastToReset);
     }
 
+    /// <summary>The window's own bounds in epoch ms, for the Agent-limits
+    /// Chart layout's sparkline gate (<see cref="LimitsChartFold.SparklineInterval"/>).
+    /// <para>
+    /// Same two inputs <see cref="Timing"/> already requires — <see cref="UsageWindow.ResetsAt"/>
+    /// and <see cref="PaceStatus.DurationSeconds"/> — but returns absolute
+    /// bounds instead of a duration/elapsed pair, and without <see cref="Timing"/>'s
+    /// "already past reset" guard: a chart still wants to draw the window it
+    /// is currently sampling even when clock skew put <c>now</c> a beat past
+    /// <see cref="UsageWindow.ResetsAt"/>. Does not replicate macOS's
+    /// <c>WindowCardLoader.resolution</c> fallback sources (contract/observed
+    /// duration) — a window with neither a parseable reset nor a reported
+    /// duration returns null here, same as it does for pace, and the row
+    /// falls back to its bar.
+    /// </para>
+    /// </summary>
+    public static (long StartMs, long EndMs)? WindowBoundsMs(UsageWindow window)
+    {
+        if (window.ResetsAt is not { } resetsAtRaw ||
+            window.PaceStatus.DurationSeconds is not { } durationSeconds ||
+            durationSeconds <= 0 ||
+            ParseRfc3339(resetsAtRaw) is not { } resetsAt)
+        {
+            return null;
+        }
+
+        var endMs = resetsAt.ToUnixTimeMilliseconds();
+        var startMs = endMs - (long)(durationSeconds * 1000);
+        return startMs < endMs ? (startMs, endMs) : null;
+    }
+
     private readonly record struct WindowTiming(
         double Duration,
         double TimeUntilReset,

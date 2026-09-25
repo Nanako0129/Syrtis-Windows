@@ -1319,7 +1319,9 @@ public sealed partial class DashboardView : UserControl
 
         // macOS windowRow settings: fill direction, density, pace policy.
         var asUsed = AppSettings.Store.GetBool("tokenbar.limits.asUsed", false);
-        var classic = AppSettings.Store.GetString("tokenbar.limits.layout", "full") == "classic";
+        var layout = LimitsChartFold.ParseLayout(AppSettings.Store.GetString("tokenbar.limits.layout", "full"));
+        var classic = layout == LimitsLayout.Classic;
+        var metric = asUsed ? QuotaMetric.Used : QuotaMetric.Remaining;
         var paceMode = CurrentPaceMode();
 
         var now = DateTimeOffset.Now;
@@ -1342,11 +1344,26 @@ public sealed partial class DashboardView : UserControl
                 continue;
             }
 
-            foreach (var window in agent.UniqueCardWindows)
+            // Chart layout draws each window's recorded quota history as a
+            // curve instead of a bar. WindowCardText.Tabs — the same fold the
+            // Session-window card already resolves its own samples through —
+            // returns one WindowCardTab per live window in agent's own order
+            // when the client has live windows to enumerate (guaranteed here:
+            // snapshot.Quota is non-null inside this loop and agent.Error was
+            // just checked null above, so WindowCardText.LiveWindowsUnavailable
+            // cannot be true), so a plain index zip against UniqueCardWindows
+            // lines each tab up with the window it belongs to.
+            var windows = agent.UniqueCardWindows;
+            var chartTabs = layout == LimitsLayout.Chart
+                ? WindowCardText.Tabs(snapshot.QuotaHistory, snapshot.Quota, agent.ClientId)
+                : [];
+            for (var i = 0; i < windows.Count; i++)
             {
+                var window = windows[i];
                 var row = UsagePace.RowPresentation(
                     window, paceMode, asUsed, classic, now);
-                section.Children.Add(QuotaRow(window, row, classic));
+                var chartSamples = i < chartTabs.Count ? chartTabs[i].Active?.Samples : null;
+                section.Children.Add(QuotaRow(window, row, classic, metric, chartSamples));
             }
 
             panel.Children.Add(section);
@@ -2216,7 +2233,9 @@ public sealed partial class DashboardView : UserControl
     /// display values. The responsive footer is built once and only toggles
     /// visibility when the actual row width crosses its measured threshold.</summary>
     internal static FrameworkElement QuotaRow(
-        UsageWindow window, UsagePaceRowPresentation row, bool classic)
+        UsageWindow window, UsagePaceRowPresentation row, bool classic,
+        QuotaMetric metric = QuotaMetric.Remaining,
+        IReadOnlyList<QuotaSample>? chartSamples = null)
     {
         var root = new StackPanel { Spacing = 3 };
         // Derive the countdown from the structured timestamp so it follows the
@@ -2231,7 +2250,28 @@ public sealed partial class DashboardView : UserControl
         // legacy selection against, so it must never be translated on that path.
         root.Children.Add(Ui.Row(
             Ui.Text(window.Label.Localized(), 11, bold: true), headerTrailing));
-        root.Children.Add(GaugeBar(
+
+        // Chart layout: the line replaces the bar only when the row was
+        // handed samples AND enough of them fall inside the window's current
+        // interval (LimitsChartFold.SparklineInterval) — a window with fewer
+        // keeps the bar, same as macOS's AgentLimitsCard.
+        FrameworkElement? sparkline = null;
+        if (chartSamples is { Count: > 0 })
+        {
+            var nowMs = DateTimeOffset.Now.ToUnixTimeMilliseconds();
+            var bounds = UsagePace.WindowBoundsMs(window);
+            if (LimitsChartFold.SparklineInterval(
+                    bounds?.StartMs, bounds?.EndMs, nowMs, chartSamples) is { } interval)
+            {
+                sparkline = Sparkline(
+                    interval.Start, interval.End, nowMs, chartSamples, metric,
+                    GaugeColorHex(row.RemainingPercent),
+                    classic ? null : row.ExpectedUsedPercent,
+                    row.IsHistoricalDeficit);
+            }
+        }
+
+        root.Children.Add(sparkline ?? GaugeBar(
             row.FillPercent,
             row.RemainingPercent,
             classic ? null : row.MarkerPercent,
@@ -2349,10 +2389,7 @@ public sealed partial class DashboardView : UserControl
     {
         var fill = double.IsFinite(fillPercent)
             ? Math.Clamp(fillPercent, 0, 100) : 0;
-        var remaining = double.IsFinite(remainingForColor)
-            ? Math.Clamp(remainingForColor, 0, 100) : 100;
-        var color = remaining <= 10 ? "#ef4444"
-            : remaining <= 25 ? "#f59e0b" : "#22c55e";
+        var color = GaugeColorHex(remainingForColor);
         var track = new Grid
         {
             Height = 5,
@@ -2413,5 +2450,123 @@ public sealed partial class DashboardView : UserControl
         }
 
         return holder;
+    }
+
+    /// <summary>Quota-bar tint by how much is left (macOS AgentLimitsCard
+    /// <c>gaugeColor</c>): red under 10%, amber under 25%, green otherwise.
+    /// Shared by <see cref="GaugeBar"/> and <see cref="Sparkline"/> so the two
+    /// row renderings a Chart-layout row can fall between never disagree about
+    /// its color.</summary>
+    private static string GaugeColorHex(double remainingForColor)
+    {
+        var remaining = double.IsFinite(remainingForColor)
+            ? Math.Clamp(remainingForColor, 0, 100) : 100;
+        return remaining <= 10 ? "#ef4444"
+            : remaining <= 25 ? "#f59e0b" : "#22c55e";
+    }
+
+    // ── LimitsLayout.Chart: the window row's line, from AgentLimitsCard.swift
+    // `Spark` (:104-131) — each constant here cites the source line it ports.
+    private const double SparkHeight = 26; // Spark.height (:110)
+    private const double SparkInset = 2; // Spark.inset (:112)
+    private const double SparkLineWidth = 1.4; // Spark.lineWidth (:115)
+    private const double SparkPaceWidth = 1; // Spark.paceWidth (:118)
+    /// <summary>Tint under the curve. Spark.fillOpacity (:122-131) — measured
+    /// load-bearing on macOS, not decoration: at this row height a flat 26px
+    /// axis moves as little as 2.6-2.9px between two genuinely different
+    /// readings, indistinguishable by height alone. The fill is what makes
+    /// that move legible.</summary>
+    private const double SparkFillOpacity = 0.22;
+
+    /// <summary>The quota over the window's own time axis, in place of the
+    /// bar. Port of <c>AgentLimitsCard.sparkline(samples:interval:color:pace:)</c>
+    /// (:1311-1358): fixed 0…100 axis (never rescaled — see that method's own
+    /// comment for why), filled area under the curve in the gauge color, and a
+    /// dashed pace/projection line from the window's start to where the pace
+    /// estimate expects usage to sit right now.</summary>
+    private static FrameworkElement Sparkline(
+        long intervalStartMs, long intervalEndMs, long nowMs,
+        IReadOnlyList<QuotaSample> samples, QuotaMetric metric, string colorHex,
+        double? expectedUsedPercent, bool historicalDeficit)
+    {
+        var canvas = new Canvas { Height = SparkHeight };
+        var accent = Ui.BrushFromHex(colorHex).Color;
+
+        void Draw()
+        {
+            canvas.Children.Clear();
+            var width = canvas.ActualWidth;
+            if (width <= 0)
+            {
+                return;
+            }
+
+            var clampedNow = Math.Min(nowMs, intervalEndMs);
+            var geometry = WindowCardGeometry.QuotaGeometry(
+                intervalStartMs, intervalEndMs, clampedNow, samples, metric);
+
+            Windows.Foundation.Point At(CurvePoint p) => new(
+                p.X * width,
+                SparkInset + ((1 - (p.Y / 100)) * (SparkHeight - (SparkInset * 2))));
+
+            if (expectedUsedPercent is { } expected)
+            {
+                var paceLine = new PointCollection();
+                paceLine.Add(At(new CurvePoint(0, metric.Value(0))));
+                paceLine.Add(At(new CurvePoint(
+                    geometry.NowX, metric.Value(Math.Clamp(expected, 0, 100)))));
+                canvas.Children.Add(new Polyline
+                {
+                    Points = paceLine,
+                    Stroke = new SolidColorBrush(historicalDeficit
+                        ? Ui.BrushFromHex(PaceOrange).Color
+                        : Tint(Colors.Gray, 0.55)),
+                    StrokeThickness = SparkPaceWidth,
+                    StrokeDashArray = new DoubleCollection { 3, 2 }, // Spark.paceDash (:119)
+                    IsHitTestVisible = false,
+                });
+            }
+
+            if (geometry.Curve.Count <= 1)
+            {
+                return;
+            }
+
+            // Area first, line on top — the fill is what carries the reading
+            // at this height (see SparkFillOpacity).
+            var floorY = At(new CurvePoint(0, 0)).Y;
+            var area = new Polygon
+            {
+                Fill = new SolidColorBrush(Tint(accent, SparkFillOpacity)),
+                IsHitTestVisible = false,
+            };
+            foreach (var point in geometry.Curve)
+            {
+                area.Points.Add(At(point));
+            }
+
+            area.Points.Add(new Windows.Foundation.Point(At(geometry.Curve[^1]).X, floorY));
+            area.Points.Add(new Windows.Foundation.Point(At(geometry.Curve[0]).X, floorY));
+            canvas.Children.Add(area);
+
+            var line = new Polyline
+            {
+                Stroke = new SolidColorBrush(accent),
+                StrokeThickness = SparkLineWidth,
+                StrokeLineJoin = PenLineJoin.Round,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                IsHitTestVisible = false,
+            };
+            foreach (var point in geometry.Curve)
+            {
+                line.Points.Add(At(point));
+            }
+
+            canvas.Children.Add(line);
+        }
+
+        canvas.SizeChanged += (_, _) => Draw();
+        return canvas;
     }
 }
