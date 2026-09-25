@@ -53,6 +53,7 @@
   "Cost reported by the client, about {0}x the local price estimate": "費用由用戶端自行回報，約為本機價格估算的 {0} 倍",
   "Could not check agent limits. It will be retried.": "無法查詢 Agent 額度，稍後會重試。",
   "Could not check for updates.": "無法檢查更新。",
+  "GitHub is limiting update checks. Try again later.": "GitHub 暫時限制查詢次數，請稍後再試。",
   "Could not save this classification: existing attribution data is invalid or foreign.": "無法儲存這項分類：現有的歸屬資料無效或來自其他格式。",
   "Could not save this classification: the attribution entry limit was reached.": "無法儲存這項分類：已達歸屬項目上限。",
   "Could not save this classification: the new value is too large or unsupported.": "無法儲存這項分類：新值太大或不受支援。",

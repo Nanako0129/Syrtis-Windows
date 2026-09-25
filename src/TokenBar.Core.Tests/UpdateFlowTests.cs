@@ -1082,6 +1082,37 @@ public class UpdateFlowTests : IDisposable
             UpdateCheckResult.Failed.Text(), UpdateCheckResult.Unmanaged.Text());
     }
 
+    // GitHub answers an exhausted unauthenticated quota with 403 (or 429), and
+    // Velopack surfaces it as HttpRequestException with that status. It clears
+    // by itself, so it must not read as the generic failure that sends someone
+    // looking for a fault.
+    [Theory]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    public void RateLimitedCheckRendersItsOwnLine(HttpStatusCode status)
+    {
+        Localization.Load("en", AppContext.BaseDirectory);
+        var result = UpdateCheckResult.FromFailure(
+            new HttpRequestException("limited", null, status));
+        Assert.Equal(UpdateCheckState.RateLimited, result.State);
+        Assert.Equal("GitHub is limiting update checks. Try again later.", result.Text());
+    }
+
+    [Fact]
+    public void OtherCheckFailuresStayGeneric()
+    {
+        Assert.Equal(
+            UpdateCheckState.Failed,
+            UpdateCheckResult.FromFailure(
+                new HttpRequestException("down", null, HttpStatusCode.NotFound)).State);
+        Assert.Equal(
+            UpdateCheckState.Failed,
+            UpdateCheckResult.FromFailure(new HttpRequestException("no network")).State);
+        Assert.Equal(
+            UpdateCheckState.Failed,
+            UpdateCheckResult.FromFailure(new InvalidOperationException()).State);
+    }
+
     // ValidateTarget already rejects an empty version, so Available("") means a
     // caller went around it. Reporting failure is honest; "Update available: v"
     // is not.
@@ -1103,6 +1134,8 @@ public class UpdateFlowTests : IDisposable
             Assert.Equal("已是最新版本。", UpdateCheckResult.UpToDate.Text());
             Assert.Equal("有可用更新：v1.2.3", UpdateCheckResult.Available("1.2.3").Text());
             Assert.Equal("無法檢查更新。", UpdateCheckResult.Failed.Text());
+            Assert.Equal(
+                "GitHub 暫時限制查詢次數，請稍後再試。", UpdateCheckResult.RateLimited.Text());
             Assert.Equal(
                 "更新由安裝這份程式的工具負責。", UpdateCheckResult.Unmanaged.Text());
         }
