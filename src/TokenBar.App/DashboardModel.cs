@@ -954,11 +954,20 @@ public sealed class DashboardModel
                 // Recorded before publishing, and outside the snapshot: the
                 // publish below is dropped entirely if the graph lane has not
                 // seeded Current yet, and this is the only thing that survives
-                // that window.
-                _quotaAttempted = true;
+                // that window. The payload is written BEFORE the flag, and
+                // CreateBaseline reads the flag before the payload (both
+                // fields are volatile, so the order holds): a baseline taken
+                // between the two writes must never see "attempted" without
+                // the quota, or ApplyClientSelection would persist a stored
+                // quota-only tab (e.g. Copilot) as Overview.
                 if (quota is not null)
                 {
                     _latestQuota = quota;
+                }
+
+                _quotaAttempted = true;
+                if (quota is not null)
+                {
                     Publish(s => s with { Quota = quota, QuotaAttempted = true }, graph: null);
                 }
                 else
@@ -1035,11 +1044,17 @@ public sealed class DashboardModel
     /// <para>Everything held outside the snapshot is seeded here, and nowhere
     /// else. A second construction site is what let a field be remembered on
     /// one path and forgotten on the other.</para></summary>
-    private Snapshot CreateBaseline(UsagePayload graph) =>
-        new(graph, null, _latestQuota, 0, [], DateTimeOffset.Now, _graphState.CostAuthoritative)
+    private Snapshot CreateBaseline(UsagePayload graph)
+    {
+        // Flag first, payload second — the mirror of RefreshQuota's write
+        // order; see the comment there.
+        var attempted = _quotaAttempted;
+        var quota = _latestQuota;
+        return new(graph, null, quota, 0, [], DateTimeOffset.Now, _graphState.CostAuthoritative)
         {
-            QuotaAttempted = _quotaAttempted,
+            QuotaAttempted = attempted,
         };
+    }
 
     private void Publish(
         Func<Snapshot, Snapshot> update, UsagePayload? graph,
