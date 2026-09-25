@@ -473,10 +473,10 @@ public sealed partial class DashboardView : UserControl
     private DashboardModel.Snapshot ApplyClientSelection(DashboardModel.Snapshot snapshot)
     {
         // Configured quota-only providers (Copilot etc.) belong in the tab row
-        // even without local usage. Empty until the quota lane has answered
-        // at least once (snapshot.Quota is null pre-attempt) — see the
-        // persistence guard below for why that race is handled rather than
-        // ignored.
+        // even without local usage. Empty while no quota payload exists —
+        // before the lane's first answer, and after fetches that only failed
+        // (snapshot.Quota stays null then) — see the persistence guard below
+        // for why that is handled rather than ignored.
         var quotaIds = snapshot.Quota?.ConfiguredClientIds ?? [];
         var storedActiveTab = AppSettings.Store.GetString(ClientRegistry.ActiveTabKey);
         var selection = ClientRegistry.ResolveSelection(
@@ -504,8 +504,9 @@ public sealed partial class DashboardView : UserControl
         // after a failed fetch too: the lane then reports attempted with no
         // payload, and a transient failure at startup is no evidence that the
         // provider stopped being configured. So the guard is "a payload
-        // exists", not "the lane was attempted". This frame still RENDERS Overview (_activeClientTab
-        // above), but must not persist that normalisation: once the quota
+        // exists", not "the lane was attempted". This frame still RENDERS
+        // Overview (_activeClientTab above), but must not persist that
+        // normalisation: once the quota
         // payload lists the provider configured, the stored tab has to
         // resolve to it again rather than having been overwritten to
         // "overview" in the meantime. `selection.ActiveTab == storedActiveTab`
