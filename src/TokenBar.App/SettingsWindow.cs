@@ -1,10 +1,13 @@
+using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Shapes;
 using System.Reflection;
 using TokenBar.Core;
 using TokenBar.Interop;
+using Windows.UI;
 // TokenBar.Core.Grid (the contribution-grid builder) collides with the XAML
 // Grid — same clash DashboardView notes.
 using Grid = Microsoft.UI.Xaml.Controls.Grid;
@@ -198,6 +201,7 @@ public sealed class SettingsWindow : Window
             // preview column in place.
             var rebuildAll = key is "tokenbar.tray.animationStyle"
                 or "tokenbar.limits.layout"
+                or MenuBarTextColor.StorageKey
                 or ClientRegistry.TabHiddenKey
                 or ClientRegistry.TabOrderKey;
             _ = DispatcherQueue.TryEnqueue(() =>
@@ -288,6 +292,40 @@ public sealed class SettingsWindow : Window
             TrayModes.All.Select(m => (m.RawValue(), m.Label())),
             TrayModes.Parse(store.GetString(TrayModes.StorageKey)).RawValue(),
             raw => store.SetString(TrayModes.StorageKey, raw))));
+
+        // ── Font color (colors the value TrayIconRenderer draws into the
+        // icon — Windows has no tray title text to color directly) ─────
+        var textColorModeRaw = store.GetString(MenuBarTextColor.StorageKey)
+            ?? TrayTextColorMode.Automatic.RawValue();
+        var textColor = new StackPanel { Spacing = 8 };
+        textColor.Children.Add(RadioGroup(
+            "tray.textColorMode",
+            [
+                (TrayTextColorMode.Automatic.RawValue(), TrayTextColorMode.Automatic.Label()),
+                (TrayTextColorMode.Custom.RawValue(), TrayTextColorMode.Custom.Label()),
+            ],
+            textColorModeRaw,
+            raw => store.SetString(MenuBarTextColor.StorageKey, raw)));
+        if (MenuBarTextColor.ParseMode(textColorModeRaw) == TrayTextColorMode.Custom)
+        {
+            var swatches = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 14 };
+            foreach (var level in new[]
+                { QuotaColorLevel.Normal, QuotaColorLevel.Warning, QuotaColorLevel.Critical })
+            {
+                swatches.Children.Add(TextColorSwatch(level, store));
+            }
+
+            var customColorRow = new StackPanel { Spacing = 6 };
+            customColorRow.Children.Add(Ui.Text("Custom color".Localized(), 12));
+            customColorRow.Children.Add(swatches);
+            textColor.Children.Add(customColorRow);
+        }
+
+        textColor.Children.Add(Hint(
+            ("Custom colors follow each item's remaining quota: normal above 25%, low above "
+                + "10% through 25%, and very low at 10% or below. Other text and unavailable "
+                + "quota use the normal color. Automatic keeps the original colors.").Localized()));
+        panel.Children.Add(Section("Font color".Localized(), textColor));
 
         // ── Tray icon ──────────────────────────────────────────────────
         var styleRaw = store.GetString("tokenbar.tray.animationStyle", "cat") ?? "cat";
@@ -1193,8 +1231,10 @@ public sealed class SettingsWindow : Window
                     double.IsFinite(lastRemaining) ? lastRemaining : null);
         var title = SampleTitle(mode, remaining);
 
-        System.Drawing.Color? titleColor = mode == TrayMode.QuotaLeft
+        System.Drawing.Color? automaticColor = mode == TrayMode.QuotaLeft
             ? TrayIconRenderer.GaugeColor(remaining ?? 57) : null;
+        var titleColor = TrayIconRenderer.ResolveInk(
+            store, automaticColor, mode == TrayMode.QuotaLeft ? remaining ?? 57 : null);
         var gaugeStyle = TrayIconRenderer.ParseGaugeStyle(styleRaw);
         foreach (var dark in new[] { true, false })
         {
@@ -1426,6 +1466,138 @@ public sealed class SettingsWindow : Window
         var hint = Ui.Dim(text, 11);
         hint.Opacity = 0.55;
         return hint;
+    }
+
+    // ── Font color: one swatch per QuotaColorLevel, each opening a flyout
+    // with the 16-preset grid plus a HEX box (macOS MenuBarTextColorControl /
+    // MenuBarTextColorPopover). ──────────────────────────────────────────
+    private static StackPanel TextColorSwatch(QuotaColorLevel level, SettingsStore store)
+    {
+        var hex = MenuBarTextColor.NormalizeHex(
+            store.GetString(level.StorageKeyFor())) ?? level.DefaultHexFor();
+        var swatch = new Border
+        {
+            Width = 42,
+            Height = 18,
+            CornerRadius = new CornerRadius(9),
+            Background = Ui.BrushFromHex(hex),
+        };
+        var button = new Button
+        {
+            Content = swatch,
+            Padding = new Thickness(3),
+            CornerRadius = new CornerRadius(9),
+        };
+        ToolTipService.SetToolTip(button, level.Hint());
+        button.Flyout = TextColorFlyout(level, store, hex, applied => swatch.Background = Ui.BrushFromHex(applied));
+
+        var column = new StackPanel { Spacing = 3, HorizontalAlignment = HorizontalAlignment.Center };
+        column.Children.Add(Ui.Dim(level.Label(), 10));
+        column.Children.Add(button);
+        return column;
+    }
+
+    /// <summary>Selection ring width on the preset matching the current colour.</summary>
+    private const double PresetRingThickness = 2;
+
+    private static Flyout TextColorFlyout(
+        QuotaColorLevel level, SettingsStore store, string initialHex, Action<string> onApplied)
+    {
+        var panel = new StackPanel { Spacing = 10, Width = 224 };
+        panel.Children.Add(Ui.Dim(level.Label(), 11));
+
+        var grid = new Grid { ColumnSpacing = 6, RowSpacing = 6 };
+        const int columns = 8;
+        for (var c = 0; c < columns; c++)
+        {
+            grid.ColumnDefinitions.Add(new ColumnDefinition());
+        }
+
+        for (var r = 0; r < (MenuBarTextColor.Presets.Count + columns - 1) / columns; r++)
+        {
+            grid.RowDefinitions.Add(new RowDefinition());
+        }
+
+        TextBox hexBox = null!;
+        // The ring on the preset matching the current colour (macOS popover
+        // shows the same selection ring; screenshot reference 2026-09-25).
+        var presetButtons = new List<(string Hex, Button Button)>();
+        void MarkSelected(string? selected)
+        {
+            foreach (var (presetHex, presetButton) in presetButtons)
+            {
+                var on = presetHex == selected;
+                presetButton.BorderBrush = on
+                    ? (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"]
+                    : null;
+                presetButton.BorderThickness = new Thickness(on ? PresetRingThickness : 0);
+            }
+        }
+
+        for (var i = 0; i < MenuBarTextColor.Presets.Count; i++)
+        {
+            var (name, presetHex) = MenuBarTextColor.Presets[i];
+            var preset = new Button
+            {
+                Content = new Ellipse
+                {
+                    Width = 18,
+                    Height = 18,
+                    Fill = Ui.BrushFromHex(presetHex),
+                },
+                Padding = new Thickness(2),
+                CornerRadius = new CornerRadius(11),
+            };
+            ToolTipService.SetToolTip(preset, $"{name.Localized()} {presetHex}");
+            preset.Click += (_, _) =>
+            {
+                store.SetString(level.StorageKeyFor(), presetHex);
+                hexBox.Text = presetHex;
+                onApplied(presetHex);
+                MarkSelected(presetHex);
+            };
+            presetButtons.Add((presetHex, preset));
+            Grid.SetColumn(preset, i % columns);
+            Grid.SetRow(preset, i / columns);
+            grid.Children.Add(preset);
+        }
+
+        panel.Children.Add(grid);
+
+        var hexRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        hexRow.Children.Add(Ui.Text("HEX", 11));
+        hexBox = new TextBox
+        {
+            Text = initialHex,
+            PlaceholderText = "#000000",
+            FontFamily = new FontFamily("Consolas"),
+            Width = 140,
+        };
+        var error = Hint("Enter a 6-digit hex color, e.g. #000000.".Localized());
+        error.Foreground = new SolidColorBrush(Colors.Red);
+        error.Visibility = Visibility.Collapsed;
+        hexBox.TextChanged += (_, _) =>
+        {
+            var normalized = MenuBarTextColor.NormalizeHex(hexBox.Text);
+            // Ignore invalid input rather than persisting it — the box stays
+            // exactly what was typed so the person can keep fixing it.
+            error.Visibility = hexBox.Text.Length > 0 && normalized is null
+                ? Visibility.Visible : Visibility.Collapsed;
+            if (normalized is null)
+            {
+                return;
+            }
+
+            store.SetString(level.StorageKeyFor(), normalized);
+            onApplied(normalized);
+            MarkSelected(normalized);
+        };
+        hexRow.Children.Add(hexBox);
+        panel.Children.Add(hexRow);
+        panel.Children.Add(error);
+        MarkSelected(initialHex);
+
+        return new Flyout { Content = panel };
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
