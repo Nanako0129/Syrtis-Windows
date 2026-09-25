@@ -25,10 +25,17 @@
          of its own, so copying that would render as a rounded tile floating in
          the taskbar rather than as the app's own shape.
 
-         Regenerate from Assets\syrtis-disc.svg with ImageMagick. Two steps,
-         not one pipeline: routing through the intermediate PNG is what makes
-         the result reproducible, and a single chained command produces a
-         different file.
+         Since 2026-09-25 the shipped .ico carries the macOS v2.0 lighting
+         (sphere shading and sheen, no drop shadow or glow; the user's pick,
+         "variant b"). That lighting is raster work in the macOS icon
+         pipeline, not in this repository, and it fades out at small sizes, so
+         16px is effectively the flat disc. Regenerating from the SVG with the
+         commands below produces the previous FLAT icon and drops the shading;
+         they are kept as the fallback and as the record of the geometry the
+         lit icon reproduces (same inset, same ten frames).
+         Two steps, not one pipeline: routing through the intermediate PNG is
+         what makes the result reproducible, and a single chained command
+         produces a different file.
 
            magick -background none -density 600 Assets\syrtis-disc.svg \
              -resize 3066x3066 disc.png
