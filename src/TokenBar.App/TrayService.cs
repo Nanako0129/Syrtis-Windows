@@ -21,6 +21,8 @@ public sealed class TrayService : IDisposable
         TrayModes.StorageKey, "tokenbar.tray.animationStyle",
         "tokenbar.icon.coloring", "tokenbar.quota.source",
         "tokenbar.tray.animate",
+        MenuBarTextColor.StorageKey, MenuBarTextColor.CustomColorKey,
+        MenuBarTextColor.WarningColorKey, MenuBarTextColor.CriticalColorKey,
     ];
 
     private readonly TaskbarIcon _icon;
@@ -555,7 +557,13 @@ public sealed class TrayService : IDisposable
         // iconSettingsSignature): the feed ticks far more often than the
         // numbers move.
         var animate = AppSettings.Store.GetBool("tokenbar.tray.animate", true);
-        var signature = $"{mode}|{styleRaw}|{coloring}|{dark}|{title}|{remaining:F1}|{animate}";
+        var textColorMode = AppSettings.Store.GetString(MenuBarTextColor.StorageKey);
+        var textColorHex = AppSettings.Store.GetString(MenuBarTextColor.CustomColorKey)
+            + "|" + AppSettings.Store.GetString(MenuBarTextColor.WarningColorKey)
+            + "|" + AppSettings.Store.GetString(MenuBarTextColor.CriticalColorKey);
+        var signature =
+            $"{mode}|{styleRaw}|{coloring}|{dark}|{title}|{remaining:F1}|{animate}"
+            + $"|{textColorMode}|{textColorHex}";
         if (signature == _iconSignature)
         {
             return;
@@ -573,11 +581,14 @@ public sealed class TrayService : IDisposable
         }
 
         _animator.Stop();
+        var automaticColor = mode == TrayMode.QuotaLeft && remaining is { } q
+            ? TrayIconRenderer.GaugeColor(q) : (System.Drawing.Color?)null;
         using var bmp = mode != TrayMode.Hidden && title.Length > 0
             ? TrayIconRenderer.RenderTitle(
                 TrayModes.IconTitle(title),
-                mode == TrayMode.QuotaLeft && remaining is { } q
-                    ? TrayIconRenderer.GaugeColor(q) : null,
+                TrayIconRenderer.ResolveInk(
+                    AppSettings.Store, automaticColor,
+                    mode == TrayMode.QuotaLeft ? remaining : null),
                 dark)
             : TrayIconRenderer.RenderGauge(
                 TrayIconRenderer.ParseGaugeStyle(styleRaw) ?? QuotaIconStyle.Bars,

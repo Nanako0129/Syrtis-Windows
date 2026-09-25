@@ -2,6 +2,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
+using TokenBar.Core;
 
 namespace TokenBar.App;
 
@@ -55,6 +56,49 @@ internal static class TrayIconRenderer
         "popsicle" => QuotaIconStyle.Popsicle,
         _ => null, // cat/parrot (animator) or unknown
     };
+
+    /// <summary>Parse a MenuBarTextColor-normalized "#RRGGBB" hex string
+    /// (TokenBar.Core has no System.Drawing reference, so colors cross that
+    /// boundary as strings). Null on anything that is not exactly that shape
+    /// — callers fall back to the automatic color, same as macOS's
+    /// <c>Color(hex:)</c> failing to construct.</summary>
+    public static Color? ParseHex(string? hex)
+    {
+        if (hex is not { Length: 7 } || hex[0] != '#')
+        {
+            return null;
+        }
+
+        try
+        {
+            return Color.FromArgb(
+                Convert.ToByte(hex.Substring(1, 2), 16),
+                Convert.ToByte(hex.Substring(3, 2), 16),
+                Convert.ToByte(hex.Substring(5, 2), 16));
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The color a drawn value should ink with, folding the "Font
+    /// color" setting over an already-decided automatic color: Automatic
+    /// mode (or a Custom mode with an invalid stored hex) keeps
+    /// <paramref name="automatic"/> unchanged. <paramref name="levelRemaining"/>
+    /// is the remaining-quota percentage that decides the level, or null for
+    /// a non-quota mode / unavailable quota — both resolve to the Normal
+    /// color, matching macOS's <c>mode == .quotaLeft ? quotaRemaining : nil</c>.</summary>
+    public static Color? ResolveInk(SettingsStore store, Color? automatic, double? levelRemaining)
+    {
+        var level = MenuBarTextColor.LevelFor(levelRemaining);
+        var levelHex = store.GetString(level.StorageKeyFor(), level.DefaultHexFor())
+            ?? level.DefaultHexFor();
+        var modeRaw = store.GetString(MenuBarTextColor.StorageKey);
+        return MenuBarTextColor.Resolve(modeRaw, levelHex) is { } hex
+            ? ParseHex(hex) ?? automatic
+            : automatic;
+    }
 
     private static Color Ink(double? remaining, bool dark, IconColoring coloring)
     {
