@@ -1,4 +1,5 @@
 using TokenBar.Core;
+using TokenBar.Interop;
 
 namespace TokenBar.App;
 
@@ -349,4 +350,75 @@ public static class WindowHistoryText
             [.. shown.Select(row => new WindowEquivalence.Cycle(
                 row.Cycle.UsedPercent, row.SpanTokens, row.SpanCost, row.Cycle.ObservedFraction,
                 row.Cycle.RisingRuns))]);
+
+    // ---- the hover breakdown -----------------------------------------------
+
+    /// <summary>One lane of the hover breakdown: a token class, its share of
+    /// the total, and its own count. Built in <see cref="TokenBar.Interop.TokenBreakdown"/>'s
+    /// fixed five-class order (Input, Output, Cache read, Cache write,
+    /// Reasoning), and ALL five are returned — including a zero one. A lane
+    /// omitted for being zero leaves the reader unable to tell "none of this
+    /// kind" from "this kind is not counted here", and the row and model
+    /// columns this tooltip explains already carry that distinction.</summary>
+    public readonly record struct BreakdownLine(string Kind, string Share, string Tokens);
+
+    /// <summary>The five lines plus the total, for a hover over a history row
+    /// or one of its model lines. Both scopes read this one function so they
+    /// cannot disagree about what a class is or how its share is rounded.
+    /// <para>
+    /// The share is a dash rather than "0%" when <paramref name="breakdown"/>'s
+    /// total is zero — the same rule the row's own percent column uses for a
+    /// total nobody measured — because a share OF nothing is not a measured
+    /// zero.
+    /// </para>
+    /// </summary>
+    public static (IReadOnlyList<BreakdownLine> Lines, string Total) BreakdownTip(TokenBreakdown breakdown)
+    {
+        var total = breakdown.Total;
+        (string Kind, long Value)[] lanes =
+        [
+            ("Input".Localized(), breakdown.Input),
+            ("Output".Localized(), breakdown.Output),
+            ("Cache read".Localized(), breakdown.CacheRead),
+            ("Cache write".Localized(), breakdown.CacheWrite),
+            ("Reasoning".Localized(), breakdown.Reasoning),
+        ];
+        var lines = lanes.Select(lane => new BreakdownLine(
+            lane.Kind,
+            total > 0
+                ? ((int)Math.Round(100.0 * lane.Value / total, MidpointRounding.AwayFromZero))
+                    .ToString(System.Globalization.CultureInfo.CurrentCulture) + "%"
+                : "—",
+            Format.CompactTokens(lane.Value))).ToList();
+        return (lines, Format.CompactTokens(total));
+    }
+
+    /// <summary>A window's span, for the row hover's heading.
+    /// <para>
+    /// The end date is dropped when both ends fall on the same calendar day,
+    /// which is every session-length window: printing "09-20 22:39 – 09-20
+    /// 03:39" puts the reader through the date twice to learn nothing. It is
+    /// kept when they differ, because a window crossing midnight is exactly
+    /// when the second date carries information.
+    /// </para>
+    /// <para>
+    /// The day comparison is on the converted local dates, not on the
+    /// formatted strings: slicing "MM-dd" off the front of <see cref="Stamp"/>
+    /// works only while that format keeps its exact layout, and a format that
+    /// moves is a comparison that silently starts answering a different
+    /// question.
+    /// </para>
+    /// </summary>
+    public static string HoverHeading(long startMs, long resetMs)
+    {
+        var start = DateTimeOffset.FromUnixTimeMilliseconds(startMs).ToLocalTime();
+        var end = DateTimeOffset.FromUnixTimeMilliseconds(resetMs).ToLocalTime();
+        var head = Stamp(startMs);
+        if (start.Date != end.Date)
+        {
+            return $"{head} – {Stamp(resetMs)}";
+        }
+
+        return $"{head} – {end:HH:mm}";
+    }
 }

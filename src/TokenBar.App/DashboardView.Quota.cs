@@ -879,7 +879,14 @@ public sealed partial class DashboardView
             _historyExpanded = open ? null : id;
             RenderContent(animated: false);
         };
-        block.Children.Add(head);
+        // The whole row, not the token column alone: a target the width of
+        // one number is a target you have to find, and the row already has a
+        // hit-test background for its expand tap.
+        var cycle = historyRow.Cycle;
+        var headHost = WithRowGlow(head);
+        HoverTip.AttachRich(headHost, () => BreakdownTip(
+            WindowHistoryText.HoverHeading(cycle.StartMs, cycle.ResetAtMs), historyRow.MineBreakdown));
+        block.Children.Add(headHost);
 
         if (open)
         {
@@ -935,9 +942,13 @@ public sealed partial class DashboardView
         return block;
     }
 
-    private static FrameworkElement ModelDetailRow(QuotaHistoryModel model)
+    private FrameworkElement ModelDetailRow(QuotaHistoryModel model)
     {
-        var grid = new Grid { ColumnSpacing = 6 };
+        var grid = new Grid
+        {
+            ColumnSpacing = 6,
+            Background = new SolidColorBrush(Colors.Transparent), // hit-test for its own hover
+        };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(54) });
@@ -954,7 +965,88 @@ public sealed partial class DashboardView
         Grid.SetColumn(cost, 2);
         grid.Children.Add(cost);
 
-        return grid;
+        // Its own hover target, not the row's: the row's covers the whole
+        // line above it, and would otherwise leave the per-model split
+        // reachable nowhere.
+        var host = WithRowGlow(grid);
+        HoverTip.AttachRich(host, () => BreakdownTip(model.ModelId, model.Breakdown));
+        return host;
+    }
+
+    /// <summary>Outline strength on a hovered history row or model line — the
+    /// value the Daily/Monthly model stripes use (ModelStripeRow), so every
+    /// hoverable row in the flyout lights the same way.</summary>
+    private const double HistoryRowGlowOpacity = 0.55;
+
+    /// <summary>The row outline every other hoverable list row draws while the
+    /// pointer is over it (see ModelStripeRow): an accent border laid over the
+    /// row, outside layout so it cannot move the row or the tooltip.</summary>
+    private FrameworkElement WithRowGlow(FrameworkElement row)
+    {
+        var glow = new Border
+        {
+            BorderBrush = new SolidColorBrush(Colors.Transparent),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(3),
+            IsHitTestVisible = false,
+            Opacity = 0,
+        };
+        var host = new Grid();
+        host.Children.Add(row);
+        host.Children.Add(glow);
+        AttachHoverOutline(host, hovered =>
+        {
+            if (hovered)
+            {
+                glow.BorderBrush = HoverOutlineBrush();
+            }
+
+            glow.Opacity = hovered ? HistoryRowGlowOpacity : 0;
+        });
+        return host;
+    }
+
+    /// <summary>The hover breakdown shared by a history row and one of its
+    /// model lines: a heading, the five token classes with their share and
+    /// count (<see cref="WindowHistoryText.BreakdownTip"/>), and the total —
+    /// the same content at two scopes, so one builder serves both rather than
+    /// two nearly identical panels.</summary>
+    private static UIElement BreakdownTip(string heading, TokenBreakdown breakdown)
+    {
+        var (lines, total) = WindowHistoryText.BreakdownTip(breakdown);
+        var panel = new StackPanel { Spacing = 3, MinWidth = 180 };
+        panel.Children.Add(TipText(heading, 11, bold: true));
+        // Zipped by index, not matched by label text: WindowHistoryText.BreakdownTip
+        // and Ui.TokenKinds both state the same fixed five-class order
+        // (Input, Output, Cache read, Cache write, Reasoning), so the Nth
+        // line is always the Nth palette color.
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var line = lines[i];
+            var row = new Grid { ColumnSpacing = 5 };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(34) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });
+            row.Children.Add(TipLabel(Ui.TokenKinds[i].Color, line.Kind, square: true));
+            var share = TipText(line.Share, 9, 0.55);
+            share.TextAlignment = TextAlignment.Right;
+            Grid.SetColumn(share, 1);
+            row.Children.Add(share);
+            var tokens = TipText(line.Tokens, 9, 0.85);
+            tokens.TextAlignment = TextAlignment.Right;
+            Grid.SetColumn(tokens, 2);
+            row.Children.Add(tokens);
+            panel.Children.Add(row);
+        }
+
+        panel.Children.Add(new Rectangle
+        {
+            Height = 1,
+            Margin = new Thickness(0, 2, 0, 2),
+            Fill = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255)),
+        });
+        panel.Children.Add(TipRow(TipText("Total".Localized(), 10, 0.85, bold: true), total, 0.85));
+        return panel;
     }
 
     /// <summary>Two bars, stacked and deliberately NOT sharing a scale. Quota

@@ -1,5 +1,6 @@
 using TokenBar.App;
 using TokenBar.Core;
+using TokenBar.Interop;
 using Xunit;
 
 namespace TokenBar.Core.Tests;
@@ -377,6 +378,7 @@ public class WindowHistoryTextTests
             Cycle: Cycle(10 * Hour, 42),
             MineTokens: mineTokens,
             MineTokensExCacheRead: mineTokens,
+            MineBreakdown: new TokenBreakdown(0, 0, 0, 0, 0),
             MineCost: mineCost,
             SpanTokens: mineTokens,
             SpanCost: mineCost,
@@ -435,7 +437,7 @@ public class WindowHistoryTextTests
         Assert.Null(WindowHistoryText.SameHoursLine(HistoryRow(otherTokens: 0, otherCost: 0)));
 
     private static QuotaHistoryModel Model(string modelId, long tokens, double cost) =>
-        new("anthropic", modelId, tokens, cost);
+        new("anthropic", modelId, tokens, new TokenBreakdown(0, 0, 0, 0, 0), cost);
 
     // "The heaviest four" — a fifth, smaller model does not appear.
     [Fact]
@@ -513,4 +515,71 @@ public class WindowHistoryTextTests
     public void EquivalenceIsUndeclaredWhenNothingHasBeenClassified() =>
         Assert.IsType<WindowEquivalence.Row.Undeclared>(
             WindowHistoryText.Equivalence([HistoryRow()], declared: false));
+
+    // ---- the hover breakdown -----------------------------------------------
+
+    [Fact]
+    public void BreakdownTipListsAllFiveLanesIncludingZeroesAndSumsToTheTotal()
+    {
+        var breakdown = new TokenBreakdown(Input: 2_000, Output: 537_000, CacheRead: 204_000_000,
+            CacheWrite: 4_900_000, Reasoning: 0);
+
+        var (lines, total) = WindowHistoryText.BreakdownTip(breakdown);
+
+        Assert.Equal(5, lines.Count);
+        Assert.Equal("2K", lines[0].Tokens);
+        Assert.Equal("537K", lines[1].Tokens);
+        Assert.Equal("204M", lines[2].Tokens);
+        Assert.Equal("4.9M", lines[3].Tokens);
+        // Zero lane still present, not omitted.
+        Assert.Equal("Reasoning", lines[4].Kind);
+        Assert.Equal("0", lines[4].Tokens);
+        Assert.Equal("0%", lines[4].Share);
+        // The one non-trivial share, rounded to a whole percent.
+        Assert.Equal("97%", lines[2].Share);
+        Assert.Equal(Format.CompactTokens(breakdown.Total), total);
+    }
+
+    [Fact]
+    public void BreakdownTipSharesAreADashWhenTheTotalIsZero()
+    {
+        var (lines, total) = WindowHistoryText.BreakdownTip(new TokenBreakdown(0, 0, 0, 0, 0));
+
+        Assert.All(lines, line => Assert.Equal("—", line.Share));
+        Assert.Equal("0", total);
+    }
+
+    // Explicit LOCAL-time fixtures (DateTimeKind.Local), not UTC converted to
+    // local: HoverHeading's same-day rule reads the LOCAL calendar day, and a
+    // UTC fixture would flip across that boundary depending on the machine
+    // running the test.
+    private static long LocalMs(int year, int month, int day, int hour, int minute) =>
+        new DateTimeOffset(new DateTime(year, month, day, hour, minute, 0, DateTimeKind.Local))
+            .ToUnixTimeMilliseconds();
+
+    [Fact]
+    public void HoverHeadingDropsTheEndDateOnTheSameCalendarDay()
+    {
+        var start = LocalMs(2026, 9, 24, 23, 9);
+        var end = LocalMs(2026, 9, 24, 23, 59);
+
+        var heading = WindowHistoryText.HoverHeading(start, end);
+
+        Assert.Equal($"{WindowHistoryText.Stamp(start)} – 23:59", heading);
+        Assert.Equal(1, heading.Split("09-24").Length - 1); // the date appears exactly once
+    }
+
+    [Fact]
+    public void HoverHeadingKeepsTheEndDateAcrossCalendarDays()
+    {
+        var start = LocalMs(2026, 9, 24, 23, 9);
+        var end = LocalMs(2026, 9, 25, 4, 9);
+
+        var heading = WindowHistoryText.HoverHeading(start, end);
+
+        Assert.Equal(
+            $"{WindowHistoryText.Stamp(start)} – {WindowHistoryText.Stamp(end)}", heading);
+        Assert.Contains("09-24", heading);
+        Assert.Contains("09-25", heading);
+    }
 }
