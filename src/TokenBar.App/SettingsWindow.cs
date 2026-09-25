@@ -80,11 +80,21 @@ public sealed class SettingsWindow : Window
     private readonly Dictionary<string, StackPanel> _pages = new(StringComparer.Ordinal);
     private string _selectedTag = "menubar";
 
+    /// <param name="showDiscord">Open on the General page scrolled to the
+    /// Discord section — the Discord intro's "Open Settings" (macOS
+    /// <c>show(scrollingTo: .discord)</c>). Navigation only; it writes
+    /// nothing.</param>
     public static void Present(
         Func<AgentUsagePayload?> quota, Func<UsagePayload?> graph,
-        Func<IReadOnlyList<TraceBucket>> trace)
+        Func<IReadOnlyList<TraceBucket>> trace, bool showDiscord = false)
     {
         _shared ??= new SettingsWindow(quota, graph, trace);
+        if (showDiscord)
+        {
+            _shared._selectedTag = "general";
+            _shared._nav.SelectedItem = _shared._generalItem;
+        }
+
         _shared.Rebuild();
         _shared.AppWindow.Show();
         // Activate() alone cannot bring the window forward when the opener
@@ -95,6 +105,11 @@ public sealed class SettingsWindow : Window
         DevLog.Write($"settings: shown visible={_shared.AppWindow.IsVisible} " +
             $"pos={_shared.AppWindow.Position.X},{_shared.AppWindow.Position.Y} " +
             $"size={_shared.AppWindow.Size.Width}x{_shared.AppWindow.Size.Height}");
+        if (showDiscord)
+        {
+            _shared.ScrollToDiscord();
+        }
+
         _ = _shared.DispatcherQueue.TryEnqueue(
             Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
             DevLog.Write($"settings layout: scroll={_shared._scroll.ActualWidth:F0}x" +
@@ -824,6 +839,10 @@ public sealed class SettingsWindow : Window
                 + "continuous either way.").Localized()));
         panel.Children.Add(Section("Data refresh".Localized(), refresh));
 
+        // ── Discord (macOS SettingsPanel :944-1007) ─────────────────────
+        _discordSection = Section(DiscordCopy.Section.Localized(), BuildDiscord(store));
+        panel.Children.Add(_discordSection);
+
         // ── Language ───────────────────────────────────────────────────
         var languageStored = store.GetString(AppLanguage.StorageKey, AppLanguage.System)
             ?? AppLanguage.System;
@@ -851,6 +870,139 @@ public sealed class SettingsWindow : Window
         panel.Children.Add(Section("Language".Localized().Localized(), language));
 
         return panel;
+    }
+
+    private StackPanel? _discordSection;
+
+    /// <summary>Scroll the General page to the Discord section. Ordered after
+    /// the two things that would otherwise undo or pre-empt it: ShowPage's
+    /// reset to offset 0 (already issued synchronously by Rebuild, so this
+    /// ChangeView is the later request and wins) and layout (the freshly built
+    /// section has no position until it is loaded, so this waits for its own
+    /// Loaded and then forces a pass). The same path serves a fresh window and
+    /// one already open on another page, because Rebuild always builds a new,
+    /// not-yet-loaded section. A rebuild that replaces the section before it
+    /// loads drops the scroll rather than scrolling a detached element.</summary>
+    private void ScrollToDiscord()
+    {
+        if (_discordSection is not { } section)
+        {
+            return;
+        }
+
+        if (!section.IsLoaded)
+        {
+            void OnLoaded(object sender, RoutedEventArgs e)
+            {
+                section.Loaded -= OnLoaded;
+                if (ReferenceEquals(section, _discordSection))
+                {
+                    ScrollToDiscord();
+                }
+            }
+
+            section.Loaded += OnLoaded;
+            return;
+        }
+
+        _scroll.UpdateLayout();
+        if (_scroll.Content is not UIElement content)
+        {
+            return;
+        }
+
+        var top = section.TransformToVisual(content)
+            .TransformPoint(new Windows.Foundation.Point(0, 0)).Y;
+        _scroll.ChangeView(null, top, null, disableAnimation: true);
+    }
+
+    /// <summary>The opt-in and its four refinements. Every control writes
+    /// only its own key; whether anything is published, and what, is decided
+    /// by DiscordPresenceController from the store — never by this panel. The
+    /// consent copy sits above the switches it governs, verbatim from macOS,
+    /// so it is read before opting in.</summary>
+    private StackPanel BuildDiscord(SettingsStore store)
+    {
+        var body = new StackPanel { Spacing = 6 };
+        var enabled = new ToggleSwitch
+        {
+            IsOn = DiscordPresence.Enabled(store),
+            OnContent = null,
+            OffContent = null,
+        };
+        enabled.Toggled += (_, _) => store.SetBool(DiscordPresence.EnabledKey, enabled.IsOn);
+        body.Children.Add(ToggleRow(DiscordCopy.Toggle.Localized(), enabled));
+        body.Children.Add(Hint(DiscordCopy.Consent.Localized()));
+
+        foreach (var (component, label) in new[]
+                 {
+                     (DiscordPresence.Component.Tokens, DiscordCopy.IncludeTokens),
+                     (DiscordPresence.Component.Client, DiscordCopy.IncludeClient),
+                     (DiscordPresence.Component.Cost, DiscordCopy.IncludeCost),
+                 })
+        {
+            var toggle = new ToggleSwitch
+            {
+                IsOn = DiscordPresence.Components(store).Contains(component),
+                OnContent = null,
+                OffContent = null,
+            };
+            toggle.Toggled += (_, _) =>
+            {
+                // Re-read at write time and store the canonical form, so the
+                // three switches cannot overwrite each other's ticks.
+                var next = new HashSet<DiscordPresence.Component>(DiscordPresence.Components(store));
+                if (toggle.IsOn)
+                {
+                    next.Add(component);
+                }
+                else
+                {
+                    next.Remove(component);
+                }
+
+                store.SetString(DiscordPresence.ComponentsKey, DiscordPresence.RawComponents(next));
+            };
+            body.Children.Add(ToggleRow(label.Localized(), toggle));
+        }
+
+        body.Children.Add(Hint(DiscordCopy.UntickHint.Localized()));
+
+        // The ANSWER comes from the strict reader: a malformed stored value
+        // ticks nothing, which is honest — nothing is published then.
+        var selection = DiscordPresence.ReadSelection(store);
+        var current = selection switch
+        {
+            DiscordPresence.Selection.Only only => only.Id,
+            DiscordPresence.Selection.Malformed => DiscordPresence.MalformedSelectionLabel,
+            _ => "",
+        };
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        IReadOnlyList<string>? present = _graph() is { } graph
+            ? graph.Summary.Clients.Select(ClientRegistry.CanonicalClient).Where(seen.Add).ToList()
+            : null;
+        var options = new List<(string Raw, string Label)> { ("", DiscordCopy.MostUsed.Localized()) };
+        options.AddRange(DiscordPresence.SelectableClients(
+                present,
+                store.GetString(ClientRegistry.TabHiddenKey) ?? "",
+                store.GetString(ClientRegistry.TabOrderKey) ?? "",
+                selection)
+            .Select(id => (id, ClientRegistry.Style(id).DisplayName)));
+        body.Children.Add(RadioGroup(
+            "discord.client", options, current,
+            raw => store.SetString(DiscordPresence.SelectionKey, raw)));
+        body.Children.Add(Hint(DiscordCopy.NamingHint.Localized()));
+
+        var wholeDollars = new ToggleSwitch
+        {
+            IsOn = DiscordPresence.ReadCostStyle(store) == DiscordPresence.CostStyle.WholeDollars,
+            OnContent = null,
+            OffContent = null,
+        };
+        wholeDollars.Toggled += (_, _) => store.SetBool(DiscordPresence.WholeDollarsKey, wholeDollars.IsOn);
+        body.Children.Add(ToggleRow(DiscordCopy.WholeDollars.Localized(), wholeDollars));
+        body.Children.Add(Hint(DiscordCopy.WholeDollarsHint.Localized()));
+        return body;
     }
 
     // ── Manual update check ───────────────────────────────────────────────

@@ -28,6 +28,7 @@ public sealed class TrayService : IDisposable
     private readonly TaskbarIcon _icon;
     private readonly TrayFeed _feed;
     private readonly TrayAnimator _animator;
+    private readonly DiscordPresenceController _discord;
     private readonly Action<string> _onStoreChanged;
     private readonly PendingUpdateAction _pendingUpdate = new();
     private PendingUpdateAction.PendingAction? _activeUpdate;
@@ -71,13 +72,30 @@ public sealed class TrayService : IDisposable
         _feed = new TrayFeed(_dispatcher, graphCoordinator);
         _animator = new TrayAnimator(_dispatcher, () => _feed.TokensPerMin, ApplyCachedIcon);
         OpenSettings = ShowSettings;
+        // Discord presence (opt-in, default off). The only production client
+        // factory: the constant local pipe, reached only after
+        // DiscordPresence.MayConnect has said yes for these arguments.
+        _discord = new DiscordPresenceController(
+            AppSettings.Store,
+            Environment.GetCommandLineArgs(),
+            () => new DiscordIpcClient(DiscordIpc.ProductionConnector));
         _feed.Changed += () =>
         {
             UpdateIcon();
             RebuildMenu(); // quota percentages in the source picker move
+            // Every accepted, cost-authoritative graph republishes (macOS
+            // AppDelegate.swift :573-576). Changed also fires for trace/quota
+            // ticks (same graph instance) and for LocalFirst graphs (unpriced);
+            // the controller ignores both, judging authority from the graph
+            // itself.
+            _discord.OnGraph(_feed.Graph);
         };
         _onStoreChanged = key =>
         {
+            // Synchronously on the writing thread, before any later write can
+            // land: a hide must retire queued payloads at once. The controller
+            // is value-gated and ignores every key but its five.
+            _discord.OnSettingChanged(key);
             if (IconKeys.Contains(key))
             {
                 // Changed fires on the writing thread; today's writers are
@@ -94,12 +112,18 @@ public sealed class TrayService : IDisposable
 
         QuitApp = () =>
         {
+            // Queue the clear and wait for it, at most 300 ms, before
+            // teardown (macOS AppDelegate.swift :468-495).
+            _discord.Quit(TimeSpan.FromMilliseconds(300));
             Dispose();
             Microsoft.UI.Xaml.Application.Current.Exit();
         };
 
         UpdateIcon();
         RebuildMenu();
+        // Enabled at launch: start the worker now; the first accepted graph
+        // publishes, nothing before it.
+        _discord.Launch();
         // Soft first attempt without Sleep; schedule timer ticks if needed.
         BeginCreationEpisode();
     }
@@ -146,6 +170,11 @@ public sealed class TrayService : IDisposable
 
     public void ShowSettings() => SettingsWindow.Present(
         () => _feed.Quota, () => _feed.Graph, () => _feed.Trace);
+
+    /// <summary>The Discord intro's "Open Settings": navigation to the
+    /// Discord section, never a write.</summary>
+    internal void ShowDiscordSettings() => SettingsWindow.Present(
+        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showDiscord: true);
 
     internal bool CanHandoff => !Volatile.Read(ref _disposed);
 

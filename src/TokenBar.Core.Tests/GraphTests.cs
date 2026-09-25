@@ -89,4 +89,136 @@ public class GraphTests
         Assert.Equal(10L, t.TodayTokens);
         Assert.Equal(0.1, t.TodayCost, 6);
     }
+
+    // ---- TodayAllowlisted: the Discord presence's positive allowlist ----
+    //
+    // The aggregate a fast path would read (todayEntry.Totals, Summary) is
+    // summed upstream in the Rust core across EVERY client, unregistered ones
+    // included. These fixtures make that aggregate disagree with the stripes,
+    // so a regression back onto an aggregate is visible in the numbers.
+
+    private static readonly IReadOnlySet<string> Registered =
+        new HashSet<string>(ClientRegistry.AllIds, StringComparer.Ordinal);
+
+    private static Contribution Day(string date, long totalTokens, double totalCost, params ContributionClient[] clients) =>
+        new(date, new ContributionTotals(totalTokens, totalCost, 1), 1, new TokenBreakdown(0, 0, 0, 0, 0), clients);
+
+    private static AllowlistedToday Allowlisted(
+        UsagePayload payload, IReadOnlySet<string>? hidden = null, IReadOnlySet<string>? only = null) =>
+        payload.TodayAllowlisted(
+            hidden ?? new HashSet<string>(), "2026-07-02", only ?? Registered, ClientRegistry.CanonicalClient);
+
+    [Fact]
+    public void AllowlistWithUnregisteredOnlyGraphIsZero()
+    {
+        var payload = PayloadWith(Day(
+            "2026-07-02", 500, 5.0,
+            Client("cc-mirror/acme-internal", new TokenBreakdown(500, 0, 0, 0, 0), 5.0)));
+
+        var t = Allowlisted(payload);
+
+        Assert.Equal(0L, t.Tokens);
+        Assert.Equal(0.0, t.Cost);
+        Assert.Null(t.TopClient);
+    }
+
+    [Fact]
+    public void AllowlistNeverReadsTheUpstreamAggregateEvenWithNothingHidden()
+    {
+        // Upstream totals 150/1.5 include the unregistered client; the
+        // allowlisted figure is claude's stripe alone.
+        var payload = PayloadWith(Day(
+            "2026-07-02", 150, 1.5,
+            Client("claude", new TokenBreakdown(100, 0, 0, 0, 0), 1.0),
+            Client("cc-mirror/acme-internal", new TokenBreakdown(50, 0, 0, 0, 0), 0.5)));
+
+        var t = Allowlisted(payload);
+        Assert.Equal(100L, t.Tokens);
+        Assert.Equal(1.0, t.Cost, 6);
+        Assert.Equal("claude", t.TopClient);
+
+        // The existing tray caller keeps its fast path, untouched.
+        var tray = payload.TrayTotals(new HashSet<string>(), "2026-07-02");
+        Assert.Equal(150L, tray.TodayTokens);
+        Assert.Equal(999L, tray.TotalTokens);
+    }
+
+    [Fact]
+    public void HiddenTopClientContributesNeitherNameNorNumbers()
+    {
+        var payload = PayloadWith(Day(
+            "2026-07-02", 1_010, 10.1,
+            Client("claude", new TokenBreakdown(1_000, 0, 0, 0, 0), 10.0),
+            Client("codex", new TokenBreakdown(10, 0, 0, 0, 0), 0.1)));
+
+        var t = Allowlisted(payload, hidden: new HashSet<string> { "claude" });
+
+        Assert.Equal("codex", t.TopClient);
+        Assert.Equal(10L, t.Tokens);
+        Assert.Equal(0.1, t.Cost, 6);
+    }
+
+    [Fact]
+    public void TopClientAndFiguresFoldEveryContributionDatedToday()
+    {
+        // Two entries share today's date. The figures and the top client must
+        // come from the same set: codex wins on the combined day (60 > 50)
+        // though it loses on the last entry alone (20 < 50).
+        var payload = PayloadWith(
+            Day("2026-07-01", 0, 0, Client("amp", new TokenBreakdown(900, 0, 0, 0, 0), 9)),
+            Day("2026-07-02", 0, 0, Client("codex", new TokenBreakdown(40, 0, 0, 0, 0), 0.4)),
+            Day("2026-07-02", 0, 0,
+                Client("claude", new TokenBreakdown(50, 0, 0, 0, 0), 0.5),
+                Client("codex", new TokenBreakdown(20, 0, 0, 0, 0), 0.2)));
+
+        var t = Allowlisted(payload);
+
+        Assert.Equal(110L, t.Tokens);
+        Assert.Equal(1.1, t.Cost, 6);
+        Assert.Equal("codex", t.TopClient);
+    }
+
+    [Fact]
+    public void AliasStripeCountsUnderItsCanonicalId()
+    {
+        // `claude-code` is the live-tail alias of `claude`; the picker, the
+        // hidden set and the registry all key on the canonical id.
+        var payload = PayloadWith(Day(
+            "2026-07-02", 0, 0,
+            Client("claude-code", new TokenBreakdown(40, 0, 0, 0, 0), 0.4),
+            Client("claude", new TokenBreakdown(30, 0, 0, 0, 0), 0.3),
+            Client("codex", new TokenBreakdown(50, 0, 0, 0, 0), 0.5)));
+
+        // Most used: 70 under "claude" beats codex's 50.
+        var mostUsed = Allowlisted(payload);
+        Assert.Equal("claude", mostUsed.TopClient);
+        Assert.Equal(120L, mostUsed.Tokens);
+
+        // Only("claude") includes the alias stripe.
+        var only = Allowlisted(payload, only: new HashSet<string> { "claude" });
+        Assert.Equal(70L, only.Tokens);
+
+        // Hiding the canonical id hides the alias stripe too.
+        var hidden = Allowlisted(payload, hidden: new HashSet<string> { "claude" });
+        Assert.Equal(50L, hidden.Tokens);
+        Assert.Equal("codex", hidden.TopClient);
+    }
+
+    [Fact]
+    public void TopClientBreaksTiesDeterministically()
+    {
+        // codex spreads 60 over two model stripes; claude has one stripe of 50.
+        // The busiest CLIENT is codex, though claude has the largest stripe.
+        Assert.Equal("codex", Allowlisted(PayloadWith(Day("2026-07-02", 0, 0,
+            Client("claude", new TokenBreakdown(50, 0, 0, 0, 0), 0.5),
+            Client("codex", new TokenBreakdown(30, 0, 0, 0, 0), 0.1),
+            Client("codex", new TokenBreakdown(30, 0, 0, 0, 0), 0.1)))).TopClient);
+        // Token tie → higher cost wins; full tie → ordinally smaller id.
+        Assert.Equal("codex", Allowlisted(PayloadWith(Day("2026-07-02", 0, 0,
+            Client("codex", new TokenBreakdown(10, 0, 0, 0, 0), 0.2),
+            Client("amp", new TokenBreakdown(10, 0, 0, 0, 0), 0.1)))).TopClient);
+        Assert.Equal("amp", Allowlisted(PayloadWith(Day("2026-07-02", 0, 0,
+            Client("codex", new TokenBreakdown(10, 0, 0, 0, 0), 0.1),
+            Client("amp", new TokenBreakdown(10, 0, 0, 0, 0), 0.1)))).TopClient);
+    }
 }
