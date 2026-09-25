@@ -184,8 +184,11 @@ internal sealed class DiscordIntroWindow : Window
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
         var art = new Image { Width = 56, Height = 56 };
-        // The same asset Discord resolves `syrtis` to, clipped to a rounded
-        // square the way UpdateDialog clips its header icon.
+        // The app icon's 256 px frame, clipped to a rounded square the way
+        // UpdateDialog clips its header icon. Not the .ico itself: BitmapImage
+        // picks one small frame from an .ico and upscales it, which rendered
+        // blurry at this size (user screenshot, 2026-09-26). Whether it matches
+        // the `syrtis` art uploaded to the Discord portal is not checked here.
         var artHost = new Border
         {
             Width = 56,
@@ -197,7 +200,7 @@ internal sealed class DiscordIntroWindow : Window
         art.ImageFailed += (_, _) => artHost.Visibility = Visibility.Collapsed;
         try
         {
-            art.Source = new BitmapImage(new Uri("ms-appx:///Assets/syrtis.ico"));
+            art.Source = new BitmapImage(new Uri("ms-appx:///Assets/syrtis-256.png"));
         }
         catch (Exception ex)
         {
