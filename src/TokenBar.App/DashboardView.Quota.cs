@@ -1181,7 +1181,8 @@ public sealed partial class DashboardView
     {
         var block = new StackPanel { Spacing = 3 };
         var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5 };
-        head.Children.Add(Ui.Disc(ClientRegistry.Style(summary.Id.ProviderId).Color, 8));
+        // macOS QuotaHistoryStripCard.swift:125 draws the brand icon at 11pt here.
+        head.Children.Add(AgentIcon.Create(summary.Id.ProviderId, 11));
         head.Children.Add(Ui.Text(QuotaLabels.RowLabel(summary), 11));
         block.Children.Add(Ui.Row(
             head, Ui.Text(QuotaLensText.WindowCount(summary.CycleCount), 9, 0.5)));
