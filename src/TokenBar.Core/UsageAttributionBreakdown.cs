@@ -28,14 +28,19 @@ public static class UsageAttributionBreakdown
         IReadOnlyList<string> clientIds,
         IReadOnlyList<UsageAttribution.Record> confirmed)
     {
-        var allowed = new HashSet<string>(clientIds, StringComparer.Ordinal);
+        // Both sides canonicalised, as the Stats lens's own entry filter does
+        // (DashboardView SelectedModelEntries): the report carries raw ids such
+        // as claude-code and codex-cli while the selection holds short ids.
+        var allowed = new HashSet<string>(
+            clientIds.Select(ClientRegistry.CanonicalClient), StringComparer.Ordinal);
         var assigned = new Dictionary<string, (long Tokens, double Cost)>(StringComparer.Ordinal);
         (long Tokens, double Cost) excluded = (0, 0);
         (long Tokens, double Cost) unassigned = (0, 0);
 
         foreach (var entry in entries)
         {
-            if (!allowed.Contains(entry.Client) || (entry.Total == 0 && entry.Cost == 0))
+            if (!allowed.Contains(ClientRegistry.CanonicalClient(entry.Client))
+                || (entry.Total == 0 && entry.Cost == 0))
             {
                 continue;
             }
