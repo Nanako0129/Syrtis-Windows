@@ -47,6 +47,21 @@ public class UsageAttributionBreakdownTests
             });
     }
 
+    // The report carries raw live-tail ids (claude-code) while the Stats
+    // selection holds short ids (claude). Without canonicalising, that usage
+    // was dropped from the card entirely.
+    [Fact]
+    public void RawClientIdsMatchTheirShortSelectionId()
+    {
+        ModelReportEntry[] entries = [Entry("claude-code", "anthropic", "m1", 7, 0.7)];
+        UsageAttribution.Record[] confirmed = [];
+
+        var rows = UsageAttributionBreakdown.Rows(entries, ["claude"], confirmed);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(7, row.Tokens);
+    }
+
     [Fact]
     public void ExcludedRowsMergeIntoOneBucket()
     {
