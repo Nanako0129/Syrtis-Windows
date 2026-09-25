@@ -9,7 +9,7 @@ TokenBar. Solution and namespace identifiers remain `TokenBar.*` — they are
 internal, and the Velopack package id `Nyanako.Syrtis` is deliberately
 independent of both so a rename cannot move an installed app.
 
-> **Status: [`v0.4.1`](https://github.com/Nanako0129/Syrtis-Windows/releases/tag/v0.4.1) is the
+> **Status: [`v0.5.0`](https://github.com/Nanako0129/Syrtis-Windows/releases/tag/v0.5.0) is the
 > latest release.** See the [release list](https://github.com/Nanako0129/Syrtis-Windows/releases)
 > for history, [`docs/release-velopack.md`](docs/release-velopack.md) for the current packaging
 > contract, and [`docs/release.md`](docs/release.md) for the earlier portable one.
