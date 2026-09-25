@@ -958,8 +958,9 @@ public sealed class DashboardModel
                 // CreateBaseline reads the flag before the payload (both
                 // fields are volatile, so the order holds): a baseline taken
                 // between the two writes must never see "attempted" without
-                // the quota, or ApplyClientSelection would persist a stored
-                // quota-only tab (e.g. Copilot) as Overview.
+                // the quota, because LazyLaneFold.Outcome(QuotaAttempted,
+                // Quota) reads exactly that pair as a failed fetch, and a
+                // fetch that succeeded would render as failed for a frame.
                 if (quota is not null)
                 {
                     _latestQuota = quota;

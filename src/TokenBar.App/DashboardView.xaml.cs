@@ -499,16 +499,19 @@ public sealed partial class DashboardView : UserControl
         _snapshot = snapshot;
 
         // A stored active tab naming a quota-only provider (e.g. "copilot")
-        // is unresolvable before the quota lane's first answer arrives —
-        // ConfiguredClientIds is empty, so ResolveSelection normalizes it to
-        // Overview. This frame still RENDERS Overview (_activeClientTab
+        // is unresolvable until a quota PAYLOAD arrives — ConfiguredClientIds
+        // is empty, so ResolveSelection normalizes it to Overview. That holds
+        // after a failed fetch too: the lane then reports attempted with no
+        // payload, and a transient failure at startup is no evidence that the
+        // provider stopped being configured. So the guard is "a payload
+        // exists", not "the lane was attempted". This frame still RENDERS Overview (_activeClientTab
         // above), but must not persist that normalisation: once the quota
         // payload lists the provider configured, the stored tab has to
         // resolve to it again rather than having been overwritten to
         // "overview" in the meantime. `selection.ActiveTab == storedActiveTab`
         // lets through every case where normalisation didn't actually change
         // anything (including the ordinary Overview-to-Overview no-op).
-        var persistable = snapshot.QuotaAttempted || selection.ActiveTab == storedActiveTab;
+        var persistable = snapshot.Quota is not null || selection.ActiveTab == storedActiveTab;
         if (persistable && AppSettings.Store.GetString(ClientRegistry.ActiveTabKey) != selection.ActiveTab)
         {
             AppSettings.Store.SetString(ClientRegistry.ActiveTabKey, selection.ActiveTab);

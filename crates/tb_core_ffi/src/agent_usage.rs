@@ -32,6 +32,11 @@ const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// tab. Matches macOS's marker string exactly (agent_usage.rs :1826-1832 on
 /// TokenBar-Native), though the two are independent Rust crates.
 const CODEX_UNCONFIGURED_ERROR: &str = "Codex auth.json not found. Run `codex` to log in.";
+/// An `auth.json` that exists but cannot be read — a configured account whose
+/// credential is broken. `required_card_source` leaves this at `oauth`, so the
+/// card keeps its tab and shows the failure instead of claiming the user never
+/// logged in.
+const CODEX_CREDENTIALS_UNREADABLE_ERROR: &str = "Codex auth.json could not be read.";
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_REFRESH_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -2362,8 +2367,19 @@ fn load_codex_credentials() -> Result<CodexCredentials, String> {
 }
 
 fn load_codex_credentials_from(auth_path: &Path) -> Result<CodexCredentials, String> {
-    let raw = fs::read_to_string(auth_path)
-        .map_err(|_| CODEX_UNCONFIGURED_ERROR.to_string())?;
+    // Only an absent file means "not set up". `read_to_string` also fails for a
+    // permission problem, a directory at this path, or invalid UTF-8, and every
+    // one of those belongs to a configured account whose credential is broken:
+    // mapping them to the marker would hand them `source: "unconfigured"`, which
+    // takes the card out of tab navigation and tells the user to log in again
+    // (macOS #345; ported from macOS).
+    let raw = fs::read_to_string(auth_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CODEX_UNCONFIGURED_ERROR.to_string()
+        } else {
+            CODEX_CREDENTIALS_UNREADABLE_ERROR.to_string()
+        }
+    })?;
     let raw_json: Value =
         serde_json::from_str(&raw).map_err(|e| format!("decode Codex auth.json: {}", e))?;
 
@@ -4536,6 +4552,45 @@ where
 mod tests {
     use super::*;
     use crate::agent_account_scope::test_support::TestRefreshScope;
+
+    /// A read failure other than an absent file belongs to an account that IS
+    /// configured, so it must not reach the marker: `required_card_source` would
+    /// hand it `unconfigured` and the Codex card would leave the tab bar while
+    /// telling the user to run `codex`. A directory at the path is the reliably
+    /// reproducible member of that set. Ported from macOS.
+    #[test]
+    fn a_codex_auth_json_that_exists_but_cannot_be_read_keeps_its_card() {
+        let root = std::env::temp_dir().join(format!(
+            "tb-codex-unreadable-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let unreadable = root.join("auth.json");
+        fs::create_dir_all(&unreadable).unwrap();
+        assert!(unreadable.is_dir(), "the fixture must not be a regular file");
+
+        let display = load_codex_credentials_from(&unreadable).unwrap_err();
+        assert_eq!(display, CODEX_CREDENTIALS_UNREADABLE_ERROR);
+        assert_ne!(display, CODEX_UNCONFIGURED_ERROR);
+        assert_eq!(
+            required_card_source(
+                &ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(display)),
+                CODEX_UNCONFIGURED_ERROR,
+            ),
+            "oauth",
+            "an unreadable credential is a configured account, and keeps its tab"
+        );
+
+        let absent = root.join("missing").join("auth.json");
+        assert_eq!(
+            load_codex_credentials_from(&absent).unwrap_err(),
+            CODEX_UNCONFIGURED_ERROR
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
 
     /// The control the `unconfigured` arm needs: everything that is not
     /// "there is no credential" stays `oauth`, so a configured-but-failing
