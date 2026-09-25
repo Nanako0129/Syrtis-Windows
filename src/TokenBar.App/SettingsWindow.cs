@@ -1498,14 +1498,29 @@ public sealed class SettingsWindow : Window
     /// <summary>Selection ring width on the preset matching the current colour.</summary>
     private const double PresetRingThickness = 2;
 
+    /// <summary>Preset swatch diameter, and the gap between it and its
+    /// selection ring. The ring is its own ellipse outside the swatch in a
+    /// fixed-size cell, so selecting a preset never shrinks or covers the
+    /// colour. The first build drew the ring as the button border inside a
+    /// squeezed cell, and it cut into the circle (user screenshot,
+    /// 2026-09-25).</summary>
+    private const double PresetSwatchSize = 18;
+    private const double PresetRingGap = 2;
+    private const double PresetCellSize = PresetSwatchSize + 2 * (PresetRingGap + PresetRingThickness);
+    private const double PresetGridSpacing = 4;
+
     private static Flyout TextColorFlyout(
         QuotaColorLevel level, SettingsStore store, string initialHex, Action<string> onApplied)
     {
-        var panel = new StackPanel { Spacing = 10, Width = 224 };
+        const int columns = 8;
+        var panel = new StackPanel
+        {
+            Spacing = 10,
+            Width = columns * PresetCellSize + (columns - 1) * PresetGridSpacing,
+        };
         panel.Children.Add(Ui.Dim(level.Label(), 11));
 
-        var grid = new Grid { ColumnSpacing = 6, RowSpacing = 6 };
-        const int columns = 8;
+        var grid = new Grid { ColumnSpacing = PresetGridSpacing, RowSpacing = PresetGridSpacing };
         for (var c = 0; c < columns; c++)
         {
             grid.ColumnDefinitions.Add(new ColumnDefinition());
@@ -1519,32 +1534,45 @@ public sealed class SettingsWindow : Window
         TextBox hexBox = null!;
         // The ring on the preset matching the current colour (macOS popover
         // shows the same selection ring; screenshot reference 2026-09-25).
-        var presetButtons = new List<(string Hex, Button Button)>();
+        var presetRings = new List<(string Hex, Microsoft.UI.Xaml.Shapes.Ellipse Ring)>();
         void MarkSelected(string? selected)
         {
-            foreach (var (presetHex, presetButton) in presetButtons)
+            foreach (var (presetHex, ring) in presetRings)
             {
-                var on = presetHex == selected;
-                presetButton.BorderBrush = on
-                    ? (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"]
-                    : null;
-                presetButton.BorderThickness = new Thickness(on ? PresetRingThickness : 0);
+                ring.Visibility = presetHex == selected ? Visibility.Visible : Visibility.Collapsed;
             }
         }
 
         for (var i = 0; i < MenuBarTextColor.Presets.Count; i++)
         {
             var (name, presetHex) = MenuBarTextColor.Presets[i];
+            var ring = new Microsoft.UI.Xaml.Shapes.Ellipse
+            {
+                Width = PresetCellSize,
+                Height = PresetCellSize,
+                Stroke = (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"],
+                StrokeThickness = PresetRingThickness,
+                Visibility = Visibility.Collapsed,
+            };
+            var cell = new Grid { Width = PresetCellSize, Height = PresetCellSize };
+            cell.Children.Add(ring);
+            cell.Children.Add(new Microsoft.UI.Xaml.Shapes.Ellipse
+            {
+                Width = PresetSwatchSize,
+                Height = PresetSwatchSize,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Fill = Ui.BrushFromHex(presetHex),
+            });
             var preset = new Button
             {
-                Content = new Microsoft.UI.Xaml.Shapes.Ellipse
-                {
-                    Width = 18,
-                    Height = 18,
-                    Fill = Ui.BrushFromHex(presetHex),
-                },
-                Padding = new Thickness(2),
-                CornerRadius = new CornerRadius(11),
+                Content = cell,
+                Padding = new Thickness(0),
+                MinWidth = 0,
+                MinHeight = 0,
+                BorderThickness = new Thickness(0),
+                Background = new SolidColorBrush(Colors.Transparent),
+                CornerRadius = new CornerRadius(PresetCellSize / 2),
             };
             ToolTipService.SetToolTip(preset, $"{name.Localized()} {presetHex}");
             preset.Click += (_, _) =>
@@ -1554,7 +1582,7 @@ public sealed class SettingsWindow : Window
                 onApplied(presetHex);
                 MarkSelected(presetHex);
             };
-            presetButtons.Add((presetHex, preset));
+            presetRings.Add((presetHex, ring));
             Grid.SetColumn(preset, i % columns);
             Grid.SetRow(preset, i / columns);
             grid.Children.Add(preset);
