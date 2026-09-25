@@ -472,8 +472,15 @@ public sealed partial class DashboardView : UserControl
 
     private DashboardModel.Snapshot ApplyClientSelection(DashboardModel.Snapshot snapshot)
     {
+        // Configured quota-only providers (Copilot etc.) belong in the tab row
+        // even without local usage. Empty while no quota payload exists —
+        // before the lane's first answer, and after fetches that only failed
+        // (snapshot.Quota stays null then) — see the persistence guard below
+        // for why that is handled rather than ignored.
+        var quotaIds = snapshot.Quota?.ConfiguredClientIds ?? [];
+        var storedActiveTab = AppSettings.Store.GetString(ClientRegistry.ActiveTabKey);
         var selection = ClientRegistry.ResolveSelection(
-            snapshot.Graph.Summary.Clients, AppSettings.Store);
+            snapshot.Graph.Summary.Clients, quotaIds, AppSettings.Store);
         _displayClients = selection.DisplayClients;
         _selectedClients = selection.SelectedClients;
         _selectedSet = new HashSet<string>(selection.SelectedClients, StringComparer.Ordinal);
@@ -490,7 +497,23 @@ public sealed partial class DashboardView : UserControl
         }
 
         _snapshot = snapshot;
-        if (AppSettings.Store.GetString(ClientRegistry.ActiveTabKey) != selection.ActiveTab)
+
+        // A stored active tab naming a quota-only provider (e.g. "copilot")
+        // is unresolvable until a quota PAYLOAD arrives — ConfiguredClientIds
+        // is empty, so ResolveSelection normalizes it to Overview. That holds
+        // after a failed fetch too: the lane then reports attempted with no
+        // payload, and a transient failure at startup is no evidence that the
+        // provider stopped being configured. So the guard is "a payload
+        // exists", not "the lane was attempted". This frame still RENDERS
+        // Overview (_activeClientTab above), but must not persist that
+        // normalisation: once the quota
+        // payload lists the provider configured, the stored tab has to
+        // resolve to it again rather than having been overwritten to
+        // "overview" in the meantime. `selection.ActiveTab == storedActiveTab`
+        // lets through every case where normalisation didn't actually change
+        // anything (including the ordinary Overview-to-Overview no-op).
+        var persistable = snapshot.Quota is not null || selection.ActiveTab == storedActiveTab;
+        if (persistable && AppSettings.Store.GetString(ClientRegistry.ActiveTabKey) != selection.ActiveTab)
         {
             AppSettings.Store.SetString(ClientRegistry.ActiveTabKey, selection.ActiveTab);
         }
@@ -701,7 +724,7 @@ public sealed partial class DashboardView : UserControl
         AddClientTab(ClientRegistry.OverviewTab, "Overview".Localized());
         foreach (var id in _displayClients)
         {
-            AddClientTab(id, ClientRegistry.ShortName(id));
+            AddClientTab(id, ClientRegistry.TabLabel(id));
         }
     }
 
