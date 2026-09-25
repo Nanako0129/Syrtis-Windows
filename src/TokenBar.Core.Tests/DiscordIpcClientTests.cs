@@ -32,6 +32,16 @@ internal sealed class FakeDiscord : IAsyncDisposable
     // 16-character prefix overflowed it).
     public string Name { get; } = "tbdc-" + Guid.NewGuid().ToString("N")[..16];
 
+    /// <summary>Pipe buffer size for the fake server. The default is 0, and on
+    /// Windows a zero-sized server buffer makes every client write wait until
+    /// the server reads it, so a deliberately silent fixture held each
+    /// handshake write for the whole WriteTimeout (measured on x64 2026-09-26:
+    /// ~2 s per reconnect cycle, SilentServerGetsBoundedReconnects failing 5/5;
+    /// with 64 KiB it passes and the Discord suite runs in 4 s). macOS maps the
+    /// pipe to a Unix socket and never showed it. Whether the real Discord
+    /// client's pipe is buffered is not measured here.</summary>
+    private const int FixtureBufferBytes = 64 * 1024;
+
     public int AcceptCount => Volatile.Read(ref _acceptCount);
 
     public FakeDiscord() => _ = Task.Run(AcceptLoopAsync);
@@ -53,7 +63,8 @@ internal sealed class FakeDiscord : IAsyncDisposable
         {
             var server = new NamedPipeServerStream(
                 Name, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances,
-                PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+                PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly,
+                FixtureBufferBytes, FixtureBufferBytes);
             lock (_all)
             {
                 _all.Add(server);
