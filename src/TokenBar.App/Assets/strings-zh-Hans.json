@@ -404,5 +404,20 @@
   "{0}{1}% this interval": "此区间 {0}{1}%",
   "~ {0} API-equivalent, ±{1}%": "≈ {0}（按 API 公开价估算，误差 ±{1}%）",
   "~ {0} – {1} API-equivalent": "≈ {0}–{1}（按 API 公开价估算）",
-  "≈ {0}% run-out risk": "≈ {0}% 用完风险"
+  "≈ {0}% run-out risk": "≈ {0}% 用完风险",
+  "Show today's usage on Discord": "在 Discord 上显示今日用量",
+  "Open Settings": "打开设置",
+  "Not now": "暂不",
+  "1.2M tokens today": "今日 1.2M token",
+  "Claude Code · $10-50": "Claude Code · $10-50",
+  "Your Discord profile can show what you have been building today. Pick exactly what appears — or nothing at all — in Settings.": "你的 Discord 个人资料可以显示今天的开发活动。显示哪些内容——或不显示任何内容——可在设置中选择。",
+  "Off by default. Publishes what you pick below — today's tokens, a client name, a cost range or rounded figure — for whichever client you choose, and a link to Syrtis's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included, and a change here reaches your profile within about 15 seconds.": "默认关闭。它会根据你选择的客户端，将下方勾选的内容——今日 token 数、客户端名称、费用区间或取整金额——以及 Syrtis 源代码链接发布到 Discord 个人资料。工作期间会持续更新，因此也会暴露活跃时段。任何能查看你个人资料的人都可以读取并保存每次更新；关闭后只会停止新的发布，无法撤回已经发布的内容。隐藏的客户端绝不会包含在内；此处更改约在 15 秒内显示在个人资料中。",
+  "Include today's tokens": "包含今日 token 数",
+  "Include the client name": "包含客户端名称",
+  "Include cost": "包含费用",
+  "Untick everything and nothing is published at all.": "取消全部勾选后不会发布任何内容。",
+  "Show cost as a figure instead of a range": "用具体金额而非区间显示费用",
+  "A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend.": "区间会将你和该范围内的其他人归为一组。具体金额会取整到美元，不显示美分，但仍会每天透露更多信息。若上方指定一个客户端，该金额就是该工具的每日费用。",
+  "Whichever client you used most": "用量最多的客户端",
+  "Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones Syrtis does not recognise. The cost becomes that one tool's daily spend rather than the whole day's.": "指定一个客户端后只会发布该客户端的用量，因此总数可能与菜单栏不同；菜单栏会统计所有客户端，包括 Syrtis 尚未识别的客户端。费用也会变为该工具当日的费用，而不是全天总费用。"
 }

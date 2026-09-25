@@ -71,6 +71,12 @@
          silently. -->
     <Compile Include="..\TokenBar.App\WindowCardText.cs" Link="WindowCardText.cs" />
     <Compile Include="..\TokenBar.App\WindowHistoryText.cs" Link="WindowHistoryText.cs" />
+    <!-- Every decision the Discord presence wiring makes: the four
+         visibility classifiers, the value-gated re-publish, the launch/graph/
+         quit triggers, the one-time intro gate and the consent copy.
+         TrayService, App and SettingsWindow compile under no test project, so
+         left there these would be rules nothing can assert against. -->
+    <Compile Include="..\TokenBar.App\DiscordPresenceWiring.cs" Link="DiscordPresenceWiring.cs" />
     <!-- Syrtis.Installer's boundary logic, pulled in for the same reason as
          the App sources above: none of these five files references
          System.Windows.Forms, so they compile as-is under net10. Deliberately

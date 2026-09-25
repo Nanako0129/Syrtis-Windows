@@ -114,6 +114,7 @@ public partial class App : Application
             }
 
             StartUpdateCheckOnce();
+            ScheduleDiscordIntro();
 
             // Dev-only 3D panel (Phase 8 Gate 0). --graph3d mounts and shows
             // it for manual inspection; --soak3d runs the device-lifecycle
@@ -135,6 +136,33 @@ public partial class App : Application
             DevLog.Write($"launch FAILED: {ex}");
             throw;
         }
+    }
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _discordIntroTimer;
+
+    /// <summary>The one-time Discord card, 1.5 s after launch so it does not
+    /// race the tray's first render, and gated on the same test arguments the
+    /// connection is — a harness run never shows it (macOS AppDelegate.swift
+    /// :141-149). Whether it shows at all is DiscordIntro.Consume's call.</summary>
+    private void ScheduleDiscordIntro()
+    {
+        if (_flyout is null || _tray is not { } tray
+            || !TokenBar.Core.DiscordPresence.MayConnect(Environment.GetCommandLineArgs(), enabled: true))
+        {
+            return;
+        }
+
+        var timer = _flyout.DispatcherQueue.CreateTimer();
+        timer.IsRepeating = false;
+        timer.Interval = TimeSpan.FromSeconds(1.5);
+        timer.Tick += (_, _) =>
+        {
+            _discordIntroTimer?.Stop();
+            _discordIntroTimer = null;
+            DiscordIntroWindow.PresentIfNeeded(tray.ShowDiscordSettings);
+        };
+        _discordIntroTimer = timer; // held until it fires: a collected timer never ticks
+        timer.Start();
     }
 
     private void StartUpdateCheckOnce()
