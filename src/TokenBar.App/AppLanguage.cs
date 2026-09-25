@@ -11,9 +11,10 @@ public static class AppLanguage
     public const string StorageKey = "tokenbar.language";
     public const string System = "system";
     public const string English = "en";
+    public const string SimplifiedChinese = "zh-Hans";
     public const string TraditionalChinese = "zh-Hant";
 
-    /// <summary>Options in settings order, with the label each renders. The two
+    /// <summary>Options in settings order, with the label each renders. The
     /// concrete languages name themselves in their own language, as macOS does
     /// — a reader who cannot read the current UI language still finds theirs.</summary>
     /// A property rather than a static readonly field: <see cref="Apply"/>
@@ -24,6 +25,7 @@ public static class AppLanguage
     [
         (System, "System".Localized()),
         (English, "English"),
+        (SimplifiedChinese, "简体中文"),
         (TraditionalChinese, "繁體中文"),
     ];
 
@@ -52,6 +54,15 @@ public static class AppLanguage
             || tag.StartsWith("zh-MO", StringComparison.OrdinalIgnoreCase))
         {
             return TraditionalChinese;
+        }
+
+        // "zh-CN" / "zh-SG" / "zh-Hans-CN" all want the Simplified table —
+        // same rule macOS's bundle resolution applies to those OS locales.
+        if (tag.StartsWith("zh-Hans", StringComparison.OrdinalIgnoreCase)
+            || tag.StartsWith("zh-CN", StringComparison.OrdinalIgnoreCase)
+            || tag.StartsWith("zh-SG", StringComparison.OrdinalIgnoreCase))
+        {
+            return SimplifiedChinese;
         }
 
         return English;
