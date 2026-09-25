@@ -1929,8 +1929,144 @@ public sealed partial class DashboardView : UserControl
         grid.Children.Add(favoriteCell);
 
         stack.Children.Add(Ui.Card("Stats".Localized(), grid));
+        // macOS places the attribution card directly after the Stats summary
+        // (StatsView.swift:34-45); Windows has no equivalent summary card
+        // there — Stats grid is it — and Streaks has no macOS counterpart, so
+        // it stays last.
+        stack.Children.Add(BuildAttributionCard(snapshot));
         stack.Children.Add(Ui.Card("Streaks".Localized(), BuildStreaks(snapshot)));
         return stack;
+    }
+
+    // ── usage-attribution breakdown card (UsageAttributionBreakdownCard.swift) ──
+
+    // RowTint (UsageAttributionBreakdownCard.swift:112-135). `assigned` gets no
+    // fill; the two non-subscription buckets are tinted because they mean
+    // opposite things — excluded is money actually charged, unassigned is work
+    // left for the user.
+    private const double AttributionRowFillOpacity = 0.12; // .opacity(0.12)
+    private const string AttributionUnassignedFillColor = "#3b82f6";
+    private const string AttributionAmountGreen = "#22c55e";
+
+    private UIElement BuildAttributionCard(DashboardModel.Snapshot snapshot)
+    {
+        var report = snapshot.Models;
+        var confirmed = UsageAttribution.Confirmed(AppSettings.Store).Records;
+        // Models is cleared to null on every query (year) change until the new
+        // report lands (DashboardModel.ApplyGraphRequestStart), so whenever it
+        // is non-null it belongs to the currently selected _model.Year — unlike
+        // macOS there is no separate "reportYear" to carry alongside it.
+        var rows = report is null
+            ? null
+            : UsageAttributionBreakdown.Rows(report.Entries, _selectedClients, confirmed);
+
+        var range = string.IsNullOrEmpty(_model?.Year) ? "All years".Localized() : _model!.Year;
+        var singleClient = OverviewScope.SingleClient(_activeClientTab);
+        var subtitle = singleClient is null
+            ? range
+            : UsageAttributionPage.Copy.Source.Localized(range, ClientRegistry.ShortName(singleClient));
+
+        UIElement content;
+        if (rows is null)
+        {
+            // Windows has no ModelsAttempted flag the way Hourly/Agents do, so
+            // "still loading" and "the request finished without one" collapse
+            // into one state here.
+            content = Ui.Dim("Loading…".Localized());
+        }
+        else if (rows.Count == 0)
+        {
+            content = Ui.Dim("No attributed usage in this range.".Localized());
+        }
+        else
+        {
+            var panel = new StackPanel { Spacing = 6 };
+            if (confirmed.Count == 0)
+            {
+                panel.Children.Add(Ui.Dim(
+                    "Nothing is classified yet. Classify sources in Settings → Usage attribution.".Localized()));
+            }
+
+            foreach (var row in rows)
+            {
+                panel.Children.Add(BuildAttributionRow(row, snapshot.CostAuthoritative));
+            }
+
+            content = panel;
+        }
+
+        return Ui.Card("API-list-price equivalent".Localized(), content, subtitle);
+    }
+
+    private UIElement BuildAttributionRow(UsageAttributionBreakdown.Row row, bool costAuthoritative)
+    {
+        string label;
+        string? fillHex;
+        string amountHex;
+        bool assignedStyle;
+        switch (row.State.Kind)
+        {
+            case UsageAttribution.StateKind.Assigned:
+                label = UsageAttributionPage.Copy.Assigned.Localized(
+                    ClientRegistry.ShortName(row.State.Target!));
+                fillHex = null;
+                amountHex = AttributionAmountGreen;
+                assignedStyle = true;
+                break;
+            case UsageAttribution.StateKind.Excluded:
+                label = UsageAttributionPage.Copy.Excluded.Localized();
+                fillHex = PaceOrange;
+                amountHex = PaceOrange;
+                assignedStyle = false;
+                break;
+            default:
+                label = UsageAttributionPage.Copy.Unassigned.Localized();
+                fillHex = AttributionUnassignedFillColor;
+                amountHex = AttributionAmountGreen;
+                assignedStyle = false;
+                break;
+        }
+
+        var grid = new Grid { ColumnSpacing = 8 };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto, MinWidth = 52 });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto, MinWidth = 76 });
+
+        var labelText = Ui.Text(label, 11, assignedStyle ? 0.6 : 1.0, bold: !assignedStyle);
+        Grid.SetColumn(labelText, 0);
+        grid.Children.Add(labelText);
+
+        var tokensText = Ui.Text(Format.CompactTokens(row.Tokens), 11);
+        tokensText.HorizontalAlignment = HorizontalAlignment.Right;
+        Grid.SetColumn(tokensText, 1);
+        grid.Children.Add(tokensText);
+
+        var amountText = Ui.Text(
+            CostSurfaceProjection.CostText(row.Tokens, row.Cost, costAuthoritative), 11);
+        amountText.Foreground = Ui.BrushFromHex(amountHex);
+        amountText.HorizontalAlignment = HorizontalAlignment.Right;
+        Grid.SetColumn(amountText, 2);
+        grid.Children.Add(amountText);
+
+        Brush background;
+        if (fillHex is null)
+        {
+            background = new SolidColorBrush(Colors.Transparent);
+        }
+        else
+        {
+            var brush = Ui.BrushFromHex(fillHex);
+            brush.Opacity = AttributionRowFillOpacity;
+            background = brush;
+        }
+
+        return new Border
+        {
+            Padding = new Thickness(6, 3, 6, 3),
+            CornerRadius = new CornerRadius(6),
+            Background = background,
+            Child = grid,
+        };
     }
 
     // ── Agents lens ──────────────────────────────────────────────────────
