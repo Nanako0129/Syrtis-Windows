@@ -131,8 +131,9 @@ tokscale-core PR #12, following the source-context foundation in PR #10 — the
 Windows FFI captured the engine-owned context once per process and routed graph, report, parse,
 source-token, and live-tail work through the context-aware APIs. The engine
 source token includes report-visible retained-only Claude cache state, and that
-slice kept the cache schema and public interfaces unchanged — a statement about
-that advance, not about the current one, which does change the cache format.
+slice kept the cache schema and public interfaces unchanged. That statement
+is about that advance only. The format moved 3 to 4 later, at `d6512f5`, and
+has stayed 4 through the current pin.
 
 ## Ownership
 
