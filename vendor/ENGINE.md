@@ -10,18 +10,55 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `be0861d4ec5331a97410b5eb747ffc92db002d2f` |
+| Reviewed pin | `bb9a2a9ac787344bb4bd3120d645208217b21016` |
 | TokenBar alignment | `v1.17.0` (engine `8a88602b`) → ahead of it; macOS `main` pins `3eec5846`, both ancestors of this pin |
-| Engine alignment | `d6512f5ae62c2be6751ed93adb9391ffe3f91579` → `be0861d4ec5331a97410b5eb747ffc92db002d2f` (engine `main`, the same advance macOS TokenBar took in its PR #386) |
+| Engine alignment | `be0861d4ec5331a97410b5eb747ffc92db002d2f` → `bb9a2a9ac787344bb4bd3120d645208217b21016` (engine `main`, the same advance macOS TokenBar took in its PR #389) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/be0861d4ec5331a97410b5eb747ffc92db002d2f/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/bb9a2a9ac787344bb4bd3120d645208217b21016/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `be0861d`, engine PRs #28–#40
+## Current pin: `bb9a2a9`, engine PRs #42, #30, #43
+
+The reviewed pin is the merge commit of tokscale-core PR #43 on the engine's
+`main`, 13 commits after `be0861d`:
+
+- #42 counts Pi fork copies once, keyed across sessions by provider and
+  response id.
+- #30 lets OpenRouter entries take part in pricing lookup across
+  version-separator spellings (`claude-fable-5-1` vs `claude-fable-5.1`).
+- #43 attributes Droid usage per reply.
+
+Measured on this advance:
+
+- `CACHE_FORMAT_VERSION` stays 4 and no `pub` item changes. The parser
+  identities move for Pi (1→2) and Droid (1→2), so those namespaces re-parse
+  once. `crates/tb_core_ffi` needed no change.
+- Windows numeric comparison on a real corpus, two rounds, graph path only,
+  frozen cache-only pricing: old pin cold, old pin cold again, new pin warm on
+  the old cache, and new pin cold. The two old runs match each other and the
+  two new runs match each other. Tokens are identical on every date × client
+  × provider × model row. No Pi or Droid data was present, so those two
+  changes rest on the engine's tests.
+
+What #30 does to costs, by mechanism:
+
+- **Historical cost falls where the old lookup chose a GovCloud price.** When
+  the dotted OpenRouter spelling could not match, the provider-scoped LiteLLM
+  stage picked a Bedrock GovCloud entry (`bedrock/us-gov-*/anthropic.*`, or
+  `us-gov.anthropic.*`), whose rates are 1.2× first-party. The first-party
+  OpenRouter entry now wins. On the measured corpus `claude-fable-5-1` and
+  `claude-opus-5-5` fell by exactly 1/1.2 (−16.7%). The 1-hour cache-write
+  premium is unaffected.
+- **Cost rises where a cache-write rate was missing.** Rows whose chosen entry
+  carried no cache-write rate priced cache writes at $0. They are now priced:
+  `claude-opus-4-8` and an OpenCode `claude-haiku-4-5` row rose by the value
+  of their cache writes.
+
+## Historical: `be0861d`, engine PRs #28–#40
 
 The reviewed pin is the merge commit of tokscale-core PR #40 on the engine's
 `main`: 49 commits after `d6512f5`, carrying engine PRs #28, #33, #35–#40
@@ -94,8 +131,9 @@ tokscale-core PR #12, following the source-context foundation in PR #10 — the
 Windows FFI captured the engine-owned context once per process and routed graph, report, parse,
 source-token, and live-tail work through the context-aware APIs. The engine
 source token includes report-visible retained-only Claude cache state, and that
-slice kept the cache schema and public interfaces unchanged — a statement about
-that advance, not about the current one, which does change the cache format.
+slice kept the cache schema and public interfaces unchanged. That statement
+is about that advance only. The format moved 3 to 4 later, at `d6512f5`, and
+has stayed 4 through the current pin.
 
 ## Ownership
 
