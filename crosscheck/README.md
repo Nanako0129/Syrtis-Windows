@@ -84,6 +84,23 @@ Grid, ModelColors, DayBars, UsageStats, TraceCollapse, ClientRegistry, and UI
 layout are not fixture-checked here. Add a shared fixture only when a
 cross-language value contract exists for one of those surfaces.
 
+Repeated-label window qualification is also outside this cross-check, by the
+maintainer's decision that it is a per-platform presentation property rather
+than a shared contract. When one card's windows share a label (two
+`Codex Spark` windows, for example), `AgentUsageQualifier` names them by
+period, then reset, then ordinal on the card view (`UniqueCardWindows`). The
+provider fixture does carry one repeated label (`shared-first.invalid` and
+`shared-second.invalid` are both `Shared label`), but nothing here reads it
+through the qualifier. The lifecycle output serializes the raw windows. The
+selection cases exercise `QuotaResolver` on raw labels. The three pace cases,
+which do look windows up through `UniqueCardWindows`, target other card IDs.
+No case output therefore carries a qualified name. Windows covers the
+qualification itself in `src/TokenBar.Core.Tests/AgentUsageQualifierTests.cs`: each tier,
+collision stepping over a label another window already carries, rounding that
+matches the countdown text, and the unqualified raw labels that keep
+legacy-label migration ambiguous. A green run here therefore says nothing
+about whether the two platforms name repeated windows the same way.
+
 ## Contract
 
 ### Input and decoding
