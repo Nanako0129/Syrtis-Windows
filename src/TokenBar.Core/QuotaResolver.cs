@@ -2,7 +2,15 @@ using TokenBar.Interop;
 
 namespace TokenBar.Core;
 
-public sealed record QuotaPick(string ClientId, UsageWindow Window);
+/// <summary>Carries the picked snapshot itself, not just its ClientId: two
+/// snapshots can share a ClientId (a future multi-account payload), and a
+/// caller that re-searched <c>payload.Agents</c> by ClientId (as
+/// <c>QuotaSelectionPolicy.ResolvedAt</c> used to) could match the wrong
+/// one.</summary>
+public sealed record QuotaPick(AgentUsageSnapshot Agent, UsageWindow Window)
+{
+    public string ClientId => Agent.ClientId;
+}
 
 /// <summary>
 /// Picks which quota window the tray displays (port of
@@ -91,7 +99,7 @@ public static class QuotaResolver
 
         var agent = payload.Agents.FirstOrDefault(a => a.ClientId == parsed.Value.ClientId);
         var window = agent?.UniqueCardWindows.FirstOrDefault(w => w.CardId == parsed.Value.Value);
-        return window is null ? null : new QuotaPick(agent!.ClientId, window);
+        return window is null ? null : new QuotaPick(agent!, window);
     }
 
     /// <summary>True when <see cref="Resolve"/> returned null ONLY because the
@@ -144,7 +152,7 @@ public static class QuotaResolver
 
                 if (best is null || window.RemainingPercent < best.Window.RemainingPercent)
                 {
-                    best = new QuotaPick(agent.ClientId, window);
+                    best = new QuotaPick(agent, window);
                 }
             }
         }

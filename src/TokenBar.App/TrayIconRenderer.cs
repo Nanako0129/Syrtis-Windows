@@ -116,9 +116,28 @@ internal static class TrayIconRenderer
         };
     }
 
-    /// <summary>A pictorial gauge icon (Hidden mode's "icon only").</summary>
+    /// <summary>Stale-reading fill (macOS #8, TrayIcons.swift:71-79): an
+    /// opaque grey, not an alpha-blended one — the popsicle's overlapping
+    /// fill shapes double an alpha blend into a visible bright stripe.
+    /// Values match the macOS NSColor(white:) literals exactly (tune only
+    /// here, and there in TrayIcons.swift).</summary>
+    private const double StaleFillDark = 0.70;
+    private const double StaleFillLight = 0.40;
+
+    private static Color StaleFill(bool dark)
+    {
+        var level = (int)Math.Round(255 * (dark ? StaleFillDark : StaleFillLight));
+        return Color.FromArgb(255, level, level, level);
+    }
+
+    /// <summary>A pictorial gauge icon (Hidden mode's "icon only").
+    /// <paramref name="stale"/> (macOS #8) drops the coloring policy for an
+    /// opaque grey fill — a green or red reading that is half an hour old
+    /// would still read as a live verdict; with no reading there is nothing
+    /// to be stale, so the flag is ignored (TrayIcons.swift:85-91).</summary>
     public static Bitmap RenderGauge(
-        QuotaIconStyle style, double? remaining, bool dark, IconColoring coloring)
+        QuotaIconStyle style, double? remaining, bool dark, IconColoring coloring,
+        bool stale = false)
     {
         var bmp = new Bitmap(Size, Size, PixelFormat.Format32bppArgb);
         using var g = Graphics.FromImage(bmp);
@@ -128,7 +147,7 @@ internal static class TrayIconRenderer
         g.TranslateTransform(0, Size);
         g.ScaleTransform(Scale, -Scale);
         var mono = dark ? Color.White : Color.Black;
-        var fill = Ink(remaining, dark, coloring);
+        var fill = stale && remaining is not null ? StaleFill(dark) : Ink(remaining, dark, coloring);
         var level = remaining ?? 100; // no data draws full, macOS TrayIcons.image
         switch (style)
         {
