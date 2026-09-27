@@ -18,13 +18,21 @@ public static class QuotaStaleness
     /// too.</summary>
     public const string LastResolvedAtKey = "tokenbar.quota.lastResolvedAt";
 
+    private static readonly double MinUnixMs = DateTimeOffset.MinValue.ToUnixTimeMilliseconds();
+    private static readonly double MaxUnixMs = DateTimeOffset.MaxValue.ToUnixTimeMilliseconds();
+
     /// <summary>The persisted stamp, parsed. Shared by TrayFeed (cold start /
     /// no-payload staleness) and the Settings preview so neither duplicates
     /// the GetDouble→IsFinite→FromUnixTimeMilliseconds chain.</summary>
     public static DateTimeOffset? PersistedResolvedAt(SettingsStore store)
     {
+        // A finite value can still lie outside what DateTimeOffset represents
+        // (a hand-edited 1e300), and FromUnixTimeMilliseconds throws there.
+        // Out of range is treated as unknown age, like a missing stamp.
         var ms = store.GetDouble(LastResolvedAtKey, double.NaN);
-        return double.IsFinite(ms) ? DateTimeOffset.FromUnixTimeMilliseconds((long)ms) : null;
+        return double.IsFinite(ms) && ms >= MinUnixMs && ms <= MaxUnixMs
+            ? DateTimeOffset.FromUnixTimeMilliseconds((long)ms)
+            : null;
     }
 
     /// <summary>Exclusive boundary (macOS TrayAnimator.swift:312: <c>&gt;

@@ -88,4 +88,27 @@ public class QuotaStalenessTests
         Assert.False(QuotaStaleness.ReadingIsStale(
             payload, "missing-client|no.such.card", NoneHidden, veryOldStamp, now));
     }
+
+    // A finite stamp outside DateTimeOffset's range (a hand-edited 1e300)
+    // must read as unknown age rather than throw inside the tray update.
+    [Theory]
+    [InlineData("1e300", false)]
+    [InlineData("-1e300", false)]
+    [InlineData("1790000000000", true)]
+    public void PersistedResolvedAt_OutOfRangeStampIsUnknownNotAThrow(string raw, bool expectParsed)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "tb-quota-stale-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var file = Path.Combine(dir, "settings.json");
+            File.WriteAllText(file, "{\"" + QuotaStaleness.LastResolvedAtKey + "\": " + raw + "}");
+            var parsed = QuotaStaleness.PersistedResolvedAt(new SettingsStore(file));
+            Assert.Equal(expectParsed, parsed is not null);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
 }
