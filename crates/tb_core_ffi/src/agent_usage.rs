@@ -2770,12 +2770,14 @@ fn claude_desktop_read_retry_failure() -> ProviderFetchFailure {
     ProviderFetchFailure::transient(
         CLAUDE_DESKTOP_READ_RETRY_ERROR,
         None,
-        SafeTransportDiagnostic::from_facts(TransportErrorFacts::synthetic(
-            false,
-            false,
-            TransportPhase::Request,
-            None,
-        )),
+        SafeTransportDiagnostic::from_facts(TransportErrorFacts {
+            is_timeout: false,
+            is_connect: false,
+            is_dns: false,
+            is_tls: false,
+            phase: TransportPhase::Request,
+            raw_os_code: None,
+        }),
     )
 }
 
