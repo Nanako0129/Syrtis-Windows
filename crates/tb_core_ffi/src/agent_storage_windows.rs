@@ -879,7 +879,8 @@ impl Drop for OwnedHandle {
     }
 }
 
-struct LocalAllocation(*mut c_void);
+/// Frees a `LocalAlloc` buffer on drop. Shared with `win_safe_storage`.
+pub(crate) struct LocalAllocation(pub(crate) *mut c_void);
 
 impl Drop for LocalAllocation {
     fn drop(&mut self) {

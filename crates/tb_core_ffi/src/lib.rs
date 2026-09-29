@@ -30,6 +30,8 @@ mod model_report;
 mod opencode_integrations;
 mod usage_graph;
 mod usage_tail;
+#[cfg(target_os = "windows")]
+mod win_safe_storage;
 mod window_usage;
 
 use std::collections::HashMap;
