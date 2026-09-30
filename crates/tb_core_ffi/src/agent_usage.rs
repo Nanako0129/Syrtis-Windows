@@ -1036,6 +1036,13 @@ impl ClaudeCredentials {
                 .filter(|token| !token.is_empty())
                 .map(str::as_bytes),
             ClaudeCredentialSource::Environment => Some(self.access_token.as_bytes()),
+            ClaudeCredentialSource::Desktop => Some(
+                self.refresh_token
+                    .as_deref()
+                    .filter(|token| !token.is_empty())
+                    .unwrap_or(&self.access_token)
+                    .as_bytes(),
+            ),
         }
     }
 
@@ -1058,6 +1065,10 @@ enum ClaudeCredentialSource {
     File,
     /// Token injected via env var — read-only, has no refresh token.
     Environment,
+    /// Claude Desktop's safeStorage token cache (Windows) — read-only. Never
+    /// refreshed: a refresh rotates the refresh token and would sign the user
+    /// out of Claude Desktop.
+    Desktop,
 }
 
 #[derive(Debug)]
@@ -1812,14 +1823,11 @@ fn claude_cache_binding(
         .map(ProviderCacheBinding::primary)
 }
 
-fn clear_claude_gate_for_login_resolution(
-    login: &ClaudeLoginResolution,
-    gate: &mut ClaudeUsageGate,
-) {
-    if matches!(
-        login,
-        ClaudeLoginResolution::Absent | ClaudeLoginResolution::ExplicitLogout
-    ) {
+/// Clear the 429 gate only once no Claude credential of any kind resolved.
+/// Clearing on an Absent CLI login alone would wipe the gate before every
+/// Claude Desktop fetch.
+fn clear_claude_gate_if_unconfigured(failure_source: &str, gate: &mut ClaudeUsageGate) {
+    if failure_source == "unconfigured" {
         gate.clear();
     }
 }
@@ -1830,8 +1838,7 @@ async fn fetch_claude_inner() -> (&'static str, ProviderFetchOutcome) {
     }
 
     let login = load_claude_login_credentials();
-    clear_claude_gate_for_login_resolution(&login, &mut lock_gate());
-    fetch_claude_login_or_setup_with(
+    let (failure_source, outcome) = fetch_claude_login_or_setup_with(
         login,
         |credentials| async move {
             let verified = claude_cache_binding(&credentials).map_err(|_| {
@@ -1845,8 +1852,11 @@ async fn fetch_claude_inner() -> (&'static str, ProviderFetchOutcome) {
         },
         resolve_claude_keychain_token,
         fetch_claude_setup_token,
+        load_claude_desktop_login,
     )
-    .await
+    .await;
+    clear_claude_gate_if_unconfigured(failure_source, &mut lock_gate());
+    (failure_source, outcome)
 }
 
 async fn fetch_claude_setup_token(
@@ -1870,11 +1880,23 @@ async fn fetch_claude_setup_token(
     ("setup-token", outcome)
 }
 
-async fn fetch_claude_login_or_setup_with<Login, LoginFuture, LoadSetup, Setup, SetupFuture>(
+/// Precedence below `CLAUDE_CODE_OAUTH_TOKEN`: the stored CLI login, then the
+/// setup-token Keychain item, then the Claude Desktop login as the last
+/// fallback. A Desktop login goes through the same `request_login` path; its
+/// failures report the `desktop` source.
+async fn fetch_claude_login_or_setup_with<
+    Login,
+    LoginFuture,
+    LoadSetup,
+    Setup,
+    SetupFuture,
+    LoadDesktop,
+>(
     login: ClaudeLoginResolution,
     request_login: Login,
     load_setup: LoadSetup,
     request_setup: Setup,
+    load_desktop: LoadDesktop,
 ) -> (&'static str, ProviderFetchOutcome)
 where
     Login: FnOnce(ClaudeCredentials) -> LoginFuture,
@@ -1882,6 +1904,7 @@ where
     LoadSetup: FnOnce() -> Result<Option<ResolvedClaudeToken>, String>,
     Setup: FnOnce(ResolvedClaudeToken) -> SetupFuture,
     SetupFuture: std::future::Future<Output = (&'static str, ProviderFetchOutcome)>,
+    LoadDesktop: FnOnce() -> Result<Option<ClaudeCredentials>, ProviderFetchFailure>,
 {
     match login {
         ClaudeLoginResolution::Ready(credentials) => request_login(credentials).await,
@@ -1894,12 +1917,16 @@ where
         ClaudeLoginResolution::Absent | ClaudeLoginResolution::ExplicitLogout => {
             match load_setup() {
                 Ok(Some(token)) => request_setup(token).await,
-                Ok(None) => (
-                    "unconfigured",
-                    ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
-                        CLAUDE_UNCONFIGURED_ERROR,
-                    )),
-                ),
+                Ok(None) => match load_desktop() {
+                    Ok(Some(credentials)) => ("desktop", request_login(credentials).await.1),
+                    Ok(None) => (
+                        "unconfigured",
+                        ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                            CLAUDE_UNCONFIGURED_ERROR,
+                        )),
+                    ),
+                    Err(failure) => ("desktop", ProviderFetchOutcome::Failure(failure)),
+                },
                 Err(_) => (
                     "setup-token",
                     ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
@@ -1994,6 +2021,18 @@ where
         }
     }
 
+    // Never refresh a Desktop token (see `ClaudeCredentialSource::Desktop`).
+    if credentials.source == ClaudeCredentialSource::Desktop
+        && claude_desktop_credentials_expired(&credentials, now)
+    {
+        return (
+            "oauth",
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                CLAUDE_DESKTOP_EXPIRED_ERROR,
+            )),
+        );
+    }
+
     let (credentials, account_scope, cache_binding) = if claude_credentials_expired(&credentials) {
         match refresh(credentials).await {
             Ok(refreshed) => refreshed,
@@ -2013,6 +2052,24 @@ where
 
     let gate_binding = ProviderCacheBinding::primary(account_scope.clone());
     oauth(credentials, account_scope, cache_binding, gate_binding).await
+}
+
+fn claude_unauthorized_message(source: ClaudeCredentialSource) -> &'static str {
+    match source {
+        ClaudeCredentialSource::Desktop => {
+            "Claude Desktop login was rejected. Sign in to Claude Desktop again."
+        }
+        _ => "Claude OAuth token expired or invalid. Run `claude` to re-authenticate.",
+    }
+}
+
+fn claude_denied_message(source: ClaudeCredentialSource) -> &'static str {
+    match source {
+        ClaudeCredentialSource::Desktop => {
+            "Claude OAuth usage was denied. Sign in to Claude Desktop again."
+        }
+        _ => "Claude OAuth usage was denied. Run `claude logout && claude login` to grant user:profile.",
+    }
 }
 
 async fn fetch_claude_oauth_usage_request(
@@ -2087,7 +2144,7 @@ async fn fetch_claude_oauth_usage_request(
             return (
                 "oauth",
                 ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
-                    "Claude OAuth token expired or invalid. Run `claude` to re-authenticate.",
+                    claude_unauthorized_message(credentials.source),
                 )),
             );
         }
@@ -2095,7 +2152,7 @@ async fn fetch_claude_oauth_usage_request(
             return (
                 "oauth",
                 ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
-                    "Claude OAuth usage was denied. Run `claude logout && claude login` to grant user:profile.",
+                    claude_denied_message(credentials.source),
                 )),
             );
         }
@@ -2119,9 +2176,9 @@ async fn fetch_claude_oauth_usage_request(
         }
         return (
             "oauth",
-            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
-                "Claude OAuth usage was denied. Run `claude logout && claude login` to grant user:profile.",
-            )),
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(claude_denied_message(
+                credentials.source,
+            ))),
         );
     }
 
@@ -2210,9 +2267,10 @@ fn refresh_cached_windows(windows: &[UsageWindow], now: DateTime<Utc>) -> Option
 }
 
 async fn fetch_claude_via_headers(
-    access_token: &str,
+    credentials: &ClaudeCredentials,
     attempt_binding: Option<ProviderCacheBinding>,
 ) -> Result<Vec<UsageWindow>, ProviderFetchFailure> {
+    let access_token = credentials.access_token.as_str();
     {
         let now = Utc::now();
         let guard = CLAUDE_HEADER_CACHE
@@ -2286,12 +2344,18 @@ async fn fetch_claude_via_headers(
         ));
     }
     Err(ProviderFetchFailure::terminal(
-        if matches!(status, 401 | 403) {
-            "Claude setup-token expired or lacks access.".to_string()
-        } else {
-            format!("Claude header probe rejected the request (status {status}).")
-        },
+        claude_header_rejection_message(credentials.source, status),
     ))
+}
+
+fn claude_header_rejection_message(source: ClaudeCredentialSource, status: u16) -> String {
+    match (source, status) {
+        (ClaudeCredentialSource::Desktop, 401 | 403) => {
+            claude_unauthorized_message(source).to_string()
+        }
+        (_, 401 | 403) => "Claude setup-token expired or lacks access.".to_string(),
+        _ => format!("Claude header probe rejected the request (status {status})."),
+    }
 }
 
 async fn claude_header_snapshot(
@@ -2300,11 +2364,10 @@ async fn claude_header_snapshot(
     account_scope: Result<AccountScope, AccountScopeError>,
     cache_binding: Option<ProviderCacheBinding>,
 ) -> ProviderFetchOutcome {
-    let windows =
-        match fetch_claude_via_headers(&credentials.access_token, cache_binding.clone()).await {
-            Ok(windows) => windows,
-            Err(failure) => return ProviderFetchOutcome::Failure(failure),
-        };
+    let windows = match fetch_claude_via_headers(credentials, cache_binding.clone()).await {
+        Ok(windows) => windows,
+        Err(failure) => return ProviderFetchOutcome::Failure(failure),
+    };
     ProviderFetchOutcome::Success {
         snapshot: AgentUsageSnapshot {
             client_id: "claude".to_string(),
@@ -2635,10 +2698,276 @@ fn claude_login_scope_slot(source: ClaudeCredentialSource) -> Result<CredentialS
             )
             .map_err(|_| "Claude credential location cannot be scoped safely.".to_string())?,
         }),
-        ClaudeCredentialSource::Environment => {
-            Err("environment credentials require an explicit account-scope slot".to_string())
+        ClaudeCredentialSource::Environment | ClaudeCredentialSource::Desktop => {
+            Err("this credential source requires an explicit account-scope slot".to_string())
         }
     }
+}
+
+const CLAUDE_DESKTOP_TOKEN_CACHE_KEY: &str = "oauth:tokenCache";
+const CLAUDE_DESKTOP_READ_ERROR: &str = "Claude Desktop login could not be read.";
+const CLAUDE_DESKTOP_READ_RETRY_ERROR: &str =
+    "Claude Desktop login could not be read. Retrying automatically.";
+const CLAUDE_DESKTOP_EXPIRED_ERROR: &str =
+    "Claude Desktop login has expired. Open Claude Desktop to renew it.";
+const CLAUDE_DESKTOP_REFRESH_ERROR: &str = "Claude Desktop credentials cannot be refreshed.";
+const CLAUDE_DESKTOP_EXPIRY_SKEW_SECS: i64 = 60;
+/// Nesting levels below the decrypted root searched for a token object.
+const CLAUDE_DESKTOP_MAX_DEPTH: usize = 3;
+const CLAUDE_DESKTOP_MAX_REPORTED_KEYS: usize = 10;
+
+/// The Claude Desktop login (Windows only; last fallback). `Ok(None)` means no
+/// Desktop login is stored; `Err` carries a failure with a fixed display
+/// string. Only this function resolves the real `%APPDATA%\Claude` paths.
+#[cfg(target_os = "windows")]
+fn load_claude_desktop_login() -> Result<Option<ClaudeCredentials>, ProviderFetchFailure> {
+    let Some(root) = dirs::config_dir() else {
+        return Ok(None);
+    };
+    let root = root.join("Claude");
+    load_claude_desktop_credentials_from(&root.join("config.json"), &root.join("Local State"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn load_claude_desktop_login() -> Result<Option<ClaudeCredentials>, ProviderFetchFailure> {
+    Ok(None)
+}
+
+#[cfg(target_os = "windows")]
+fn load_claude_desktop_credentials_from(
+    config_path: &Path,
+    local_state_path: &Path,
+) -> Result<Option<ClaudeCredentials>, ProviderFetchFailure> {
+    use crate::win_safe_storage;
+
+    let Some(value) = read_claude_desktop_token_cache(config_path)? else {
+        return Ok(None);
+    };
+    let local_state = match fs::read_to_string(local_state_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ProviderFetchFailure::terminal(CLAUDE_DESKTOP_READ_ERROR));
+        }
+        Err(_) => return Err(claude_desktop_read_retry_failure()),
+    };
+    let local_state: Value =
+        serde_json::from_str(&local_state).map_err(|_| claude_desktop_read_retry_failure())?;
+    let terminal = |_| ProviderFetchFailure::terminal(CLAUDE_DESKTOP_READ_ERROR);
+    let key = win_safe_storage::load_key(&local_state).map_err(terminal)?;
+    let mut plaintext = win_safe_storage::decrypt(&key, &value).map_err(terminal)?;
+    drop(key);
+    let parsed = parse_claude_desktop_token_cache(&plaintext, config_path);
+    win_safe_storage::wipe(&mut plaintext);
+    parsed.map(Some).map_err(ProviderFetchFailure::terminal)
+}
+
+/// A read or JSON-parse failure of Claude Desktop's own files, which it
+/// rewrites in place, is treated as a race and retried rather than reported
+/// as a broken login. No account binding is provable without the token, so
+/// the failure carries none.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn claude_desktop_read_retry_failure() -> ProviderFetchFailure {
+    ProviderFetchFailure::transient(
+        CLAUDE_DESKTOP_READ_RETRY_ERROR,
+        None,
+        SafeTransportDiagnostic::from_facts(TransportErrorFacts {
+            is_timeout: false,
+            is_connect: false,
+            is_dns: false,
+            is_tls: false,
+            phase: TransportPhase::Request,
+            raw_os_code: None,
+        }),
+    )
+}
+
+/// The encrypted `oauth:tokenCache` value from Claude Desktop's config.json.
+/// A missing file, key or empty value means Desktop is not logged in.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn read_claude_desktop_token_cache(
+    config_path: &Path,
+) -> Result<Option<String>, ProviderFetchFailure> {
+    let raw = match fs::read_to_string(config_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(claude_desktop_read_retry_failure()),
+    };
+    let root: Value =
+        serde_json::from_str(&raw).map_err(|_| claude_desktop_read_retry_failure())?;
+    match root.get(CLAUDE_DESKTOP_TOKEN_CACHE_KEY) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.trim().to_string())),
+        Some(_) => Err(ProviderFetchFailure::terminal(CLAUDE_DESKTOP_READ_ERROR)),
+    }
+}
+
+struct ClaudeDesktopCandidate {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+    scopes: Vec<String>,
+    /// Carries a refresh-token or expiry key next to the token.
+    has_token_metadata: bool,
+}
+
+impl ClaudeDesktopCandidate {
+    fn rank(&self) -> (bool, bool, Option<DateTime<Utc>>) {
+        (
+            self.scopes.iter().any(|scope| scope == "user:profile"),
+            self.has_token_metadata,
+            self.expires_at,
+        )
+    }
+}
+
+/// Tolerant parse of the decrypted token cache, whose shape Claude Desktop
+/// does not document. Picks the most plausible token object: one granting
+/// `user:profile` (the usage endpoint needs it), then one with token metadata
+/// over a bare token, then the latest expiry (none ranks lowest).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_claude_desktop_token_cache(
+    plaintext: &[u8],
+    config_path: &Path,
+) -> Result<ClaudeCredentials, String> {
+    let root: Value =
+        serde_json::from_slice(plaintext).map_err(|_| CLAUDE_DESKTOP_READ_ERROR.to_string())?;
+    let mut candidates = Vec::new();
+    collect_claude_desktop_candidates(&root, 0, &mut candidates);
+    let Some(best) = candidates
+        .into_iter()
+        .max_by_key(ClaudeDesktopCandidate::rank)
+    else {
+        return Err(claude_desktop_unrecognized_error(&root));
+    };
+    Ok(ClaudeCredentials {
+        access_token: best.access_token,
+        refresh_token: best.refresh_token,
+        expires_at: best.expires_at,
+        scopes: best.scopes,
+        rate_limit_tier: None,
+        subscription_type: None,
+        source: ClaudeCredentialSource::Desktop,
+        raw_root: None,
+        keychain_account: None,
+        scope_slot: CredentialSlot {
+            semantic_source: "claude-desktop-safestorage",
+            canonical_location: agent_account_scope::canonical_file_location(
+                config_path,
+                Some(CLAUDE_DESKTOP_TOKEN_CACHE_KEY),
+            )
+            .map_err(|_| CLAUDE_DESKTOP_READ_ERROR.to_string())?,
+        },
+    })
+}
+
+fn collect_claude_desktop_candidates(
+    value: &Value,
+    depth: usize,
+    candidates: &mut Vec<ClaudeDesktopCandidate>,
+) {
+    let children: Box<dyn Iterator<Item = &Value>> = match value {
+        Value::Object(object) => {
+            candidates.extend(claude_desktop_candidate(object));
+            Box::new(object.values())
+        }
+        Value::Array(items) => Box::new(items.iter()),
+        _ => return,
+    };
+    if depth < CLAUDE_DESKTOP_MAX_DEPTH {
+        for child in children {
+            collect_claude_desktop_candidates(child, depth + 1, candidates);
+        }
+    }
+}
+
+fn claude_desktop_candidate(
+    object: &serde_json::Map<String, Value>,
+) -> Option<ClaudeDesktopCandidate> {
+    let non_empty = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            object
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+    };
+    let refresh_token = non_empty(&["refreshToken", "refresh_token"]);
+    let expiry = ["expiresAt", "expires_at", "expiry"]
+        .iter()
+        .find_map(|key| object.get(*key));
+    let has_token_metadata = refresh_token.is_some() || expiry.is_some();
+    // A bare `token` key is too generic to trust on its own.
+    let access_token = non_empty(&["accessToken", "access_token"])
+        .or_else(|| has_token_metadata.then(|| non_empty(&["token"])).flatten())?;
+    let scopes = match object.get("scopes").or_else(|| object.get("scope")) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Some(Value::String(scopes)) => scopes.split_whitespace().map(str::to_string).collect(),
+        _ => Vec::new(),
+    };
+    Some(ClaudeDesktopCandidate {
+        access_token,
+        refresh_token,
+        expires_at: expiry.and_then(parse_claude_desktop_expiry),
+        scopes,
+        has_token_metadata,
+    })
+}
+
+/// Epoch milliseconds when above 1e12, else epoch seconds; or RFC 3339.
+fn parse_claude_desktop_expiry(value: &Value) -> Option<DateTime<Utc>> {
+    match value {
+        Value::Number(number) => {
+            let raw = number.as_f64()?;
+            let millis = if raw > 1e12 { raw } else { raw * 1000.0 };
+            Utc.timestamp_millis_opt(millis as i64).single()
+        }
+        Value::String(text) => parse_datetime(text.trim()),
+        _ => None,
+    }
+}
+
+/// Names only object keys that look like identifiers (letters and `_`, at
+/// most 40), so neither a token nor an account/UUID key can reach the message.
+fn claude_desktop_unrecognized_error(root: &Value) -> String {
+    fn collect<'a>(value: &'a Value, depth: usize, keys: &mut std::collections::BTreeSet<&'a str>) {
+        let children: Box<dyn Iterator<Item = &Value>> = match value {
+            Value::Object(object) => {
+                keys.extend(object.keys().map(String::as_str).filter(|key| {
+                    (1..=40).contains(&key.len())
+                        && key
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+                }));
+                Box::new(object.values())
+            }
+            Value::Array(items) => Box::new(items.iter()),
+            _ => return,
+        };
+        if depth < CLAUDE_DESKTOP_MAX_DEPTH {
+            for child in children {
+                collect(child, depth + 1, keys);
+            }
+        }
+    }
+    let mut keys = std::collections::BTreeSet::new();
+    collect(root, 0, &mut keys);
+    let listed: Vec<&str> = keys
+        .into_iter()
+        .take(CLAUDE_DESKTOP_MAX_REPORTED_KEYS)
+        .collect();
+    let listed = if listed.is_empty() {
+        "none".to_string()
+    } else {
+        listed.join(", ")
+    };
+    format!("Claude Desktop login format is not recognized (keys: {listed}).")
 }
 
 #[cfg(target_os = "macos")]
@@ -3268,6 +3597,7 @@ fn reload_claude_credentials(original: &ClaudeCredentials) -> Result<ClaudeCrede
         ClaudeCredentialSource::Environment => {
             Err("Claude environment credentials cannot be refreshed in place.".to_string())
         }
+        ClaudeCredentialSource::Desktop => Err(CLAUDE_DESKTOP_REFRESH_ERROR.to_string()),
     }
 }
 
@@ -3280,6 +3610,8 @@ fn save_claude_credentials(credentials: &ClaudeCredentials) -> Result<(), String
             save_claude_credentials_to_file(credentials, &claude_credentials_path())
         }
         ClaudeCredentialSource::Environment => Ok(()),
+        // Never write to Claude Desktop's files.
+        ClaudeCredentialSource::Desktop => Err(CLAUDE_DESKTOP_REFRESH_ERROR.to_string()),
     }
 }
 
@@ -4394,6 +4726,14 @@ fn jwt_expiration(token: &str) -> Option<DateTime<Utc>> {
     Utc.timestamp_opt(seconds, 0).single()
 }
 
+/// TokenBar cannot renew a Desktop token, so it stops using one a minute
+/// early rather than sending a token that expires in flight.
+fn claude_desktop_credentials_expired(credentials: &ClaudeCredentials, now: DateTime<Utc>) -> bool {
+    credentials.expires_at.is_some_and(|expires_at| {
+        now + chrono::Duration::seconds(CLAUDE_DESKTOP_EXPIRY_SKEW_SECS) >= expires_at
+    })
+}
+
 fn claude_credentials_expired(credentials: &ClaudeCredentials) -> bool {
     credentials
         .expires_at
@@ -5127,6 +5467,7 @@ mod tests {
                     setup_calls.set(setup_calls.get() + 1);
                     ("setup-token", claude_test_success_outcome())
                 },
+                || panic!("Claude Desktop must not be read"),
             )
             .await;
             assert_eq!(source, "oauth");
@@ -5172,6 +5513,7 @@ mod tests {
                     setup_calls.set(setup_calls.get() + 1);
                     ("setup-token", claude_test_success_outcome())
                 },
+                || panic!("Claude Desktop must not be read"),
             )
             .await;
             assert_eq!(source, "oauth", "{label}");
@@ -5213,6 +5555,7 @@ mod tests {
                     setup_calls.set(setup_calls.get() + 1);
                     ("setup-token", claude_test_success_outcome())
                 },
+                || panic!("Claude Desktop must not be read"),
             )
             .await;
             assert_eq!(source, "setup-token");
@@ -5280,7 +5623,14 @@ mod tests {
         let mut gate = ClaudeUsageGate::default();
         gate.record_rate_limit(binding.clone(), None, now);
         assert!(gate.blocked_until_for(&binding, now).is_some());
-        clear_claude_gate_for_login_resolution(&login, &mut gate);
+        for resolved in ["oauth", "setup-token", "desktop"] {
+            clear_claude_gate_if_unconfigured(resolved, &mut gate);
+            assert!(
+                gate.blocked_until_for(&binding, now).is_some(),
+                "{resolved}"
+            );
+        }
+        clear_claude_gate_if_unconfigured("unconfigured", &mut gate);
         assert!(gate.blocked_until_for(&binding, now).is_none());
 
         let oauth_calls = std::cell::Cell::new(0);
@@ -5300,6 +5650,7 @@ mod tests {
                 setup_calls.set(setup_calls.get() + 1);
                 ("setup-token", claude_test_success_outcome())
             },
+            || panic!("Claude Desktop must not be read"),
         )
         .await;
         assert_eq!(source, "setup-token");
@@ -5308,6 +5659,525 @@ mod tests {
         assert_eq!(setup_loads.get(), 1);
         assert_eq!(setup_calls.get(), 1);
         scope.cleanup();
+    }
+
+    fn claude_test_desktop_credentials(expires_at: Option<DateTime<Utc>>) -> ClaudeCredentials {
+        ClaudeCredentials {
+            access_token: "desktop-access".to_string(),
+            refresh_token: Some("desktop-refresh".to_string()),
+            expires_at,
+            scopes: vec!["user:profile".to_string()],
+            rate_limit_tier: None,
+            subscription_type: None,
+            source: ClaudeCredentialSource::Desktop,
+            raw_root: None,
+            keychain_account: None,
+            scope_slot: CredentialSlot {
+                semantic_source: "fixture-desktop",
+                canonical_location: "fixture-desktop".to_string(),
+            },
+        }
+    }
+
+    fn terminal_display(outcome: &ProviderFetchOutcome) -> Option<&str> {
+        match outcome {
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { display }) => {
+                Some(display)
+            }
+            _ => None,
+        }
+    }
+
+    struct DesktopPrecedenceRun {
+        source: &'static str,
+        outcome: ProviderFetchOutcome,
+        login_sources: Vec<ClaudeCredentialSource>,
+        setup_calls: usize,
+        desktop_loads: usize,
+    }
+
+    async fn run_desktop_precedence(
+        login: ClaudeLoginResolution,
+        setup: Result<Option<ResolvedClaudeToken>, String>,
+        desktop: Result<Option<ClaudeCredentials>, ProviderFetchFailure>,
+    ) -> DesktopPrecedenceRun {
+        let login_sources = std::cell::RefCell::new(Vec::new());
+        let setup_calls = std::cell::Cell::new(0);
+        let desktop_loads = std::cell::Cell::new(0);
+        let (source, outcome) = fetch_claude_login_or_setup_with(
+            login,
+            |credentials| {
+                login_sources.borrow_mut().push(credentials.source);
+                async { ("oauth", claude_test_success_outcome()) }
+            },
+            || setup,
+            |_| async {
+                setup_calls.set(setup_calls.get() + 1);
+                ("setup-token", claude_test_success_outcome())
+            },
+            || {
+                desktop_loads.set(desktop_loads.get() + 1);
+                desktop
+            },
+        )
+        .await;
+        DesktopPrecedenceRun {
+            source,
+            outcome,
+            login_sources: login_sources.into_inner(),
+            setup_calls: setup_calls.get(),
+            desktop_loads: desktop_loads.get(),
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_desktop_login_is_the_last_fallback() {
+        let desktop = || Ok(Some(claude_test_desktop_credentials(None)));
+
+        // A CLI login wins; Desktop is never read.
+        let run = run_desktop_precedence(
+            ClaudeLoginResolution::Ready(claude_test_login_credentials()),
+            Ok(None),
+            desktop(),
+        )
+        .await;
+        assert_eq!(run.source, "oauth");
+        assert_eq!(run.login_sources, [ClaudeCredentialSource::File]);
+        assert_eq!(run.desktop_loads, 0);
+
+        // Absent and ExplicitLogout both fall through to Desktop, whose
+        // result is reported under the `desktop` source.
+        let logged_out = resolve_stored_claude_login(
+            r#"{"claudeAiOauth":{"refreshToken":"stale"}}"#,
+            ClaudeCredentialSource::File,
+        );
+        for login in [ClaudeLoginResolution::Absent, logged_out] {
+            let run = run_desktop_precedence(login, Ok(None), desktop()).await;
+            assert_eq!(run.source, "desktop");
+            assert!(matches!(run.outcome, ProviderFetchOutcome::Success { .. }));
+            assert_eq!(run.login_sources, [ClaudeCredentialSource::Desktop]);
+            assert_eq!(run.desktop_loads, 1);
+        }
+
+        // A corrupt CLI login stays terminal.
+        let run =
+            run_desktop_precedence(ClaudeLoginResolution::Terminal, Ok(None), desktop()).await;
+        assert_eq!(run.source, "oauth");
+        assert_eq!(
+            terminal_display(&run.outcome),
+            Some(CLAUDE_CREDENTIALS_LOAD_ERROR)
+        );
+        assert!(run.login_sources.is_empty());
+        assert_eq!(run.desktop_loads, 0);
+
+        // The setup token outranks Desktop.
+        let run = run_desktop_precedence(
+            ClaudeLoginResolution::Absent,
+            Ok(Some(claude_test_setup_token())),
+            desktop(),
+        )
+        .await;
+        assert_eq!(run.source, "setup-token");
+        assert_eq!(run.setup_calls, 1);
+        assert_eq!(run.desktop_loads, 0);
+
+        // No Desktop login: the setup prompt, as before.
+        let run = run_desktop_precedence(ClaudeLoginResolution::Absent, Ok(None), Ok(None)).await;
+        assert_eq!(run.source, "unconfigured");
+        assert_eq!(
+            terminal_display(&run.outcome),
+            Some(CLAUDE_UNCONFIGURED_ERROR)
+        );
+        assert_eq!(run.desktop_loads, 1);
+
+        // An unreadable Desktop login is a named terminal failure.
+        let run = run_desktop_precedence(
+            ClaudeLoginResolution::Absent,
+            Ok(None),
+            Err(ProviderFetchFailure::terminal(CLAUDE_DESKTOP_READ_ERROR)),
+        )
+        .await;
+        assert_eq!(run.source, "desktop");
+        assert_eq!(
+            terminal_display(&run.outcome),
+            Some(CLAUDE_DESKTOP_READ_ERROR)
+        );
+        assert!(run.login_sources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn claude_desktop_fetch_keeps_a_recorded_rate_limit_gate() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("claude", "desktop-gate");
+        let binding = ProviderCacheBinding::primary(
+            scope
+                .resolve_current("fixture-desktop", "fixture-desktop", b"desktop-refresh")
+                .unwrap(),
+        );
+        let mut gate = ClaudeUsageGate::default();
+        gate.record_rate_limit(binding.clone(), None, now);
+        let oauth_calls = std::cell::Cell::new(0);
+        let refresh_calls = std::cell::Cell::new(0);
+
+        let (source, outcome) = {
+            let gate = &mut gate;
+            let oauth_calls = &oauth_calls;
+            let refresh_calls = &refresh_calls;
+            let request_binding = binding.clone();
+            fetch_claude_login_or_setup_with(
+                ClaudeLoginResolution::Absent,
+                move |credentials| {
+                    fetch_claude_login_usage_with(
+                        credentials,
+                        request_binding.clone(),
+                        now,
+                        move |binding, at| gate.blocked_until_for(binding, at),
+                        move |credentials| {
+                            refresh_calls.set(refresh_calls.get() + 1);
+                            let binding = request_binding.clone();
+                            async move { Ok((credentials, binding.primary.clone(), Some(binding))) }
+                        },
+                        |_, _, _| async { claude_test_success_outcome() },
+                        move |_, _, _, _| async move {
+                            oauth_calls.set(oauth_calls.get() + 1);
+                            ("oauth", claude_test_success_outcome())
+                        },
+                    )
+                },
+                || Ok(None),
+                |_| async { ("setup-token", claude_test_success_outcome()) },
+                || Ok(Some(claude_test_desktop_credentials(None))),
+            )
+            .await
+        };
+        assert_eq!(source, "desktop");
+        assert!(matches!(
+            outcome,
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::Transient {
+                transport_diagnostic: SafeTransportDiagnostic {
+                    category: TransportCategory::RateLimited,
+                    ..
+                },
+                ..
+            })
+        ));
+        assert_eq!(oauth_calls.get(), 0);
+        assert_eq!(refresh_calls.get(), 0);
+        clear_claude_gate_if_unconfigured(source, &mut gate);
+        assert!(gate.blocked_until_for(&binding, now).is_some());
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn claude_desktop_token_is_never_refreshed() {
+        // The generic refresh check reads the wall clock, so `now` must too.
+        let now = Utc::now();
+        let scope = TestRefreshScope::new("claude", "desktop-expiry");
+        let binding = ProviderCacheBinding::primary(
+            scope
+                .resolve_current("fixture-desktop", "fixture-desktop", b"desktop-refresh")
+                .unwrap(),
+        );
+        for (expires_in, expired) in [(-3_600, true), (30, true), (120, false)] {
+            let refresh_calls = std::cell::Cell::new(0);
+            let oauth_calls = std::cell::Cell::new(0);
+            let credentials =
+                claude_test_desktop_credentials(Some(now + chrono::Duration::seconds(expires_in)));
+            let (_, outcome) = fetch_claude_login_usage_with(
+                credentials,
+                binding.clone(),
+                now,
+                |_, _| None,
+                |credentials| {
+                    refresh_calls.set(refresh_calls.get() + 1);
+                    let binding = binding.clone();
+                    async move { Ok((credentials, binding.primary.clone(), Some(binding))) }
+                },
+                |_, _, _| async { claude_test_success_outcome() },
+                |_, _, _, _| async {
+                    oauth_calls.set(oauth_calls.get() + 1);
+                    ("oauth", claude_test_success_outcome())
+                },
+            )
+            .await;
+            assert_eq!(refresh_calls.get(), 0, "{expires_in}");
+            if expired {
+                assert_eq!(
+                    terminal_display(&outcome),
+                    Some(CLAUDE_DESKTOP_EXPIRED_ERROR),
+                    "{expires_in}"
+                );
+                assert_eq!(oauth_calls.get(), 0, "{expires_in}");
+            } else {
+                assert!(matches!(outcome, ProviderFetchOutcome::Success { .. }));
+                assert_eq!(oauth_calls.get(), 1, "{expires_in}");
+            }
+        }
+
+        // The refresh path itself refuses a Desktop credential before any
+        // network request, and nothing is written back.
+        let request_calls = std::cell::Cell::new(0);
+        let failure = refresh_claude_credentials_with(
+            &claude_test_desktop_credentials(Some(Utc::now() - chrono::Duration::hours(1))),
+            &scope,
+            reload_claude_credentials,
+            |_, _| {
+                request_calls.set(request_calls.get() + 1);
+                async { Err(ProviderFetchFailure::terminal("request must not be called")) }
+            },
+            save_claude_credentials,
+            |_| Ok(()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            failure,
+            ProviderFetchFailure::Terminal { ref display } if display == CLAUDE_DESKTOP_REFRESH_ERROR
+        ));
+        assert_eq!(request_calls.get(), 0);
+        assert_eq!(
+            save_claude_credentials(&claude_test_desktop_credentials(None)),
+            Err(CLAUDE_DESKTOP_REFRESH_ERROR.to_string())
+        );
+        scope.cleanup();
+    }
+
+    fn desktop_fixture_config_path() -> PathBuf {
+        std::env::temp_dir()
+            .join("tb-claude-desktop-fixture")
+            .join("config.json")
+    }
+
+    fn parse_desktop(json: &str) -> Result<ClaudeCredentials, String> {
+        parse_claude_desktop_token_cache(json.as_bytes(), &desktop_fixture_config_path())
+    }
+
+    #[test]
+    fn claude_desktop_token_cache_parses_known_shapes() {
+        let flat_camel = parse_desktop(
+            r#"{"accessToken":"a1","refreshToken":"r1","expiresAt":1900000000000,
+                "scopes":["user:profile","user:inference"]}"#,
+        )
+        .unwrap();
+        assert_eq!(flat_camel.access_token, "a1");
+        assert_eq!(flat_camel.refresh_token.as_deref(), Some("r1"));
+        assert_eq!(
+            flat_camel.expires_at,
+            Utc.timestamp_opt(1_900_000_000, 0).single()
+        );
+        assert_eq!(flat_camel.scopes, ["user:profile", "user:inference"]);
+        assert_eq!(flat_camel.source, ClaudeCredentialSource::Desktop);
+        assert!(flat_camel.raw_root.is_none());
+        assert_eq!(
+            flat_camel.scope_slot.semantic_source,
+            "claude-desktop-safestorage"
+        );
+        assert!(flat_camel
+            .scope_slot
+            .canonical_location
+            .ends_with("config.json\0oauth:tokenCache"));
+        assert_eq!(flat_camel.scope_marker(), Some(&b"r1"[..]));
+
+        let flat_snake = parse_desktop(
+            r#"{"access_token":"a2","expires_at":1900000000,"scope":"user:profile user:inference"}"#,
+        )
+        .unwrap();
+        assert_eq!(flat_snake.access_token, "a2");
+        assert_eq!(flat_snake.refresh_token, None);
+        assert_eq!(
+            flat_snake.expires_at,
+            Utc.timestamp_opt(1_900_000_000, 0).single()
+        );
+        assert_eq!(flat_snake.scopes, ["user:profile", "user:inference"]);
+        assert_eq!(flat_snake.scope_marker(), Some(&b"a2"[..]));
+
+        let nested = parse_desktop(
+            r#"{"client:user:profile":{"token":"a3","refreshToken":"r3",
+                "expiry":"2030-01-01T00:00:00Z"}}"#,
+        )
+        .unwrap();
+        assert_eq!(nested.access_token, "a3");
+        assert_eq!(nested.expires_at, parse_datetime("2030-01-01T00:00:00Z"));
+
+        let latest = parse_desktop(
+            r#"{"x":{"accessToken":"older","expiresAt":1800000000000},
+                "y":{"accessToken":"newest","expiresAt":1900000000000},
+                "z":{"accessToken":"bare-without-metadata"}}"#,
+        )
+        .unwrap();
+        assert_eq!(latest.access_token, "newest");
+
+        // A token that can reach the usage endpoint beats a later-expiring
+        // one without `user:profile`.
+        let profile = parse_desktop(
+            r#"{"x":{"accessToken":"profile","expiresAt":1800000000000,
+                     "scopes":["user:profile","user:inference"]},
+                "y":{"accessToken":"inference-only","expiresAt":1900000000000,
+                     "scopes":["user:inference"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(profile.access_token, "profile");
+
+        let deep = parse_desktop(r#"{"a":{"b":{"c":{"accessToken":"depth-3"}}}}"#).unwrap();
+        assert_eq!(deep.access_token, "depth-3");
+        assert!(parse_desktop(r#"{"a":{"b":{"c":{"d":{"accessToken":"depth-4"}}}}}"#).is_err());
+
+        // A bare `token` key alone is not trusted as an access token.
+        assert!(parse_desktop(r#"{"token":"generic"}"#).is_err());
+        assert_eq!(
+            parse_desktop("not json").unwrap_err(),
+            CLAUDE_DESKTOP_READ_ERROR
+        );
+    }
+
+    #[test]
+    fn claude_desktop_unrecognized_format_names_keys_but_never_values() {
+        let error = parse_desktop(
+            r#"{"0b8f3c1e-5a4d-4c2b-9e7f-1a2b3c4d5e6f":{"note":"secret-value-123",
+                "idToken":"secret-id-token"},"oauth:tokenCache":"secret-blob",
+                "k1":"x","a_b":"y"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "Claude Desktop login format is not recognized (keys: a_b, idToken, note)."
+        );
+        for leaked in ["0b8f3c1e", "secret", "oauth:tokenCache", "k1"] {
+            assert!(!error.contains(leaked), "{leaked}");
+        }
+
+        let many: serde_json::Map<String, Value> = ('a'..='l')
+            .map(|letter| (format!("key_{letter}"), Value::Bool(true)))
+            .collect();
+        let error = parse_desktop(&Value::Object(many).to_string()).unwrap_err();
+        assert!(error.contains("key_j"));
+        assert!(!error.contains("key_k"));
+
+        assert_eq!(
+            parse_desktop("[]").unwrap_err(),
+            "Claude Desktop login format is not recognized (keys: none)."
+        );
+    }
+
+    /// `(transient, display)` so desktop load results can be compared.
+    fn desktop_failure_kind(failure: ProviderFetchFailure) -> (bool, String) {
+        match failure {
+            ProviderFetchFailure::Transient { display, .. } => (true, display),
+            ProviderFetchFailure::Terminal { display } => (false, display),
+        }
+    }
+
+    #[test]
+    fn claude_desktop_header_probe_rejection_names_claude_desktop() {
+        for status in [401, 403] {
+            assert_eq!(
+                claude_header_rejection_message(ClaudeCredentialSource::Desktop, status),
+                "Claude Desktop login was rejected. Sign in to Claude Desktop again."
+            );
+            assert_eq!(
+                claude_header_rejection_message(ClaudeCredentialSource::Environment, status),
+                "Claude setup-token expired or lacks access."
+            );
+        }
+        assert_eq!(
+            claude_header_rejection_message(ClaudeCredentialSource::Desktop, 418),
+            "Claude header probe rejected the request (status 418)."
+        );
+    }
+
+    #[test]
+    fn claude_desktop_config_without_a_token_cache_is_absent() {
+        let dir =
+            std::env::temp_dir().join(format!("tb_claude_desktop_config_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let read =
+            |path: &Path| read_claude_desktop_token_cache(path).map_err(desktop_failure_kind);
+        assert_eq!(read(&path), Ok(None));
+        let retry = (true, CLAUDE_DESKTOP_READ_RETRY_ERROR.to_string());
+        for (raw, expected) in [
+            ("{}", Ok(None)),
+            (r#"{"oauth:tokenCache":null}"#, Ok(None)),
+            (r#"{"oauth:tokenCache":"  "}"#, Ok(None)),
+            (
+                r#"{"oauth:tokenCache":" djEw "}"#,
+                Ok(Some("djEw".to_string())),
+            ),
+            (
+                r#"{"oauth:tokenCache":5}"#,
+                Err((false, CLAUDE_DESKTOP_READ_ERROR.to_string())),
+            ),
+            // A half-written file (Claude Desktop rewriting it) is retried.
+            (r#"{"oauth:tokenCa"#, Err(retry.clone())),
+        ] {
+            fs::write(&path, raw).unwrap();
+            assert_eq!(read(&path), expected, "{raw}");
+        }
+
+        // An I/O error other than NotFound is retried too.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert_eq!(read(&path), Err(retry));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// End to end on synthetic files: DPAPI-wrapped key in `Local State`, a
+    /// v10 value in `config.json`, parsed into Desktop credentials.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn crypto_claude_desktop_loader_reads_synthetic_files() {
+        use crate::win_safe_storage::test_support::{local_state_for, v10_value};
+
+        let dir =
+            std::env::temp_dir().join(format!("tb_claude_desktop_loader_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.json");
+        let local_state = dir.join("Local State");
+        let key = [0x21u8; 32];
+        let plaintext =
+            br#"{"entry":{"accessToken":"synthetic-access","refreshToken":"synthetic-refresh","expiresAt":1900000000000}}"#;
+        fs::write(&local_state, local_state_for(&key).to_string()).unwrap();
+        fs::write(
+            &config,
+            serde_json::json!({ "oauth:tokenCache": v10_value(&key, &[7u8; 12], plaintext) })
+                .to_string(),
+        )
+        .unwrap();
+
+        let credentials = load_claude_desktop_credentials_from(&config, &local_state)
+            .unwrap()
+            .unwrap();
+        assert_eq!(credentials.access_token, "synthetic-access");
+        assert_eq!(
+            credentials.refresh_token.as_deref(),
+            Some("synthetic-refresh")
+        );
+        assert_eq!(credentials.source, ClaudeCredentialSource::Desktop);
+
+        let load = || {
+            load_claude_desktop_credentials_from(&config, &local_state)
+                .map(|credentials| credentials.is_some())
+                .map_err(desktop_failure_kind)
+        };
+        let terminal = Err((false, CLAUDE_DESKTOP_READ_ERROR.to_string()));
+
+        // A value sealed under another key is a named terminal failure.
+        fs::write(&local_state, local_state_for(&[0x22u8; 32]).to_string()).unwrap();
+        assert_eq!(load(), terminal);
+        // A half-written Local State is retried.
+        fs::write(&local_state, r#"{"os_crypt":"#).unwrap();
+        assert_eq!(
+            load(),
+            Err((true, CLAUDE_DESKTOP_READ_RETRY_ERROR.to_string()))
+        );
+        fs::remove_file(&local_state).unwrap();
+        assert_eq!(load(), terminal);
+        fs::write(&config, "{}").unwrap();
+        assert!(matches!(
+            load_claude_desktop_credentials_from(&config, &local_state),
+            Ok(None)
+        ));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     fn timeout_diagnostic() -> SafeTransportDiagnostic {
