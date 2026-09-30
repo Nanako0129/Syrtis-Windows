@@ -1817,6 +1817,7 @@ async fn fetch_claude_accounts() -> Vec<AgentUsageSnapshot> {
         &current_dirs,
         current_generation,
         now,
+        agent_account_scope::resolve_history_scope("claude", None),
         fetched,
         |snapshot| enrich_snapshot(snapshot, now.timestamp()),
     )
@@ -1967,16 +1968,30 @@ impl ClaudeAccountCaches<'static> {
 }
 
 /// End of a Claude run, under `CLAUDE_ACCOUNT_STATE_LOCK`. If the registry
-/// moved since the run's snapshot, a config-directory card whose directory is
-/// no longer registered is dropped unpublished, and every entry its in-flight
-/// fetch wrote (gate, header, profile, identity) is purged again before any
-/// kept card is applied.
+/// moved since the run's snapshot, every config-directory card of this run is
+/// dropped unpublished and unapplied — not only removed ones: a directory
+/// removed and re-added under the same path may hold a different login by
+/// now, and the path alone cannot tell. The next poll refetches under the
+/// current generation. Every entry an in-flight fetch of a now-removed
+/// directory wrote (gate, header, profile, identity) is purged again before
+/// the primary and Desktop cards are applied.
+///
+/// The primary card always names its history scope: the per-installation
+/// constant `primary_history_scope` (`resolve_history_scope("claude", None)`),
+/// which depends on no credential. An error, unconfigured or last-good card
+/// of the primary carries it too, because the C# window card joins stored
+/// series to a live card strictly by `historyScope.scope`; without it the
+/// primary's history would vanish whenever its fetch fails. This happens
+/// after enrich, and error cards have no windows, so nothing new is recorded.
+/// Other providers and non-primary Claude cards are untouched: their failure
+/// cards keep `NoTrustedEvidence`.
 fn settle_claude_run_with<F>(
     caches: &ClaudeAccountCaches<'_>,
     snapshot_generation: u64,
     current_dirs: &[String],
     current_generation: u64,
     now: DateTime<Utc>,
+    primary_history_scope: Result<HistoryScope, AccountScopeError>,
     fetched: Vec<ClaudeAccountFetch>,
     enrich: F,
 ) -> Vec<AgentUsageSnapshot>
@@ -1989,13 +2004,21 @@ where
         purge_removed_claude_accounts_in(caches, current_dirs);
         fetched
             .into_iter()
-            .filter(|fetch| match fetch.account_key.as_deref() {
-                None | Some(CLAUDE_DESKTOP_ACCOUNT_KEY) => true,
-                Some(key) => current_dirs.iter().any(|dir| dir == key),
+            .filter(|fetch| {
+                matches!(
+                    fetch.account_key.as_deref(),
+                    None | Some(CLAUDE_DESKTOP_ACCOUNT_KEY)
+                )
             })
             .collect()
     };
-    publish_claude_accounts_with(caches.last_good, now, fetched, enrich)
+    let mut published = publish_claude_accounts_with(caches.last_good, now, fetched, enrich);
+    for card in &mut published {
+        if card.account_key.is_none() && card.history_scope.is_err() {
+            card.history_scope = primary_history_scope.clone();
+        }
+    }
+    published
 }
 
 /// Forget every per-account entry (last-good, 429 gate, header cache, profile
@@ -7439,15 +7462,26 @@ mod tests {
             &[kept.to_string(), removed.to_string()],
             7,
             now,
+            Err(AccountScopeError::NoTrustedEvidence),
             run(),
             |_| {},
         );
         assert_eq!(keys_of(&unchanged), [None, Some(kept), Some(removed)]);
 
         // B removed mid-run (generation 7 -> 8).
-        let published =
-            settle_claude_run_with(&caches, 7, &[kept.to_string()], 8, now, run(), |_| {});
-        assert_eq!(keys_of(&published), [None, Some(kept)]);
+        let published = settle_claude_run_with(
+            &caches,
+            7,
+            &[kept.to_string()],
+            8,
+            now,
+            Err(AccountScopeError::NoTrustedEvidence),
+            run(),
+            |_| {},
+        );
+        // Every config-dir card of a run the registry moved under is dropped,
+        // the still-registered A included; it refetches next poll.
+        assert_eq!(keys_of(&published), [None]);
         let b = Some(removed.to_string());
         assert!(!lock_last_good(&last_good)
             .entries
@@ -7462,6 +7496,225 @@ mod tests {
             .contains_key(&account_slot("claude", Some(kept))));
         assert!(headers.lock().unwrap().contains_key(&a));
         assert!(identities.lock().unwrap().keys().any(|(key, _)| key == &a));
+        scope.cleanup();
+    }
+
+    /// A directory removed and re-added under the same path mid-run may hold a
+    /// different login: its stale fetch is neither published nor applied.
+    #[test]
+    fn a_directory_re_added_mid_run_does_not_publish_its_stale_fetch() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("claude", "re-added-mid-run");
+        let credential = |name: &str| {
+            scope
+                .resolve_current("fixture", name, name.as_bytes())
+                .unwrap()
+        };
+        let dir_b = r"C:\claude\b";
+        let last_good = Mutex::new(ProviderLastGoodCache::default());
+        let gates = Mutex::new(ClaudeUsageGates::new());
+        let headers = Mutex::new(ClaudeHeaderCache::new());
+        let profiles = Mutex::new(ClaudeProfileCache::new());
+        let identities = Mutex::new(ClaudeIdentityCache::new());
+        let caches = ClaudeAccountCaches {
+            last_good: &last_good,
+            gates: &gates,
+            headers: &headers,
+            profiles: &profiles,
+            identities: &identities,
+        };
+        let run = || {
+            vec![
+                claude_account_success(None, credential("cli"), None, "p", now),
+                claude_account_success(Some(dir_b), credential("b-old"), None, "b", now),
+                claude_account_success(
+                    Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+                    credential("desktop"),
+                    None,
+                    "d",
+                    now,
+                ),
+            ]
+        };
+        let settle = |current_generation| {
+            settle_claude_run_with(
+                &caches,
+                3,
+                &[dir_b.to_string()],
+                current_generation,
+                now,
+                Err(AccountScopeError::NoTrustedEvidence),
+                run(),
+                |_| {},
+            )
+        };
+
+        // Removed and re-added (generation 3 -> 5), B still registered.
+        let published = settle(5);
+        assert_eq!(
+            keys_of(&published),
+            [None, Some(CLAUDE_DESKTOP_ACCOUNT_KEY)]
+        );
+        assert!(!lock_last_good(&last_good)
+            .entries
+            .contains_key(&account_slot("claude", Some(dir_b))));
+
+        // Unchanged generation publishes every card.
+        let published = settle(3);
+        assert_eq!(
+            keys_of(&published),
+            [None, Some(dir_b), Some(CLAUDE_DESKTOP_ACCOUNT_KEY)]
+        );
+        scope.cleanup();
+    }
+
+    /// The primary card names its constant history scope on every outcome so
+    /// the C# window card can join its stored series; other cards' failures
+    /// do not, and an error card records nothing.
+    #[test]
+    fn primary_card_always_carries_its_constant_history_scope() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let last_good = Mutex::new(ProviderLastGoodCache::default());
+        let gates = Mutex::new(ClaudeUsageGates::new());
+        let headers = Mutex::new(ClaudeHeaderCache::new());
+        let profiles = Mutex::new(ClaudeProfileCache::new());
+        let identities = Mutex::new(ClaudeIdentityCache::new());
+        let caches = ClaudeAccountCaches {
+            last_good: &last_good,
+            gates: &gates,
+            headers: &headers,
+            profiles: &profiles,
+            identities: &identities,
+        };
+        let dir = r"C:\claude\work";
+        let failure = |key: Option<&str>, source: &'static str, failure| ClaudeAccountFetch {
+            account_key: key.map(str::to_string),
+            failure_source: source,
+            outcome: ProviderFetchOutcome::Failure(failure),
+            remembered_scope: None,
+        };
+        let observations = std::cell::Cell::new(0usize);
+        let recorder_calls = std::cell::Cell::new(0usize);
+        for primary in [
+            failure(
+                None,
+                "unconfigured",
+                ProviderFetchFailure::terminal(CLAUDE_UNCONFIGURED_ERROR),
+            ),
+            failure(
+                None,
+                "oauth",
+                ProviderFetchFailure::terminal(
+                    "Claude OAuth token expired or invalid. Run `claude` to re-authenticate.",
+                ),
+            ),
+            failure(
+                None,
+                "oauth",
+                ProviderFetchFailure::transient(
+                    "Claude usage request failed. Retrying automatically.",
+                    None,
+                    timeout_diagnostic(),
+                ),
+            ),
+        ] {
+            let published = settle_claude_run_with(
+                &caches,
+                1,
+                &[dir.to_string()],
+                1,
+                now,
+                Ok(HistoryScope::for_test("claude-constant")),
+                vec![
+                    primary,
+                    failure(
+                        Some(dir),
+                        "oauth",
+                        ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_EXPIRED_ERROR),
+                    ),
+                    failure(
+                        Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+                        "oauth",
+                        ProviderFetchFailure::terminal(CLAUDE_DESKTOP_EXPIRED_ERROR),
+                    ),
+                ],
+                |snapshot| {
+                    enrich_snapshot_with(snapshot, now.timestamp(), |_, recorded, _| {
+                        recorder_calls.set(recorder_calls.get() + 1);
+                        observations.set(observations.get() + recorded.len());
+                        Ok(Vec::new())
+                    })
+                },
+            );
+            assert_eq!(
+                keys_of(&published),
+                [None, Some(dir), Some(CLAUDE_DESKTOP_ACCOUNT_KEY)]
+            );
+            let wire: Vec<Value> = published
+                .iter()
+                .map(|card| serde_json::to_value(card).unwrap())
+                .collect();
+            assert_eq!(
+                wire[0]["historyScope"],
+                serde_json::json!({"scope": "claude-constant"}),
+                "{}",
+                wire[0]
+            );
+            assert!(wire[0].get("accountKey").is_none());
+            for extra in &wire[1..] {
+                assert_eq!(
+                    extra["historyScope"],
+                    serde_json::json!({"error": "no trusted account evidence"}),
+                    "{extra}"
+                );
+            }
+        }
+        assert_eq!(observations.get(), 0, "an error card records nothing");
+        assert_eq!(recorder_calls.get(), 0);
+        assert!(lock_last_good(&last_good).entries.is_empty());
+
+        // The primary's last-good fallback keeps the scope it was recorded
+        // under; a success is untouched.
+        let scope = TestRefreshScope::new("claude", "primary-history-scope");
+        let binding =
+            ProviderCacheBinding::primary(scope.resolve_current("fixture", "cli", b"cli").unwrap());
+        let mut snapshot = cache_test_snapshot("claude", Ok(binding.primary.clone()), now);
+        snapshot.history_scope = Ok(HistoryScope::for_test("claude-constant"));
+        let run = |outcome| {
+            settle_claude_run_with(
+                &caches,
+                1,
+                &[],
+                1,
+                now,
+                Ok(HistoryScope::for_test("claude-constant")),
+                vec![ClaudeAccountFetch {
+                    account_key: None,
+                    failure_source: "oauth",
+                    outcome,
+                    remembered_scope: None,
+                }],
+                |_| {},
+            )
+        };
+        let success = run(ProviderFetchOutcome::Success {
+            snapshot,
+            cache_binding: Some(binding.clone()),
+        });
+        let fallback = run(ProviderFetchOutcome::Failure(
+            ProviderFetchFailure::transient(
+                "Claude usage request failed. Retrying automatically.",
+                Some(binding),
+                timeout_diagnostic(),
+            ),
+        ));
+        for card in [&success[0], &fallback[0]] {
+            assert_eq!(
+                card.history_scope,
+                Ok(HistoryScope::for_test("claude-constant"))
+            );
+        }
+        assert_eq!(fallback[0].windows.len(), 1, "served from last-good");
         scope.cleanup();
     }
 
