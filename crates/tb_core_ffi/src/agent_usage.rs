@@ -3662,7 +3662,17 @@ fn claude_login_scope_slot(source: &ClaudeCredentialSource) -> Result<Credential
     }
 }
 
+/// `config.json` keys holding Claude Desktop's safeStorage-encrypted token
+/// cache, in the order they are tried. Desktop app-2.16120.0 (observed
+/// 2026-10-01) writes its login to `oauth:tokenCacheV2` and leaves
+/// `oauth:tokenCache` holding an encrypted `{}`; older builds only have
+/// `oauth:tokenCache`.
+const CLAUDE_DESKTOP_TOKEN_CACHE_KEY_V2: &str = "oauth:tokenCacheV2";
 const CLAUDE_DESKTOP_TOKEN_CACHE_KEY: &str = "oauth:tokenCache";
+const CLAUDE_DESKTOP_TOKEN_CACHE_KEYS: [&str; 2] = [
+    CLAUDE_DESKTOP_TOKEN_CACHE_KEY_V2,
+    CLAUDE_DESKTOP_TOKEN_CACHE_KEY,
+];
 const CLAUDE_DESKTOP_READ_ERROR: &str = "Claude Desktop login could not be read.";
 const CLAUDE_DESKTOP_READ_RETRY_ERROR: &str =
     "Claude Desktop login could not be read. Retrying automatically.";
@@ -3698,9 +3708,10 @@ fn load_claude_desktop_credentials_from(
 ) -> Result<Option<ClaudeCredentials>, ProviderFetchFailure> {
     use crate::win_safe_storage;
 
-    let Some(value) = read_claude_desktop_token_cache(config_path)? else {
+    let caches = read_claude_desktop_token_cache(config_path)?;
+    if caches.is_empty() {
         return Ok(None);
-    };
+    }
     let local_state = match fs::read_to_string(local_state_path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -3712,11 +3723,41 @@ fn load_claude_desktop_credentials_from(
         .map_err(|_| claude_read_retry_failure(CLAUDE_DESKTOP_READ_RETRY_ERROR))?;
     let terminal = |_| ProviderFetchFailure::terminal(CLAUDE_DESKTOP_READ_ERROR);
     let key = win_safe_storage::load_key(&local_state).map_err(terminal)?;
-    let mut plaintext = win_safe_storage::decrypt(&key, &value).map_err(terminal)?;
+    let selected = select_claude_desktop_token_cache(caches, |cache_key, value| {
+        let mut plaintext = win_safe_storage::decrypt(&key, value).map_err(terminal)?;
+        let parsed = parse_claude_desktop_token_cache(&plaintext, config_path, cache_key);
+        win_safe_storage::wipe(&mut plaintext);
+        Ok(parsed)
+    });
     drop(key);
-    let parsed = parse_claude_desktop_token_cache(&plaintext, config_path);
-    win_safe_storage::wipe(&mut plaintext);
-    parsed.map(Some).map_err(ProviderFetchFailure::terminal)
+    selected.map(Some)
+}
+
+/// Try each present token cache in preference order and return the first one
+/// that holds a token. A cache that decrypts but holds no recognizable token
+/// (Desktop 2.16120.0 leaves `oauth:tokenCache` as `{}`) falls through to the
+/// next; a decrypt failure stops. With no token anywhere, the error of the
+/// first cache tried is reported.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn select_claude_desktop_token_cache<T>(
+    caches: Vec<(&'static str, String)>,
+    mut try_cache: T,
+) -> Result<ClaudeCredentials, ProviderFetchFailure>
+where
+    T: FnMut(&'static str, &str) -> Result<Result<ClaudeCredentials, String>, ProviderFetchFailure>,
+{
+    let mut first_error = None;
+    for (cache_key, value) in caches {
+        match try_cache(cache_key, &value)? {
+            Ok(credentials) => return Ok(credentials),
+            Err(display) => {
+                first_error.get_or_insert(display);
+            }
+        }
+    }
+    Err(ProviderFetchFailure::terminal(
+        first_error.unwrap_or_else(|| CLAUDE_DESKTOP_READ_ERROR.to_string()),
+    ))
 }
 
 /// A read or JSON-parse failure of a credential file another program
@@ -3814,25 +3855,36 @@ fn read_claude_config_dir_credentials(path: &Path) -> Result<String, ProviderFet
     Ok(raw)
 }
 
-/// The encrypted `oauth:tokenCache` value from Claude Desktop's config.json.
-/// A missing file, key or empty value means Desktop is not logged in.
+/// The encrypted token-cache values in Claude Desktop's config.json, as
+/// `(key, value)` in `CLAUDE_DESKTOP_TOKEN_CACHE_KEYS` order. A missing file,
+/// or every key missing, null or empty, means Desktop is not logged in (empty
+/// list). A key holding a non-string is skipped; if nothing usable remains
+/// and such a key exists, the login is reported unreadable.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn read_claude_desktop_token_cache(
     config_path: &Path,
-) -> Result<Option<String>, ProviderFetchFailure> {
+) -> Result<Vec<(&'static str, String)>, ProviderFetchFailure> {
     let raw = match fs::read_to_string(config_path) {
         Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(_) => return Err(claude_read_retry_failure(CLAUDE_DESKTOP_READ_RETRY_ERROR)),
     };
     let root: Value = serde_json::from_str(&raw)
         .map_err(|_| claude_read_retry_failure(CLAUDE_DESKTOP_READ_RETRY_ERROR))?;
-    match root.get(CLAUDE_DESKTOP_TOKEN_CACHE_KEY) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) if value.trim().is_empty() => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value.trim().to_string())),
-        Some(_) => Err(ProviderFetchFailure::terminal(CLAUDE_DESKTOP_READ_ERROR)),
+    let mut caches = Vec::new();
+    let mut malformed = false;
+    for cache_key in CLAUDE_DESKTOP_TOKEN_CACHE_KEYS {
+        match root.get(cache_key) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(value)) if value.trim().is_empty() => {}
+            Some(Value::String(value)) => caches.push((cache_key, value.trim().to_string())),
+            Some(_) => malformed = true,
+        }
     }
+    if caches.is_empty() && malformed {
+        return Err(ProviderFetchFailure::terminal(CLAUDE_DESKTOP_READ_ERROR));
+    }
+    Ok(caches)
 }
 
 struct ClaudeDesktopCandidate {
@@ -3862,6 +3914,7 @@ impl ClaudeDesktopCandidate {
 fn parse_claude_desktop_token_cache(
     plaintext: &[u8],
     config_path: &Path,
+    cache_key: &'static str,
 ) -> Result<ClaudeCredentials, String> {
     let root: Value =
         serde_json::from_slice(plaintext).map_err(|_| CLAUDE_DESKTOP_READ_ERROR.to_string())?;
@@ -3871,7 +3924,7 @@ fn parse_claude_desktop_token_cache(
         .into_iter()
         .max_by_key(ClaudeDesktopCandidate::rank)
     else {
-        return Err(claude_desktop_unrecognized_error(&root));
+        return Err(claude_desktop_unrecognized_error(cache_key, &root));
     };
     Ok(ClaudeCredentials {
         access_token: best.access_token,
@@ -3887,7 +3940,7 @@ fn parse_claude_desktop_token_cache(
             semantic_source: "claude-desktop-safestorage",
             canonical_location: agent_account_scope::canonical_file_location(
                 config_path,
-                Some(CLAUDE_DESKTOP_TOKEN_CACHE_KEY),
+                Some(cache_key),
             )
             .map_err(|_| CLAUDE_DESKTOP_READ_ERROR.to_string())?,
         },
@@ -3968,7 +4021,8 @@ fn parse_claude_desktop_expiry(value: &Value) -> Option<DateTime<Utc>> {
 
 /// Names only object keys that look like identifiers (letters and `_`, at
 /// most 40), so neither a token nor an account/UUID key can reach the message.
-fn claude_desktop_unrecognized_error(root: &Value) -> String {
+/// `cache_key` is one of `CLAUDE_DESKTOP_TOKEN_CACHE_KEYS`, a literal.
+fn claude_desktop_unrecognized_error(cache_key: &'static str, root: &Value) -> String {
     fn collect<'a>(value: &'a Value, depth: usize, keys: &mut std::collections::BTreeSet<&'a str>) {
         let children: Box<dyn Iterator<Item = &Value>> = match value {
             Value::Object(object) => {
@@ -4000,7 +4054,7 @@ fn claude_desktop_unrecognized_error(root: &Value) -> String {
     } else {
         listed.join(", ")
     };
-    format!("Claude Desktop login format is not recognized (keys: {listed}).")
+    format!("Claude Desktop login format is not recognized (cache: {cache_key}, keys: {listed}).")
 }
 
 #[cfg(target_os = "macos")]
@@ -8561,7 +8615,11 @@ mod tests {
     }
 
     fn parse_desktop(json: &str) -> Result<ClaudeCredentials, String> {
-        parse_claude_desktop_token_cache(json.as_bytes(), &desktop_fixture_config_path())
+        parse_claude_desktop_token_cache(
+            json.as_bytes(),
+            &desktop_fixture_config_path(),
+            CLAUDE_DESKTOP_TOKEN_CACHE_KEY,
+        )
     }
 
     #[test]
@@ -8652,9 +8710,10 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             error,
-            "Claude Desktop login format is not recognized (keys: a_b, idToken, note)."
+            "Claude Desktop login format is not recognized (cache: oauth:tokenCache, keys: a_b, idToken, note)."
         );
-        for leaked in ["0b8f3c1e", "secret", "oauth:tokenCache", "k1"] {
+        // The cache key named is the literal key read, not decrypted content.
+        for leaked in ["0b8f3c1e", "secret", "k1"] {
             assert!(!error.contains(leaked), "{leaked}");
         }
 
@@ -8667,8 +8726,102 @@ mod tests {
 
         assert_eq!(
             parse_desktop("[]").unwrap_err(),
-            "Claude Desktop login format is not recognized (keys: none)."
+            "Claude Desktop login format is not recognized (cache: oauth:tokenCache, keys: none)."
         );
+    }
+
+    /// Key selection without crypto: each cache value here is the plaintext
+    /// JSON itself, and the "decrypt" step passes it through.
+    #[test]
+    fn claude_desktop_prefers_token_cache_v2_and_falls_back_to_v1() {
+        let dir =
+            std::env::temp_dir().join(format!("tb_claude_desktop_select_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let valid = |token: &str| format!(r#"{{"accessToken":"{token}","refreshToken":"r"}}"#);
+        let select = |config: Value| {
+            fs::write(&path, config.to_string()).unwrap();
+            let caches = read_claude_desktop_token_cache(&path).unwrap();
+            select_claude_desktop_token_cache(caches, |cache_key, value| {
+                Ok(parse_claude_desktop_token_cache(
+                    value.as_bytes(),
+                    &path,
+                    cache_key,
+                ))
+            })
+        };
+        let token = |result: Result<ClaudeCredentials, ProviderFetchFailure>| {
+            let credentials = result.unwrap();
+            let record = credentials
+                .scope_slot
+                .canonical_location
+                .rsplit('\0')
+                .next()
+                .unwrap()
+                .to_string();
+            (credentials.access_token, record)
+        };
+
+        // V2 present: V2 used, and the slot names the key actually read.
+        assert_eq!(
+            token(select(serde_json::json!({
+                "oauth:tokenCache": valid("v1-token"),
+                "oauth:tokenCacheV2": valid("v2-token"),
+            }))),
+            ("v2-token".to_string(), "oauth:tokenCacheV2".to_string())
+        );
+        // V2 absent: V1 used.
+        assert_eq!(
+            token(select(
+                serde_json::json!({ "oauth:tokenCache": valid("v1-token") })
+            )),
+            ("v1-token".to_string(), "oauth:tokenCache".to_string())
+        );
+        // Desktop 2.16120.0: V1 holds `{}`, V2 holds the login.
+        assert_eq!(
+            token(select(serde_json::json!({
+                "oauth:tokenCache": "{}",
+                "oauth:tokenCacheV2": valid("v2-token"),
+            }))),
+            ("v2-token".to_string(), "oauth:tokenCacheV2".to_string())
+        );
+        // V2 left empty (`{}`), V1 still valid.
+        assert_eq!(
+            token(select(serde_json::json!({
+                "oauth:tokenCache": valid("v1-token"),
+                "oauth:tokenCacheV2": "{}",
+            }))),
+            ("v1-token".to_string(), "oauth:tokenCache".to_string())
+        );
+        // Both empty: the format error names the first key read.
+        assert_eq!(
+            select(serde_json::json!({
+                "oauth:tokenCache": "{}",
+                "oauth:tokenCacheV2": "{}",
+            }))
+            .map_err(desktop_failure_kind)
+            .unwrap_err(),
+            (
+                false,
+                "Claude Desktop login format is not recognized (cache: oauth:tokenCacheV2, keys: none)."
+                    .to_string()
+            )
+        );
+        // A decrypt failure stops instead of trying the other key.
+        let calls = std::cell::Cell::new(0);
+        let failure = select_claude_desktop_token_cache(
+            vec![
+                (CLAUDE_DESKTOP_TOKEN_CACHE_KEY_V2, "x".to_string()),
+                (CLAUDE_DESKTOP_TOKEN_CACHE_KEY, "y".to_string()),
+            ],
+            |_, _| {
+                calls.set(calls.get() + 1);
+                Err(ProviderFetchFailure::terminal(CLAUDE_DESKTOP_READ_ERROR))
+            },
+        );
+        assert!(failure.is_err());
+        assert_eq!(calls.get(), 1);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `(transient, display)` so desktop load results can be compared.
@@ -8705,15 +8858,31 @@ mod tests {
         let path = dir.join("config.json");
         let read =
             |path: &Path| read_claude_desktop_token_cache(path).map_err(desktop_failure_kind);
-        assert_eq!(read(&path), Ok(None));
+        assert_eq!(read(&path), Ok(Vec::new()));
         let retry = (true, CLAUDE_DESKTOP_READ_RETRY_ERROR.to_string());
+        let v1 = |value: &str| vec![(CLAUDE_DESKTOP_TOKEN_CACHE_KEY, value.to_string())];
+        let v2 = |value: &str| vec![(CLAUDE_DESKTOP_TOKEN_CACHE_KEY_V2, value.to_string())];
         for (raw, expected) in [
-            ("{}", Ok(None)),
-            (r#"{"oauth:tokenCache":null}"#, Ok(None)),
-            (r#"{"oauth:tokenCache":"  "}"#, Ok(None)),
+            ("{}", Ok(Vec::new())),
+            (r#"{"oauth:tokenCache":null}"#, Ok(Vec::new())),
+            (r#"{"oauth:tokenCache":"  "}"#, Ok(Vec::new())),
+            (r#"{"oauth:tokenCache":" djEw "}"#, Ok(v1("djEw"))),
+            (r#"{"oauth:tokenCacheV2":"djEwV2"}"#, Ok(v2("djEwV2"))),
+            // V2 is tried first; V1 stays available as the fallback.
             (
-                r#"{"oauth:tokenCache":" djEw "}"#,
-                Ok(Some("djEw".to_string())),
+                r#"{"oauth:tokenCache":"djEwV1","oauth:tokenCacheV2":"djEwV2"}"#,
+                Ok(vec![
+                    (CLAUDE_DESKTOP_TOKEN_CACHE_KEY_V2, "djEwV2".to_string()),
+                    (CLAUDE_DESKTOP_TOKEN_CACHE_KEY, "djEwV1".to_string()),
+                ]),
+            ),
+            (
+                r#"{"oauth:tokenCache":"djEwV1","oauth:tokenCacheV2":""}"#,
+                Ok(v1("djEwV1")),
+            ),
+            (
+                r#"{"oauth:tokenCache":"djEwV1","oauth:tokenCacheV2":7}"#,
+                Ok(v1("djEwV1")),
             ),
             (
                 r#"{"oauth:tokenCache":5}"#,
@@ -8765,6 +8934,27 @@ mod tests {
             Some("synthetic-refresh")
         );
         assert_eq!(credentials.source, ClaudeCredentialSource::Desktop);
+
+        // Desktop 2.16120.0 shape: an encrypted `{}` under `oauth:tokenCache`
+        // and the login under `oauth:tokenCacheV2`.
+        let v2_plaintext = br#"{"entry":{"accessToken":"synthetic-v2-access","refreshToken":"synthetic-v2-refresh"}}"#;
+        fs::write(
+            &config,
+            serde_json::json!({
+                "oauth:tokenCache": v10_value(&key, &[8u8; 12], b"{}"),
+                "oauth:tokenCacheV2": v10_value(&key, &[9u8; 12], v2_plaintext),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let credentials = load_claude_desktop_credentials_from(&config, &local_state)
+            .unwrap()
+            .unwrap();
+        assert_eq!(credentials.access_token, "synthetic-v2-access");
+        assert!(credentials
+            .scope_slot
+            .canonical_location
+            .ends_with("\0oauth:tokenCacheV2"));
 
         let load = || {
             load_claude_desktop_credentials_from(&config, &local_state)
