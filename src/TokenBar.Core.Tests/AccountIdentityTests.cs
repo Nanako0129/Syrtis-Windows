@@ -229,10 +229,76 @@ public class AccountIdentityTests
     [Fact]
     public void ASeriesWithNoLiveSnapshotOfItsScopeKeepsTheFallbackLabel()
     {
-        var quota = Payload(Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")));
-
-        var (summaries, _, _) = QuotaLensData.Build([Series("gone", active: false)], quota);
+        // Multi-card client: an unmatched series never borrows the primary's label.
+        var (summaries, _, _) = QuotaLensData.Build([Series("gone", active: false)], TwoAccounts());
 
         Assert.Null(Assert.Single(summaries).WindowLabel);
+    }
+
+    [Fact]
+    public void ASingleCardClientKeepsTheScopeBlindLabelJoin()
+    {
+        // Codex: one card, series from an earlier account still takes the live label.
+        var quota = Payload(new AgentUsageSnapshot(
+            "codex", "oauth", "n", [Window("session.v1", "Session", 80, "session.v1")],
+            HistoryScope: new AccountScopeStatus(Scope: "new")));
+        var old = Series("old", active: false) with { ProviderId = "codex" };
+
+        var (summaries, _, _) = QuotaLensData.Build([old], quota);
+
+        Assert.Equal("Session", Assert.Single(summaries).WindowLabel);
+    }
+
+    [Fact]
+    public void ConfigDirLabelsWidenOnlyWhenTheDirectoryNameCollides()
+    {
+        var a = @"D:\one\Work";
+        var b = @"E:\two\work";
+        var c = @"E:\two\other";
+        var payload = Payload(
+            Card(null, "P"), Card(a, "A"), Card(b, "B"), Card(c, "C"));
+
+        Assert.Equal(@"Claude · one\Work", AccountLabel.Of(new AccountIdentity("claude", a), payload));
+        Assert.Equal(@"Claude · two\work", AccountLabel.Of(new AccountIdentity("claude", b), payload));
+        Assert.Equal("Claude · other", AccountLabel.Of(new AccountIdentity("claude", c), payload));
+
+        // Same parent too: walk up until they differ.
+        var d = @"D:\x\shared\Work";
+        var e = @"D:\y\shared\work";
+        var deep = Payload(Card(d, "D"), Card(e, "E"));
+        Assert.Equal(@"Claude · x\shared\Work", AccountLabel.Of(new AccountIdentity("claude", d), deep));
+    }
+
+    // ---- primary window-card target, normalization -------------------------
+
+    [Fact]
+    public void WindowCardFollowsThePrimaryElseTheFirstAccountWithWindows()
+    {
+        var desktopOnly = Payload(
+            Card(null, "P", error: "not signed in"),
+            Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
+        Assert.Equal(Desktop, WindowCardText.WindowCardAccount(desktopOnly, "claude"));
+        var tab = Assert.Single(WindowCardText.Tabs(
+            [Series("S"), Series("P")], desktopOnly, "claude", WindowCardText.WindowCardAccount(desktopOnly, "claude")));
+        Assert.Equal("S", tab.Id.AccountScope);
+        Assert.Equal("Session", tab.Label);
+
+        Assert.Null(WindowCardText.WindowCardAccount(TwoAccounts(), "claude"));
+        Assert.Null(WindowCardText.WindowCardAccount(Payload(Card(null, "P", error: "x")), "claude"));
+        Assert.Null(WindowCardText.WindowCardAccount(null, "claude"));
+    }
+
+    [Fact]
+    public void ThePrimaryFallsBackToStoredSeriesOnlyWithoutAPayload()
+    {
+        var history = new[] { Series("P"), Series("S") };
+
+        Assert.Equal(2, WindowCardText.Tabs(history, null, "claude", null).Count);
+        Assert.Equal(2, WindowCardText.Tabs(history, null, "claude", "").Count);
+        // A primary agent with a scope filters by it, "" being the primary.
+        var tab = Assert.Single(WindowCardText.Tabs(history, TwoAccounts(), "claude", ""));
+        Assert.Equal("P", tab.Id.AccountScope);
+        // A non-primary account with no payload gets nothing.
+        Assert.Empty(WindowCardText.Tabs(history, null, "claude", Desktop));
     }
 }

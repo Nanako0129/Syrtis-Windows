@@ -399,7 +399,7 @@ public sealed class SettingsWindow : Window
                 {
                     choices.Add((
                         QuotaResolver.Selection(agent.ClientId, window.CardId, agent.Account.AccountKey),
-                        $"{AccountLabel.Of(agent)} · {window.Label.Localized()}"));
+                        $"{AccountLabel.Of(agent, payload)} · {window.Label.Localized()}"));
                 }
             }
         }

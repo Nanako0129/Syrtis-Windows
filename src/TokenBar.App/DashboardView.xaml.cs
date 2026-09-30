@@ -1346,7 +1346,7 @@ public sealed partial class DashboardView : UserControl
             var section = new StackPanel { Spacing = 5 };
             var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
             header.Children.Add(AgentIcon.Create(agent.ClientId, 14));
-            var title = Ui.Text(AccountLabel.Of(agent), 12, bold: true);
+            var title = Ui.Text(AccountLabel.Of(agent, snapshot.Quota), 12, bold: true);
             if (AccountLabel.Detail(agent.Account) is { } fullPath)
             {
                 ToolTipService.SetToolTip(title, fullPath);

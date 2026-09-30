@@ -112,7 +112,7 @@ public static class QuotaSummaryText
     /// <summary>Who a window belongs to: the primary keeps the bare client
     /// name; another account is named by <see cref="AccountLabel"/>.</summary>
     private static string AccountQualifiedName(string clientId, string? accountKey) =>
-        AccountLabel.Of(new AccountIdentity(clientId, accountKey), full: true);
+        AccountLabel.Of(AccountIdentity.Of(clientId, accountKey), full: true);
 
     public static string TightestName(QuotaSummary summary) =>
         AccountQualifiedName(summary.TightestClient, summary.TightestAccountKey);

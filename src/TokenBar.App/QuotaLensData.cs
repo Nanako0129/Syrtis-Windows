@@ -31,7 +31,7 @@ public static class QuotaLensData
         IReadOnlyDictionary<QuotaWindowIdentity, QuotaHeatmap> Grids)
         Build(IReadOnlyList<QuotaHistorySeries>? history, AgentUsagePayload? quota)
     {
-        var labels = WindowLabels(quota);
+        var labels = new WindowLabelJoin(quota);
         var forSummaries =
             new List<(QuotaWindowIdentity Id, string? Label, IReadOnlyList<QuotaCycle> Cycles)>();
         var forWindows = new List<(QuotaWindowIdentity Id, string? Label, QuotaHeatmap Grid)>();
@@ -49,8 +49,7 @@ public static class QuotaLensData
             // seam would collapse "no label" into "labelled with its own key"
             // in the data layer, where nothing downstream could tell them apart
             // again.
-            var label = labels.GetValueOrDefault((series.ProviderId, series.AccountScope, series.WindowKey))
-                ?? labels.GetValueOrDefault((series.ProviderId, null, series.WindowKey));
+            var label = labels.Lookup(series);
             var grid = QuotaHeatmapFold.Build(series.Samples);
             grids[id] = grid;
             forWindows.Add((id, label, grid));
@@ -63,45 +62,66 @@ public static class QuotaLensData
             grids);
     }
 
-    /// <summary>The label join: a stored series belongs to the live snapshot
-    /// with the same <c>ProviderId == ClientId</c> AND
-    /// <c>AccountScope == HistoryScope.Scope</c> (the one join every history
-    /// consumer uses), then <c>PaceStatus.WindowKey</c> picks the window. A
-    /// series with no matching live window keeps its identity and loses only
-    /// its label, so a miss leaves null rather than dropping the row. A
+    /// <summary>The label join from a stored series to a live window.
+    /// <para>A client with ONE card in the payload (every provider but
+    /// Claude, and Claude without extra accounts) joins exactly as it always
+    /// did: <c>(client, PaceStatus.WindowKey)</c>, scope ignored.</para>
+    /// <para>A client with several cards joins by the one history rule: the
+    /// snapshot with the same <c>ProviderId</c> AND
+    /// <c>AccountScope == HistoryScope.Scope</c>, then the window key. A
     /// non-primary account's label is prefixed with its
-    /// <see cref="AccountLabel"/>, so two accounts' rows for the same window
-    /// read differently.
-    /// <para>A primary snapshot whose history scope is unknown (an old core,
-    /// or a resolution error) has no scope to join on: it keeps the
-    /// pre-account <c>(client, window)</c> join, byte-identical for every
-    /// provider. Only the primary does — a non-primary card with no scope
-    /// labels nothing.</para></summary>
-    private static Dictionary<(string Client, string? Scope, string Window), string> WindowLabels(
-        AgentUsagePayload? quota)
+    /// <see cref="AccountLabel"/>. A series with no exact match gets no live
+    /// label (the caller's derived fallback) — never another account's.</para>
+    /// A miss leaves null rather than dropping the row.</summary>
+    private sealed class WindowLabelJoin
     {
-        var labels = new Dictionary<(string Client, string? Scope, string Window), string>();
-        foreach (var agent in quota?.Agents ?? [])
+        private readonly HashSet<string> _multi = [];
+        private readonly Dictionary<(string Client, string Window), string> _byClient = [];
+        private readonly Dictionary<(string Client, string Scope, string Window), string> _byScope = [];
+
+        public WindowLabelJoin(AgentUsagePayload? quota)
         {
-            var account = agent.Account;
-            var scope = agent.HistoryScope?.Scope;
-            if (scope is null && account.AccountKey is not null)
+            var agents = quota?.Agents ?? [];
+            foreach (var group in agents.GroupBy(a => a.ClientId).Where(g => g.Count() > 1))
             {
-                continue;
+                _multi.Add(group.Key);
             }
 
-            foreach (var window in agent.UniqueCardWindows)
+            foreach (var agent in agents)
             {
-                if (window.PaceStatus.WindowKey is { } key)
+                var multi = _multi.Contains(agent.ClientId);
+                var account = agent.Account;
+                if (multi && agent.HistoryScope?.Scope is null)
                 {
-                    var text = account.AccountKey is null
-                        ? window.Label
-                        : $"{AccountLabel.Of(account)} · {window.Label}";
-                    labels.TryAdd((agent.ClientId, scope, key), text);
+                    continue;
+                }
+
+                foreach (var window in agent.UniqueCardWindows)
+                {
+                    if (window.PaceStatus.WindowKey is not { } key)
+                    {
+                        continue;
+                    }
+
+                    if (multi)
+                    {
+                        _byScope.TryAdd(
+                            (agent.ClientId, agent.HistoryScope!.Scope!, key),
+                            account.AccountKey is null
+                                ? window.Label
+                                : $"{AccountLabel.Of(account, quota)} · {window.Label}");
+                    }
+                    else
+                    {
+                        _byClient.TryAdd((agent.ClientId, key), window.Label);
+                    }
                 }
             }
         }
 
-        return labels;
+        public string? Lookup(QuotaHistorySeries series) =>
+            _multi.Contains(series.ProviderId)
+                ? _byScope.GetValueOrDefault((series.ProviderId, series.AccountScope, series.WindowKey))
+                : _byClient.GetValueOrDefault((series.ProviderId, series.WindowKey));
     }
 }

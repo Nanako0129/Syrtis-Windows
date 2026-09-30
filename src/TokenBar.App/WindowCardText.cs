@@ -241,14 +241,17 @@ public static class WindowCardText
     {
         // The snapshot is selected by (clientId, accountKey); accountKey null
         // is the primary. A stored series belongs to it only when
-        // series.AccountScope == its HistoryScope.Scope — for Claude (whose
-        // accounts share one client id) and for any non-primary account that
-        // is STRICT: no scope, no series, never "every series". Other
-        // providers keep the lenient fallback below.
-        var agent = quota?.Agents.FirstOrDefault(a =>
-            a.ClientId == clientId && a.Account.AccountKey == (accountKey is { Length: > 0 } ? accountKey : null));
+        // series.AccountScope == its HistoryScope.Scope. A non-primary
+        // account is STRICT: no scope, no series, never "every series". The
+        // primary filters by its scope whenever it has one (the core gives
+        // the Claude primary one on every outcome); with no payload yet, or
+        // no such agent, it falls back to every stored series of the client.
+        // Ceiling: until the first payload arrives, a multi-account user's
+        // primary window card may show other accounts' series.
+        var identity = AccountIdentity.Of(clientId, accountKey);
+        var agent = quota?.Agents.FirstOrDefault(a => a.Account == identity);
         var liveScope = agent?.HistoryScope?.Scope;
-        var strict = clientId == "claude" || accountKey is { Length: > 0 };
+        var strict = identity.AccountKey is not null;
 
         // Every stored series this client's own scope-filtered set contains —
         // restricted to the live history scope first (see the doc
@@ -354,6 +357,22 @@ public static class WindowCardText
         // macOS's WindowCardLoader keeps between `candidates` (display order)
         // and `pick` (which one is shown first).
         return tabs;
+    }
+
+    /// <summary>Which account's card the per-client window card shows: the
+    /// primary when it has windows to draw; otherwise the first non-primary
+    /// card of the client (payload order) that has; otherwise the primary.
+    /// Returns the account key (null = primary), for <see cref="Tabs"/>.</summary>
+    public static string? WindowCardAccount(AgentUsagePayload? quota, string clientId)
+    {
+        var cards = (quota?.Agents ?? []).Where(a => a.ClientId == clientId).ToList();
+        if (cards.Any(a => a.Account.AccountKey is null && a.Windows.Count > 0))
+        {
+            return null;
+        }
+
+        return cards.FirstOrDefault(a => a.Account.AccountKey is not null && a.Windows.Count > 0)
+            ?.Account.AccountKey;
     }
 
     /// <summary>Whether <paramref name="windowKey"/> names a session-class

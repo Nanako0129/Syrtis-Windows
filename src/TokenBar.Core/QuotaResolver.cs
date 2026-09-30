@@ -23,9 +23,9 @@ public static class QuotaResolver
 
     /// <summary>Builds the canonical persisted selection for one quota card.</summary>
     public static string Selection(string clientId, string cardId, string? accountKey = null) =>
-        string.IsNullOrEmpty(accountKey)
-            ? $"{clientId}|{cardId}"
-            : $"{clientId}|{cardId}|{accountKey}";
+        AccountIdentity.Normalize(accountKey) is { } key
+            ? $"{clientId}|{cardId}|{key}"
+            : $"{clientId}|{cardId}";
 
     /// <summary>
     /// Canonicalizes a persisted selection against the current payload. Empty,

@@ -725,7 +725,17 @@ public sealed class AgentUsageTransportDiagnosticJsonConverter :
 
 /// <summary>One quota card's identity: the client plus which of its accounts.
 /// <see cref="AccountKey"/> null = the primary account.</summary>
-public sealed record AccountIdentity(string ClientId, string? AccountKey);
+public sealed record AccountIdentity(string ClientId, string? AccountKey)
+{
+    /// <summary>The one normalization of an account key (mirrors the core's
+    /// <c>account_key_component</c>): null and "" are the primary (null);
+    /// anything else, whitespace included, is a distinct account.</summary>
+    public static string? Normalize(string? accountKey) =>
+        string.IsNullOrEmpty(accountKey) ? null : accountKey;
+
+    public static AccountIdentity Of(string clientId, string? accountKey) =>
+        new(clientId, Normalize(accountKey));
+}
 
 public sealed record AgentUsageSnapshot(
     string ClientId,
@@ -762,7 +772,7 @@ public sealed record AgentUsageSnapshot(
     /// primary, anything else, whitespace included, is a distinct
     /// account).</summary>
     [JsonIgnore]
-    public AccountIdentity Account => new(ClientId, AccountKey is { Length: > 0 } ? AccountKey : null);
+    public AccountIdentity Account => AccountIdentity.Of(ClientId, AccountKey);
 
     void IJsonOnDeserialized.OnDeserialized()
     {

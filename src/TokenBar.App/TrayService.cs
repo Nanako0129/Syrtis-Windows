@@ -478,17 +478,11 @@ public sealed class TrayService : IDisposable
                 a => a.Error is null && a.UniqueCardWindows.Count > 0))
             {
                 source.Items.Add(new Microsoft.UI.Xaml.Controls.MenuFlyoutSeparator());
-                var header = new Microsoft.UI.Xaml.Controls.MenuFlyoutItem
+                source.Items.Add(new Microsoft.UI.Xaml.Controls.MenuFlyoutItem
                 {
-                    Text = AccountLabel.Of(agent),
+                    Text = AccountLabel.Of(agent, payload),
                     IsEnabled = false,
-                };
-                if (AccountLabel.Detail(agent.Account) is { } fullPath)
-                {
-                    Microsoft.UI.Xaml.Controls.ToolTipService.SetToolTip(header, fullPath);
-                }
-
-                source.Items.Add(header);
+                });
                 foreach (var window in agent.UniqueCardWindows)
                 {
                     var left = (int)Math.Round(
@@ -560,7 +554,7 @@ public sealed class TrayService : IDisposable
         {
             var left = Math.Clamp(pick.Window.RemainingPercent, 0, 100);
             lines.Add("{0} {1} {2}% left".Localized(
-                AccountLabel.Of(new AccountIdentity(pick.ClientId, pick.AccountKey)),
+                AccountLabel.Of(AccountIdentity.Of(pick.ClientId, pick.AccountKey), _feed.Quota),
                 pick.Window.Label.Localized(),
                 left.ToString("F0", System.Globalization.CultureInfo.CurrentCulture)));
         }
