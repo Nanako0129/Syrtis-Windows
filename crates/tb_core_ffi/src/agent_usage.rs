@@ -19,7 +19,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{LazyLock, Mutex};
 use tower_service::Service;
 
@@ -74,6 +76,18 @@ pub struct AgentUsagePayload {
 #[serde(rename_all = "camelCase")]
 pub struct AgentUsageSnapshot {
     client_id: String,
+    /// Which account of `client_id` this card belongs to: `None` for the
+    /// primary account (omitted on the wire, so a single-account payload is
+    /// byte-identical to one produced before this field existed), a configured
+    /// `CLAUDE_CONFIG_DIR` path, or `CLAUDE_DESKTOP_ACCOUNT_KEY`. Stamped by
+    /// `apply_account_outcome_with`, never by a fetch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_key: Option<String>,
+    /// The binding-keyed `/api/oauth/profile` identity this fetch proved, used
+    /// only by the Claude merge pass. Never serialized: it is an HMAC scope,
+    /// not something a consumer may join on.
+    #[serde(skip)]
+    merge_scope: Option<AccountScope>,
     source: String,
     updated_at: String,
     identity: Option<AgentIdentity>,
@@ -497,37 +511,58 @@ struct LastGoodEntry {
     snapshot: AgentUsageSnapshot,
 }
 
+/// One account's slot in a per-client cache: `(client_id, account_key)`, with
+/// the account key already passed through `account_key_component`. Keyed on
+/// `client_id` alone, a second Claude account would overwrite the primary's
+/// entry and the primary would have no last-good to recover.
+type AccountSlot = (String, Option<String>);
+
+fn account_slot(client_id: &str, account: Option<&str>) -> AccountSlot {
+    (
+        client_id.to_string(),
+        account_key_component(account).map(str::to_string),
+    )
+}
+
+/// The one place an account argument becomes "which account is this": `None`
+/// or empty is the primary, anything else is used byte for byte. Nobody trims:
+/// the last-good slot, the 429 gate, the header and profile caches, the wire
+/// `accountKey` and the config-dir history digest all go through this rule.
+pub(crate) fn account_key_component(account: Option<&str>) -> Option<&str> {
+    account.filter(|value| !value.is_empty())
+}
+
 #[derive(Debug, Default)]
 struct ProviderLastGoodCache {
-    entries: HashMap<String, LastGoodEntry>,
+    entries: HashMap<AccountSlot, LastGoodEntry>,
 }
 
 impl ProviderLastGoodCache {
     fn clean_for(
         &self,
-        client_id: &str,
+        slot: &AccountSlot,
         binding: &ProviderCacheBinding,
     ) -> Option<AgentUsageSnapshot> {
         self.entries
-            .get(client_id)
+            .get(slot)
             .filter(|entry| &entry.binding == binding)
             .map(|entry| entry.snapshot.clone())
     }
 
     fn replace(
         &mut self,
-        client_id: &str,
+        slot: &AccountSlot,
         binding: ProviderCacheBinding,
         mut snapshot: AgentUsageSnapshot,
     ) {
         snapshot.error = None;
         snapshot.transport_diagnostic = None;
         self.entries
-            .insert(client_id.to_string(), LastGoodEntry { binding, snapshot });
+            .insert(slot.clone(), LastGoodEntry { binding, snapshot });
     }
 
-    fn clear(&mut self, client_id: &str) {
-        self.entries.remove(client_id);
+    fn clear(&mut self, slot: &AccountSlot) {
+        self.entries.remove(slot);
     }
 }
 
@@ -1036,7 +1071,7 @@ impl ClaudeCredentials {
                 .filter(|token| !token.is_empty())
                 .map(str::as_bytes),
             ClaudeCredentialSource::Environment => Some(self.access_token.as_bytes()),
-            ClaudeCredentialSource::Desktop => Some(
+            ClaudeCredentialSource::Desktop | ClaudeCredentialSource::ConfigDir(_) => Some(
                 self.refresh_token
                     .as_deref()
                     .filter(|token| !token.is_empty())
@@ -1059,7 +1094,7 @@ impl ClaudeCredentials {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ClaudeCredentialSource {
     Keychain,
     File,
@@ -1069,6 +1104,18 @@ enum ClaudeCredentialSource {
     /// refreshed: a refresh rotates the refresh token and would sign the user
     /// out of Claude Desktop.
     Desktop,
+    /// `<dir>\.credentials.json` of a configured `CLAUDE_CONFIG_DIR` (the
+    /// directory is carried). Read-only: refreshing would rotate that
+    /// account's refresh token behind Claude Code's back, and the refresh
+    /// path writes only to the primary's stores.
+    ConfigDir(PathBuf),
+}
+
+impl ClaudeCredentialSource {
+    /// A credential TokenBar must never refresh, reload for refresh, or write.
+    fn is_read_only(&self) -> bool {
+        matches!(self, Self::Desktop | Self::ConfigDir(_))
+    }
 }
 
 #[derive(Debug)]
@@ -1236,6 +1283,8 @@ fn empty_error_snapshot(
     transport_diagnostic: Option<SafeTransportDiagnostic>,
 ) -> AgentUsageSnapshot {
     AgentUsageSnapshot {
+        account_key: None,
+        merge_scope: None,
         client_id: client_id.to_string(),
         source: source.to_string(),
         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -1282,14 +1331,38 @@ fn apply_provider_outcome_with<F>(
     failure_source: &str,
     now: DateTime<Utc>,
     outcome: ProviderFetchOutcome,
+    enrich: F,
+) -> Option<AgentUsageSnapshot>
+where
+    F: FnMut(&mut AgentUsageSnapshot),
+{
+    apply_account_outcome_with(cache, client_id, None, failure_source, now, outcome, enrich)
+}
+
+/// `apply_provider_outcome_with` for one account of `client_id`. Every cache
+/// operation uses that account's own slot, and every snapshot it returns —
+/// fresh, last-good or error — carries that account's `account_key`.
+fn apply_account_outcome_with<F>(
+    cache: &Mutex<ProviderLastGoodCache>,
+    client_id: &str,
+    account: Option<&str>,
+    failure_source: &str,
+    now: DateTime<Utc>,
+    outcome: ProviderFetchOutcome,
     mut enrich: F,
 ) -> Option<AgentUsageSnapshot>
 where
     F: FnMut(&mut AgentUsageSnapshot),
 {
+    let slot = account_slot(client_id, account);
+    let error_snapshot = |source: &str, display: String, diagnostic| {
+        let mut snapshot = empty_error_snapshot(client_id, source, now, display, diagnostic);
+        snapshot.account_key = slot.1.clone();
+        snapshot
+    };
     match outcome {
         ProviderFetchOutcome::Absent => {
-            lock_last_good(cache).clear(client_id);
+            lock_last_good(cache).clear(&slot);
             None
         }
         ProviderFetchOutcome::Success {
@@ -1299,12 +1372,10 @@ where
             match snapshot.account_scope.as_ref() {
                 Ok(_) | Err(AccountScopeError::NoTrustedEvidence) => {}
                 Err(_) => {
-                    lock_last_good(cache).clear(client_id);
+                    lock_last_good(cache).clear(&slot);
                     let source = snapshot.source.clone();
-                    return Some(empty_error_snapshot(
-                        client_id,
+                    return Some(error_snapshot(
                         &source,
-                        now,
                         format!(
                             "{} account identity could not be verified.",
                             clean_plan(client_id)
@@ -1314,6 +1385,7 @@ where
                 }
             }
 
+            snapshot.account_key = slot.1.clone();
             enrich(&mut snapshot);
             let cacheable = snapshot.account_scope.is_ok()
                 && snapshot.error.is_none()
@@ -1321,20 +1393,14 @@ where
                 && usable_success(&snapshot);
             let mut cache = lock_last_good(cache);
             match (cacheable, cache_binding) {
-                (true, Some(binding)) => cache.replace(client_id, binding, snapshot.clone()),
-                _ => cache.clear(client_id),
+                (true, Some(binding)) => cache.replace(&slot, binding, snapshot.clone()),
+                _ => cache.clear(&slot),
             }
             Some(snapshot)
         }
         ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { display }) => {
-            lock_last_good(cache).clear(client_id);
-            Some(empty_error_snapshot(
-                client_id,
-                failure_source,
-                now,
-                display,
-                None,
-            ))
+            lock_last_good(cache).clear(&slot);
+            Some(error_snapshot(failure_source, display, None))
         }
         ProviderFetchOutcome::Failure(ProviderFetchFailure::Transient {
             display,
@@ -1343,13 +1409,11 @@ where
         }) => {
             let fallback = attempt_binding
                 .as_ref()
-                .and_then(|binding| lock_last_good(cache).clean_for(client_id, binding));
+                .and_then(|binding| lock_last_good(cache).clean_for(&slot, binding));
             let Some(mut snapshot) = fallback else {
-                lock_last_good(cache).clear(client_id);
-                return Some(empty_error_snapshot(
-                    client_id,
+                lock_last_good(cache).clear(&slot);
+                return Some(error_snapshot(
                     failure_source,
-                    now,
                     display,
                     Some(transport_diagnostic),
                 ));
@@ -1398,12 +1462,14 @@ pub async fn run(publication_generation: u64) -> AgentUsagePayload {
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     let (codex, claude, antigravity, copilot, grok) = tokio::join!(
         fetch_codex(),
-        fetch_claude(),
+        fetch_claude_accounts(),
         fetch_antigravity(),
         fetch_copilot(),
         fetch_grok()
     );
-    let mut agents = vec![codex, claude, antigravity];
+    let mut agents = vec![codex];
+    agents.extend(claude);
+    agents.push(antigravity);
     // Copilot only appears when signed in (via opencode); skip a bare not-signed-in error card.
     if let Some(copilot) = copilot {
         agents.push(copilot);
@@ -1426,6 +1492,8 @@ async fn fetch_grok() -> Option<AgentUsageSnapshot> {
         Ok(Some(data)) => ProviderFetchOutcome::Success {
             cache_binding: data.cache_binding,
             snapshot: AgentUsageSnapshot {
+                account_key: None,
+                merge_scope: None,
                 client_id: "grok".to_string(),
                 source: "oauth".to_string(),
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -1459,6 +1527,8 @@ async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
                 Ok(data) => ProviderFetchOutcome::Success {
                     cache_binding: Some(data.cache_binding),
                     snapshot: AgentUsageSnapshot {
+                        account_key: None,
+                        merge_scope: None,
                         client_id: "copilot".to_string(),
                         source: "oauth".to_string(),
                         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -1485,6 +1555,8 @@ async fn fetch_antigravity() -> AgentUsageSnapshot {
         Ok(fetched) => ProviderFetchOutcome::Success {
             cache_binding: fetched.cache_binding,
             snapshot: AgentUsageSnapshot {
+                account_key: None,
+                merge_scope: None,
                 client_id: "antigravity".to_string(),
                 source: fetched.source,
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -1587,15 +1659,30 @@ impl ClaudeUsageGate {
     }
 }
 
-static CLAUDE_USAGE_GATE: Mutex<ClaudeUsageGate> = Mutex::new(ClaudeUsageGate {
-    blocked_until: None,
-    binding: None,
-});
+/// One 429 gate per Claude account (`account_key_component`), so a binding
+/// mismatch in one account's gate can never wipe another account's cooldown.
+type ClaudeUsageGates = HashMap<Option<String>, ClaudeUsageGate>;
 
-fn lock_gate() -> std::sync::MutexGuard<'static, ClaudeUsageGate> {
-    CLAUDE_USAGE_GATE
+static CLAUDE_USAGE_GATES: LazyLock<Mutex<ClaudeUsageGates>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn with_gate<T>(account: Option<&str>, body: impl FnOnce(&mut ClaudeUsageGate) -> T) -> T {
+    with_gate_in(&CLAUDE_USAGE_GATES, account, body)
+}
+
+fn with_gate_in<T>(
+    gates: &Mutex<ClaudeUsageGates>,
+    account: Option<&str>,
+    body: impl FnOnce(&mut ClaudeUsageGate) -> T,
+) -> T {
+    let mut gates = gates
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    body(
+        gates
+            .entry(account_key_component(account).map(str::to_string))
+            .or_default(),
+    )
 }
 
 fn claude_gate_failure(
@@ -1626,10 +1713,382 @@ fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<Dat
         .map(|t| t.with_timezone(&Utc))
 }
 
-async fn fetch_claude() -> AgentUsageSnapshot {
-    let (failure_source, outcome) = fetch_claude_inner().await;
-    apply_provider_outcome("claude", failure_source, outcome)
-        .expect("Claude is a required provider card")
+/// `accountKey` of the Claude Desktop card. Not an absolute path, so
+/// `claude_config_dirs::normalize` can never register a directory that
+/// collides with it.
+const CLAUDE_DESKTOP_ACCOUNT_KEY: &str = "claude-desktop";
+
+/// At most this many Claude account fetches are in flight at once.
+const MAX_ACCOUNT_FETCHES_IN_FLIGHT: usize = 4;
+
+/// Which Claude card a fetch is for. Decides the account key, the credential
+/// source the card may use, its durable history scope, and whether it asks
+/// `/api/oauth/profile` for a merge identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClaudeAccount {
+    /// The existing chain (env token -> CLI login -> setup token). `identify`
+    /// is set only when another card exists that it could merge with; without
+    /// one the primary makes no profile request, so its payload is unchanged.
+    Primary { identify: bool },
+    /// A configured `CLAUDE_CONFIG_DIR`, exactly as registered.
+    ConfigDir(String),
+    /// Claude Desktop's own login.
+    Desktop,
+}
+
+impl ClaudeAccount {
+    fn key(&self) -> Option<&str> {
+        match self {
+            Self::Primary { .. } => None,
+            Self::ConfigDir(dir) => account_key_component(Some(dir)),
+            Self::Desktop => Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+        }
+    }
+
+    fn wants_profile(&self) -> bool {
+        match self {
+            Self::Primary { identify } => *identify,
+            Self::ConfigDir(_) | Self::Desktop => true,
+        }
+    }
+}
+
+enum ClaudeAccountRequest {
+    Primary { identify: bool },
+    ConfigDir(String),
+    Desktop(Result<ClaudeCredentials, ProviderFetchFailure>),
+}
+
+/// The cards this run fetches, in precedence order: primary, then configured
+/// directories in the order the user listed them, then Claude Desktop (only
+/// when a Desktop login or a failure to read one exists).
+fn claude_account_requests(
+    config_dirs: Vec<String>,
+    desktop: Result<Option<ClaudeCredentials>, ProviderFetchFailure>,
+) -> Vec<ClaudeAccountRequest> {
+    let desktop = desktop.transpose();
+    let identify = !config_dirs.is_empty() || matches!(desktop, Some(Ok(_)));
+    std::iter::once(ClaudeAccountRequest::Primary { identify })
+        .chain(config_dirs.into_iter().map(ClaudeAccountRequest::ConfigDir))
+        .chain(desktop.map(ClaudeAccountRequest::Desktop))
+        .collect()
+}
+
+/// One account's raw fetch result, before merge and before
+/// `apply_account_outcome_with` (history recording, last-good).
+struct ClaudeAccountFetch {
+    account_key: Option<String>,
+    failure_source: &'static str,
+    outcome: ProviderFetchOutcome,
+    /// The identity remembered for this card's current binding, used when the
+    /// fetch itself produced none (expired token, failed request). Always
+    /// `None` for the primary, which is never merged away.
+    remembered_scope: Option<AccountScope>,
+}
+
+impl ClaudeAccountFetch {
+    /// A success carries the identity its own profile step settled on; any
+    /// other outcome falls back to what this binding was last proved to be.
+    fn merge_scope(&self) -> Option<&AccountScope> {
+        match &self.outcome {
+            ProviderFetchOutcome::Success { snapshot, .. } => snapshot.merge_scope.as_ref(),
+            _ => self.remembered_scope.as_ref(),
+        }
+    }
+}
+
+/// Every Claude card this publication carries. The registry is read once per
+/// run. With no configured directory and no Desktop login this is the single
+/// primary card it was before multi-account support.
+async fn fetch_claude_accounts() -> Vec<AgentUsageSnapshot> {
+    let (config_dirs, generation) = crate::claude_config_dirs::snapshot();
+    let requests = claude_account_requests(config_dirs, load_claude_desktop_login());
+    let work: Vec<Pin<Box<dyn Future<Output = ClaudeAccountFetch>>>> = requests
+        .into_iter()
+        .map(|request| Box::pin(fetch_claude_account(request)) as Pin<Box<dyn Future<Output = _>>>)
+        .collect();
+    let fetched = join_bounded_ordered(work, MAX_ACCOUNT_FETCHES_IN_FLIGHT).await;
+    let now = Utc::now();
+    let _state = lock_claude_account_state();
+    let (current_dirs, current_generation) = crate::claude_config_dirs::snapshot();
+    settle_claude_run_with(
+        &ClaudeAccountCaches::process(),
+        generation,
+        &current_dirs,
+        current_generation,
+        now,
+        fetched,
+        |snapshot| enrich_snapshot(snapshot, now.timestamp()),
+    )
+}
+
+async fn fetch_claude_account(request: ClaudeAccountRequest) -> ClaudeAccountFetch {
+    let (account, loaded) = match request {
+        ClaudeAccountRequest::Primary { identify } => {
+            let account = ClaudeAccount::Primary { identify };
+            let (failure_source, outcome) = fetch_claude_inner(account.clone()).await;
+            return ClaudeAccountFetch {
+                account_key: None,
+                failure_source,
+                outcome,
+                remembered_scope: None,
+            };
+        }
+        ClaudeAccountRequest::ConfigDir(dir) => {
+            let loaded = load_claude_config_dir_credentials(&dir);
+            (ClaudeAccount::ConfigDir(dir), loaded)
+        }
+        ClaudeAccountRequest::Desktop(loaded) => (ClaudeAccount::Desktop, loaded),
+    };
+    let account_key = account.key().map(str::to_string);
+    let credentials = match loaded {
+        Ok(credentials) => credentials,
+        Err(failure) => {
+            return ClaudeAccountFetch {
+                account_key,
+                failure_source: "oauth",
+                outcome: ProviderFetchOutcome::Failure(failure),
+                remembered_scope: None,
+            };
+        }
+    };
+    let binding = claude_cache_binding(&credentials);
+    let remembered_scope = binding.as_ref().ok().and_then(|binding| {
+        remembered_claude_identity(
+            &CLAUDE_IDENTITY_CACHE,
+            &claude_profile_slot(account_key.as_deref(), &binding.primary),
+        )
+        .map(|(scope, _)| scope)
+    });
+    let verified = binding.map_err(|_| {
+        ProviderFetchFailure::terminal("Claude account identity could not be verified.")
+    });
+    let (failure_source, outcome) =
+        request_after_verified_binding(verified, |binding| async move {
+            Ok(fetch_claude_oauth_usage(credentials, binding, account).await)
+        })
+        .await
+        .unwrap_or_else(|failure| ("oauth", ProviderFetchOutcome::Failure(failure)));
+    ClaudeAccountFetch {
+        account_key,
+        failure_source,
+        outcome,
+        remembered_scope,
+    }
+}
+
+/// Keep one card per known identity, then run only the kept cards through
+/// `apply_account_outcome_with`, so a merged-away card records no history and
+/// touches no last-good slot.
+///
+/// Within one identity a successful card wins over a failed one (a failed card
+/// has its identity from `remembered_scope`); among several successes, or
+/// several failures, the earliest by precedence wins (primary, then config
+/// directories in order, then Desktop). The primary is never dropped: it only
+/// has an identity when it succeeded, and then it is the earliest success. A
+/// card whose identity is unknown is never merged: two cards for one account
+/// is recoverable, hiding an account behind another is not.
+fn publish_claude_accounts_with<F>(
+    cache: &Mutex<ProviderLastGoodCache>,
+    now: DateTime<Utc>,
+    fetched: Vec<ClaudeAccountFetch>,
+    mut enrich: F,
+) -> Vec<AgentUsageSnapshot>
+where
+    F: FnMut(&mut AgentUsageSnapshot),
+{
+    let succeeded =
+        |fetch: &ClaudeAccountFetch| matches!(fetch.outcome, ProviderFetchOutcome::Success { .. });
+    let winner = |scope: &AccountScope| {
+        fetched
+            .iter()
+            .enumerate()
+            .filter(|(_, fetch)| fetch.merge_scope() == Some(scope))
+            .min_by_key(|(index, fetch)| (!succeeded(fetch), *index))
+            .map(|(index, _)| index)
+    };
+    let keep: Vec<bool> = fetched
+        .iter()
+        .enumerate()
+        .map(|(index, fetch)| match fetch.merge_scope() {
+            Some(scope) if fetch.account_key.is_some() => winner(scope) == Some(index),
+            _ => true,
+        })
+        .collect();
+    fetched
+        .into_iter()
+        .zip(keep)
+        .filter(|(_, keep)| *keep)
+        .filter_map(|(fetch, _)| {
+            apply_account_outcome_with(
+                cache,
+                "claude",
+                fetch.account_key.as_deref(),
+                fetch.failure_source,
+                now,
+                fetch.outcome,
+                &mut enrich,
+            )
+        })
+        .collect()
+}
+
+/// Serializes the end of a Claude run (registry re-check, apply) against the
+/// registry setter's purge, so a directory removed mid-run can never have its
+/// state written back after the purge. Held only across synchronous code.
+static CLAUDE_ACCOUNT_STATE_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_claude_account_state() -> std::sync::MutexGuard<'static, ()> {
+    CLAUDE_ACCOUNT_STATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Every per-account Claude cache, so the purge and the end-of-run settle can
+/// be driven against test instances.
+struct ClaudeAccountCaches<'a> {
+    last_good: &'a Mutex<ProviderLastGoodCache>,
+    gates: &'a Mutex<ClaudeUsageGates>,
+    headers: &'a Mutex<ClaudeHeaderCache>,
+    profiles: &'a Mutex<ClaudeProfileCache>,
+    identities: &'a Mutex<ClaudeIdentityCache>,
+}
+
+impl ClaudeAccountCaches<'static> {
+    fn process() -> Self {
+        Self {
+            last_good: &PROVIDER_LAST_GOOD,
+            gates: &CLAUDE_USAGE_GATES,
+            headers: &CLAUDE_HEADER_CACHE,
+            profiles: &CLAUDE_PROFILE_CACHE,
+            identities: &CLAUDE_IDENTITY_CACHE,
+        }
+    }
+}
+
+/// End of a Claude run, under `CLAUDE_ACCOUNT_STATE_LOCK`. If the registry
+/// moved since the run's snapshot, a config-directory card whose directory is
+/// no longer registered is dropped unpublished, and every entry its in-flight
+/// fetch wrote (gate, header, profile, identity) is purged again before any
+/// kept card is applied.
+fn settle_claude_run_with<F>(
+    caches: &ClaudeAccountCaches<'_>,
+    snapshot_generation: u64,
+    current_dirs: &[String],
+    current_generation: u64,
+    now: DateTime<Utc>,
+    fetched: Vec<ClaudeAccountFetch>,
+    enrich: F,
+) -> Vec<AgentUsageSnapshot>
+where
+    F: FnMut(&mut AgentUsageSnapshot),
+{
+    let fetched = if current_generation == snapshot_generation {
+        fetched
+    } else {
+        purge_removed_claude_accounts_in(caches, current_dirs);
+        fetched
+            .into_iter()
+            .filter(|fetch| match fetch.account_key.as_deref() {
+                None | Some(CLAUDE_DESKTOP_ACCOUNT_KEY) => true,
+                Some(key) => current_dirs.iter().any(|dir| dir == key),
+            })
+            .collect()
+    };
+    publish_claude_accounts_with(caches.last_good, now, fetched, enrich)
+}
+
+/// Forget every per-account entry (last-good, 429 gate, header cache, profile
+/// cache) of a configured directory that is no longer in `configured`. The
+/// primary and the Claude Desktop card are never purged here.
+pub(crate) fn purge_removed_claude_accounts(configured: &[String]) {
+    let _state = lock_claude_account_state();
+    purge_removed_claude_accounts_in(&ClaudeAccountCaches::process(), configured);
+}
+
+fn purge_removed_claude_accounts_in(caches: &ClaudeAccountCaches<'_>, configured: &[String]) {
+    let ClaudeAccountCaches {
+        last_good,
+        gates,
+        headers,
+        profiles,
+        identities,
+    } = caches;
+    let removed = |key: &Option<String>| {
+        key.as_deref().is_some_and(|key| {
+            key != CLAUDE_DESKTOP_ACCOUNT_KEY && !configured.iter().any(|dir| dir == key)
+        })
+    };
+    lock_last_good(last_good)
+        .entries
+        .retain(|(client_id, key), _| client_id != "claude" || !removed(key));
+    gates
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|key, _| !removed(key));
+    headers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|key, _| !removed(key));
+    profiles
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(key, _), _| !removed(key));
+    identities
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(key, _), _| !removed(key));
+}
+
+/// Run `futures` concurrently, at most `limit` at a time, and return their
+/// results in input order (the order cards are laid out in), not completion
+/// order. Polled in place on the calling task: the Windows core has no
+/// `LocalSet`, and a Claude fetch is not `Send`.
+async fn join_bounded_ordered<'a, T>(
+    futures: Vec<Pin<Box<dyn Future<Output = T> + 'a>>>,
+    limit: usize,
+) -> Vec<T> {
+    let limit = limit.max(1);
+    let total = futures.len();
+    let mut pending: Vec<Option<Pin<Box<dyn Future<Output = T> + 'a>>>> =
+        futures.into_iter().map(Some).collect();
+    let mut results: Vec<Option<T>> = (0..total).map(|_| None).collect();
+    let mut active: Vec<usize> = Vec::new();
+    let mut next = 0;
+    std::future::poll_fn(|cx| {
+        loop {
+            while active.len() < limit && next < total {
+                active.push(next);
+                next += 1;
+            }
+            let before = active.len();
+            active.retain(|&index| {
+                let Some(future) = pending[index].as_mut() else {
+                    return false;
+                };
+                match future.as_mut().poll(cx) {
+                    std::task::Poll::Ready(value) => {
+                        results[index] = Some(value);
+                        pending[index] = None;
+                        false
+                    }
+                    std::task::Poll::Pending => true,
+                }
+            });
+            // Refill freed slots and poll the newcomers in this same call, so
+            // each of them registers a waker before we return Pending.
+            if active.len() == before || next == total {
+                break;
+            }
+        }
+        if active.is_empty() && next == total {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+    results.into_iter().flatten().collect()
 }
 
 async fn fetch_codex_inner() -> ProviderFetchOutcome {
@@ -1772,6 +2231,8 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
 
     ProviderFetchOutcome::Success {
         snapshot: AgentUsageSnapshot {
+            account_key: None,
+            merge_scope: None,
             client_id: "codex".to_string(),
             source: "oauth".to_string(),
             updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -1823,42 +2284,55 @@ fn claude_cache_binding(
         .map(ProviderCacheBinding::primary)
 }
 
-/// Clear the 429 gate only once no Claude credential of any kind resolved.
-/// Clearing on an Absent CLI login alone would wipe the gate before every
-/// Claude Desktop fetch.
+/// Clear the primary account's 429 gate only when its final outcome is
+/// `unconfigured` (the rule PR #151 introduced): a cooldown recorded against a
+/// binding survives every outcome that still resolved some credential,
+/// including a setup token serving while the CLI login is absent. Other
+/// accounts' gates are untouched.
 fn clear_claude_gate_if_unconfigured(failure_source: &str, gate: &mut ClaudeUsageGate) {
     if failure_source == "unconfigured" {
         gate.clear();
     }
 }
 
-async fn fetch_claude_inner() -> (&'static str, ProviderFetchOutcome) {
+/// The primary card's chain: `CLAUDE_CODE_OAUTH_TOKEN`, then the stored CLI
+/// login, then the setup-token item. Claude Desktop is its own card, never a
+/// fallback here.
+async fn fetch_claude_inner(account: ClaudeAccount) -> (&'static str, ProviderFetchOutcome) {
     if let Some(token) = resolve_claude_code_oauth_token().await {
         return fetch_claude_setup_token(token).await;
     }
 
     let login = load_claude_login_credentials();
+    let gate_account = account.clone();
     let (failure_source, outcome) = fetch_claude_login_or_setup_with(
         login,
-        |credentials| async move {
-            let verified = claude_cache_binding(&credentials).map_err(|_| {
-                ProviderFetchFailure::terminal("Claude account identity could not be verified.")
-            });
-            request_after_verified_binding(verified, |binding| async move {
-                Ok(fetch_claude_oauth_usage(credentials, binding).await)
-            })
-            .await
-            .unwrap_or_else(|failure| ("oauth", ProviderFetchOutcome::Failure(failure)))
-        },
+        |credentials| fetch_claude_verified_login(credentials, account),
         resolve_claude_keychain_token,
         fetch_claude_setup_token,
-        load_claude_desktop_login,
     )
     .await;
-    clear_claude_gate_if_unconfigured(failure_source, &mut lock_gate());
+    with_gate(gate_account.key(), |gate| {
+        clear_claude_gate_if_unconfigured(failure_source, gate)
+    });
     (failure_source, outcome)
 }
 
+async fn fetch_claude_verified_login(
+    credentials: ClaudeCredentials,
+    account: ClaudeAccount,
+) -> (&'static str, ProviderFetchOutcome) {
+    let verified = claude_cache_binding(&credentials).map_err(|_| {
+        ProviderFetchFailure::terminal("Claude account identity could not be verified.")
+    });
+    request_after_verified_binding(verified, |binding| async move {
+        Ok(fetch_claude_oauth_usage(credentials, binding, account).await)
+    })
+    .await
+    .unwrap_or_else(|failure| ("oauth", ProviderFetchOutcome::Failure(failure)))
+}
+
+/// Primary only: a setup token has no backing account directory.
 async fn fetch_claude_setup_token(
     token: ResolvedClaudeToken,
 ) -> (&'static str, ProviderFetchOutcome) {
@@ -1869,6 +2343,7 @@ async fn fetch_claude_setup_token(
     let outcome = request_after_verified_binding(verified, |binding| async move {
         Ok(claude_header_snapshot(
             &credentials,
+            &ClaudeAccount::Primary { identify: false },
             Utc::now(),
             Ok(binding.primary.clone()),
             Some(binding),
@@ -1880,23 +2355,11 @@ async fn fetch_claude_setup_token(
     ("setup-token", outcome)
 }
 
-/// Precedence below `CLAUDE_CODE_OAUTH_TOKEN`: the stored CLI login, then the
-/// setup-token Keychain item, then the Claude Desktop login as the last
-/// fallback. A Desktop login goes through the same `request_login` path; its
-/// failures report the `desktop` source.
-async fn fetch_claude_login_or_setup_with<
-    Login,
-    LoginFuture,
-    LoadSetup,
-    Setup,
-    SetupFuture,
-    LoadDesktop,
->(
+async fn fetch_claude_login_or_setup_with<Login, LoginFuture, LoadSetup, Setup, SetupFuture>(
     login: ClaudeLoginResolution,
     request_login: Login,
     load_setup: LoadSetup,
     request_setup: Setup,
-    load_desktop: LoadDesktop,
 ) -> (&'static str, ProviderFetchOutcome)
 where
     Login: FnOnce(ClaudeCredentials) -> LoginFuture,
@@ -1904,7 +2367,6 @@ where
     LoadSetup: FnOnce() -> Result<Option<ResolvedClaudeToken>, String>,
     Setup: FnOnce(ResolvedClaudeToken) -> SetupFuture,
     SetupFuture: std::future::Future<Output = (&'static str, ProviderFetchOutcome)>,
-    LoadDesktop: FnOnce() -> Result<Option<ClaudeCredentials>, ProviderFetchFailure>,
 {
     match login {
         ClaudeLoginResolution::Ready(credentials) => request_login(credentials).await,
@@ -1917,16 +2379,12 @@ where
         ClaudeLoginResolution::Absent | ClaudeLoginResolution::ExplicitLogout => {
             match load_setup() {
                 Ok(Some(token)) => request_setup(token).await,
-                Ok(None) => match load_desktop() {
-                    Ok(Some(credentials)) => ("desktop", request_login(credentials).await.1),
-                    Ok(None) => (
-                        "unconfigured",
-                        ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
-                            CLAUDE_UNCONFIGURED_ERROR,
-                        )),
-                    ),
-                    Err(failure) => ("desktop", ProviderFetchOutcome::Failure(failure)),
-                },
+                Ok(None) => (
+                    "unconfigured",
+                    ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                        CLAUDE_UNCONFIGURED_ERROR,
+                    )),
+                ),
                 Err(_) => (
                     "setup-token",
                     ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
@@ -1941,22 +2399,44 @@ where
 async fn fetch_claude_oauth_usage(
     credentials: ClaudeCredentials,
     pre_binding: ProviderCacheBinding,
+    account: ClaudeAccount,
 ) -> (&'static str, ProviderFetchOutcome) {
+    let gate_account = account.clone();
+    let header_account = account.clone();
     fetch_claude_login_usage_with(
         credentials,
         pre_binding,
         Utc::now(),
-        |binding, now| {
-            let mut gate = lock_gate();
-            gate.blocked_until_for(binding, now)
+        move |binding, now| {
+            with_gate(gate_account.key(), |gate| {
+                gate.blocked_until_for(binding, now)
+            })
         },
-        |credentials| async move { refresh_claude_credentials(&credentials).await },
-        |credentials, account_scope, cache_binding| async move {
-            claude_header_snapshot(&credentials, Utc::now(), Ok(account_scope), cache_binding).await
+        |credentials| async move {
+            // Unreachable for a read-only source (the expiry guard in
+            // `fetch_claude_login_usage_with` returns first); kept so no
+            // future path can take the refresh lock for one.
+            if credentials.source.is_read_only() {
+                return Err(ProviderFetchFailure::terminal(
+                    CLAUDE_READ_ONLY_REFRESH_ERROR,
+                ));
+            }
+            refresh_claude_credentials(&credentials).await
         },
-        |credentials, account_scope, cache_binding, gate_binding| async move {
+        move |credentials, account_scope, cache_binding| async move {
+            claude_header_snapshot(
+                &credentials,
+                &header_account,
+                Utc::now(),
+                Ok(account_scope),
+                cache_binding,
+            )
+            .await
+        },
+        move |credentials, account_scope, cache_binding, gate_binding| async move {
             fetch_claude_oauth_usage_request(
                 &credentials,
+                &account,
                 account_scope,
                 cache_binding,
                 gate_binding,
@@ -2021,16 +2501,15 @@ where
         }
     }
 
-    // Never refresh a Desktop token (see `ClaudeCredentialSource::Desktop`).
-    if credentials.source == ClaudeCredentialSource::Desktop
-        && claude_desktop_credentials_expired(&credentials, now)
-    {
-        return (
-            "oauth",
-            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
-                CLAUDE_DESKTOP_EXPIRED_ERROR,
-            )),
-        );
+    // Never refresh a read-only credential (Claude Desktop or a configured
+    // directory): stop before the refresh lock, the network and any write.
+    if let Some(expired) = claude_read_only_expired_message(&credentials.source) {
+        if claude_read_only_credentials_expired(&credentials, now) {
+            return (
+                "oauth",
+                ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(expired)),
+            );
+        }
     }
 
     let (credentials, account_scope, cache_binding) = if claude_credentials_expired(&credentials) {
@@ -2054,26 +2533,29 @@ where
     oauth(credentials, account_scope, cache_binding, gate_binding).await
 }
 
-fn claude_unauthorized_message(source: ClaudeCredentialSource) -> &'static str {
+fn claude_unauthorized_message(source: &ClaudeCredentialSource) -> &'static str {
     match source {
         ClaudeCredentialSource::Desktop => {
             "Claude Desktop login was rejected. Sign in to Claude Desktop again."
         }
+        ClaudeCredentialSource::ConfigDir(_) => CLAUDE_CONFIG_DIR_REJECTED_ERROR,
         _ => "Claude OAuth token expired or invalid. Run `claude` to re-authenticate.",
     }
 }
 
-fn claude_denied_message(source: ClaudeCredentialSource) -> &'static str {
+fn claude_denied_message(source: &ClaudeCredentialSource) -> &'static str {
     match source {
         ClaudeCredentialSource::Desktop => {
             "Claude OAuth usage was denied. Sign in to Claude Desktop again."
         }
+        ClaudeCredentialSource::ConfigDir(_) => CLAUDE_CONFIG_DIR_REJECTED_ERROR,
         _ => "Claude OAuth usage was denied. Run `claude logout && claude login` to grant user:profile.",
     }
 }
 
 async fn fetch_claude_oauth_usage_request(
     credentials: &ClaudeCredentials,
+    account: &ClaudeAccount,
     account_scope: AccountScope,
     cache_binding: Option<ProviderCacheBinding>,
     gate_binding: ProviderCacheBinding,
@@ -2129,7 +2611,9 @@ async fn fetch_claude_oauth_usage_request(
         Ok(body) => body,
         Err(ResponseReadFailure::Transient(diagnostic)) => {
             if status == 429 {
-                lock_gate().record_rate_limit(gate_binding, retry_after, Utc::now());
+                with_gate(account.key(), |gate| {
+                    gate.record_rate_limit(gate_binding, retry_after, Utc::now())
+                });
             }
             return (
                 "oauth",
@@ -2144,7 +2628,7 @@ async fn fetch_claude_oauth_usage_request(
             return (
                 "oauth",
                 ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
-                    claude_unauthorized_message(credentials.source),
+                    claude_unauthorized_message(&credentials.source),
                 )),
             );
         }
@@ -2152,7 +2636,7 @@ async fn fetch_claude_oauth_usage_request(
             return (
                 "oauth",
                 ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
-                    claude_denied_message(credentials.source),
+                    claude_denied_message(&credentials.source),
                 )),
             );
         }
@@ -2170,14 +2654,20 @@ async fn fetch_claude_oauth_usage_request(
         if body.contains("user:profile") {
             return (
                 "setup-token",
-                claude_header_snapshot(credentials, Utc::now(), Ok(account_scope), cache_binding)
-                    .await,
+                claude_header_snapshot(
+                    credentials,
+                    account,
+                    Utc::now(),
+                    Ok(account_scope),
+                    cache_binding,
+                )
+                .await,
             );
         }
         return (
             "oauth",
             ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(claude_denied_message(
-                credentials.source,
+                &credentials.source,
             ))),
         );
     }
@@ -2203,25 +2693,52 @@ async fn fetch_claude_oauth_usage_request(
             )),
         );
     }
-    lock_gate().clear();
+    with_gate(account.key(), ClaudeUsageGate::clear);
+
+    let profile = if account.wants_profile() {
+        Some(
+            claude_profile_identity(
+                &client,
+                account.key(),
+                &credentials.access_token,
+                &account_scope,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    let stored_plan = first_non_empty([
+        credentials.subscription_type.as_deref(),
+        credentials.rate_limit_tier.as_deref(),
+    ])
+    .map(clean_plan);
+    // The primary keeps its stored plan label (its payload is unchanged by
+    // multi-account support); every other card prefers the live profile plan,
+    // which is the only plan a Desktop login carries at all.
+    let plan = match account {
+        ClaudeAccount::Primary { .. } => stored_plan,
+        _ => profile
+            .as_ref()
+            .and_then(|profile| profile.plan.clone())
+            .or(stored_plan),
+    };
 
     (
         "oauth",
         ProviderFetchOutcome::Success {
             snapshot: AgentUsageSnapshot {
+                account_key: None,
+                merge_scope: profile
+                    .as_ref()
+                    .and_then(|profile| profile.scopes.as_ref())
+                    .map(|(scope, _)| scope.clone()),
                 client_id: "claude".to_string(),
                 source: "oauth".to_string(),
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-                identity: Some(AgentIdentity {
-                    email: None,
-                    plan: first_non_empty([
-                        credentials.subscription_type.as_deref(),
-                        credentials.rate_limit_tier.as_deref(),
-                    ])
-                    .map(clean_plan),
-                }),
+                identity: Some(AgentIdentity { email: None, plan }),
                 account_scope: Ok(account_scope),
-                history_scope: claude_history_scope(),
+                history_scope: claude_account_history_scope(account, credentials, profile.as_ref()),
                 windows,
                 credits: claude_credits(usage.extra_usage.as_ref()),
                 error: None,
@@ -2243,8 +2760,12 @@ async fn fetch_claude_oauth_usage_request(
 /// every refresh. Keyed on the token so a changed token re-probes.
 /// `(fetched_at, token, windows)` — the token keys the entry so a changed token
 /// re-probes rather than serving another account's cached windows.
+/// One entry per Claude account (`account_key_component`), each still keyed
+/// on its token.
 type ClaudeHeaderCacheEntry = (DateTime<Utc>, String, Vec<UsageWindow>);
-static CLAUDE_HEADER_CACHE: Mutex<Option<ClaudeHeaderCacheEntry>> = Mutex::new(None);
+type ClaudeHeaderCache = HashMap<Option<String>, ClaudeHeaderCacheEntry>;
+static CLAUDE_HEADER_CACHE: LazyLock<Mutex<ClaudeHeaderCache>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 const CLAUDE_HEADER_TTL_SECS: i64 = 300;
 
 /// Refresh the relative `reset_text` on cached header windows so a 300s-cached
@@ -2266,23 +2787,46 @@ fn refresh_cached_windows(windows: &[UsageWindow], now: DateTime<Utc>) -> Option
     Some(refreshed)
 }
 
+/// The cached header windows of `account`, if they were probed with this
+/// exact token within the TTL and no reset has passed since.
+fn claude_cached_header_windows(
+    cache: &Mutex<ClaudeHeaderCache>,
+    account: Option<&str>,
+    access_token: &str,
+    now: DateTime<Utc>,
+) -> Option<Vec<UsageWindow>> {
+    let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let (fetched_at, token, windows) =
+        guard.get(&account_key_component(account).map(str::to_string))?;
+    if token != access_token || (now - *fetched_at).num_seconds() >= CLAUDE_HEADER_TTL_SECS {
+        return None;
+    }
+    refresh_cached_windows(windows, now)
+}
+
+fn store_claude_header_windows(
+    cache: &Mutex<ClaudeHeaderCache>,
+    account: Option<&str>,
+    access_token: &str,
+    now: DateTime<Utc>,
+    windows: Vec<UsageWindow>,
+) {
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        account_key_component(account).map(str::to_string),
+        (now, access_token.to_string(), windows),
+    );
+}
+
 async fn fetch_claude_via_headers(
     credentials: &ClaudeCredentials,
+    account: Option<&str>,
     attempt_binding: Option<ProviderCacheBinding>,
 ) -> Result<Vec<UsageWindow>, ProviderFetchFailure> {
     let access_token = credentials.access_token.as_str();
+    if let Some(cached) =
+        claude_cached_header_windows(&CLAUDE_HEADER_CACHE, account, access_token, Utc::now())
     {
-        let now = Utc::now();
-        let guard = CLAUDE_HEADER_CACHE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some((fetched_at, token, windows)) = guard.as_ref() {
-            if token == access_token && (now - *fetched_at).num_seconds() < CLAUDE_HEADER_TTL_SECS {
-                if let Some(refreshed) = refresh_cached_windows(windows, now) {
-                    return Ok(refreshed);
-                }
-            }
-        }
+        return Ok(cached);
     }
 
     let client = provider_http_client_builder()
@@ -2330,10 +2874,13 @@ async fn fetch_claude_via_headers(
                 "Claude header probe returned no usable rate-limit headers.",
             ));
         }
-        let mut guard = CLAUDE_HEADER_CACHE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *guard = Some((Utc::now(), access_token.to_string(), windows.clone()));
+        store_claude_header_windows(
+            &CLAUDE_HEADER_CACHE,
+            account,
+            access_token,
+            Utc::now(),
+            windows.clone(),
+        );
         return Ok(windows);
     }
     if (500..=599).contains(&status) {
@@ -2344,13 +2891,13 @@ async fn fetch_claude_via_headers(
         ));
     }
     Err(ProviderFetchFailure::terminal(
-        claude_header_rejection_message(credentials.source, status),
+        claude_header_rejection_message(&credentials.source, status),
     ))
 }
 
-fn claude_header_rejection_message(source: ClaudeCredentialSource, status: u16) -> String {
+fn claude_header_rejection_message(source: &ClaudeCredentialSource, status: u16) -> String {
     match (source, status) {
-        (ClaudeCredentialSource::Desktop, 401 | 403) => {
+        (ClaudeCredentialSource::Desktop | ClaudeCredentialSource::ConfigDir(_), 401 | 403) => {
             claude_unauthorized_message(source).to_string()
         }
         (_, 401 | 403) => "Claude setup-token expired or lacks access.".to_string(),
@@ -2358,18 +2905,24 @@ fn claude_header_rejection_message(source: ClaudeCredentialSource, status: u16) 
     }
 }
 
+/// The header route proves no `user:profile` scope, so it never has a
+/// profile identity: a Desktop card here records no history and never merges.
 async fn claude_header_snapshot(
     credentials: &ClaudeCredentials,
+    account: &ClaudeAccount,
     now: DateTime<Utc>,
     account_scope: Result<AccountScope, AccountScopeError>,
     cache_binding: Option<ProviderCacheBinding>,
 ) -> ProviderFetchOutcome {
-    let windows = match fetch_claude_via_headers(credentials, cache_binding.clone()).await {
-        Ok(windows) => windows,
-        Err(failure) => return ProviderFetchOutcome::Failure(failure),
-    };
+    let windows =
+        match fetch_claude_via_headers(credentials, account.key(), cache_binding.clone()).await {
+            Ok(windows) => windows,
+            Err(failure) => return ProviderFetchOutcome::Failure(failure),
+        };
     ProviderFetchOutcome::Success {
         snapshot: AgentUsageSnapshot {
+            account_key: None,
+            merge_scope: None,
             client_id: "claude".to_string(),
             source: "setup-token".to_string(),
             updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -2382,7 +2935,7 @@ async fn claude_header_snapshot(
                 .map(clean_plan),
             }),
             account_scope,
-            history_scope: claude_history_scope(),
+            history_scope: claude_account_history_scope(account, credentials, None),
             windows,
             credits: None,
             error: None,
@@ -2392,14 +2945,388 @@ async fn claude_header_snapshot(
     }
 }
 
-/// Claude's durable history identity: the per-installation constant, on every
-/// route. Claude's usage payload carries no owner ID, so a lineage — which a
-/// Claude CLI refresh-token rotation moves — was the only other candidate, and
-/// that is what stranded the old series. macOS gives an extra
-/// `CLAUDE_CONFIG_DIR` account its own authoritative scope; Windows has only the
-/// primary account, which macOS also keys on this constant.
-fn claude_history_scope() -> Result<HistoryScope, AccountScopeError> {
-    agent_account_scope::resolve_history_scope("claude", None)
+fn claude_account_history_scope(
+    account: &ClaudeAccount,
+    credentials: &ClaudeCredentials,
+    profile: Option<&ClaudeProfileIdentity>,
+) -> Result<HistoryScope, AccountScopeError> {
+    claude_account_history_scope_with(
+        account,
+        credentials,
+        profile,
+        agent_account_scope::resolve_history_scope,
+    )
+}
+
+/// Who a Claude card's durable samples belong to, decided per card:
+///
+/// - primary: the per-installation constant on every route, unchanged (every
+///   existing series is keyed on it). Claude's usage payload carries no owner
+///   ID, and a lineage — which a CLI refresh-token rotation moves — is what
+///   stranded the old series;
+/// - configured directory D: authoritative `config-dir:<sha256(D)>`, but only
+///   when the credential was read from D's own `.credentials.json` — any other
+///   source would record someone else's numbers under D (macOS inv. A7). Keyed
+///   on the path, as on macOS: renaming the directory starts a new series;
+/// - Claude Desktop: authoritative `profile:<account>\0<org>` from this
+///   fetch's binding-keyed profile; without one, no history (the card still
+///   shows, only samples are withheld).
+///
+/// `Err` is refusal, never a fallback to the primary's constant: that would
+/// merge another account's samples into the primary's series.
+fn claude_account_history_scope_with<R>(
+    account: &ClaudeAccount,
+    credentials: &ClaudeCredentials,
+    profile: Option<&ClaudeProfileIdentity>,
+    resolve: R,
+) -> Result<HistoryScope, AccountScopeError>
+where
+    R: FnOnce(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>,
+{
+    match account {
+        ClaudeAccount::Primary { .. } => resolve("claude", None),
+        ClaudeAccount::ConfigDir(dir) => match &credentials.source {
+            ClaudeCredentialSource::ConfigDir(source_dir) if source_dir == Path::new(dir) => {
+                let evidence = format!("config-dir:{}", sha256_hex_exact(dir.as_bytes()));
+                resolve(
+                    "claude",
+                    Some((AuthoritativeIdKind::OpaqueId, evidence.as_str())),
+                )
+            }
+            _ => Err(AccountScopeError::NoTrustedEvidence),
+        },
+        ClaudeAccount::Desktop => match (&credentials.source, profile) {
+            (ClaudeCredentialSource::Desktop, Some(profile)) => profile
+                .scopes
+                .as_ref()
+                .map(|(_, history)| history.clone())
+                .ok_or(AccountScopeError::NoTrustedEvidence),
+            _ => Err(AccountScopeError::NoTrustedEvidence),
+        },
+    }
+}
+
+/// SHA-256 of the exact bytes, lower-case hex. Unlike `sha256_hex` it never
+/// trims: two directories differing only in surrounding whitespace must not
+/// share a history series.
+fn sha256_hex_exact(value: &[u8]) -> String {
+    Sha256::digest(value)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+const CLAUDE_PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
+/// A subscription or account changes far more slowly than the 60s/300s polls.
+const CLAUDE_PROFILE_TTL_SECS: i64 = 3600;
+/// Negative-cache time for a 429 without Retry-After, a 5xx, a timeout or a
+/// transport failure. A 4xx other than 429 is cached for the full TTL.
+const CLAUDE_PROFILE_RETRY_SECS: i64 = 300;
+/// Short next to the 30s usage timeout: a slow profile endpoint costs a
+/// missing merge identity, never a delayed quota payload.
+const CLAUDE_PROFILE_TIMEOUT_SECS: u64 = 5;
+
+/// What one binding-keyed `/api/oauth/profile` answer proved. The raw UUIDs
+/// never leave `claude_profile_identity_from`; only these HMAC scopes do.
+#[derive(Debug, Clone)]
+struct ClaudeProfileIdentity {
+    /// `(merge scope, history scope)` of `profile:<account>\0<org>`, both from
+    /// the authoritative resolver. `None` when either UUID is missing or
+    /// malformed, or the resolver failed: the card is then never merged.
+    scopes: Option<(AccountScope, HistoryScope)>,
+    plan: Option<String>,
+}
+
+/// Only the fields TokenBar uses. No `Debug`, and no email or name field
+/// exists to be logged.
+#[derive(Deserialize)]
+struct ClaudeProfileResponse {
+    #[serde(default, deserialize_with = "deserialize_optional_raw")]
+    account: Option<ClaudeProfileAccount>,
+    #[serde(default, deserialize_with = "deserialize_optional_raw")]
+    organization: Option<ClaudeProfileOrganization>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeProfileAccount {
+    #[serde(default, deserialize_with = "deserialize_optional_raw")]
+    uuid: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeProfileOrganization {
+    #[serde(default, deserialize_with = "deserialize_optional_raw")]
+    uuid: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_raw")]
+    organization_type: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_raw")]
+    rate_limit_tier: Option<String>,
+}
+
+/// `(account_key_component, binding primary scope)`: a profile answer is
+/// reused only for the same account AND the same credential binding, so a
+/// credential swapped under one account key never inherits the old identity.
+type ClaudeProfileSlot = (Option<String>, String);
+/// `(valid_until, identity)`; `None` is a cached failure.
+type ClaudeProfileCacheEntry = (DateTime<Utc>, Option<ClaudeProfileIdentity>);
+type ClaudeProfileCache = HashMap<ClaudeProfileSlot, ClaudeProfileCacheEntry>;
+static CLAUDE_PROFILE_CACHE: LazyLock<Mutex<ClaudeProfileCache>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The merge/history identity a profile answer proved for one credential
+/// lineage, kept without a TTL: an account+org behind an unchanged binding
+/// cannot change, so it stays valid while the token is expired or the fetch
+/// fails (Claude Desktop closed is the common case). A changed binding
+/// (re-login, rotation) is a different slot and stays unknown until a fresh
+/// profile succeeds. In memory only.
+///
+/// ponytail: not persisted, so after an app restart the first poll with an
+/// expired Desktop token cannot merge (two cards) until Desktop renews its
+/// token and a profile lookup succeeds; persist it next to the account-scope
+/// metadata if that window matters.
+type ClaudeIdentityCache = HashMap<ClaudeProfileSlot, (AccountScope, HistoryScope)>;
+static CLAUDE_IDENTITY_CACHE: LazyLock<Mutex<ClaudeIdentityCache>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+async fn claude_profile_identity(
+    client: &reqwest::Client,
+    account: Option<&str>,
+    access_token: &str,
+    binding: &AccountScope,
+) -> ClaudeProfileIdentity {
+    claude_profile_identity_with(
+        &CLAUDE_PROFILE_CACHE,
+        &CLAUDE_IDENTITY_CACHE,
+        claude_profile_slot(account, binding),
+        Utc::now(),
+        || async {
+            let now = Utc::now();
+            let answered = tokio::time::timeout(
+                std::time::Duration::from_secs(CLAUDE_PROFILE_TIMEOUT_SECS),
+                claude_profile_request(client, access_token),
+            )
+            .await;
+            match answered {
+                Ok(Ok(profile)) => (
+                    Some(claude_profile_identity_from(
+                        profile,
+                        agent_account_scope::resolve_authoritative,
+                        agent_account_scope::resolve_history_scope,
+                    )),
+                    CLAUDE_PROFILE_TTL_SECS,
+                ),
+                Ok(Err((status, retry_after))) => {
+                    (None, claude_profile_retry_secs(status, retry_after, now))
+                }
+                Err(_) => (None, CLAUDE_PROFILE_RETRY_SECS),
+            }
+        },
+    )
+    .await
+}
+
+fn claude_profile_slot(account: Option<&str>, binding: &AccountScope) -> ClaudeProfileSlot {
+    (
+        account_key_component(account).map(str::to_string),
+        binding.as_str().to_string(),
+    )
+}
+
+/// The plan comes from the TTL'd answer cache; the identity comes from the
+/// lineage-keyed `identity_cache`, which a fresh answer updates (set when it
+/// names both UUIDs, cleared when it does not) and a failed lookup leaves
+/// alone.
+async fn claude_profile_identity_with<F, Fut>(
+    plan_cache: &Mutex<ClaudeProfileCache>,
+    identity_cache: &Mutex<ClaudeIdentityCache>,
+    slot: ClaudeProfileSlot,
+    now: DateTime<Utc>,
+    fetch: F,
+) -> ClaudeProfileIdentity
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = (Option<ClaudeProfileIdentity>, i64)>,
+{
+    let remember_slot = slot.clone();
+    let answered = claude_profile_cached_with(plan_cache, slot.clone(), now, || async move {
+        let (answer, valid_secs) = fetch().await;
+        if let Some(answer) = &answer {
+            remember_claude_identity(identity_cache, remember_slot, answer.scopes.clone());
+        }
+        (answer, valid_secs)
+    })
+    .await;
+    ClaudeProfileIdentity {
+        scopes: remembered_claude_identity(identity_cache, &slot),
+        plan: answered.and_then(|answer| answer.plan),
+    }
+}
+
+fn remember_claude_identity(
+    cache: &Mutex<ClaudeIdentityCache>,
+    slot: ClaudeProfileSlot,
+    scopes: Option<(AccountScope, HistoryScope)>,
+) {
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    match scopes {
+        Some(scopes) => {
+            guard.insert(slot, scopes);
+        }
+        None => {
+            guard.remove(&slot);
+        }
+    }
+}
+
+fn remembered_claude_identity(
+    cache: &Mutex<ClaudeIdentityCache>,
+    slot: &ClaudeProfileSlot,
+) -> Option<(AccountScope, HistoryScope)> {
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(slot)
+        .cloned()
+}
+
+/// Serve a live cache entry for exactly this slot, else run `fetch` and cache
+/// what it returns (a failure included) for the seconds it names.
+async fn claude_profile_cached_with<F, Fut>(
+    cache: &Mutex<ClaudeProfileCache>,
+    slot: ClaudeProfileSlot,
+    now: DateTime<Utc>,
+    fetch: F,
+) -> Option<ClaudeProfileIdentity>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = (Option<ClaudeProfileIdentity>, i64)>,
+{
+    {
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((valid_until, identity)) = guard.get(&slot) {
+            if now < *valid_until {
+                return identity.clone();
+            }
+        }
+    }
+    let (identity, valid_secs) = fetch().await;
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        slot,
+        (
+            now + chrono::Duration::seconds(valid_secs),
+            identity.clone(),
+        ),
+    );
+    identity
+}
+
+/// `Err((status, Retry-After))` for any non-success answer, with status 0 for
+/// a transport or decode failure. Never carries a body.
+async fn claude_profile_request(
+    client: &reqwest::Client,
+    access_token: &str,
+) -> Result<ClaudeProfileResponse, (u16, Option<DateTime<Utc>>)> {
+    let response = client
+        .get(CLAUDE_PROFILE_URL)
+        .bearer_auth(access_token)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(reqwest::header::USER_AGENT, claude_user_agent())
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+        .await
+        .map_err(|_| (0, None))?;
+    let status = response.status().as_u16();
+    if !(200..=299).contains(&status) {
+        let retry_after = (status == 429)
+            .then(|| parse_retry_after(response.headers().get(reqwest::header::RETRY_AFTER)))
+            .flatten();
+        return Err((status, retry_after));
+    }
+    response.json().await.map_err(|_| (0, None))
+}
+
+/// How long a failed profile lookup is cached: a 4xx (other than 429) for the
+/// full TTL, a 429 until its Retry-After (at most the TTL), anything else for
+/// `CLAUDE_PROFILE_RETRY_SECS`. Independent of the usage 429 gate.
+fn claude_profile_retry_secs(
+    status: u16,
+    retry_after: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> i64 {
+    match status {
+        429 => retry_after
+            .map(|until| (until - now).num_seconds())
+            .unwrap_or(CLAUDE_PROFILE_RETRY_SECS)
+            .clamp(1, CLAUDE_PROFILE_TTL_SECS),
+        400..=499 => CLAUDE_PROFILE_TTL_SECS,
+        _ => CLAUDE_PROFILE_RETRY_SECS,
+    }
+}
+
+/// Reduce a profile answer to its HMAC scopes and plan. Both UUIDs are
+/// required and format-checked; the tagged evidence `profile:<acct>\0<org>`
+/// cannot collide with a `config-dir:` input.
+fn claude_profile_identity_from<A, H>(
+    profile: ClaudeProfileResponse,
+    resolve_account: A,
+    resolve_history: H,
+) -> ClaudeProfileIdentity
+where
+    A: FnOnce(&str, AuthoritativeIdKind, &str) -> Result<AccountScope, AccountScopeError>,
+    H: FnOnce(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>,
+{
+    let account = profile
+        .account
+        .and_then(|account| account.uuid)
+        .and_then(claude_profile_uuid);
+    let organization = profile.organization;
+    let plan = organization.as_ref().and_then(claude_profile_plan);
+    let org = organization
+        .and_then(|organization| organization.uuid)
+        .and_then(claude_profile_uuid);
+    let scopes = account.zip(org).and_then(|(account, org)| {
+        let evidence = format!("profile:{account}\0{org}");
+        let merge = resolve_account("claude", AuthoritativeIdKind::OpaqueId, &evidence).ok()?;
+        let history =
+            resolve_history("claude", Some((AuthoritativeIdKind::OpaqueId, &evidence))).ok()?;
+        Some((merge, history))
+    });
+    ClaudeProfileIdentity { scopes, plan }
+}
+
+/// A canonical 8-4-4-4-12 hex UUID, lower-cased; anything else is `None`.
+fn claude_profile_uuid(value: String) -> Option<String> {
+    let bytes = value.as_bytes();
+    let valid = bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        });
+    valid.then(|| value.to_ascii_lowercase())
+}
+
+/// `claude_max` + `default_claude_max_5x` -> `Max 5x`; `claude_pro` -> `Pro`.
+/// The multiplier only exists on the rate-limit tier (ported from macOS).
+fn claude_profile_plan(org: &ClaudeProfileOrganization) -> Option<String> {
+    let kind = org
+        .organization_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let base = clean_plan(kind.strip_prefix("claude_").unwrap_or(kind));
+    let multiplier = org
+        .rate_limit_tier
+        .as_deref()
+        .and_then(|tier| tier.rsplit('_').next())
+        .filter(|part| {
+            part.len() > 1
+                && part.ends_with('x')
+                && part[..part.len() - 1].chars().all(|c| c.is_ascii_digit())
+        });
+    Some(match multiplier {
+        Some(multiplier) => format!("{base} {multiplier}"),
+        None => base,
+    })
 }
 
 /// Codex is one of the two routes with an authoritative owner ID today. Its
@@ -2677,14 +3604,14 @@ fn parse_claude_credentials_data(
         scopes: oauth.scopes.unwrap_or_default(),
         rate_limit_tier: oauth.rate_limit_tier,
         subscription_type: oauth.subscription_type,
+        scope_slot: claude_login_scope_slot(&source)?,
         source,
         raw_root: Some(raw_root),
         keychain_account: None,
-        scope_slot: claude_login_scope_slot(source)?,
     })
 }
 
-fn claude_login_scope_slot(source: ClaudeCredentialSource) -> Result<CredentialSlot, String> {
+fn claude_login_scope_slot(source: &ClaudeCredentialSource) -> Result<CredentialSlot, String> {
     match source {
         ClaudeCredentialSource::Keychain => Ok(CredentialSlot {
             semantic_source: "claude-login-keychain",
@@ -2697,6 +3624,14 @@ fn claude_login_scope_slot(source: ClaudeCredentialSource) -> Result<CredentialS
                 Some("claudeAiOauth"),
             )
             .map_err(|_| "Claude credential location cannot be scoped safely.".to_string())?,
+        }),
+        ClaudeCredentialSource::ConfigDir(dir) => Ok(CredentialSlot {
+            semantic_source: CLAUDE_CONFIG_DIR_FILE_SOURCE,
+            canonical_location: agent_account_scope::canonical_file_location(
+                &dir.join(CLAUDE_CONFIG_DIR_CREDENTIALS_FILE),
+                Some("claudeAiOauth"),
+            )
+            .map_err(|_| CLAUDE_CONFIG_DIR_READ_ERROR.to_string())?,
         }),
         ClaudeCredentialSource::Environment | ClaudeCredentialSource::Desktop => {
             Err("this credential source requires an explicit account-scope slot".to_string())
@@ -2711,12 +3646,12 @@ const CLAUDE_DESKTOP_READ_RETRY_ERROR: &str =
 const CLAUDE_DESKTOP_EXPIRED_ERROR: &str =
     "Claude Desktop login has expired. Open Claude Desktop to renew it.";
 const CLAUDE_DESKTOP_REFRESH_ERROR: &str = "Claude Desktop credentials cannot be refreshed.";
-const CLAUDE_DESKTOP_EXPIRY_SKEW_SECS: i64 = 60;
+const CLAUDE_READ_ONLY_EXPIRY_SKEW_SECS: i64 = 60;
 /// Nesting levels below the decrypted root searched for a token object.
 const CLAUDE_DESKTOP_MAX_DEPTH: usize = 3;
 const CLAUDE_DESKTOP_MAX_REPORTED_KEYS: usize = 10;
 
-/// The Claude Desktop login (Windows only; last fallback). `Ok(None)` means no
+/// The Claude Desktop login (Windows only; its own card). `Ok(None)` means no
 /// Desktop login is stored; `Err` carries a failure with a fixed display
 /// string. Only this function resolves the real `%APPDATA%\Claude` paths.
 #[cfg(target_os = "windows")]
@@ -2748,10 +3683,10 @@ fn load_claude_desktop_credentials_from(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(ProviderFetchFailure::terminal(CLAUDE_DESKTOP_READ_ERROR));
         }
-        Err(_) => return Err(claude_desktop_read_retry_failure()),
+        Err(_) => return Err(claude_read_retry_failure(CLAUDE_DESKTOP_READ_RETRY_ERROR)),
     };
-    let local_state: Value =
-        serde_json::from_str(&local_state).map_err(|_| claude_desktop_read_retry_failure())?;
+    let local_state: Value = serde_json::from_str(&local_state)
+        .map_err(|_| claude_read_retry_failure(CLAUDE_DESKTOP_READ_RETRY_ERROR))?;
     let terminal = |_| ProviderFetchFailure::terminal(CLAUDE_DESKTOP_READ_ERROR);
     let key = win_safe_storage::load_key(&local_state).map_err(terminal)?;
     let mut plaintext = win_safe_storage::decrypt(&key, &value).map_err(terminal)?;
@@ -2761,14 +3696,14 @@ fn load_claude_desktop_credentials_from(
     parsed.map(Some).map_err(ProviderFetchFailure::terminal)
 }
 
-/// A read or JSON-parse failure of Claude Desktop's own files, which it
-/// rewrites in place, is treated as a race and retried rather than reported
+/// A read or JSON-parse failure of a credential file another program
+/// rewrites in place (Claude Desktop's files, a config directory's
+/// `.credentials.json`) is treated as a race and retried rather than reported
 /// as a broken login. No account binding is provable without the token, so
 /// the failure carries none.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn claude_desktop_read_retry_failure() -> ProviderFetchFailure {
+fn claude_read_retry_failure(display: &'static str) -> ProviderFetchFailure {
     ProviderFetchFailure::transient(
-        CLAUDE_DESKTOP_READ_RETRY_ERROR,
+        display,
         None,
         SafeTransportDiagnostic::from_facts(TransportErrorFacts {
             is_timeout: false,
@@ -2781,6 +3716,81 @@ fn claude_desktop_read_retry_failure() -> ProviderFetchFailure {
     )
 }
 
+const CLAUDE_CONFIG_DIR_CREDENTIALS_FILE: &str = ".credentials.json";
+/// `semantic_source` of a credential read from a configured directory's own
+/// `.credentials.json`; distinct from the primary's `claude-login-file` so
+/// the two never share a lineage slot, and the one value that lets a config
+/// directory card record durable history.
+const CLAUDE_CONFIG_DIR_FILE_SOURCE: &str = "claude-config-dir-file";
+/// Claude Code's own login file is a few hundred bytes; anything larger is
+/// not one and is refused before parsing.
+const CLAUDE_CONFIG_DIR_CREDENTIALS_MAX_BYTES: u64 = 64 * 1024;
+/// No usable login in the directory. Reported as a normal (`oauth`) card, not
+/// the setup prompt: there is no setup-token fallback for an extra account.
+const CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR: &str =
+    "No Claude Code login found for this config directory. Run `claude` with CLAUDE_CONFIG_DIR set to that directory to sign in.";
+const CLAUDE_CONFIG_DIR_READ_ERROR: &str =
+    "Claude Code login for this config directory could not be read.";
+const CLAUDE_CONFIG_DIR_READ_RETRY_ERROR: &str =
+    "Claude Code login for this config directory could not be read. Retrying automatically.";
+const CLAUDE_CONFIG_DIR_REJECTED_ERROR: &str =
+    "Claude Code login for this config directory was rejected. Run `claude` with CLAUDE_CONFIG_DIR set to that directory to sign in again.";
+const CLAUDE_CONFIG_DIR_EXPIRED_ERROR: &str =
+    "Claude Code login for this config directory has expired. Run `claude` with CLAUDE_CONFIG_DIR set to that directory to renew it.";
+const CLAUDE_READ_ONLY_REFRESH_ERROR: &str = "This Claude login cannot be refreshed by TokenBar.";
+
+/// Load a configured directory's login from `<dir>\.credentials.json` and
+/// from nothing else (plan assumption U1: Claude Code on Windows keeps its
+/// login there for `CLAUDE_CONFIG_DIR`). The primary's chain — environment
+/// tokens, shell harvest, keychain, `~/.claude` — belongs to the primary; a
+/// missing file here is this account's error, never a fall-through.
+fn load_claude_config_dir_credentials(
+    dir: &str,
+) -> Result<ClaudeCredentials, ProviderFetchFailure> {
+    let dir = PathBuf::from(dir);
+    let raw = read_claude_config_dir_credentials(&dir.join(CLAUDE_CONFIG_DIR_CREDENTIALS_FILE))?;
+    if serde_json::from_str::<Value>(&raw).is_err() {
+        // A torn read of a file Claude Code is rewriting.
+        return Err(claude_read_retry_failure(
+            CLAUDE_CONFIG_DIR_READ_RETRY_ERROR,
+        ));
+    }
+    match resolve_stored_claude_login(&raw, ClaudeCredentialSource::ConfigDir(dir)) {
+        ClaudeLoginResolution::Ready(credentials) => Ok(credentials),
+        ClaudeLoginResolution::Absent | ClaudeLoginResolution::ExplicitLogout => Err(
+            ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR),
+        ),
+        ClaudeLoginResolution::Terminal => {
+            Err(ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_READ_ERROR))
+        }
+    }
+}
+
+fn read_claude_config_dir_credentials(path: &Path) -> Result<String, ProviderFetchFailure> {
+    use std::io::Read as _;
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ProviderFetchFailure::terminal(
+                CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR,
+            ));
+        }
+        Err(_) => {
+            return Err(claude_read_retry_failure(
+                CLAUDE_CONFIG_DIR_READ_RETRY_ERROR,
+            ))
+        }
+    };
+    let mut raw = String::new();
+    file.take(CLAUDE_CONFIG_DIR_CREDENTIALS_MAX_BYTES + 1)
+        .read_to_string(&mut raw)
+        .map_err(|_| claude_read_retry_failure(CLAUDE_CONFIG_DIR_READ_RETRY_ERROR))?;
+    if raw.len() as u64 > CLAUDE_CONFIG_DIR_CREDENTIALS_MAX_BYTES {
+        return Err(ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_READ_ERROR));
+    }
+    Ok(raw)
+}
+
 /// The encrypted `oauth:tokenCache` value from Claude Desktop's config.json.
 /// A missing file, key or empty value means Desktop is not logged in.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -2790,10 +3800,10 @@ fn read_claude_desktop_token_cache(
     let raw = match fs::read_to_string(config_path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(claude_desktop_read_retry_failure()),
+        Err(_) => return Err(claude_read_retry_failure(CLAUDE_DESKTOP_READ_RETRY_ERROR)),
     };
-    let root: Value =
-        serde_json::from_str(&raw).map_err(|_| claude_desktop_read_retry_failure())?;
+    let root: Value = serde_json::from_str(&raw)
+        .map_err(|_| claude_read_retry_failure(CLAUDE_DESKTOP_READ_RETRY_ERROR))?;
     match root.get(CLAUDE_DESKTOP_TOKEN_CACHE_KEY) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) if value.trim().is_empty() => Ok(None),
@@ -3063,7 +4073,7 @@ const CLAUDE_HARVEST_NEGATIVE_TTL_SECS: i64 = 1800;
 /// keychain fallback can still fire.
 async fn harvest_shell_env_token() -> Option<String> {
     // Scope the guard so it is dropped before the `.await` below (never hold a
-    // std Mutex across an await). Recover a poisoned lock (like `lock_gate`) so a
+    // std Mutex across an await). Recover a poisoned lock (like `with_gate`) so a
     // stray panic can't permanently disable the cache and reintroduce a per-poll
     // shell spawn.
     {
@@ -3598,6 +4608,7 @@ fn reload_claude_credentials(original: &ClaudeCredentials) -> Result<ClaudeCrede
             Err("Claude environment credentials cannot be refreshed in place.".to_string())
         }
         ClaudeCredentialSource::Desktop => Err(CLAUDE_DESKTOP_REFRESH_ERROR.to_string()),
+        ClaudeCredentialSource::ConfigDir(_) => Err(CLAUDE_READ_ONLY_REFRESH_ERROR.to_string()),
     }
 }
 
@@ -3612,6 +4623,8 @@ fn save_claude_credentials(credentials: &ClaudeCredentials) -> Result<(), String
         ClaudeCredentialSource::Environment => Ok(()),
         // Never write to Claude Desktop's files.
         ClaudeCredentialSource::Desktop => Err(CLAUDE_DESKTOP_REFRESH_ERROR.to_string()),
+        // Never write to a configured directory's store either.
+        ClaudeCredentialSource::ConfigDir(_) => Err(CLAUDE_READ_ONLY_REFRESH_ERROR.to_string()),
     }
 }
 
@@ -4726,12 +5739,27 @@ fn jwt_expiration(token: &str) -> Option<DateTime<Utc>> {
     Utc.timestamp_opt(seconds, 0).single()
 }
 
-/// TokenBar cannot renew a Desktop token, so it stops using one a minute
+/// TokenBar cannot renew a read-only token, so it stops using one a minute
 /// early rather than sending a token that expires in flight.
-fn claude_desktop_credentials_expired(credentials: &ClaudeCredentials, now: DateTime<Utc>) -> bool {
+fn claude_read_only_credentials_expired(
+    credentials: &ClaudeCredentials,
+    now: DateTime<Utc>,
+) -> bool {
     credentials.expires_at.is_some_and(|expires_at| {
-        now + chrono::Duration::seconds(CLAUDE_DESKTOP_EXPIRY_SKEW_SECS) >= expires_at
+        now + chrono::Duration::seconds(CLAUDE_READ_ONLY_EXPIRY_SKEW_SECS) >= expires_at
     })
+}
+
+/// The terminal message for an expired read-only credential, or `None` for a
+/// source TokenBar refreshes itself. Fixed strings: a configured directory's
+/// card is already labelled with its basename, so the message names neither
+/// the path nor a relative command.
+fn claude_read_only_expired_message(source: &ClaudeCredentialSource) -> Option<&'static str> {
+    match source {
+        ClaudeCredentialSource::Desktop => Some(CLAUDE_DESKTOP_EXPIRED_ERROR),
+        ClaudeCredentialSource::ConfigDir(_) => Some(CLAUDE_CONFIG_DIR_EXPIRED_ERROR),
+        _ => None,
+    }
 }
 
 fn claude_credentials_expired(credentials: &ClaudeCredentials) -> bool {
@@ -5378,6 +6406,8 @@ mod tests {
         now: DateTime<Utc>,
     ) -> AgentUsageSnapshot {
         AgentUsageSnapshot {
+            account_key: None,
+            merge_scope: None,
             client_id: client_id.to_string(),
             source: "oauth".to_string(),
             updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -5467,7 +6497,6 @@ mod tests {
                     setup_calls.set(setup_calls.get() + 1);
                     ("setup-token", claude_test_success_outcome())
                 },
-                || panic!("Claude Desktop must not be read"),
             )
             .await;
             assert_eq!(source, "oauth");
@@ -5513,7 +6542,6 @@ mod tests {
                     setup_calls.set(setup_calls.get() + 1);
                     ("setup-token", claude_test_success_outcome())
                 },
-                || panic!("Claude Desktop must not be read"),
             )
             .await;
             assert_eq!(source, "oauth", "{label}");
@@ -5555,7 +6583,6 @@ mod tests {
                     setup_calls.set(setup_calls.get() + 1);
                     ("setup-token", claude_test_success_outcome())
                 },
-                || panic!("Claude Desktop must not be read"),
             )
             .await;
             assert_eq!(source, "setup-token");
@@ -5623,7 +6650,7 @@ mod tests {
         let mut gate = ClaudeUsageGate::default();
         gate.record_rate_limit(binding.clone(), None, now);
         assert!(gate.blocked_until_for(&binding, now).is_some());
-        for resolved in ["oauth", "setup-token", "desktop"] {
+        for resolved in ["oauth", "setup-token"] {
             clear_claude_gate_if_unconfigured(resolved, &mut gate);
             assert!(
                 gate.blocked_until_for(&binding, now).is_some(),
@@ -5650,7 +6677,6 @@ mod tests {
                 setup_calls.set(setup_calls.get() + 1);
                 ("setup-token", claude_test_success_outcome())
             },
-            || panic!("Claude Desktop must not be read"),
         )
         .await;
         assert_eq!(source, "setup-token");
@@ -5688,184 +6714,1517 @@ mod tests {
         }
     }
 
-    struct DesktopPrecedenceRun {
-        source: &'static str,
-        outcome: ProviderFetchOutcome,
-        login_sources: Vec<ClaudeCredentialSource>,
-        setup_calls: usize,
-        desktop_loads: usize,
-    }
+    // ---- Multi-account Claude cards (S1) ----------------------------------
 
-    async fn run_desktop_precedence(
-        login: ClaudeLoginResolution,
-        setup: Result<Option<ResolvedClaudeToken>, String>,
-        desktop: Result<Option<ClaudeCredentials>, ProviderFetchFailure>,
-    ) -> DesktopPrecedenceRun {
-        let login_sources = std::cell::RefCell::new(Vec::new());
-        let setup_calls = std::cell::Cell::new(0);
-        let desktop_loads = std::cell::Cell::new(0);
-        let (source, outcome) = fetch_claude_login_or_setup_with(
-            login,
-            |credentials| {
-                login_sources.borrow_mut().push(credentials.source);
-                async { ("oauth", claude_test_success_outcome()) }
+    /// A synthetic successful Claude fetch for `key`, with the given merge
+    /// identity and history scope.
+    fn claude_account_success(
+        key: Option<&str>,
+        account_scope: AccountScope,
+        merge_scope: Option<AccountScope>,
+        history: &str,
+        now: DateTime<Utc>,
+    ) -> ClaudeAccountFetch {
+        let mut snapshot = cache_test_snapshot("claude", Ok(account_scope.clone()), now);
+        snapshot.history_scope = Ok(HistoryScope::for_test(history));
+        snapshot.merge_scope = merge_scope;
+        ClaudeAccountFetch {
+            account_key: key.map(str::to_string),
+            failure_source: "oauth",
+            outcome: ProviderFetchOutcome::Success {
+                snapshot,
+                cache_binding: Some(ProviderCacheBinding::primary(account_scope)),
             },
-            || setup,
-            |_| async {
-                setup_calls.set(setup_calls.get() + 1);
-                ("setup-token", claude_test_success_outcome())
-            },
-            || {
-                desktop_loads.set(desktop_loads.get() + 1);
-                desktop
-            },
-        )
-        .await;
-        DesktopPrecedenceRun {
-            source,
-            outcome,
-            login_sources: login_sources.into_inner(),
-            setup_calls: setup_calls.get(),
-            desktop_loads: desktop_loads.get(),
+            remembered_scope: None,
         }
     }
 
-    #[tokio::test]
-    async fn claude_desktop_login_is_the_last_fallback() {
-        let desktop = || Ok(Some(claude_test_desktop_credentials(None)));
-
-        // A CLI login wins; Desktop is never read.
-        let run = run_desktop_precedence(
-            ClaudeLoginResolution::Ready(claude_test_login_credentials()),
-            Ok(None),
-            desktop(),
-        )
-        .await;
-        assert_eq!(run.source, "oauth");
-        assert_eq!(run.login_sources, [ClaudeCredentialSource::File]);
-        assert_eq!(run.desktop_loads, 0);
-
-        // Absent and ExplicitLogout both fall through to Desktop, whose
-        // result is reported under the `desktop` source.
-        let logged_out = resolve_stored_claude_login(
-            r#"{"claudeAiOauth":{"refreshToken":"stale"}}"#,
-            ClaudeCredentialSource::File,
-        );
-        for login in [ClaudeLoginResolution::Absent, logged_out] {
-            let run = run_desktop_precedence(login, Ok(None), desktop()).await;
-            assert_eq!(run.source, "desktop");
-            assert!(matches!(run.outcome, ProviderFetchOutcome::Success { .. }));
-            assert_eq!(run.login_sources, [ClaudeCredentialSource::Desktop]);
-            assert_eq!(run.desktop_loads, 1);
+    fn claude_config_dir_credentials(
+        dir: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> ClaudeCredentials {
+        ClaudeCredentials {
+            access_token: "config-dir-access".to_string(),
+            refresh_token: Some("config-dir-refresh".to_string()),
+            expires_at,
+            scopes: vec!["user:profile".to_string()],
+            rate_limit_tier: None,
+            subscription_type: None,
+            source: ClaudeCredentialSource::ConfigDir(PathBuf::from(dir)),
+            raw_root: None,
+            keychain_account: None,
+            scope_slot: CredentialSlot {
+                semantic_source: CLAUDE_CONFIG_DIR_FILE_SOURCE,
+                canonical_location: "fixture-config-dir".to_string(),
+            },
         }
-
-        // A corrupt CLI login stays terminal.
-        let run =
-            run_desktop_precedence(ClaudeLoginResolution::Terminal, Ok(None), desktop()).await;
-        assert_eq!(run.source, "oauth");
-        assert_eq!(
-            terminal_display(&run.outcome),
-            Some(CLAUDE_CREDENTIALS_LOAD_ERROR)
-        );
-        assert!(run.login_sources.is_empty());
-        assert_eq!(run.desktop_loads, 0);
-
-        // The setup token outranks Desktop.
-        let run = run_desktop_precedence(
-            ClaudeLoginResolution::Absent,
-            Ok(Some(claude_test_setup_token())),
-            desktop(),
-        )
-        .await;
-        assert_eq!(run.source, "setup-token");
-        assert_eq!(run.setup_calls, 1);
-        assert_eq!(run.desktop_loads, 0);
-
-        // No Desktop login: the setup prompt, as before.
-        let run = run_desktop_precedence(ClaudeLoginResolution::Absent, Ok(None), Ok(None)).await;
-        assert_eq!(run.source, "unconfigured");
-        assert_eq!(
-            terminal_display(&run.outcome),
-            Some(CLAUDE_UNCONFIGURED_ERROR)
-        );
-        assert_eq!(run.desktop_loads, 1);
-
-        // An unreadable Desktop login is a named terminal failure.
-        let run = run_desktop_precedence(
-            ClaudeLoginResolution::Absent,
-            Ok(None),
-            Err(ProviderFetchFailure::terminal(CLAUDE_DESKTOP_READ_ERROR)),
-        )
-        .await;
-        assert_eq!(run.source, "desktop");
-        assert_eq!(
-            terminal_display(&run.outcome),
-            Some(CLAUDE_DESKTOP_READ_ERROR)
-        );
-        assert!(run.login_sources.is_empty());
     }
 
-    #[tokio::test]
-    async fn claude_desktop_fetch_keeps_a_recorded_rate_limit_gate() {
+    fn keys_of(snapshots: &[AgentUsageSnapshot]) -> Vec<Option<&str>> {
+        snapshots
+            .iter()
+            .map(|snapshot| snapshot.account_key.as_deref())
+            .collect()
+    }
+
+    #[test]
+    fn account_key_component_is_the_one_untrimmed_rule() {
+        assert_eq!(account_key_component(None), None);
+        assert_eq!(account_key_component(Some("")), None);
+        assert_eq!(account_key_component(Some("  ")), Some("  "));
+        assert_ne!(
+            account_slot("claude", Some(r"C:\x\dir")),
+            account_slot("claude", Some(r"C:\x\dir "))
+        );
+        assert_eq!(
+            account_slot("claude", Some("")),
+            account_slot("claude", None)
+        );
+        assert_eq!(ClaudeAccount::Primary { identify: true }.key(), None);
+        assert_eq!(
+            ClaudeAccount::ConfigDir(r"C:\x\dir".to_string()).key(),
+            Some(r"C:\x\dir")
+        );
+        assert_eq!(
+            ClaudeAccount::Desktop.key(),
+            Some(CLAUDE_DESKTOP_ACCOUNT_KEY)
+        );
+        // The sentinel is not absolute, so no registered directory equals it.
+        assert!(!CLAUDE_DESKTOP_ACCOUNT_KEY.contains(':'));
+    }
+
+    #[test]
+    fn claude_account_requests_add_desktop_as_its_own_card() {
+        let kinds = |requests: Vec<ClaudeAccountRequest>| -> Vec<String> {
+            requests
+                .into_iter()
+                .map(|request| match request {
+                    ClaudeAccountRequest::Primary { identify } => format!("primary:{identify}"),
+                    ClaudeAccountRequest::ConfigDir(dir) => format!("dir:{dir}"),
+                    ClaudeAccountRequest::Desktop(Ok(_)) => "desktop".to_string(),
+                    ClaudeAccountRequest::Desktop(Err(_)) => "desktop-error".to_string(),
+                })
+                .collect()
+        };
+        // No extra account and no Desktop login: the primary alone, and it
+        // asks nobody for a profile.
+        assert_eq!(
+            kinds(claude_account_requests(Vec::new(), Ok(None))),
+            ["primary:false"]
+        );
+        assert!(!ClaudeAccount::Primary { identify: false }.wants_profile());
+        // Only Desktop signed in: the primary (setup prompt) AND a Desktop card.
+        assert_eq!(
+            kinds(claude_account_requests(
+                Vec::new(),
+                Ok(Some(claude_test_desktop_credentials(None)))
+            )),
+            ["primary:true", "desktop"]
+        );
+        // An unreadable Desktop login is a Desktop error card; nothing to merge.
+        assert_eq!(
+            kinds(claude_account_requests(
+                Vec::new(),
+                Err(ProviderFetchFailure::terminal(CLAUDE_DESKTOP_READ_ERROR))
+            )),
+            ["primary:false", "desktop-error"]
+        );
+        assert_eq!(
+            kinds(claude_account_requests(
+                vec![r"C:\a".to_string(), r"C:\b".to_string()],
+                Ok(Some(claude_test_desktop_credentials(None)))
+            )),
+            ["primary:true", r"dir:C:\a", r"dir:C:\b", "desktop"]
+        );
+    }
+
+    /// G5-style: with no extra account and no Desktop login the published
+    /// Claude card is exactly what the single-account path produced.
+    #[test]
+    fn primary_payload_is_byte_identical_without_extra_accounts() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
-        let scope = TestRefreshScope::new("claude", "desktop-gate");
+        let scope = TestRefreshScope::new("claude", "primary-byte-identical");
+        let binding = scope
+            .resolve_current("fixture", "primary", b"marker")
+            .unwrap();
+        let fetch = claude_account_success(None, binding, None, "primary-history", now);
+        let old_path_outcome = match &fetch.outcome {
+            ProviderFetchOutcome::Success {
+                snapshot,
+                cache_binding,
+            } => ProviderFetchOutcome::Success {
+                snapshot: snapshot.clone(),
+                cache_binding: cache_binding.clone(),
+            },
+            _ => unreachable!(),
+        };
+
+        let published = publish_claude_accounts_with(
+            &Mutex::new(ProviderLastGoodCache::default()),
+            now,
+            vec![fetch],
+            |_| {},
+        );
+        let single = apply_provider_outcome_with(
+            &Mutex::new(ProviderLastGoodCache::default()),
+            "claude",
+            "oauth",
+            now,
+            old_path_outcome,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(published.len(), 1);
+        let published_json = serde_json::to_string(&published[0]).unwrap();
+        assert_eq!(published_json, serde_json::to_string(&single).unwrap());
+        let value: Value = serde_json::from_str(&published_json).unwrap();
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "accountScope",
+                "clientId",
+                "credits",
+                "error",
+                "historyScope",
+                "identity",
+                "source",
+                "updatedAt",
+                "windows"
+            ],
+            "no accountKey and no merge identity on the primary's wire"
+        );
+        assert!(published_json.starts_with(r#"{"clientId":"claude","source":"oauth","#));
+        scope.cleanup();
+    }
+
+    #[test]
+    fn account_key_is_serialized_only_for_extra_cards() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        let card = apply_account_outcome_with(
+            &cache,
+            "claude",
+            Some(r"C:\Users\me\.claude-work"),
+            "oauth",
+            now,
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR,
+            )),
+            |_| {},
+        )
+        .unwrap();
+        let value = serde_json::to_value(&card).unwrap();
+        assert_eq!(value["accountKey"], r"C:\Users\me\.claude-work");
+        assert_eq!(
+            value["source"], "oauth",
+            "an extra account is never the setup prompt"
+        );
+    }
+
+    #[test]
+    fn per_account_last_good_slots_are_isolated() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("claude", "per-account-last-good");
         let binding = ProviderCacheBinding::primary(
             scope
-                .resolve_current("fixture-desktop", "fixture-desktop", b"desktop-refresh")
+                .resolve_current("fixture", "shared", b"marker")
                 .unwrap(),
         );
-        let mut gate = ClaudeUsageGate::default();
-        gate.record_rate_limit(binding.clone(), None, now);
-        let oauth_calls = std::cell::Cell::new(0);
-        let refresh_calls = std::cell::Cell::new(0);
-
-        let (source, outcome) = {
-            let gate = &mut gate;
-            let oauth_calls = &oauth_calls;
-            let refresh_calls = &refresh_calls;
-            let request_binding = binding.clone();
-            fetch_claude_login_or_setup_with(
-                ClaudeLoginResolution::Absent,
-                move |credentials| {
-                    fetch_claude_login_usage_with(
-                        credentials,
-                        request_binding.clone(),
-                        now,
-                        move |binding, at| gate.blocked_until_for(binding, at),
-                        move |credentials| {
-                            refresh_calls.set(refresh_calls.get() + 1);
-                            let binding = request_binding.clone();
-                            async move { Ok((credentials, binding.primary.clone(), Some(binding))) }
-                        },
-                        |_, _, _| async { claude_test_success_outcome() },
-                        move |_, _, _, _| async move {
-                            oauth_calls.set(oauth_calls.get() + 1);
-                            ("oauth", claude_test_success_outcome())
-                        },
-                    )
-                },
-                || Ok(None),
-                |_| async { ("setup-token", claude_test_success_outcome()) },
-                || Ok(Some(claude_test_desktop_credentials(None))),
-            )
-            .await
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        let transient = || {
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
+                "Claude usage request failed. Retrying automatically.",
+                Some(binding.clone()),
+                timeout_diagnostic(),
+            ))
         };
-        assert_eq!(source, "desktop");
-        assert!(matches!(
-            outcome,
-            ProviderFetchOutcome::Failure(ProviderFetchFailure::Transient {
-                transport_diagnostic: SafeTransportDiagnostic {
-                    category: TransportCategory::RateLimited,
-                    ..
-                },
-                ..
-            })
-        ));
-        assert_eq!(oauth_calls.get(), 0);
-        assert_eq!(refresh_calls.get(), 0);
-        clear_claude_gate_if_unconfigured(source, &mut gate);
-        assert!(gate.blocked_until_for(&binding, now).is_some());
+
+        // The primary succeeds and is cached under its own slot.
+        apply_account_outcome_with(
+            &cache,
+            "claude",
+            None,
+            "oauth",
+            now,
+            ProviderFetchOutcome::Success {
+                snapshot: cache_test_snapshot("claude", Ok(binding.primary.clone()), now),
+                cache_binding: Some(binding.clone()),
+            },
+            |_| {},
+        );
+        // Another account failing terminally clears only its own slot.
+        apply_account_outcome_with(
+            &cache,
+            "claude",
+            Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+            "oauth",
+            now,
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                CLAUDE_DESKTOP_EXPIRED_ERROR,
+            )),
+            |_| {},
+        );
+        // The other account never recovers the primary's snapshot...
+        let desktop = apply_account_outcome_with(
+            &cache,
+            "claude",
+            Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+            "oauth",
+            now,
+            transient(),
+            |_| {},
+        )
+        .unwrap();
+        assert!(desktop.windows.is_empty());
+        assert_eq!(
+            desktop.account_key.as_deref(),
+            Some(CLAUDE_DESKTOP_ACCOUNT_KEY)
+        );
+        // ...and the primary still recovers its own.
+        let primary =
+            apply_account_outcome_with(&cache, "claude", None, "oauth", now, transient(), |_| {})
+                .unwrap();
+        assert_eq!(primary.windows.len(), 1);
+        assert_eq!(primary.account_key, None);
         scope.cleanup();
+    }
+
+    #[test]
+    fn per_account_gates_never_wipe_each_other() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("claude", "per-account-gate");
+        let binding_a = ProviderCacheBinding::primary(
+            scope.resolve_current("fixture", "a", b"marker-a").unwrap(),
+        );
+        let binding_b = ProviderCacheBinding::primary(
+            scope.resolve_current("fixture", "b", b"marker-b").unwrap(),
+        );
+        let gates = Mutex::new(ClaudeUsageGates::new());
+        let extra = Some(r"C:\claude\work");
+        with_gate_in(&gates, extra, |gate| {
+            gate.record_rate_limit(binding_a.clone(), None, now)
+        });
+        // The primary checking a different binding resets only its own gate.
+        assert!(
+            with_gate_in(&gates, None, |gate| gate.blocked_until_for(&binding_b, now)).is_none()
+        );
+        with_gate_in(&gates, None, ClaudeUsageGate::clear);
+        with_gate_in(
+            &gates,
+            Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+            ClaudeUsageGate::clear,
+        );
+        assert!(with_gate_in(&gates, extra, |gate| gate
+            .blocked_until_for(&binding_a, now))
+        .is_some());
+        // The primary's own unconfigured clear also stays in its slot.
+        with_gate_in(&gates, None, |gate| {
+            clear_claude_gate_if_unconfigured("unconfigured", gate)
+        });
+        assert!(with_gate_in(&gates, extra, |gate| gate
+            .blocked_until_for(&binding_a, now))
+        .is_some());
+        scope.cleanup();
+    }
+
+    #[test]
+    fn header_cache_is_per_account_and_token_checked() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let cache = Mutex::new(ClaudeHeaderCache::new());
+        let window = UsageWindow::from_provider_used_percent(
+            "Session".to_string(),
+            10.0,
+            Some(now + chrono::Duration::hours(2)),
+            now,
+        );
+        store_claude_header_windows(&cache, None, "primary-token", now, vec![window.clone()]);
+        store_claude_header_windows(
+            &cache,
+            Some(r"C:\claude\work"),
+            "extra-token",
+            now,
+            vec![window.clone(), window],
+        );
+        let primary = claude_cached_header_windows(&cache, None, "primary-token", now).unwrap();
+        assert_eq!(
+            primary.len(),
+            1,
+            "the extra's probe did not replace the primary's"
+        );
+        assert_eq!(
+            claude_cached_header_windows(&cache, Some(r"C:\claude\work"), "extra-token", now)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(claude_cached_header_windows(
+            &cache,
+            Some(r"C:\claude\work"),
+            "primary-token",
+            now
+        )
+        .is_none());
+        assert!(claude_cached_header_windows(
+            &cache,
+            Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+            "primary-token",
+            now
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn purge_drops_only_removed_config_dirs() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("claude", "purge-removed");
+        let binding = ProviderCacheBinding::primary(
+            scope
+                .resolve_current("fixture", "purge", b"marker")
+                .unwrap(),
+        );
+        let last_good = Mutex::new(ProviderLastGoodCache::default());
+        let gates = Mutex::new(ClaudeUsageGates::new());
+        let headers = Mutex::new(ClaudeHeaderCache::new());
+        let profiles = Mutex::new(ClaudeProfileCache::new());
+        let identities = Mutex::new(ClaudeIdentityCache::new());
+        let (kept, removed) = (r"C:\claude\kept", r"C:\claude\removed");
+        let accounts = [
+            None,
+            Some(kept),
+            Some(removed),
+            Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+        ];
+        for account in accounts {
+            apply_account_outcome_with(
+                &last_good,
+                "claude",
+                account,
+                "oauth",
+                now,
+                ProviderFetchOutcome::Success {
+                    snapshot: cache_test_snapshot("claude", Ok(binding.primary.clone()), now),
+                    cache_binding: Some(binding.clone()),
+                },
+                |_| {},
+            );
+            with_gate_in(&gates, account, |gate| {
+                gate.record_rate_limit(binding.clone(), None, now)
+            });
+            store_claude_header_windows(&headers, account, "token", now, Vec::new());
+            profiles.lock().unwrap().insert(
+                (account.map(str::to_string), "binding".to_string()),
+                (now, None),
+            );
+            identities.lock().unwrap().insert(
+                (account.map(str::to_string), "binding".to_string()),
+                (
+                    binding.primary.clone(),
+                    HistoryScope::for_test("purge-history"),
+                ),
+            );
+        }
+        purge_removed_claude_accounts_in(
+            &ClaudeAccountCaches {
+                last_good: &last_good,
+                gates: &gates,
+                headers: &headers,
+                profiles: &profiles,
+                identities: &identities,
+            },
+            &[kept.to_string()],
+        );
+        let expected = |present: Vec<Option<String>>| {
+            let mut present = present;
+            present.sort();
+            present
+        };
+        let remaining = expected(vec![
+            None,
+            Some(kept.to_string()),
+            Some(CLAUDE_DESKTOP_ACCOUNT_KEY.to_string()),
+        ]);
+        let mut last_good_keys: Vec<Option<String>> = lock_last_good(&last_good)
+            .entries
+            .keys()
+            .map(|(_, key)| key.clone())
+            .collect();
+        last_good_keys.sort();
+        assert_eq!(last_good_keys, remaining);
+        assert_eq!(
+            expected(gates.lock().unwrap().keys().cloned().collect()),
+            remaining
+        );
+        assert_eq!(
+            expected(headers.lock().unwrap().keys().cloned().collect()),
+            remaining
+        );
+        assert_eq!(
+            expected(
+                identities
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .map(|(key, _)| key.clone())
+                    .collect()
+            ),
+            remaining
+        );
+        assert_eq!(
+            expected(
+                profiles
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .map(|(key, _)| key.clone())
+                    .collect()
+            ),
+            remaining
+        );
+        scope.cleanup();
+    }
+
+    #[test]
+    fn merge_drops_only_a_later_card_with_the_same_profile() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("claude", "merge-pass");
+        let credential = |name: &str| {
+            scope
+                .resolve_current("fixture", name, name.as_bytes())
+                .unwrap()
+        };
+        let profile = |evidence: &str| {
+            scope
+                .resolve_authoritative("claude", AuthoritativeIdKind::OpaqueId, evidence)
+                .unwrap()
+        };
+        let team = profile("profile:team");
+        let max = profile("profile:max");
+        let run = |fetched: Vec<ClaudeAccountFetch>| {
+            publish_claude_accounts_with(
+                &Mutex::new(ProviderLastGoodCache::default()),
+                now,
+                fetched,
+                |_| {},
+            )
+        };
+        let dir = r"C:\claude\work";
+
+        // Same account on CLI and Desktop: one card, the primary's.
+        let merged = run(vec![
+            claude_account_success(None, credential("cli"), Some(team.clone()), "p", now),
+            claude_account_success(
+                Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+                credential("desktop"),
+                Some(team.clone()),
+                "d",
+                now,
+            ),
+        ]);
+        assert_eq!(keys_of(&merged), [None]);
+
+        // Different accounts: both cards, in input order.
+        let both = run(vec![
+            claude_account_success(None, credential("cli"), Some(team.clone()), "p", now),
+            claude_account_success(Some(dir), credential("dir"), Some(max.clone()), "c", now),
+            claude_account_success(
+                Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+                credential("desktop"),
+                Some(max.clone()),
+                "d",
+                now,
+            ),
+        ]);
+        assert_eq!(
+            keys_of(&both),
+            [None, Some(dir)],
+            "Desktop shares the config dir's account, and the config dir ranks first"
+        );
+
+        // Unknown identity on either side never merges.
+        let unknown = run(vec![
+            claude_account_success(None, credential("cli"), None, "p", now),
+            claude_account_success(
+                Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+                credential("desktop"),
+                Some(team.clone()),
+                "d",
+                now,
+            ),
+        ]);
+        assert_eq!(keys_of(&unknown), [None, Some(CLAUDE_DESKTOP_ACCOUNT_KEY)]);
+        let failed_primary = run(vec![
+            ClaudeAccountFetch {
+                account_key: None,
+                failure_source: "oauth",
+                outcome: ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                    "Claude OAuth token expired or invalid. Run `claude` to re-authenticate.",
+                )),
+                remembered_scope: None,
+            },
+            claude_account_success(
+                Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+                credential("desktop"),
+                Some(team),
+                "d",
+                now,
+            ),
+        ]);
+        assert_eq!(
+            keys_of(&failed_primary),
+            [None, Some(CLAUDE_DESKTOP_ACCOUNT_KEY)]
+        );
+        scope.cleanup();
+    }
+
+    /// Within one identity a success beats a failure; ties go to precedence.
+    #[test]
+    fn merge_keeps_a_successful_card_over_a_failed_one_of_the_same_account() {
+        let now = Utc::now();
+        let scope = TestRefreshScope::new("claude", "merge-success-wins");
+        let credential = |name: &str| {
+            scope
+                .resolve_current("fixture", name, name.as_bytes())
+                .unwrap()
+        };
+        let x = scope
+            .resolve_authoritative("claude", AuthoritativeIdKind::OpaqueId, "profile:x")
+            .unwrap();
+        let dir_a = r"C:\claude\a";
+        let dir_b = r"C:\claude\b";
+        let expired = |key: &str, remembered: &AccountScope| ClaudeAccountFetch {
+            account_key: Some(key.to_string()),
+            failure_source: "oauth",
+            outcome: ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                CLAUDE_CONFIG_DIR_EXPIRED_ERROR,
+            )),
+            remembered_scope: Some(remembered.clone()),
+        };
+
+        // Config dir A expired (remembered X) + Desktop succeeding as X:
+        // Desktop kept, A dropped with no history and no last-good.
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        let recorded = std::cell::RefCell::new(Vec::<String>::new());
+        let published = publish_claude_accounts_with(
+            &cache,
+            now,
+            vec![
+                claude_account_success(None, credential("cli"), None, "primary-history", now),
+                expired(dir_a, &x),
+                claude_account_success(
+                    Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+                    credential("desktop"),
+                    Some(x.clone()),
+                    "desktop-history",
+                    now,
+                ),
+            ],
+            |snapshot| {
+                enrich_snapshot_with(snapshot, now.timestamp(), |active, observations, _| {
+                    recorded
+                        .borrow_mut()
+                        .extend(active.iter().map(|key| key.account_scope.clone()));
+                    Ok(observations
+                        .iter()
+                        .map(|_| Ok((HistoryOutcome::LearningDuration, None, 0)))
+                        .collect())
+                })
+            },
+        );
+        assert_eq!(
+            keys_of(&published),
+            [None, Some(CLAUDE_DESKTOP_ACCOUNT_KEY)]
+        );
+        assert!(published.iter().all(|card| card.error.is_none()));
+        let mut slots: Vec<AccountSlot> = lock_last_good(&cache).entries.keys().cloned().collect();
+        slots.sort();
+        assert_eq!(
+            slots,
+            [
+                account_slot("claude", None),
+                account_slot("claude", Some(CLAUDE_DESKTOP_ACCOUNT_KEY))
+            ]
+        );
+        assert!(!lock_last_good(&cache)
+            .entries
+            .contains_key(&account_slot("claude", Some(dir_a))));
+        let mut scopes = recorded.into_inner();
+        scopes.sort();
+        scopes.dedup();
+        assert_eq!(scopes, ["desktop-history", "primary-history"]);
+
+        // Two failures of one account: the earliest by precedence stays.
+        let failures = publish_claude_accounts_with(
+            &Mutex::new(ProviderLastGoodCache::default()),
+            now,
+            vec![
+                expired(dir_a, &x),
+                expired(dir_b, &x),
+                expired(CLAUDE_DESKTOP_ACCOUNT_KEY, &x),
+            ],
+            |_| {},
+        );
+        assert_eq!(keys_of(&failures), [Some(dir_a)]);
+
+        // Two successes: the earliest (the primary) stays.
+        let successes = publish_claude_accounts_with(
+            &Mutex::new(ProviderLastGoodCache::default()),
+            now,
+            vec![
+                expired(dir_a, &x),
+                claude_account_success(None, credential("cli"), Some(x.clone()), "p", now),
+                claude_account_success(Some(dir_b), credential("b"), Some(x.clone()), "b", now),
+            ],
+            |_| {},
+        );
+        assert_eq!(keys_of(&successes), [None]);
+        scope.cleanup();
+    }
+
+    /// A directory removed from the registry while its fetch was in flight is
+    /// not published, and nothing that fetch wrote survives.
+    #[test]
+    fn a_directory_removed_mid_run_is_dropped_and_its_state_purged() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("claude", "removed-mid-run");
+        let credential = |name: &str| {
+            scope
+                .resolve_current("fixture", name, name.as_bytes())
+                .unwrap()
+        };
+        let (kept, removed) = (r"C:\claude\a", r"C:\claude\b");
+        let last_good = Mutex::new(ProviderLastGoodCache::default());
+        let gates = Mutex::new(ClaudeUsageGates::new());
+        let headers = Mutex::new(ClaudeHeaderCache::new());
+        let profiles = Mutex::new(ClaudeProfileCache::new());
+        let identities = Mutex::new(ClaudeIdentityCache::new());
+        let caches = ClaudeAccountCaches {
+            last_good: &last_good,
+            gates: &gates,
+            headers: &headers,
+            profiles: &profiles,
+            identities: &identities,
+        };
+        let run = || {
+            vec![
+                claude_account_success(None, credential("cli"), None, "p", now),
+                claude_account_success(Some(kept), credential("a"), None, "a", now),
+                claude_account_success(Some(removed), credential("b"), None, "b", now),
+            ]
+        };
+        // What both extra fetches wrote while in flight.
+        for account in [Some(kept), Some(removed)] {
+            with_gate_in(&gates, account, ClaudeUsageGate::clear);
+            store_claude_header_windows(&headers, account, "token", now, Vec::new());
+            profiles.lock().unwrap().insert(
+                (account.map(str::to_string), "binding".to_string()),
+                (now, None),
+            );
+            identities.lock().unwrap().insert(
+                (account.map(str::to_string), "binding".to_string()),
+                (credential("x"), HistoryScope::for_test("x")),
+            );
+        }
+
+        // The registry did not move: every card is published.
+        let unchanged = settle_claude_run_with(
+            &caches,
+            7,
+            &[kept.to_string(), removed.to_string()],
+            7,
+            now,
+            run(),
+            |_| {},
+        );
+        assert_eq!(keys_of(&unchanged), [None, Some(kept), Some(removed)]);
+
+        // B removed mid-run (generation 7 -> 8).
+        let published =
+            settle_claude_run_with(&caches, 7, &[kept.to_string()], 8, now, run(), |_| {});
+        assert_eq!(keys_of(&published), [None, Some(kept)]);
+        let b = Some(removed.to_string());
+        assert!(!lock_last_good(&last_good)
+            .entries
+            .contains_key(&account_slot("claude", Some(removed))));
+        assert!(!gates.lock().unwrap().contains_key(&b));
+        assert!(!headers.lock().unwrap().contains_key(&b));
+        assert!(!profiles.lock().unwrap().keys().any(|(key, _)| key == &b));
+        assert!(!identities.lock().unwrap().keys().any(|(key, _)| key == &b));
+        let a = Some(kept.to_string());
+        assert!(lock_last_good(&last_good)
+            .entries
+            .contains_key(&account_slot("claude", Some(kept))));
+        assert!(headers.lock().unwrap().contains_key(&a));
+        assert!(identities.lock().unwrap().keys().any(|(key, _)| key == &a));
+        scope.cleanup();
+    }
+
+    /// Revision 2: the merge runs on raw results, before history recording and
+    /// last-good. A merged-away Desktop card records nothing.
+    #[test]
+    fn merged_away_card_records_no_history_and_touches_no_last_good() {
+        let now = Utc::now();
+        let scope = TestRefreshScope::new("claude", "merge-before-enrich");
+        let shared = scope
+            .resolve_authoritative("claude", AuthoritativeIdKind::OpaqueId, "profile:shared")
+            .unwrap();
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        let recorded = std::cell::RefCell::new(Vec::<String>::new());
+        let fetched = vec![
+            claude_account_success(
+                None,
+                scope.resolve_current("fixture", "cli", b"cli").unwrap(),
+                Some(shared.clone()),
+                "primary-history",
+                now,
+            ),
+            claude_account_success(
+                Some(CLAUDE_DESKTOP_ACCOUNT_KEY),
+                scope
+                    .resolve_current("fixture", "desktop", b"desktop")
+                    .unwrap(),
+                Some(shared),
+                "profile:desktop-history",
+                now,
+            ),
+        ];
+
+        let published = publish_claude_accounts_with(&cache, now, fetched, |snapshot| {
+            enrich_snapshot_with(snapshot, now.timestamp(), |active, observations, _| {
+                recorded
+                    .borrow_mut()
+                    .extend(active.iter().map(|key| key.account_scope.clone()));
+                Ok(observations
+                    .iter()
+                    .map(|_| Ok((HistoryOutcome::LearningDuration, None, 0)))
+                    .collect())
+            })
+        });
+
+        assert_eq!(published.len(), 1, "one Claude card");
+        assert_eq!(published[0].account_key, None);
+        let recorded = recorded.into_inner();
+        assert!(!recorded.is_empty());
+        assert!(recorded.iter().all(|scope| scope == "primary-history"));
+        assert!(!recorded.iter().any(|scope| scope.starts_with("profile:")));
+        let slots: Vec<AccountSlot> = lock_last_good(&cache).entries.keys().cloned().collect();
+        assert_eq!(slots, [account_slot("claude", None)]);
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn bounded_join_keeps_input_order_and_caps_in_flight() {
+        let in_flight = std::cell::Cell::new(0usize);
+        let peak = std::cell::Cell::new(0usize);
+        let finished = std::cell::RefCell::new(Vec::new());
+        let work: Vec<Pin<Box<dyn Future<Output = usize> + '_>>> = (0..7usize)
+            .map(|index| {
+                let (in_flight, peak, finished) = (&in_flight, &peak, &finished);
+                Box::pin(async move {
+                    in_flight.set(in_flight.get() + 1);
+                    peak.set(peak.get().max(in_flight.get()));
+                    // Earlier inputs take longer, so completion order is reversed.
+                    for _ in 0..(10 - index) {
+                        tokio::task::yield_now().await;
+                    }
+                    in_flight.set(in_flight.get() - 1);
+                    finished.borrow_mut().push(index);
+                    index
+                }) as Pin<Box<dyn Future<Output = usize> + '_>>
+            })
+            .collect();
+
+        let results = join_bounded_ordered(work, MAX_ACCOUNT_FETCHES_IN_FLIGHT).await;
+
+        assert_eq!(results, (0..7).collect::<Vec<_>>());
+        assert_eq!(peak.get(), MAX_ACCOUNT_FETCHES_IN_FLIGHT);
+        assert_ne!(
+            *finished.borrow(),
+            (0..7).collect::<Vec<_>>(),
+            "ran concurrently"
+        );
+        assert!(
+            join_bounded_ordered(Vec::<Pin<Box<dyn Future<Output = ()>>>>::new(), 4)
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_config_dir_login_never_refreshes() {
+        // The generic refresh check reads the wall clock, so `now` must too.
+        let now = Utc::now();
+        let dir = r"C:\Users\me\.claude-work";
+        let scope = TestRefreshScope::new("claude", "config-dir-expiry");
+        let binding = ProviderCacheBinding::primary(
+            scope
+                .resolve_current(
+                    CLAUDE_CONFIG_DIR_FILE_SOURCE,
+                    "fixture-config-dir",
+                    b"config-dir-refresh",
+                )
+                .unwrap(),
+        );
+        for expires_in in [-3_600, 30] {
+            let refresh_calls = std::cell::Cell::new(0);
+            let oauth_calls = std::cell::Cell::new(0);
+            let (_, outcome) = fetch_claude_login_usage_with(
+                claude_config_dir_credentials(
+                    dir,
+                    Some(now + chrono::Duration::seconds(expires_in)),
+                ),
+                binding.clone(),
+                now,
+                |_, _| None,
+                |credentials| {
+                    refresh_calls.set(refresh_calls.get() + 1);
+                    let binding = binding.clone();
+                    async move { Ok((credentials, binding.primary.clone(), Some(binding))) }
+                },
+                |_, _, _| async { claude_test_success_outcome() },
+                |_, _, _, _| async {
+                    oauth_calls.set(oauth_calls.get() + 1);
+                    ("oauth", claude_test_success_outcome())
+                },
+            )
+            .await;
+            assert_eq!(refresh_calls.get(), 0, "{expires_in}");
+            assert_eq!(oauth_calls.get(), 0, "{expires_in}");
+            assert_eq!(
+                terminal_display(&outcome),
+                Some(CLAUDE_CONFIG_DIR_EXPIRED_ERROR),
+                "{expires_in}"
+            );
+        }
+
+        // The refresh path itself refuses before any request, and nothing is
+        // written back to the directory's store.
+        let request_calls = std::cell::Cell::new(0);
+        let failure = refresh_claude_credentials_with(
+            &claude_config_dir_credentials(dir, Some(now - chrono::Duration::hours(1))),
+            &scope,
+            reload_claude_credentials,
+            |_, _| {
+                request_calls.set(request_calls.get() + 1);
+                async { Err(ProviderFetchFailure::terminal("request must not be called")) }
+            },
+            save_claude_credentials,
+            |_| Ok(()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            failure,
+            ProviderFetchFailure::Terminal { ref display } if display == CLAUDE_READ_ONLY_REFRESH_ERROR
+        ));
+        assert_eq!(request_calls.get(), 0);
+        assert_eq!(
+            save_claude_credentials(&claude_config_dir_credentials(dir, None)),
+            Err(CLAUDE_READ_ONLY_REFRESH_ERROR.to_string())
+        );
+        assert!(ClaudeCredentialSource::ConfigDir(PathBuf::from(dir)).is_read_only());
+        assert!(!ClaudeCredentialSource::File.is_read_only());
+        scope.cleanup();
+    }
+
+    fn config_dir_fixture(tag: &str, contents: Option<&[u8]>) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tb-claude-config-dir-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        if let Some(contents) = contents {
+            fs::write(dir.join(CLAUDE_CONFIG_DIR_CREDENTIALS_FILE), contents).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn config_dir_login_reads_only_its_own_file() {
+        const FIXTURE: &str = r#"{"claudeAiOauth":{"accessToken":"dir-access","refreshToken":"dir-refresh","scopes":["user:profile"]}}"#;
+        let dir = config_dir_fixture("own-file", Some(FIXTURE.as_bytes()));
+        let dir_text = dir.to_str().unwrap().to_string();
+
+        // Primary-only credential sources set in the environment are ignored.
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            ["TOKENBAR_CLAUDE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]
+                .into_iter()
+                .map(|name| (name, std::env::var_os(name)))
+                .collect();
+        for (name, _) in &saved {
+            std::env::set_var(name, "env-token-must-not-be-used");
+        }
+        let loaded = load_claude_config_dir_credentials(&dir_text);
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        let credentials = loaded.unwrap();
+        assert_eq!(credentials.access_token, "dir-access");
+        assert_eq!(
+            credentials.source,
+            ClaudeCredentialSource::ConfigDir(dir.clone())
+        );
+        assert_eq!(
+            credentials.scope_slot.semantic_source,
+            CLAUDE_CONFIG_DIR_FILE_SOURCE
+        );
+        assert_eq!(credentials.scope_marker(), Some(b"dir-refresh".as_slice()));
+
+        // Its lineage slot is its own: resolving it leaves the primary's
+        // binding exactly where it was.
+        let scope = TestRefreshScope::new("claude", "config-dir-slot");
+        let primary_before = scope
+            .resolve_current("claude-login-file", "primary-location", b"primary-refresh")
+            .unwrap();
+        let extra = scope
+            .resolve_current(
+                credentials.scope_slot.semantic_source,
+                &credentials.scope_slot.canonical_location,
+                credentials.scope_marker().unwrap(),
+            )
+            .unwrap();
+        let primary_after = scope
+            .resolve_current("claude-login-file", "primary-location", b"primary-refresh")
+            .unwrap();
+        assert_eq!(primary_before, primary_after);
+        assert_ne!(extra, primary_after);
+        scope.cleanup();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_dir_login_failures_are_classified() {
+        let kind = |result: Result<ClaudeCredentials, ProviderFetchFailure>| match result {
+            Err(ProviderFetchFailure::Terminal { display }) => format!("terminal:{display}"),
+            Err(ProviderFetchFailure::Transient { display, .. }) => format!("transient:{display}"),
+            Ok(_) => "ok".to_string(),
+        };
+        let load = |tag: &str, contents: Option<&[u8]>| {
+            let dir = config_dir_fixture(tag, contents);
+            let result = load_claude_config_dir_credentials(dir.to_str().unwrap());
+            let _ = fs::remove_dir_all(&dir);
+            kind(result)
+        };
+        assert_eq!(
+            load("missing", None),
+            format!("terminal:{CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR}")
+        );
+        assert_eq!(
+            load(
+                "logged-out",
+                Some(br#"{"claudeAiOauth":{"refreshToken":"stale"}}"#)
+            ),
+            format!("terminal:{CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR}")
+        );
+        assert_eq!(
+            load("torn", Some(br#"{"claudeAiOauth":{"accessT"#)),
+            format!("transient:{CLAUDE_CONFIG_DIR_READ_RETRY_ERROR}")
+        );
+        assert_eq!(
+            load("no-token", Some(br#"{"claudeAiOauth":{}}"#)),
+            format!("terminal:{CLAUDE_CONFIG_DIR_READ_ERROR}")
+        );
+        let oversized = format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"a"}},"pad":"{}"}}"#,
+            "x".repeat(CLAUDE_CONFIG_DIR_CREDENTIALS_MAX_BYTES as usize)
+        );
+        assert_eq!(
+            load("oversized", Some(oversized.as_bytes())),
+            format!("terminal:{CLAUDE_CONFIG_DIR_READ_ERROR}")
+        );
+        assert_eq!(
+            load("valid", Some(br#"{"claudeAiOauth":{"accessToken":"a"}}"#)),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn each_card_resolves_its_own_history_scope() {
+        let dir = r"C:\Users\me\.claude-work";
+        let calls = std::cell::RefCell::new(Vec::<Option<String>>::new());
+        let resolve = |provider: &str, authoritative: Option<(AuthoritativeIdKind, &str)>| {
+            assert_eq!(provider, "claude");
+            calls
+                .borrow_mut()
+                .push(authoritative.map(|(kind, id)| format!("{kind:?}:{id}")));
+            Ok(HistoryScope::for_test("resolved"))
+        };
+
+        // Primary: the per-installation constant.
+        assert!(claude_account_history_scope_with(
+            &ClaudeAccount::Primary { identify: true },
+            &claude_test_login_credentials(),
+            None,
+            resolve,
+        )
+        .is_ok());
+        // Config dir, credential from its own file: authoritative on the
+        // exact path digest.
+        assert!(claude_account_history_scope_with(
+            &ClaudeAccount::ConfigDir(dir.to_string()),
+            &claude_config_dir_credentials(dir, None),
+            None,
+            resolve,
+        )
+        .is_ok());
+        assert_eq!(
+            calls.borrow().clone(),
+            [
+                None,
+                Some(format!(
+                    "OpaqueId:config-dir:{}",
+                    sha256_hex_exact(dir.as_bytes())
+                ))
+            ]
+        );
+        // Config dir with a credential from anywhere else: refused.
+        assert_eq!(
+            claude_account_history_scope_with(
+                &ClaudeAccount::ConfigDir(dir.to_string()),
+                &claude_test_login_credentials(),
+                None,
+                resolve,
+            ),
+            Err(AccountScopeError::NoTrustedEvidence)
+        );
+        assert_eq!(
+            claude_account_history_scope_with(
+                &ClaudeAccount::ConfigDir(dir.to_string()),
+                &claude_config_dir_credentials(r"C:\Users\me\.claude-other", None),
+                None,
+                resolve,
+            ),
+            Err(AccountScopeError::NoTrustedEvidence)
+        );
+        // Desktop: the profile's history scope, or nothing.
+        let scope = TestRefreshScope::new("claude", "desktop-history");
+        let profile = ClaudeProfileIdentity {
+            scopes: Some((
+                scope
+                    .resolve_authoritative("claude", AuthoritativeIdKind::OpaqueId, "profile:x")
+                    .unwrap(),
+                HistoryScope::for_test("desktop-profile-history"),
+            )),
+            plan: Some("Max".to_string()),
+        };
+        assert_eq!(
+            claude_account_history_scope_with(
+                &ClaudeAccount::Desktop,
+                &claude_test_desktop_credentials(None),
+                Some(&profile),
+                resolve,
+            ),
+            Ok(HistoryScope::for_test("desktop-profile-history"))
+        );
+        for unknown in [
+            None,
+            Some(&ClaudeProfileIdentity {
+                scopes: None,
+                plan: Some("Max".to_string()),
+            }),
+        ] {
+            assert_eq!(
+                claude_account_history_scope_with(
+                    &ClaudeAccount::Desktop,
+                    &claude_test_desktop_credentials(None),
+                    unknown,
+                    resolve,
+                ),
+                Err(AccountScopeError::NoTrustedEvidence)
+            );
+        }
+        assert_eq!(calls.borrow().len(), 2, "no other branch resolved anything");
+        assert_ne!(
+            sha256_hex_exact(dir.as_bytes()),
+            sha256_hex_exact(format!("{dir} ").as_bytes()),
+            "the digest is not trimmed"
+        );
+        scope.cleanup();
+    }
+
+    fn parse_profile(json: &str) -> ClaudeProfileResponse {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn profile_identity_requires_both_uuids_and_compares_only_hmac_scopes() {
+        let scope = TestRefreshScope::new("claude", "profile-identity");
+        let identity = |json: &str| {
+            claude_profile_identity_from(
+                parse_profile(json),
+                |provider, kind, id| scope.resolve_authoritative(provider, kind, id),
+                |provider, authoritative| scope.resolve_history(provider, authoritative),
+            )
+        };
+        const ACCOUNT: &str = "0f8e2b1c-3d4a-4b5c-8d6e-7f8091a2b3c4";
+        const ORG: &str = "11111111-2222-4333-8444-555555555555";
+        let full = |account: &str, org: &str| {
+            format!(
+                r#"{{"account":{{"uuid":"{account}","email_address":"x@example.invalid"}},
+                    "organization":{{"uuid":"{org}","organization_type":"claude_max",
+                    "rate_limit_tier":"default_claude_max_20x"}}}}"#
+            )
+        };
+
+        let lower = identity(&full(ACCOUNT, ORG));
+        let upper = identity(&full(&ACCOUNT.to_uppercase(), &ORG.to_uppercase()));
+        assert_eq!(lower.plan.as_deref(), Some("Max 20x"));
+        let (merge, history) = lower.scopes.clone().unwrap();
+        assert_eq!(upper.scopes.as_ref().map(|(merge, _)| merge), Some(&merge));
+        // Opaque: neither UUID appears in either scope.
+        for text in [merge.as_str(), history.as_str()] {
+            assert!(!text.contains(ACCOUNT) && !text.contains(ORG));
+        }
+        // A different org is a different account.
+        let other_org = identity(&full(ACCOUNT, "11111111-2222-4333-8444-666666666666"));
+        assert_ne!(other_org.scopes.unwrap().0, merge);
+        // Tagged evidence: the same text as a config-dir input never collides.
+        assert_ne!(
+            scope
+                .resolve_authoritative(
+                    "claude",
+                    AuthoritativeIdKind::OpaqueId,
+                    &format!("config-dir:{ACCOUNT}\0{ORG}")
+                )
+                .unwrap(),
+            merge
+        );
+
+        // Both UUIDs are required, and both must be well-formed.
+        for json in [
+            format!(r#"{{"account":{{"uuid":"{ACCOUNT}"}}}}"#),
+            format!(r#"{{"organization":{{"uuid":"{ORG}"}}}}"#),
+            full("not-a-uuid", ORG),
+            full(&format!(" {ACCOUNT}"), ORG),
+            full(ACCOUNT, &ORG.replace('-', "")),
+            r#"{"account":{"uuid":7},"organization":null}"#.to_string(),
+            "{}".to_string(),
+        ] {
+            assert!(identity(&json).scopes.is_none(), "{json}");
+        }
+        // A resolver failure is also "unknown", never a guess.
+        let failed = claude_profile_identity_from(
+            parse_profile(&full(ACCOUNT, ORG)),
+            |_, _, _| Err(AccountScopeError::MetadataRead),
+            |provider, authoritative| scope.resolve_history(provider, authoritative),
+        );
+        assert!(failed.scopes.is_none());
+        assert_eq!(failed.plan.as_deref(), Some("Max 20x"));
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn profile_cache_is_binding_keyed() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("claude", "profile-cache");
+        let known = ClaudeProfileIdentity {
+            scopes: Some((
+                scope
+                    .resolve_authoritative("claude", AuthoritativeIdKind::OpaqueId, "profile:a")
+                    .unwrap(),
+                HistoryScope::for_test("history-a"),
+            )),
+            plan: Some("Team".to_string()),
+        };
+        let cache = Mutex::new(ClaudeProfileCache::new());
+        let fetches = std::cell::Cell::new(0);
+        let slot = |account: Option<&str>, binding: &str| {
+            (account.map(str::to_string), binding.to_string())
+        };
+        let lookup = |slot, at, answer: Option<ClaudeProfileIdentity>, ttl| {
+            let (cache, fetches) = (&cache, &fetches);
+            async move {
+                claude_profile_cached_with(cache, slot, at, || async {
+                    fetches.set(fetches.get() + 1);
+                    (answer, ttl)
+                })
+                .await
+            }
+        };
+
+        let first = lookup(
+            slot(None, "binding-a"),
+            now,
+            Some(known.clone()),
+            CLAUDE_PROFILE_TTL_SECS,
+        )
+        .await;
+        assert!(first.unwrap().scopes.is_some());
+        // Same account, same binding: served from cache.
+        let again = lookup(slot(None, "binding-a"), now, None, CLAUDE_PROFILE_TTL_SECS).await;
+        assert!(again.unwrap().scopes.is_some());
+        assert_eq!(fetches.get(), 1);
+        // Same account, changed binding: the old identity is not used.
+        let changed = lookup(
+            slot(None, "binding-b"),
+            now,
+            None,
+            CLAUDE_PROFILE_RETRY_SECS,
+        )
+        .await;
+        assert!(changed.is_none());
+        // Another account with the old binding string: not used either.
+        let other = lookup(
+            slot(Some(CLAUDE_DESKTOP_ACCOUNT_KEY), "binding-a"),
+            now,
+            None,
+            1,
+        )
+        .await;
+        assert!(other.is_none());
+        assert_eq!(fetches.get(), 3);
+        // A cached failure is served until it expires, then retried.
+        let later = now + chrono::Duration::seconds(CLAUDE_PROFILE_RETRY_SECS - 1);
+        assert!(
+            lookup(slot(None, "binding-b"), later, Some(known.clone()), 1)
+                .await
+                .is_none()
+        );
+        assert_eq!(fetches.get(), 3);
+        let expired = now + chrono::Duration::seconds(CLAUDE_PROFILE_RETRY_SECS);
+        assert!(lookup(slot(None, "binding-b"), expired, Some(known), 1)
+            .await
+            .is_some());
+        assert_eq!(fetches.get(), 4);
+        scope.cleanup();
+    }
+
+    /// Poll 1 learns the identities; poll 2 finds Claude Desktop's token
+    /// expired. Same binding: merged away with no card and no history.
+    /// Changed binding: unknown, so the expired card shows.
+    #[tokio::test]
+    async fn remembered_identity_merges_an_expired_desktop_card_only_for_its_binding() {
+        let now = Utc::now();
+        let scope = TestRefreshScope::new("claude", "remembered-identity");
+        let shared = scope
+            .resolve_authoritative("claude", AuthoritativeIdKind::OpaqueId, "profile:shared")
+            .unwrap();
+        let answer = ClaudeProfileIdentity {
+            scopes: Some((shared.clone(), HistoryScope::for_test("profile:shared"))),
+            plan: Some("Team".to_string()),
+        };
+        let plans = Mutex::new(ClaudeProfileCache::new());
+        let identities = Mutex::new(ClaudeIdentityCache::new());
+        let cli_binding = scope.resolve_current("fixture", "cli", b"cli").unwrap();
+        let desktop_binding = scope
+            .resolve_current("fixture", "desktop", b"desktop")
+            .unwrap();
+        let desktop_slot =
+            |binding: &AccountScope| claude_profile_slot(Some(CLAUDE_DESKTOP_ACCOUNT_KEY), binding);
+
+        // Poll 1: both profile lookups succeed.
+        for (account, binding) in [
+            (None, &cli_binding),
+            (Some(CLAUDE_DESKTOP_ACCOUNT_KEY), &desktop_binding),
+        ] {
+            let learned = claude_profile_identity_with(
+                &plans,
+                &identities,
+                claude_profile_slot(account, binding),
+                now,
+                || async { (Some(answer.clone()), CLAUDE_PROFILE_TTL_SECS) },
+            )
+            .await;
+            assert_eq!(learned.scopes.map(|(merge, _)| merge), Some(shared.clone()));
+        }
+
+        let expired_desktop = |remembered_scope: Option<AccountScope>| ClaudeAccountFetch {
+            account_key: Some(CLAUDE_DESKTOP_ACCOUNT_KEY.to_string()),
+            failure_source: "oauth",
+            outcome: ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                CLAUDE_DESKTOP_EXPIRED_ERROR,
+            )),
+            remembered_scope,
+        };
+        let poll = |desktop: ClaudeAccountFetch, recorded: &std::cell::RefCell<Vec<String>>| {
+            let cache = Mutex::new(ProviderLastGoodCache::default());
+            let published = publish_claude_accounts_with(
+                &cache,
+                now,
+                vec![
+                    claude_account_success(
+                        None,
+                        cli_binding.clone(),
+                        Some(shared.clone()),
+                        "primary-history",
+                        now,
+                    ),
+                    desktop,
+                ],
+                |snapshot| {
+                    enrich_snapshot_with(snapshot, now.timestamp(), |active, observations, _| {
+                        recorded
+                            .borrow_mut()
+                            .extend(active.iter().map(|key| key.account_scope.clone()));
+                        Ok(observations
+                            .iter()
+                            .map(|_| Ok((HistoryOutcome::LearningDuration, None, 0)))
+                            .collect())
+                    })
+                },
+            );
+            let slots: Vec<AccountSlot> = lock_last_good(&cache).entries.keys().cloned().collect();
+            (published, slots)
+        };
+
+        // Poll 2, same Desktop binding, token expired: one card, nothing
+        // recorded or cached for Desktop.
+        let recorded = std::cell::RefCell::new(Vec::new());
+        let remembered = remembered_claude_identity(&identities, &desktop_slot(&desktop_binding))
+            .map(|(merge, _)| merge);
+        let (published, slots) = poll(expired_desktop(remembered), &recorded);
+        assert_eq!(keys_of(&published), [None]);
+        assert!(published.iter().all(|card| card.error.is_none()));
+        assert!(recorded
+            .borrow()
+            .iter()
+            .all(|scope| scope == "primary-history"));
+        assert_eq!(slots, [account_slot("claude", None)]);
+
+        // Poll 2, Desktop re-logged-in (new binding) and expired: unknown, so
+        // its expired message is shown.
+        let rotated = scope
+            .resolve_current("fixture", "desktop", b"desktop-rotated")
+            .unwrap();
+        let recorded = std::cell::RefCell::new(Vec::new());
+        let remembered = remembered_claude_identity(&identities, &desktop_slot(&rotated))
+            .map(|(merge, _)| merge);
+        assert!(remembered.is_none());
+        let (published, _) = poll(expired_desktop(remembered), &recorded);
+        assert_eq!(
+            keys_of(&published),
+            [None, Some(CLAUDE_DESKTOP_ACCOUNT_KEY)]
+        );
+        assert_eq!(
+            published[1].error.as_deref(),
+            Some(CLAUDE_DESKTOP_EXPIRED_ERROR)
+        );
+        assert!(!recorded
+            .borrow()
+            .iter()
+            .any(|scope| scope.starts_with("profile:")));
+
+        // A different remembered identity also keeps the expired card.
+        let other = scope
+            .resolve_authoritative("claude", AuthoritativeIdKind::OpaqueId, "profile:other")
+            .unwrap();
+        let (published, _) = poll(expired_desktop(Some(other)), &std::cell::RefCell::default());
+        assert_eq!(
+            keys_of(&published),
+            [None, Some(CLAUDE_DESKTOP_ACCOUNT_KEY)]
+        );
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn plan_label_expires_independently_of_the_remembered_identity() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("claude", "plan-vs-identity");
+        let merge = scope
+            .resolve_authoritative("claude", AuthoritativeIdKind::OpaqueId, "profile:a")
+            .unwrap();
+        let answer = ClaudeProfileIdentity {
+            scopes: Some((merge.clone(), HistoryScope::for_test("profile:a"))),
+            plan: Some("Max".to_string()),
+        };
+        let plans = Mutex::new(ClaudeProfileCache::new());
+        let identities = Mutex::new(ClaudeIdentityCache::new());
+        let slot = claude_profile_slot(Some(CLAUDE_DESKTOP_ACCOUNT_KEY), &merge);
+        let fetches = std::cell::Cell::new(0);
+        let lookup = |at, answer: Option<ClaudeProfileIdentity>, ttl| {
+            let (plans, identities, fetches, slot) = (&plans, &identities, &fetches, slot.clone());
+            async move {
+                claude_profile_identity_with(plans, identities, slot, at, || async {
+                    fetches.set(fetches.get() + 1);
+                    (answer, ttl)
+                })
+                .await
+            }
+        };
+
+        let first = lookup(now, Some(answer.clone()), CLAUDE_PROFILE_TTL_SECS).await;
+        assert_eq!(first.plan.as_deref(), Some("Max"));
+        // After the plan TTL a failed lookup drops the plan, not the identity.
+        let later = now + chrono::Duration::seconds(CLAUDE_PROFILE_TTL_SECS);
+        let failed = lookup(later, None, CLAUDE_PROFILE_RETRY_SECS).await;
+        assert_eq!(fetches.get(), 2);
+        assert_eq!(failed.plan, None);
+        assert_eq!(failed.scopes.map(|(scope, _)| scope), Some(merge.clone()));
+        // A fresh answer that no longer proves an identity clears it.
+        let after_retry = later + chrono::Duration::seconds(CLAUDE_PROFILE_RETRY_SECS);
+        let unproven = ClaudeProfileIdentity {
+            scopes: None,
+            plan: Some("Max".to_string()),
+        };
+        let cleared = lookup(after_retry, Some(unproven), CLAUDE_PROFILE_TTL_SECS).await;
+        assert!(cleared.scopes.is_none());
+        assert_eq!(cleared.plan.as_deref(), Some("Max"));
+        assert!(remembered_claude_identity(&identities, &slot).is_none());
+        scope.cleanup();
+    }
+
+    #[test]
+    fn profile_failures_are_negatively_cached_apart_from_the_usage_gate() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        assert_eq!(
+            claude_profile_retry_secs(401, None, now),
+            CLAUDE_PROFILE_TTL_SECS
+        );
+        assert_eq!(
+            claude_profile_retry_secs(403, None, now),
+            CLAUDE_PROFILE_TTL_SECS
+        );
+        assert_eq!(
+            claude_profile_retry_secs(429, None, now),
+            CLAUDE_PROFILE_RETRY_SECS
+        );
+        assert_eq!(
+            claude_profile_retry_secs(429, Some(now + chrono::Duration::seconds(90)), now),
+            90
+        );
+        assert_eq!(
+            claude_profile_retry_secs(429, Some(now + chrono::Duration::days(30)), now),
+            CLAUDE_PROFILE_TTL_SECS
+        );
+        assert_eq!(
+            claude_profile_retry_secs(429, Some(now - chrono::Duration::seconds(5)), now),
+            1
+        );
+        assert_eq!(
+            claude_profile_retry_secs(503, None, now),
+            CLAUDE_PROFILE_RETRY_SECS
+        );
+        assert_eq!(
+            claude_profile_retry_secs(0, None, now),
+            CLAUDE_PROFILE_RETRY_SECS
+        );
+        assert!(CLAUDE_PROFILE_TIMEOUT_SECS <= 5);
+    }
+
+    #[test]
+    fn config_dir_rejections_name_the_config_directory() {
+        let source = ClaudeCredentialSource::ConfigDir(PathBuf::from(r"C:\claude\work"));
+        assert_eq!(
+            claude_unauthorized_message(&source),
+            CLAUDE_CONFIG_DIR_REJECTED_ERROR
+        );
+        assert_eq!(
+            claude_denied_message(&source),
+            CLAUDE_CONFIG_DIR_REJECTED_ERROR
+        );
+        assert_eq!(
+            claude_header_rejection_message(&source, 401),
+            CLAUDE_CONFIG_DIR_REJECTED_ERROR
+        );
     }
 
     #[tokio::test]
@@ -6071,16 +8430,16 @@ mod tests {
     fn claude_desktop_header_probe_rejection_names_claude_desktop() {
         for status in [401, 403] {
             assert_eq!(
-                claude_header_rejection_message(ClaudeCredentialSource::Desktop, status),
+                claude_header_rejection_message(&ClaudeCredentialSource::Desktop, status),
                 "Claude Desktop login was rejected. Sign in to Claude Desktop again."
             );
             assert_eq!(
-                claude_header_rejection_message(ClaudeCredentialSource::Environment, status),
+                claude_header_rejection_message(&ClaudeCredentialSource::Environment, status),
                 "Claude setup-token expired or lacks access."
             );
         }
         assert_eq!(
-            claude_header_rejection_message(ClaudeCredentialSource::Desktop, 418),
+            claude_header_rejection_message(&ClaudeCredentialSource::Desktop, 418),
             "Claude header probe rejected the request (status 418)."
         );
     }
@@ -6229,6 +8588,8 @@ mod tests {
         let outcome = match decoded {
             Ok((plan, windows)) => ProviderFetchOutcome::Success {
                 snapshot: AgentUsageSnapshot {
+                    account_key: None,
+                    merge_scope: None,
                     client_id: "copilot".to_string(),
                     source: "oauth".to_string(),
                     updated_at: response_at.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -6252,7 +8613,9 @@ mod tests {
         assert_eq!(snapshot.windows.len(), 1);
         assert!((snapshot.windows[0].remaining_percent - 60.0).abs() < 0.01);
         assert!(snapshot.windows[0].resets_at.is_none());
-        let cached = lock_last_good(&cache).entries["copilot"].snapshot.clone();
+        let cached = lock_last_good(&cache).entries[&account_slot("copilot", None)]
+            .snapshot
+            .clone();
         assert_eq!(cached.updated_at, snapshot.updated_at);
         assert_eq!(cached.windows.len(), 1);
         assert!(cached.error.is_none());
@@ -6352,7 +8715,7 @@ mod tests {
 
         let cached = lock_last_good(&cache)
             .entries
-            .get("codex")
+            .get(&account_slot("codex", None))
             .unwrap()
             .snapshot
             .clone();
@@ -6449,7 +8812,9 @@ mod tests {
             )
             .unwrap();
             assert!(result.windows.is_empty());
-            assert!(!lock_last_good(&cache).entries.contains_key("codex"));
+            assert!(!lock_last_good(&cache)
+                .entries
+                .contains_key(&account_slot("codex", None)));
         }
 
         let cache = Mutex::new(ProviderLastGoodCache::default());
@@ -6473,7 +8838,9 @@ mod tests {
             |_| panic!("absent must not enrich"),
         )
         .is_none());
-        assert!(!lock_last_good(&cache).entries.contains_key("codex"));
+        assert!(!lock_last_good(&cache)
+            .entries
+            .contains_key(&account_slot("codex", None)));
         scope.cleanup();
     }
 
@@ -6515,7 +8882,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(anonymous.windows.len(), 1);
-        assert!(!lock_last_good(&cache).entries.contains_key("antigravity"));
+        assert!(!lock_last_good(&cache)
+            .entries
+            .contains_key(&account_slot("antigravity", None)));
 
         apply_provider_outcome_with(
             &cache,
@@ -6543,7 +8912,9 @@ mod tests {
         )
         .unwrap();
         assert!(live_empty.windows.is_empty());
-        assert!(!lock_last_good(&cache).entries.contains_key("antigravity"));
+        assert!(!lock_last_good(&cache)
+            .entries
+            .contains_key(&account_slot("antigravity", None)));
 
         apply_provider_outcome_with(
             &cache,
@@ -6575,7 +8946,9 @@ mod tests {
         .unwrap();
         assert!(invalid.windows.is_empty());
         assert_eq!(enrich_calls.get(), 0);
-        assert!(!lock_last_good(&cache).entries.contains_key("antigravity"));
+        assert!(!lock_last_good(&cache)
+            .entries
+            .contains_key(&account_slot("antigravity", None)));
         scope.cleanup();
     }
 
@@ -7346,6 +9719,8 @@ mod tests {
             .resolve_current("fixture", "unknown-windows", b"marker")
             .unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
+            merge_scope: None,
             client_id: "codex".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -7900,6 +10275,8 @@ mod tests {
             .unwrap();
         let expected_scope = account_scope.as_str().to_string();
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
+            merge_scope: None,
             client_id: "claude".to_string(),
             source: "oauth".to_string(),
             updated_at: String::new(),
@@ -8013,6 +10390,8 @@ mod tests {
             Some(DurationEvidence::contract(86_400)),
         );
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
+            merge_scope: None,
             client_id: "claude".to_string(),
             source: "oauth".to_string(),
             updated_at: String::new(),
@@ -9540,6 +11919,8 @@ mod tests {
             )
         };
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
+            merge_scope: None,
             client_id: "fixture".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -9597,6 +11978,8 @@ mod tests {
             )
         };
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
+            merge_scope: None,
             client_id: "fixture".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -9670,6 +12053,8 @@ mod tests {
         let now = 1_700_000_000;
         let reset = Utc.timestamp_opt(now + 86_400, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
+            merge_scope: None,
             client_id: "fixture".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -9757,6 +12142,8 @@ mod tests {
         let now = 1_700_000_000;
         let reset = Utc.timestamp_opt(now + 86_400, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
+            merge_scope: None,
             client_id: "fixture".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -9811,6 +12198,8 @@ mod tests {
         let now = 1_700_000_000;
         let reset = Utc.timestamp_opt(now + 86_400, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
+            merge_scope: None,
             client_id: "fixture".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -9974,6 +12363,8 @@ mod tests {
             account_scopes.push(account_scope.as_str().to_string());
             let sampled_at = start + index as i64 * 900;
             let mut snapshot = AgentUsageSnapshot {
+                account_key: None,
+                merge_scope: None,
                 client_id: "claude".to_string(),
                 source: "oauth".to_string(),
                 updated_at: String::new(),
@@ -10024,6 +12415,8 @@ mod tests {
         let history_scope = scope.resolve_history("antigravity", None).unwrap();
         let start = 1_800_000_000_i64;
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
+            merge_scope: None,
             client_id: "antigravity".to_string(),
             source: "cli".to_string(),
             updated_at: String::new(),
@@ -10172,6 +12565,8 @@ mod tests {
     fn stage4_scope_error_is_sticky_and_skips_history() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
         let mut snapshot = AgentUsageSnapshot {
+            account_key: None,
+            merge_scope: None,
             client_id: "fixture".to_string(),
             source: "fixture".to_string(),
             updated_at: String::new(),
@@ -10375,6 +12770,8 @@ mod tests {
             generated_at: "2026-07-10T12:00:00.000Z".to_string(),
             publication_generation: 1,
             agents: vec![AgentUsageSnapshot {
+                account_key: None,
+                merge_scope: None,
                 client_id: "provider-fixture.invalid".to_string(),
                 source: "fixture.invalid".to_string(),
                 updated_at: "2026-07-10T12:00:00.000Z".to_string(),

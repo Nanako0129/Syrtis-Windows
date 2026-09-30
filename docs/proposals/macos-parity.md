@@ -36,7 +36,7 @@ vendor 進來的東西，而它自 2026-07-20 起就沒有跟著 macOS 的同一
 
 | 舊切片 | 現況 |
 |---|---|
-| 3 Quota 資料出口 | **已完成** — `include/ctb.h` 匯出 15 個函式，含 `tb_quota_history`、`tb_window_usage` |
+| 3 Quota 資料出口 | **已完成** — `include/ctb.h` 匯出 16 個函式，含 `tb_quota_history`、`tb_window_usage`、`tb_set_claude_config_dirs` |
 | 4 Quota lens 三張卡 | **已完成** — `src/TokenBar.App/DashboardView.Quota.cs`（strip card ＋ heatmap） |
 | 用量歸因整頁 | **已完成** — `UsageAttributionPage`，掛在 `SettingsWindow.cs:74` |
 | Check now | **已完成**（舊文件已記） |
@@ -94,7 +94,7 @@ macOS 159 個 commit，Windows 37 個——四倍以上的落差。對應到檔�
 | Antigravity OAuth client 候選路徑只列 macOS `.app` 路徑 | — | Windows 上無法 refresh；這是 Windows 自己的缺口，不是落後 macOS，macOS 那邊本來就沒有這個問題要解 | S5 |
 | Kiro／OpenCode Go 額度卡 | `3f543ed2`、`37b52739` | 缺；Windows 端的憑證存放位置還沒量測過 | S6 |
 | Grok Bot（Keychain + Electron `safeStorage` v10） | — | 缺；Windows 需要對應的 DPAPI 設計，不能照搬 Keychain | 暫緩 |
-| 多帳號（`extra_scan_paths`、`CLAUDE_CONFIG_DIR`、`tb_window_usage` 的 `account_key`、`tb_quota_curve`） | — | 缺 | 暫緩 |
+| 多帳號（`extra_scan_paths`、`CLAUDE_CONFIG_DIR`、`tb_window_usage` 的 `account_key`、`tb_quota_curve`） | — | 部分：Rust 核心已支援 `CLAUDE_CONFIG_DIR` 帳號與 Claude Desktop 各自一張卡（`tb_set_claude_config_dirs`、payload `accountKey`、同帳號合併）；UI（選取、標籤、設定頁）待做；`extra_scan_paths`、`tb_window_usage` 的 `account_key`、`tb_quota_curve` 仍缺 | 進行中 |
 
 ```bash
 git grep -n 'HistoryScope\|required_card_source\|RemoteCredentialError' -- crates/tb_core_ffi
@@ -156,8 +156,8 @@ security 風險門：pre-approval 走唯讀 `security-reviewer`，實作走
 
 | 能力 | macOS | Windows 現況 |
 |---|---|---|
-| 第二個 Claude 帳號分帳 | v1.15 #261：每個帳號對自己註冊的 root 各自掃描 | 缺 |
-| 自訂掃描根目錄 `CLAUDE_CONFIG_DIR` | v1.14.x | 缺。repo-wide 零命中（只有這兩份 parity 文件提到它） |
+| 第二個 Claude 帳號分帳 | v1.15 #261：每個帳號對自己註冊的 root 各自掃描 | 額度卡：Rust 核心已完成（每帳號一張卡，UI 待做）；逐帳號掃描用量：缺 |
+| 自訂掃描根目錄 `CLAUDE_CONFIG_DIR` | v1.14.x | 額度卡的帳號登錄已在 Rust 核心（`claude_config_dirs.rs`，憑證只讀 `<dir>\.credentials.json`）；設定頁 UI 與掃描根目錄仍缺 |
 
 > 這兩項碰認證與路徑，走 security 風險門。
 

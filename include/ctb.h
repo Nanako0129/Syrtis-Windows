@@ -97,6 +97,9 @@ char *tb_tokens_per_min(void);
 
 // OAuth quota cards (AgentUsagePayload) for codex/claude/antigravity/copilot/grok.
 // Network-bound; per-provider failures are reported inside each snapshot.
+// Claude can appear more than once: the primary card has no accountKey; each
+// configured config directory and the Claude Desktop login ("claude-desktop")
+// carry one. A card of the same account as an earlier card is merged away.
 char *tb_agent_usage(void);
 
 // Persisted quota-pace history for the quota lens, one entry per stored series:
@@ -127,6 +130,15 @@ char *tb_quota_history(void);
 // call after the first through a source-change-token probe — see the
 // tb_core_ffi window_usage module.
 char *tb_window_usage(int64_t from_ms, int64_t until_ms);
+
+// Replace the registry of extra Claude config directories (CLAUDE_CONFIG_DIR
+// accounts) with a JSON array of absolute drive paths; [] clears it. Each
+// directory becomes its own Claude card (accountKey = the directory) on the
+// next tb_agent_usage, read only from <dir>\.credentials.json. Success data:
+// {"registeredCount":N,"rejected":[{"index":i,"reason":code}]}. Errors and
+// reasons are fixed codes; the input is never echoed. On error the registry is
+// unchanged.
+char *tb_set_claude_config_dirs(const char *json);
 
 // Release a string returned by any tb_* entry point.
 void tb_free(char *p);
