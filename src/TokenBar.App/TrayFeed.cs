@@ -337,7 +337,10 @@ public sealed class TrayFeed : IDisposable
             var resolved = Math.Clamp(pick.Window.RemainingPercent, 0, 100);
             if (resolved != QuotaRemaining)
             {
-                DevLog.Write($"tray quota pick: {pick.ClientId}|{pick.Window.CardId} {resolved:F1}%");
+                // Never the account key: a config-dir key is a path with the user's name.
+                DevLog.Write(
+                    $"tray quota pick: {pick.ClientId}|{pick.Window.CardId}"
+                    + $"{(pick.AccountKey is null ? "" : " (other account)")} {resolved:F1}%");
             }
 
             QuotaRemaining = resolved;

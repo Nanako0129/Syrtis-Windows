@@ -236,10 +236,19 @@ public static class WindowCardText
     public static IReadOnlyList<WindowCardTab> Tabs(
         IReadOnlyList<QuotaHistorySeries>? history,
         AgentUsagePayload? quota,
-        string clientId)
+        string clientId,
+        string? accountKey = null)
     {
-        var agent = quota?.Agents.FirstOrDefault(a => a.ClientId == clientId);
+        // The snapshot is selected by (clientId, accountKey); accountKey null
+        // is the primary. A stored series belongs to it only when
+        // series.AccountScope == its HistoryScope.Scope — for Claude (whose
+        // accounts share one client id) and for any non-primary account that
+        // is STRICT: no scope, no series, never "every series". Other
+        // providers keep the lenient fallback below.
+        var agent = quota?.Agents.FirstOrDefault(a =>
+            a.ClientId == clientId && a.Account.AccountKey == (accountKey is { Length: > 0 } ? accountKey : null));
         var liveScope = agent?.HistoryScope?.Scope;
+        var strict = clientId == "claude" || accountKey is { Length: > 0 };
 
         // Every stored series this client's own scope-filtered set contains —
         // restricted to the live history scope first (see the doc
@@ -256,7 +265,7 @@ public static class WindowCardText
                 continue;
             }
 
-            if (liveScope is not null && series.AccountScope != liveScope)
+            if ((liveScope is not null || strict) && series.AccountScope != liveScope)
             {
                 continue;
             }

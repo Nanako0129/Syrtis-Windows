@@ -1311,6 +1311,7 @@ public sealed partial class DashboardView : UserControl
         var agents = snapshot.Quota?.Agents ?? [];
         if (clientId is not null)
         {
+            // Every account of the client: hiding or narrowing is per client.
             agents = [.. agents.Where(agent => agent.ClientId == clientId)];
         }
 
@@ -1345,7 +1346,13 @@ public sealed partial class DashboardView : UserControl
             var section = new StackPanel { Spacing = 5 };
             var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
             header.Children.Add(AgentIcon.Create(agent.ClientId, 14));
-            header.Children.Add(Ui.Text(ClientRegistry.ShortName(agent.ClientId), 12, bold: true));
+            var title = Ui.Text(AccountLabel.Of(agent), 12, bold: true);
+            if (AccountLabel.Detail(agent.Account) is { } fullPath)
+            {
+                ToolTipService.SetToolTip(title, fullPath);
+            }
+
+            header.Children.Add(title);
             if (agent.Identity?.Plan is { } plan)
             {
                 header.Children.Add(Ui.Dim(plan, 10));
@@ -1370,7 +1377,8 @@ public sealed partial class DashboardView : UserControl
             // lines each tab up with the window it belongs to.
             var windows = agent.UniqueCardWindows;
             var chartTabs = layout == LimitsLayout.Chart
-                ? WindowCardText.Tabs(snapshot.QuotaHistory, snapshot.Quota, agent.ClientId)
+                ? WindowCardText.Tabs(
+                    snapshot.QuotaHistory, snapshot.Quota, agent.ClientId, agent.Account.AccountKey)
                 : [];
             for (var i = 0; i < windows.Count; i++)
             {

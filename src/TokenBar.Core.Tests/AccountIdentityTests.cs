@@ -1,0 +1,238 @@
+using System.Text.Json;
+using TokenBar.App;
+using TokenBar.Core;
+using TokenBar.Interop;
+using Xunit;
+
+namespace TokenBar.Core.Tests;
+
+// S2: a Claude card is identified, labelled and selected by (clientId,
+// accountKey). Fixtures carry the primary's history scope on every outcome
+// (the core's contract), so "no scope" below always means a non-primary card.
+public class AccountIdentityTests
+{
+    private const long Hour = 3_600;
+    private const string Desktop = "claude-desktop";
+    private const string Dir = @"D:\Work\team-b";
+
+    public AccountIdentityTests() => Localization.Load("en", AppContext.BaseDirectory);
+
+    private static UsageWindow Window(string cardId, string label, double remaining, string? key = null) =>
+        new(Label: label, UsedPercent: 100 - remaining, RemainingPercent: remaining, CardId: cardId,
+            PaceStatus: key is null
+                ? new PaceStatus(UsagePaceState.Unavailable)
+                : new PaceStatus(UsagePaceState.Available, WindowKey: key, DurationSeconds: 5 * Hour));
+
+    private static AgentUsageSnapshot Card(
+        string? accountKey, string? scope, string? error = null, params UsageWindow[] windows) =>
+        new("claude", "oauth", "2026-08-31T00:00:00Z", windows, Error: error,
+            HistoryScope: scope is null ? null : new AccountScopeStatus(Scope: scope),
+            AccountKey: accountKey);
+
+    private static AgentUsagePayload Payload(params AgentUsageSnapshot[] agents) =>
+        new("2026-08-31T00:00:00Z", agents);
+
+    private static AgentUsagePayload TwoAccounts() => Payload(
+        Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")),
+        Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
+
+    private static QuotaHistorySample Sample(double used, long at, bool active) =>
+        new(ResetAt: 100 * Hour, DurationSeconds: 5 * Hour,
+            DurationSource: QuotaHistoryDurationSource.Provider, UsedPercent: used,
+            SampledAt: at * Hour, Origin: QuotaHistorySampleOrigin.LiveV3, IsActiveGroup: active);
+
+    // `active` = the running cycle (what a window card draws); otherwise a
+    // completed cycle of two readings (what the Quota lens summarises).
+    private static QuotaHistorySeries Series(
+        string scope, string key = "session.v1", double used = 40, bool active = true) =>
+        new("claude", scope, key,
+            active ? [Sample(used, 97, true)] : [Sample(10, 96, false), Sample(used, 97, false)]);
+
+    // ---- DTO ---------------------------------------------------------------
+
+    [Fact]
+    public void AccountKeyDecodesWhenPresentAndIsPrimaryWhenAbsentOrEmpty()
+    {
+        var opts = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var p = JsonSerializer.Deserialize<AgentUsagePayload>(
+            """
+            {"generatedAt":"n","agents":[
+              {"clientId":"claude","source":"oauth","updatedAt":"n","windows":[]},
+              {"clientId":"claude","source":"oauth","updatedAt":"n","windows":[],"accountKey":"claude-desktop"},
+              {"clientId":"claude","source":"oauth","updatedAt":"n","windows":[],"accountKey":""}]}
+            """, opts)!;
+        Assert.Null(p.Agents[0].AccountKey);
+        Assert.Null(p.Agents[0].Account.AccountKey);
+        Assert.Equal(Desktop, p.Agents[1].Account.AccountKey);
+        Assert.Null(p.Agents[2].Account.AccountKey);
+    }
+
+    // ---- label ---------------------------------------------------------------
+
+    [Fact]
+    public void LabelIsOneFunctionPerAccountKind()
+    {
+        Assert.Equal("Claude", AccountLabel.Of(new AccountIdentity("claude", null)));
+        Assert.Equal("Claude Code", AccountLabel.Of(new AccountIdentity("claude", null), full: true));
+        Assert.Equal("Claude Desktop", AccountLabel.Of(new AccountIdentity("claude", Desktop)));
+        Assert.Equal("Claude · team-b", AccountLabel.Of(new AccountIdentity("claude", Dir)));
+        Assert.Equal("Claude · team-b", AccountLabel.Of(new AccountIdentity("claude", Dir + @"\")));
+        Assert.Equal(Dir, AccountLabel.Detail(new AccountIdentity("claude", Dir)));
+        Assert.Null(AccountLabel.Detail(new AccountIdentity("claude", Desktop)));
+        Assert.Null(AccountLabel.Detail(new AccountIdentity("claude", null)));
+    }
+
+    // ---- selection -----------------------------------------------------------
+
+    [Fact]
+    public void PrimarySelectionIsByteIdenticalAndExtrasAreThreeSegments()
+    {
+        Assert.Equal("claude|session.v1", QuotaResolver.Selection("claude", "session.v1"));
+        Assert.Equal("claude|session.v1", QuotaResolver.Selection("claude", "session.v1", null));
+        Assert.Equal("claude|session.v1", QuotaResolver.Selection("claude", "session.v1", ""));
+        Assert.Equal(
+            $"claude|session.v1|{Desktop}", QuotaResolver.Selection("claude", "session.v1", Desktop));
+    }
+
+    [Fact]
+    public void ResolvePicksTheNamedAccountsWindow()
+    {
+        var payload = TwoAccounts();
+
+        var primary = QuotaResolver.Resolve(payload, "claude|session.v1")!;
+        Assert.Null(primary.AccountKey);
+        Assert.Equal(80, primary.Window.RemainingPercent);
+
+        var desktop = QuotaResolver.Resolve(payload, $"claude|session.v1|{Desktop}")!;
+        Assert.Equal(Desktop, desktop.AccountKey);
+        Assert.Equal(30, desktop.Window.RemainingPercent);
+    }
+
+    [Fact]
+    public void ExtraSelectionRoundTripsThroughCanonicalAndSurvivesAConfigDirPath()
+    {
+        var payload = Payload(
+            Card(null, "P", null, Window("session.v1", "Session", 80)),
+            Card(Dir, "D", null, Window("session.v1", "Session", 10)));
+        var selection = QuotaResolver.Selection("claude", "session.v1", Dir);
+
+        Assert.Equal(selection, QuotaResolver.CanonicalSelection(payload, selection));
+        Assert.Equal(10, QuotaResolver.Resolve(payload, selection)!.Window.RemainingPercent);
+        // A legacy label for the extra's window migrates inside ITS account.
+        Assert.Equal(selection, QuotaResolver.CanonicalSelection(payload, $"claude|Session|{Dir}"));
+    }
+
+    [Fact]
+    public void ACardIdContainingTheDelimiterStillBelongsToThePrimary()
+    {
+        var payload = Payload(
+            Card(null, "P", null, Window("model.gpt|preview.v1", "M", 50)),
+            Card(Desktop, "S", null, Window("model.gpt|preview.v1", "M", 20)));
+
+        Assert.Equal(50, QuotaResolver.Resolve(payload, "claude|model.gpt|preview.v1")!.Window.RemainingPercent);
+        Assert.Equal(
+            20,
+            QuotaResolver.Resolve(payload, $"claude|model.gpt|preview.v1|{Desktop}")!.Window.RemainingPercent);
+    }
+
+    [Fact]
+    public void AnExtraSelectionWhoseAccountIsGoneMatchesNothingAndIsKept()
+    {
+        var payload = Payload(Card(null, "P", null, Window("session.v1", "Session", 80)));
+        var selection = $"claude|session.v1|{Desktop}";
+
+        Assert.Equal(selection, QuotaResolver.CanonicalSelection(payload, selection));
+        Assert.Null(QuotaResolver.Resolve(payload, selection));
+    }
+
+    [Fact]
+    public void AutoConsidersEveryAccountsWindows()
+    {
+        var pick = QuotaResolver.Resolve(TwoAccounts(), QuotaResolver.Auto)!;
+        Assert.Equal(Desktop, pick.AccountKey);
+        Assert.Equal(30, pick.Window.RemainingPercent);
+    }
+
+    // ---- summary -------------------------------------------------------------
+
+    [Fact]
+    public void TightestNamesTheAccountAndDoesNotCountItselfAmongTheOthers()
+    {
+        var summary = QuotaSummaryFold.Build(TwoAccounts())!;
+        Assert.Equal(Desktop, summary.TightestAccountKey);
+        Assert.Equal("Claude Desktop", QuotaSummaryText.TightestName(summary));
+        // The primary's identically-keyed card is a different account: counted.
+        Assert.Equal(1, summary.OtherWindows);
+
+        var primaryTightest = QuotaSummaryFold.Build(Payload(
+            Card(null, "P", null, Window("session.v1", "Session", 5)),
+            Card(Desktop, "S", null, Window("session.v1", "Session", 30))))!;
+        Assert.Null(primaryTightest.TightestAccountKey);
+        Assert.Equal("Claude Code", QuotaSummaryText.TightestName(primaryTightest));
+    }
+
+    // ---- history join ----------------------------------------------------------
+
+    [Fact]
+    public void WindowCardTabsForThePrimaryIgnoreAnExtrasSeries()
+    {
+        var quota = Payload(
+            // Primary unconfigured: error, no windows, but it still has its scope.
+            Card(null, "P", error: "not signed in"),
+            Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
+
+        var tabs = WindowCardText.Tabs(
+            [Series("S"), Series("P", "weekly.v1")], quota, "claude", accountKey: null);
+
+        Assert.DoesNotContain(tabs, tab => tab.Id.AccountScope == "S");
+        Assert.All(tabs, tab => Assert.Equal("P", tab.Id.AccountScope));
+    }
+
+    [Fact]
+    public void AnExtraSectionDrawsOnlyItsOwnSeriesOrNone()
+    {
+        var quota = TwoAccounts();
+        var history = new[] { Series("P", used: 70), Series("S", used: 20) };
+
+        var desktop = Assert.Single(WindowCardText.Tabs(history, quota, "claude", Desktop));
+        Assert.Equal("S", desktop.Id.AccountScope);
+        Assert.Equal(20, desktop.Active!.Samples[^1].UsedPercent);
+
+        var primary = Assert.Single(WindowCardText.Tabs(history, quota, "claude", null));
+        Assert.Equal("P", primary.Id.AccountScope);
+        Assert.Equal(70, primary.Active!.Samples[^1].UsedPercent);
+
+        // Desktop whose profile failed: a card with no scope gets no series.
+        var noScope = Payload(
+            Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")),
+            Card(Desktop, null, null, Window("session.v1", "Session", 30, "session.v1")));
+        var tab = Assert.Single(WindowCardText.Tabs(history, noScope, "claude", Desktop));
+        Assert.Null(tab.Active);
+        Assert.False(tab.HasHistory);
+    }
+
+    [Fact]
+    public void LensLabelsJoinByScopeAndNameTheAccount()
+    {
+        var quota = Payload(
+            Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")),
+            Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
+
+        var (summaries, _, _) = QuotaLensData.Build([Series("P", active: false), Series("S", active: false)], quota);
+
+        Assert.Equal(2, summaries.Count);
+        Assert.Equal("Session", summaries.Single(s => s.Id.AccountScope == "P").WindowLabel);
+        Assert.Equal(
+            "Claude Desktop · Session", summaries.Single(s => s.Id.AccountScope == "S").WindowLabel);
+    }
+
+    [Fact]
+    public void ASeriesWithNoLiveSnapshotOfItsScopeKeepsTheFallbackLabel()
+    {
+        var quota = Payload(Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")));
+
+        var (summaries, _, _) = QuotaLensData.Build([Series("gone", active: false)], quota);
+
+        Assert.Null(Assert.Single(summaries).WindowLabel);
+    }
+}

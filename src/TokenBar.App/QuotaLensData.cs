@@ -49,7 +49,8 @@ public static class QuotaLensData
             // seam would collapse "no label" into "labelled with its own key"
             // in the data layer, where nothing downstream could tell them apart
             // again.
-            var label = labels.GetValueOrDefault((series.ProviderId, series.WindowKey));
+            var label = labels.GetValueOrDefault((series.ProviderId, series.AccountScope, series.WindowKey))
+                ?? labels.GetValueOrDefault((series.ProviderId, null, series.WindowKey));
             var grid = QuotaHeatmapFold.Build(series.Samples);
             grids[id] = grid;
             forWindows.Add((id, label, grid));
@@ -62,21 +63,41 @@ public static class QuotaLensData
             grids);
     }
 
-    /// <summary>The label join PARITY-3b established: <c>(clientId,
-    /// PaceStatus.WindowKey)</c> against the live agent-usage payload. A series
-    /// with no matching live window keeps its identity and loses only its label,
-    /// so a miss leaves null rather than dropping the row.</summary>
-    private static Dictionary<(string Client, string Window), string> WindowLabels(
+    /// <summary>The label join: a stored series belongs to the live snapshot
+    /// with the same <c>ProviderId == ClientId</c> AND
+    /// <c>AccountScope == HistoryScope.Scope</c> (the one join every history
+    /// consumer uses), then <c>PaceStatus.WindowKey</c> picks the window. A
+    /// series with no matching live window keeps its identity and loses only
+    /// its label, so a miss leaves null rather than dropping the row. A
+    /// non-primary account's label is prefixed with its
+    /// <see cref="AccountLabel"/>, so two accounts' rows for the same window
+    /// read differently.
+    /// <para>A primary snapshot whose history scope is unknown (an old core,
+    /// or a resolution error) has no scope to join on: it keeps the
+    /// pre-account <c>(client, window)</c> join, byte-identical for every
+    /// provider. Only the primary does — a non-primary card with no scope
+    /// labels nothing.</para></summary>
+    private static Dictionary<(string Client, string? Scope, string Window), string> WindowLabels(
         AgentUsagePayload? quota)
     {
-        var labels = new Dictionary<(string Client, string Window), string>();
+        var labels = new Dictionary<(string Client, string? Scope, string Window), string>();
         foreach (var agent in quota?.Agents ?? [])
         {
+            var account = agent.Account;
+            var scope = agent.HistoryScope?.Scope;
+            if (scope is null && account.AccountKey is not null)
+            {
+                continue;
+            }
+
             foreach (var window in agent.UniqueCardWindows)
             {
                 if (window.PaceStatus.WindowKey is { } key)
                 {
-                    labels.TryAdd((agent.ClientId, key), window.Label);
+                    var text = account.AccountKey is null
+                        ? window.Label
+                        : $"{AccountLabel.Of(account)} · {window.Label}";
+                    labels.TryAdd((agent.ClientId, scope, key), text);
                 }
             }
         }

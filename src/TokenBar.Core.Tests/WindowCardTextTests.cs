@@ -299,16 +299,18 @@ public class WindowCardTextTests
     // AccountScopeStatus.Error, or an absent AccountScope on an older
     // payload), there is no account signal to filter by, so this falls back
     // to the pre-fix first-wins behaviour rather than showing nothing.
+    // (Codex stands in: Claude is strict — a card with no scope gets no series —
+    // because its accounts share one client id; see AccountIdentityTests.)
     [Fact]
     public void TabsFallBackToFirstWinsWhenTheLiveScopeIsUnavailable()
     {
         var tabs = WindowCardText.Tabs(
             [
-                Series("claude", "account-a", "session.v1", Sample(40, ResetAt - 600)),
-                Series("claude", "account-b", "session.v1", Sample(90, ResetAt - 600)),
+                Series("codex", "account-a", "session.v1", Sample(40, ResetAt - 600)),
+                Series("codex", "account-b", "session.v1", Sample(90, ResetAt - 600)),
             ],
-            Quota("claude", Window("claude|session.v1", "Session", "session.v1")),
-            clientId: "claude");
+            Quota("codex", Window("codex|session.v1", "Session", "session.v1")),
+            clientId: "codex");
 
         var tab = Assert.Single(tabs);
         Assert.Equal("account-a", tab.Id.AccountScope);
@@ -357,17 +359,17 @@ public class WindowCardTextTests
         var quota = new AgentUsagePayload(
             "2026-01-01T00:00:00Z",
             [new AgentUsageSnapshot(
-                "claude", "oauth", "2026-01-01T00:00:00Z",
-                [Window("claude|session.v1", "Session", "session.v1")],
+                "codex", "oauth", "2026-01-01T00:00:00Z",
+                [Window("codex|session.v1", "Session", "session.v1")],
                 AccountScope: new AccountScopeStatus(Scope: "account-b"))]);
 
         var tabs = WindowCardText.Tabs(
             [
-                Series("claude", "account-a", "session.v1", Sample(40, ResetAt - 600)),
-                Series("claude", "account-b", "session.v1", Sample(90, ResetAt - 600)),
+                Series("codex", "account-a", "session.v1", Sample(40, ResetAt - 600)),
+                Series("codex", "account-b", "session.v1", Sample(90, ResetAt - 600)),
             ],
             quota,
-            clientId: "claude");
+            clientId: "codex");
 
         var tab = Assert.Single(tabs);
         Assert.Equal("account-a", tab.Id.AccountScope);
@@ -386,11 +388,11 @@ public class WindowCardTextTests
     {
         var tabs = WindowCardText.Tabs(
             [
-                Series("claude", "account-a", "session.v1", Sample(40, ResetAt - 600)),
-                Series("claude", "account-b", "session.v1", Sample(90, ResetAt - 600)),
+                Series("codex", "account-a", "session.v1", Sample(40, ResetAt - 600)),
+                Series("codex", "account-b", "session.v1", Sample(90, ResetAt - 600)),
             ],
             quota: null,
-            clientId: "claude");
+            clientId: "codex");
 
         Assert.Equal(2, tabs.Count);
         Assert.Equal(
@@ -611,18 +613,18 @@ public class WindowCardTextTests
     {
         var running = WindowCardText.Tabs(
             [Series("claude", "session.v1", Sample(40, ResetAt - 600))],
-            Quota("claude", Window("claude|session.v1", "Session", "session.v1")),
+            Quota("claude", "primary", Window("claude|session.v1", "Session", "session.v1")),
             "claude")[0];
         var idle = WindowCardText.Tabs(
             [Series("claude", "session.v1", Sample(40, ResetAt - 600, active: false))],
-            Quota("claude", Window("claude|session.v1", "Session", "session.v1")),
+            Quota("claude", "primary", Window("claude|session.v1", "Session", "session.v1")),
             "claude")[0];
         var unplaceable = WindowCardText.Tabs(
             [Series("claude", "session.v1", Sample(40, ResetAt - 600, duration: 0))],
-            Quota("claude", Window("claude|session.v1", "Session", "session.v1")),
+            Quota("claude", "primary", Window("claude|session.v1", "Session", "session.v1")),
             "claude")[0];
         var noHistory = WindowCardText.Tabs(
-            [], Quota("claude", Window("claude|session.v1", "Session", "session.v1")), "claude")[0];
+            [], Quota("claude", "primary", Window("claude|session.v1", "Session", "session.v1")), "claude")[0];
 
         Assert.Equal(
             WindowCardState.Chart, WindowCardText.State(running, WindowEquivalence.FetchOutcome.Succeeded));

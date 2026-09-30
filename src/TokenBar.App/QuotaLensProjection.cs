@@ -274,7 +274,9 @@ public static class QuotaLensProjection
         // not the raw client id — antigravity-cli spends the antigravity
         // subscription.
         var owner = ClientRegistry.QuotaOwner(clientId);
-        var tabs = WindowCardText.Tabs(history, quota, owner);
+        // Primary account only (accountKey null): the window card is per client,
+        // and another account's windows and history never appear on it.
+        var tabs = WindowCardText.Tabs(history, quota, owner, accountKey: null);
         var selected = tabs.FirstOrDefault(tab => WindowId(tab.Id) == windowCardTab)
             ?? DefaultTab(tabs);
         var messages = windowUsage?.Messages ?? [];
