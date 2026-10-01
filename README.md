@@ -80,6 +80,71 @@ before you go looking for a missing card:
 | Grok | OAuth via `~/.grok/auth.json` |
 | Antigravity | OAuth or local IDE credentials, whichever the installed client itself uses |
 
+## Claude Code usage in WSL
+
+If Claude Code runs inside WSL, its transcripts live in the Linux user's
+`~/.claude/projects`, separate from Windows `%USERPROFILE%\.claude\projects`.
+Syrtis can therefore show zero tokens today while its separately fetched
+subscription quota still shows usage. Continuing an older session does not
+require creating a new session to make today's usage count.
+
+The existing scanner supports additional transcript roots through
+`TOKSCALE_EXTRA_DIRS`. This is a comma-separated list of `client:path` entries;
+for Claude Code, point directly at the `projects` directory. No transcript or
+credential copying is needed for a locally accessible WSL distribution.
+
+1. Run `wsl --list --quiet` in PowerShell to find the distribution name. In the
+   WSL terminal where Claude runs, check `echo "$HOME"` and
+   `echo "$CLAUDE_CONFIG_DIR"`. A custom config directory changes the location
+   of `projects`.
+2. Fully quit Syrtis from its tray menu (closing the dashboard is not enough).
+3. In Windows PowerShell, replace both placeholders below and run:
+
+   ```powershell
+   $projects = '\\wsl.localhost\<distribution>\home\<linux-user>\.claude\projects'
+   if (-not (Test-Path -LiteralPath $projects)) {
+       throw 'Transcript directory is not accessible; check WSL and the path.'
+   }
+
+   # Preserve existing entries and avoid adding the same path twice.
+   $entry = 'claude:' + $projects
+   $existing = [Environment]::GetEnvironmentVariable('TOKSCALE_EXTRA_DIRS', 'User')
+   $entries = @($existing -split ',' | Where-Object { $_.Trim() })
+   if ($entries -notcontains $entry) { $entries += $entry }
+   $env:TOKSCALE_EXTRA_DIRS = $entries -join ','
+   [Environment]::SetEnvironmentVariable('TOKSCALE_EXTRA_DIRS', $env:TOKSCALE_EXTRA_DIRS, 'User')
+   ```
+
+4. Launch `Syrtis.App.exe` from that same PowerShell so it immediately inherits
+   the setting. For the default installer location:
+
+   ```powershell
+   Start-Process -FilePath "$env:LOCALAPPDATA\Nyanako.Syrtis\current\Syrtis.App.exe" -WindowStyle Hidden
+   ```
+
+   For a portable installation, use its actual executable path instead. The
+   user-level variable persists for future launches; an already-running
+   launcher can retain its old environment until restarted or after signing
+   out and back in. Refresh alone does not reload the scanner's process-stable
+   source configuration.
+
+Open the Claude daily view after restarting. If usage is still missing, check
+that the selected directory contains recently updated `.jsonl` files, and that
+the configured distribution is accessible. Avoid registering the same data
+through multiple path aliases or copied directories. Paths containing commas
+cannot be represented by this environment-variable format.
+
+To undo this setup, remove only the matching `claude:...` entry from the user
+variable and restart Syrtis. Preserve entries for other directories or clients;
+remove the variable entirely only if no entries remain. This setting is shared
+with other tools that honor `TOKSCALE_EXTRA_DIRS`.
+
+This configures local WSL transcript scanning, not remote-machine synchronization
+or subscription credentials. Remote synchronization is discussed separately in
+[issue #1](https://github.com/Nanako0129/Syrtis-Windows/issues/1).
+
+
+
 ## Architecture
 
 | Layer | Path | Notes |
