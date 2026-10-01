@@ -108,8 +108,12 @@ credential copying is needed for a locally accessible WSL distribution.
 
    # Preserve existing entries and avoid adding the same path twice.
    $entry = 'claude:' + $projects
-   $existing = [Environment]::GetEnvironmentVariable('TOKSCALE_EXTRA_DIRS', 'User')
-   $entries = @($existing -split ',' | Where-Object { $_.Trim() })
+   $processExisting = $env:TOKSCALE_EXTRA_DIRS
+   $userExisting = [Environment]::GetEnvironmentVariable('TOKSCALE_EXTRA_DIRS', 'User')
+   $entries = @($processExisting, $userExisting) |
+       ForEach-Object { $_ -split ',' } |
+       Where-Object { $_.Trim() } |
+       Select-Object -Unique
    if ($entries -notcontains $entry) { $entries += $entry }
    $env:TOKSCALE_EXTRA_DIRS = $entries -join ','
    [Environment]::SetEnvironmentVariable('TOKSCALE_EXTRA_DIRS', $env:TOKSCALE_EXTRA_DIRS, 'User')
