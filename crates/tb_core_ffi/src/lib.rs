@@ -742,9 +742,8 @@ unsafe fn set_claude_config_dirs_from_c(json: *const c_char) -> Result<serde_jso
     let raw = unsafe { CStr::from_ptr(json) }
         .to_str()
         .map_err(|_| "invalidUtf8".to_string())?;
-    let (report, registered) = claude_config_dirs::set_from_json(raw).map_err(str::to_string)?;
-    agent_usage::purge_removed_claude_accounts(&registered);
-    Ok(report)
+    agent_usage::replace_claude_config_dirs(|| claude_config_dirs::set_from_json(raw))
+        .map_err(str::to_string)
 }
 
 /// Release a string returned by any tb_* entry point.

@@ -2021,12 +2021,39 @@ where
     published
 }
 
-/// Forget every per-account entry (last-good, 429 gate, header cache, profile
-/// cache) of a configured directory that is no longer in `configured`. The
-/// primary and the Claude Desktop card are never purged here.
-pub(crate) fn purge_removed_claude_accounts(configured: &[String]) {
-    let _state = lock_claude_account_state();
-    purge_removed_claude_accounts_in(&ClaudeAccountCaches::process(), configured);
+/// Replace the config-directory registry and purge the removed accounts'
+/// state as one step under `CLAUDE_ACCOUNT_STATE_LOCK`. `replace` installs the
+/// new registry and returns `(report, registered)`; on `Err` nothing is purged.
+///
+/// Both halves must sit under the one lock: released in between, two
+/// concurrent setters could replace in one order and purge in the other,
+/// deleting the state of accounts that remain registered. The lock order
+/// matches `settle_claude_run_with` (state lock, then registry, then caches),
+/// and nothing here awaits.
+pub(crate) fn replace_claude_config_dirs<T, E>(
+    replace: impl FnOnce() -> Result<(T, Vec<String>), E>,
+) -> Result<T, E> {
+    replace_claude_config_dirs_in(
+        &CLAUDE_ACCOUNT_STATE_LOCK,
+        &ClaudeAccountCaches::process(),
+        replace,
+    )
+}
+
+fn replace_claude_config_dirs_in<T, E>(
+    state_lock: &Mutex<()>,
+    caches: &ClaudeAccountCaches<'_>,
+    replace: impl FnOnce() -> Result<(T, Vec<String>), E>,
+) -> Result<T, E> {
+    let _state = state_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (report, registered) = replace()?;
+    // Forget every per-account entry (last-good, 429 gate, header, profile,
+    // identity) of a directory no longer registered. The primary and the
+    // Claude Desktop card are never purged here.
+    purge_removed_claude_accounts_in(caches, &registered);
+    Ok(report)
 }
 
 fn purge_removed_claude_accounts_in(caches: &ClaudeAccountCaches<'_>, configured: &[String]) {
@@ -7550,6 +7577,83 @@ mod tests {
             .contains_key(&account_slot("claude", Some(kept))));
         assert!(headers.lock().unwrap().contains_key(&a));
         assert!(identities.lock().unwrap().keys().any(|(key, _)| key == &a));
+        scope.cleanup();
+    }
+
+    /// The setter's registry replace and purge run as one step under the state
+    /// lock: two setters in a row leave caches that match the final registry,
+    /// and the lock is held while the registry is replaced.
+    #[test]
+    fn setter_replaces_and_purges_under_the_state_lock() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("claude", "setter-state-lock");
+        let binding = ProviderCacheBinding::primary(
+            scope
+                .resolve_current("fixture", "setter", b"marker")
+                .unwrap(),
+        );
+        let state_lock = Mutex::new(());
+        let last_good = Mutex::new(ProviderLastGoodCache::default());
+        let gates = Mutex::new(ClaudeUsageGates::new());
+        let headers = Mutex::new(ClaudeHeaderCache::new());
+        let profiles = Mutex::new(ClaudeProfileCache::new());
+        let identities = Mutex::new(ClaudeIdentityCache::new());
+        let caches = ClaudeAccountCaches {
+            last_good: &last_good,
+            gates: &gates,
+            headers: &headers,
+            profiles: &profiles,
+            identities: &identities,
+        };
+        let (a, b) = (r"C:\claude\a", r"C:\claude\b");
+        for account in [Some(a), Some(b)] {
+            apply_account_outcome_with(
+                &last_good,
+                "claude",
+                account,
+                "oauth",
+                now,
+                ProviderFetchOutcome::Success {
+                    snapshot: cache_test_snapshot("claude", Ok(binding.primary.clone()), now),
+                    cache_binding: Some(binding.clone()),
+                },
+                |_| {},
+            );
+            with_gate_in(&gates, account, ClaudeUsageGate::clear);
+        }
+        let setter = |dirs: Vec<&str>| {
+            replace_claude_config_dirs_in(&state_lock, &caches, || {
+                assert!(
+                    state_lock.try_lock().is_err(),
+                    "the registry is replaced under the state lock"
+                );
+                Ok::<_, ()>(((), dirs.into_iter().map(str::to_string).collect()))
+            })
+        };
+
+        // Setter 1 keeps A and B; setter 2 removes B. Each purges against the
+        // registry it installed, so the final caches match the final registry.
+        setter(vec![a, b]).unwrap();
+        setter(vec![a]).unwrap();
+        assert!(state_lock.try_lock().is_ok(), "released afterwards");
+        let keys: Vec<Option<String>> = lock_last_good(&last_good)
+            .entries
+            .keys()
+            .map(|(_, key)| key.clone())
+            .collect();
+        assert_eq!(keys, [Some(a.to_string())]);
+        let mut gate_keys: Vec<Option<String>> = gates.lock().unwrap().keys().cloned().collect();
+        gate_keys.sort();
+        assert_eq!(gate_keys, [Some(a.to_string())]);
+
+        // A failed replace purges nothing.
+        assert_eq!(
+            replace_claude_config_dirs_in(&state_lock, &caches, || Err::<((), Vec<String>), _>(
+                "invalidJson"
+            )),
+            Err("invalidJson")
+        );
+        assert_eq!(lock_last_good(&last_good).entries.len(), 1);
         scope.cleanup();
     }
 
