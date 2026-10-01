@@ -464,7 +464,7 @@ struct LoadedStore {
     /// dropped a sample or `repair_store_at` ran. A transaction saves when this
     /// is set even if its body changes nothing, so a repair reaches disk once
     /// instead of re-running on every load and leaving the file readable only
-    /// by a build that repeats it (#207). The v3 → v4 version stamp does not
+    /// by a build that repeats it (TokenBar-Native#207). The v3 → v4 version stamp does not
     /// set it; that upgrade stays lazy, see `migrate_store_to_current`. It is
     /// independent of `on_disk_schema`.
     repaired: bool,
@@ -2468,29 +2468,6 @@ fn rollover_activity_at(rollover: &ObservedState) -> i64 {
     }
 }
 
-/// Repair a structurally valid store (`validate_store` already passed) whose
-/// clock disagrees with the reading transaction: some series' derived
-/// timestamps lead `upper_bound`. Structural failures never reach this
-/// function; they still quarantine at the call site.
-///
-/// Every detection threshold below is `upper_bound` — the same ceiling
-/// `validate_store_at` failed against, which is what "leads the ceiling"
-/// means. Only the clamp target is `observation_now`: `is_stale_observation`
-/// compares against `observation_now`, so clamping to `upper_bound` would
-/// leave a repaired series' clock above the transaction body's clock, reject
-/// this poll's observation as stale, and repeat identically on every future
-/// load. Rollover detection only ever looks at activity timestamps
-/// (`rollover_activity_at`), never at cycle boundaries: `reset_at` and
-/// friends are future boundaries that lead `upper_bound` in essentially
-/// every healthy rollover, and including them would drop every in-flight
-/// rollover on every load.
-///
-/// **Precondition: `observation_now <= upper_bound`.** Every current caller
-/// satisfies it — the transaction passes `observation_now.max(lock_time)` as
-/// the ceiling, and the two read paths pass the same value for both. A caller
-/// that broke it could produce a clamped `last_activity_at` above the ceiling,
-/// which the post-body `validate_store_at` would reject, failing the whole
-/// transaction for every provider rather than just one series.
 /// Forget samples this build cannot place, keeping everything it can.
 ///
 /// The three sample-level invariants `validate_series` enforces — each sample
@@ -2539,6 +2516,33 @@ fn drop_unplaceable_samples(mut store: Store) -> (Store, bool) {
     (store, dropped)
 }
 
+/// Repair a structurally valid store (`validate_store` already passed) whose
+/// clock disagrees with the reading transaction: some series' derived
+/// timestamps lead `upper_bound`. Structural failures never reach this
+/// function; they still quarantine at the call site.
+///
+/// A series is never dropped. The ceiling comes from the wall clock, so a
+/// clock that stepped back would otherwise erase a healthy history; only the
+/// samples stamped past the ceiling go, and the series keeps the rest.
+///
+/// Every detection threshold below is `upper_bound` — the same ceiling
+/// `validate_store_at` failed against, which is what "leads the ceiling"
+/// means. Only the clamp target is `observation_now`: `is_stale_observation`
+/// compares against `observation_now`, so clamping to `upper_bound` would
+/// leave a repaired series' clock above the transaction body's clock, reject
+/// this poll's observation as stale, and repeat identically on every future
+/// load. Rollover detection only ever looks at activity timestamps
+/// (`rollover_activity_at`), never at cycle boundaries: `reset_at` and
+/// friends are future boundaries that lead `upper_bound` in essentially
+/// every healthy rollover, and including them would drop every in-flight
+/// rollover on every load.
+///
+/// **Precondition: `observation_now <= upper_bound`.** Every current caller
+/// satisfies it — the transaction passes `observation_now.max(lock_time)` as
+/// the ceiling, and the two read paths pass the same value for both. A caller
+/// that broke it could produce a clamped `last_activity_at` above the ceiling,
+/// which the post-body `validate_store_at` would reject, failing the whole
+/// transaction for every provider rather than just one series.
 fn repair_store_at(mut store: Store, upper_bound: i64, observation_now: i64) -> Store {
     debug_assert!(
         observation_now <= upper_bound,
@@ -4019,27 +4023,32 @@ fn with_locked_transaction_with_save_and_mode<T>(
                         && repair_invalid_series(&mut loaded.store, upper_bound).is_none()
                     {
                         Err(HistoryError::Serialize)
-                    } else if loaded.store == before && !loaded.repaired {
-                        Ok(value)
-                    } else if save(path, &loaded.store).is_err() {
-                        // Writing back only the loader's repair is housekeeping:
-                        // the body's result does not depend on it, and the next
-                        // load repeats the repair in memory. Failing here would
-                        // turn a full disk into "history unavailable" for every
-                        // provider on every poll. No `settle()` on this path: a
-                        // write that failed leaves the file at its old schema,
-                        // so it must not mark the fold as done. A store the fold
-                        // or the body changed differs from `before` and still
-                        // reports the failure.
-                        if loaded.store == before {
-                            Ok(value)
-                        } else {
-                            Err(HistoryError::AtomicSave)
-                        }
                     } else {
-                        // The file on disk is now the current schema.
-                        settle();
-                        Ok(value)
+                        // One comparison decides both whether to save and what
+                        // a failed save means, so the two cannot drift apart.
+                        let changed = loaded.store != before;
+                        if !changed && !loaded.repaired {
+                            Ok(value)
+                        } else if save(path, &loaded.store).is_err() {
+                            // Writing back only the loader's repair is
+                            // housekeeping: the body's result does not depend
+                            // on it, and the next load repeats the repair in
+                            // memory. Failing here would turn a full disk into
+                            // "history unavailable" for every provider on every
+                            // poll. No `settle()` on this path: a write that
+                            // failed leaves the file at its old schema, so it
+                            // must not mark the fold as done. A store the fold
+                            // or the body changed still reports the failure.
+                            if changed {
+                                Err(HistoryError::AtomicSave)
+                            } else {
+                                Ok(value)
+                            }
+                        } else {
+                            // The file on disk is now the current schema.
+                            settle();
+                            Ok(value)
+                        }
                     }
                 }
                 Err(error) => Err(error),
@@ -8694,19 +8703,9 @@ mod tests {
         assert!(!loaded.quarantined);
         assert!(validate_store_at(&loaded.store, upper_bound));
         assert_eq!(loaded.store.series.len(), 2, "no series is dropped");
-        let sibling = loaded
-            .store
-            .series
-            .iter()
-            .find(|s| s.window_key == "session.v1")
-            .unwrap();
+        let sibling = series_of(&loaded.store, "claude", "acct", "session.v1").unwrap();
         assert_eq!(*sibling, healthy, "sibling is untouched");
-        let repaired = loaded
-            .store
-            .series
-            .iter()
-            .find(|s| s.window_key == "weekly.v1")
-            .unwrap();
+        let repaired = series_of(&loaded.store, "claude", "acct", "weekly.v1").unwrap();
         assert_eq!(
             repaired.samples,
             vec![past_sample],
@@ -9477,7 +9476,11 @@ mod tests {
         };
         assert!(!validate_store_at(&store, upper_bound));
         fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
-        let failing_save = |_: &Path, _: &Store| Err(io::Error::other("disk full"));
+        let attempts = std::cell::Cell::new(0);
+        let failing_save = |_: &Path, _: &Store| {
+            attempts.set(attempts.get() + 1);
+            Err(io::Error::other("disk full"))
+        };
 
         let repair_only = with_locked_transaction_with_save_and_mode(
             StorageMode::Generic,
@@ -9490,6 +9493,7 @@ mod tests {
             |_store| Ok(7),
         );
         assert_eq!(repair_only, Ok(7), "the body's result survives");
+        assert_eq!(attempts.get(), 1, "the repair alone reached the save");
 
         // Control: a body that changed the store still reports the failure.
         let body_changed = with_locked_transaction_with_save_and_mode(
@@ -13786,17 +13790,22 @@ mod tests {
         let v3_bytes = fs::read(&path).unwrap();
 
         let settled = AtomicBool::new(false);
+        let attempts = std::cell::Cell::new(0);
         let result = with_locked_transaction_with_save_and_mode(
             StorageMode::Generic,
             &path,
             FOLD_NOW,
             || upper_bound,
-            |_, _| Err(io::Error::other("disk full")),
+            |_, _| {
+                attempts.set(attempts.get() + 1);
+                Err(io::Error::other("disk full"))
+            },
             &fold_inputs(),
             Some(&settled),
             |_store| Ok(7),
         );
         assert_eq!(result, Ok(7), "the body's result survives");
+        assert_eq!(attempts.get(), 1, "the repair alone reached the save");
         assert!(
             !settled.load(Ordering::Acquire),
             "a failed write must not settle"
