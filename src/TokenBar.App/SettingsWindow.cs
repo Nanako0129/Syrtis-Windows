@@ -200,10 +200,18 @@ public sealed class SettingsWindow : Window
         AppSettings.Store.Changed += key =>
         {
             if (!key.StartsWith("tokenbar.", StringComparison.Ordinal)
-                || key is "tokenbar.quota.lastRemaining" or "tokenbar.popover.height")
+                || key is "tokenbar.quota.lastRemaining" or "tokenbar.quota.lastResolvedAt"
+                    or "tokenbar.popover.height")
             {
                 return;
             }
+
+            // A fresh stamp lands beside lastRemaining on every quota poll, so
+            // excluding it here means the preview's staleness flag only
+            // updates when something else triggers a rebuild — a reading can
+            // sit rendered non-grey after crossing 30 minutes until the next
+            // unrelated setting change. Known macOS limitation too (pr418
+            // "Known limitations"), left as-is rather than adding a timer.
 
             // Changed fires on the writing thread — and a vanished-year clear
             // runs Store.Remove on a background parse lane — so hop to the UI
@@ -1380,15 +1388,21 @@ public sealed class SettingsWindow : Window
         var lastRemaining = store.GetDouble(
             "tokenbar.quota.lastRemaining", double.NaN);
         var lastSelection = store.GetString("tokenbar.quota.lastSelection");
-        double? remaining = QuotaSelectionPolicy.Resolve(payload, selection, hidden)
-            is { } pick
-            ? Math.Clamp(pick.Window.RemainingPercent, 0, 100)
-            : QuotaResolver.ExcludedAllCandidates(payload, selection, hidden)
-                ? null
-                : QuotaSelectionPolicy.MatchingLastGoodRemaining(
-                    selection,
-                    lastSelection,
-                    double.IsFinite(lastRemaining) ? lastRemaining : null);
+        // Same Core function the tray writes through (TrayFeed.ResolveRemaining):
+        // the preview must show the same value under the same clear/keep rule
+        // without duplicating that branching here.
+        var reading = QuotaSelectionPolicy.ResolveReading(
+            payload, persistedSelection, hidden, lastSelection,
+            double.IsFinite(lastRemaining) ? lastRemaining : null);
+        double? remaining = reading.Remaining;
+        // Stale only applies to a real reading (macOS SettingsWindowView.swift:
+        // 453-461 passes the nullable remaining straight through). `remaining`
+        // here is that real, possibly-null value — the `?? 57` demo fallback
+        // used for DRAWING below must not also feed the no-reading guard, or
+        // it'd defeat RenderGauge's own `stale && remaining is not null` check.
+        var stamp = QuotaStaleness.PersistedResolvedAt(store);
+        var stale = remaining is not null && QuotaStaleness.ReadingIsStale(
+            payload, selection, hidden, stamp, DateTimeOffset.UtcNow);
         var title = SampleTitle(mode, remaining);
 
         System.Drawing.Color? automaticColor = mode == TrayMode.QuotaLeft
@@ -1404,7 +1418,7 @@ public sealed class SettingsWindow : Window
                 ? TrayIconRenderer.RenderTitle(
                     TrayModes.IconTitle(title), titleColor, dark)
                 : gaugeStyle is { } style
-                    ? TrayIconRenderer.RenderGauge(style, remaining ?? 57, dark, coloring)
+                    ? TrayIconRenderer.RenderGauge(style, remaining ?? 57, dark, coloring, stale)
                     : AnimationFrame(styleRaw, dark);
             var strip = new Border
             {

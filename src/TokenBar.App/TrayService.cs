@@ -570,6 +570,7 @@ public sealed class TrayService : IDisposable
             AppSettings.Store.GetString("tokenbar.icon.coloring"));
         var dark = IsSystemDark();
         var remaining = _feed.QuotaRemaining;
+        var stale = _feed.QuotaStale;
         var title = CostSurfaceProjection.TrayTitle(
             mode,
             _feed.VisibleTotals,
@@ -592,7 +593,7 @@ public sealed class TrayService : IDisposable
             + "|" + AppSettings.Store.GetString(MenuBarTextColor.WarningColorKey)
             + "|" + AppSettings.Store.GetString(MenuBarTextColor.CriticalColorKey);
         var signature =
-            $"{mode}|{styleRaw}|{coloring}|{dark}|{title}|{remaining:F1}|{animate}"
+            $"{mode}|{styleRaw}|{coloring}|{dark}|{title}|{remaining:F1}|{animate}|{stale}"
             + $"|{textColorMode}|{textColorHex}";
         if (signature == _iconSignature)
         {
@@ -622,7 +623,7 @@ public sealed class TrayService : IDisposable
                 dark)
             : TrayIconRenderer.RenderGauge(
                 TrayIconRenderer.ParseGaugeStyle(styleRaw) ?? QuotaIconStyle.Bars,
-                remaining, dark, coloring);
+                remaining, dark, coloring, stale);
         ApplyIcon(bmp);
     }
 

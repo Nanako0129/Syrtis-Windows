@@ -41,10 +41,24 @@ public sealed class TrayFeed : IDisposable
     private string? _cachedQuotaSelection;
     private double? _cachedQuotaRemaining;
 
+    /// <summary>The age source for <see cref="QuotaStale"/>, updated only by
+    /// <see cref="ResolveRemaining"/> (and seeded at cold start): with a
+    /// payload, the resolve that produced <see cref="QuotaRemaining"/>'s own
+    /// resolved-at (null if that resolve found nothing to date); with no
+    /// payload, the persisted stamp. Caching this here — instead of
+    /// re-resolving on every read — is what keeps a render from re-running
+    /// the payload resolve three times over (once for the value, once each
+    /// for two independent staleness reads).</summary>
+    private DateTimeOffset? _resolvedAt;
+
     /// <summary>Resolved remaining % for the selected quota window. Boots
     /// from the persisted last reading only when its selection identity matches
     /// the current effective selection.</summary>
     public double? QuotaRemaining { get; private set; }
+
+    /// <summary>Whether <see cref="QuotaRemaining"/> is older than
+    /// <see cref="QuotaStaleness.StaleAfter"/> (macOS #8 parity).</summary>
+    public bool QuotaStale => QuotaStaleness.IsStale(_resolvedAt, DateTimeOffset.UtcNow);
 
     public event Action? Changed;
 
@@ -68,6 +82,9 @@ public sealed class TrayFeed : IDisposable
             double.IsNaN(persisted) ? null : persisted);
         _cachedQuotaSelection = _cachedQuotaRemaining is null ? null : persistedSelection;
         QuotaRemaining = _cachedQuotaRemaining;
+        // No payload yet at cold start, so age comes from the persisted
+        // stamp — same source ResolveRemaining falls back to later.
+        _resolvedAt = QuotaStaleness.PersistedResolvedAt(AppSettings.Store);
 
         _fast = dispatcher.CreateTimer();
         _fast.Interval = TimeSpan.FromSeconds(30);
@@ -282,10 +299,6 @@ public sealed class TrayFeed : IDisposable
                 var quota = TryFetch(
                     () => AgentUsageFetchCoordinator.Shared.FetchAsync().GetAwaiter().GetResult(),
                     "tray quota");
-                if (quota is null)
-                {
-                    return;
-                }
 
                 _ = _dispatcher.TryEnqueue(() =>
                 {
@@ -294,16 +307,24 @@ public sealed class TrayFeed : IDisposable
                         return;
                     }
 
-                    Quota = quota;
-                    var persistedSelection = AppSettings.Store.GetString(
-                        "tokenbar.quota.source", QuotaResolver.Auto) ?? QuotaResolver.Auto;
-                    if (QuotaSelectionPolicy.MigrationToPersist(quota, persistedSelection)
-                        is { } migrated)
+                    if (quota is not null)
                     {
-                        AppSettings.Store.SetString("tokenbar.quota.source", migrated);
+                        Quota = quota;
+                        var persistedSelection = AppSettings.Store.GetString(
+                            "tokenbar.quota.source", QuotaResolver.Auto) ?? QuotaResolver.Auto;
+                        if (QuotaSelectionPolicy.MigrationToPersist(quota, persistedSelection)
+                            is { } migrated)
+                        {
+                            AppSettings.Store.SetString("tokenbar.quota.source", migrated);
+                        }
+
+                        RecomputeVisibleUsage();
                     }
 
-                    RecomputeVisibleUsage();
+                    // Re-resolve and re-render even on a failed fetch: with no
+                    // new payload the value doesn't change, but its age can
+                    // cross the stale threshold (macOS TrayAnimator.swift:
+                    // 477-481, "nothing changed but the reading's age").
                     ResolveRemaining();
                     Changed?.Invoke();
                 });
@@ -330,39 +351,65 @@ public sealed class TrayFeed : IDisposable
     {
         var persistedSelection = AppSettings.Store.GetString(
             "tokenbar.quota.source", QuotaResolver.Auto) ?? QuotaResolver.Auto;
-        var selection = QuotaSelectionPolicy.EffectiveSelection(Quota, persistedSelection);
         var hidden = ClientRegistry.QuotaExcludedClients(AppSettings.Store);
-        if (QuotaResolver.Resolve(Quota, selection, hidden) is { } pick)
-        {
-            var resolved = Math.Clamp(pick.Window.RemainingPercent, 0, 100);
-            if (resolved != QuotaRemaining)
-            {
-                // Never the account key: a config-dir key is a path with the user's name.
-                DevLog.Write(
-                    $"tray quota pick: {pick.ClientId}|{pick.Window.CardId}"
-                    + $"{(pick.AccountKey is null ? "" : " (other account)")} {resolved:F1}%");
-            }
+        var reading = QuotaSelectionPolicy.ResolveReading(
+            Quota, persistedSelection, hidden, _cachedQuotaSelection, _cachedQuotaRemaining);
 
-            QuotaRemaining = resolved;
-            _cachedQuotaSelection = selection;
-            _cachedQuotaRemaining = resolved;
-            // Write-through pair so the next launch boots only for this
-            // selection (the store no-ops when values have not changed).
-            AppSettings.Store.SetDouble("tokenbar.quota.lastRemaining", resolved);
-            AppSettings.Store.SetString("tokenbar.quota.lastSelection", selection);
-        }
-        else if (QuotaResolver.ExcludedAllCandidates(Quota, selection, hidden))
+        if (reading.CacheWrite == QuotaCacheWrite.Write
+            && reading.Remaining != QuotaRemaining && reading.Remaining is { } resolved)
         {
-            // All healthy AUTO candidates are hidden. Suppress only the
-            // displayed reading; keep the selected-source last-good pair.
-            QuotaRemaining = null;
+            DevLog.Write(
+                $"tray quota pick: {reading.PickedClientId}|{reading.PickedCardId}"
+                + $"{(reading.PickedOtherAccount ? " (other account)" : "")} {resolved:F1}%");
         }
-        else
+
+        QuotaRemaining = reading.Remaining;
+        // Age source for QuotaStale (macOS TrayAnimator.swift:298-313): a
+        // payload always decides its own resolve's age (null if nothing
+        // resolved from it — never the stamp); only with no payload at all
+        // does the persisted stamp apply. Cached here instead of re-resolved
+        // on every QuotaStale read.
+        _resolvedAt = Quota is not null
+            ? (reading.CacheWrite == QuotaCacheWrite.Write ? reading.ResolvedAt : null)
+            : QuotaStaleness.PersistedResolvedAt(AppSettings.Store);
+
+        switch (reading.CacheWrite)
         {
-            // Fetch/provider/explicit-selection failures keep only this
-            // selection's last-good reading visible.
-            QuotaRemaining = QuotaSelectionPolicy.MatchingLastGoodRemaining(
-                selection, _cachedQuotaSelection, _cachedQuotaRemaining);
+            case QuotaCacheWrite.Write:
+                _cachedQuotaSelection = reading.EffectiveSelection;
+                _cachedQuotaRemaining = reading.Remaining;
+                // Write-through pair (+ resolved-at) so the next launch boots
+                // only for this selection (the store no-ops when values have
+                // not changed).
+                AppSettings.Store.SetDouble("tokenbar.quota.lastRemaining", reading.Remaining!.Value);
+                AppSettings.Store.SetString("tokenbar.quota.lastSelection", reading.EffectiveSelection);
+                if (reading.ResolvedAt is { } resolvedAt)
+                {
+                    AppSettings.Store.SetDouble(
+                        QuotaStaleness.LastResolvedAtKey, resolvedAt.ToUnixTimeMilliseconds());
+                }
+                else
+                {
+                    AppSettings.Store.Remove(QuotaStaleness.LastResolvedAtKey);
+                }
+
+                break;
+            case QuotaCacheWrite.Clear:
+                // Payload arrived but the selection didn't resolve from it
+                // (terminal failure, or an explicit pick the payload doesn't
+                // contain): clear the pair and the stamp together.
+                _cachedQuotaSelection = null;
+                _cachedQuotaRemaining = null;
+                AppSettings.Store.Remove("tokenbar.quota.lastRemaining");
+                AppSettings.Store.Remove("tokenbar.quota.lastSelection");
+                AppSettings.Store.Remove(QuotaStaleness.LastResolvedAtKey);
+                break;
+            case QuotaCacheWrite.Unchanged:
+            default:
+                // No payload (cached scalar shown as-is) or all AUTO
+                // candidates hidden (display suppressed only): leave the
+                // pair and the stamp untouched.
+                break;
         }
     }
 

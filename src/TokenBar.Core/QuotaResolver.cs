@@ -2,10 +2,18 @@ using TokenBar.Interop;
 
 namespace TokenBar.Core;
 
-/// <summary><paramref name="AccountKey"/> is the card's account within
-/// <paramref name="ClientId"/> (null = primary); (ClientId, AccountKey) is the
+/// <summary>Carries the picked snapshot itself, not just its ClientId: two
+/// snapshots share a ClientId when one client has several accounts, and a
+/// caller that re-searched <c>payload.Agents</c> by ClientId (as
+/// <c>QuotaSelectionPolicy.ResolvedAt</c> used to) could match the wrong
+/// one. <see cref="AccountKey"/> is the card's account within
+/// <see cref="ClientId"/> (null = primary); (ClientId, AccountKey) is the
 /// card's identity.</summary>
-public sealed record QuotaPick(string ClientId, UsageWindow Window, string? AccountKey = null);
+public sealed record QuotaPick(AgentUsageSnapshot Agent, UsageWindow Window)
+{
+    public string ClientId => Agent.ClientId;
+    public string? AccountKey => Agent.Account.AccountKey;
+}
 
 /// <summary>
 /// Picks which quota window the tray displays (port of
@@ -101,7 +109,7 @@ public static class QuotaResolver
 
         var (agent, value) = Locate(payload, parsed.Value);
         var window = agent?.UniqueCardWindows.FirstOrDefault(w => w.CardId == value);
-        return window is null ? null : new QuotaPick(agent!.ClientId, window, agent.Account.AccountKey);
+        return window is null ? null : new QuotaPick(agent!, window);
     }
 
     /// <summary>True when <see cref="Resolve"/> returned null ONLY because the
@@ -154,7 +162,7 @@ public static class QuotaResolver
 
                 if (best is null || window.RemainingPercent < best.Window.RemainingPercent)
                 {
-                    best = new QuotaPick(agent.ClientId, window, agent.Account.AccountKey);
+                    best = new QuotaPick(agent, window);
                 }
             }
         }
