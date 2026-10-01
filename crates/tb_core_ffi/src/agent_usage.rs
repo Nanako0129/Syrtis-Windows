@@ -3757,34 +3757,43 @@ fn load_claude_desktop_credentials_from(
         Ok(parsed)
     });
     drop(key);
-    selected.map(Some)
+    selected
 }
 
 /// Try each present token cache in preference order and return the first one
-/// that holds a token. A cache that decrypts but holds no recognizable token
-/// (Desktop 2.16120.0 leaves `oauth:tokenCache` as `{}`) falls through to the
-/// next; a decrypt failure stops. With no token anywhere, the error of the
-/// first cache tried is reported.
+/// that holds a token. A cache whose plaintext is an empty JSON object or
+/// array holds no login — Claude Desktop 2.16120.0 leaves `oauth:tokenCache`
+/// as an encrypted `{}` while signed in, and writes `{}` to both keys when the
+/// user signs out — so it is skipped, and when every present cache is empty
+/// the result is `Ok(None)`: no Desktop card, exactly as with the keys
+/// missing. A non-empty cache with no token candidate (or non-JSON) also falls
+/// through, but is remembered: with no token anywhere, the first such error is
+/// reported. A decrypt failure stops.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn select_claude_desktop_token_cache<T>(
     caches: Vec<(&'static str, String)>,
     mut try_cache: T,
-) -> Result<ClaudeCredentials, ProviderFetchFailure>
+) -> Result<Option<ClaudeCredentials>, ProviderFetchFailure>
 where
-    T: FnMut(&'static str, &str) -> Result<Result<ClaudeCredentials, String>, ProviderFetchFailure>,
+    T: FnMut(
+        &'static str,
+        &str,
+    ) -> Result<Result<Option<ClaudeCredentials>, String>, ProviderFetchFailure>,
 {
     let mut first_error = None;
     for (cache_key, value) in caches {
         match try_cache(cache_key, &value)? {
-            Ok(credentials) => return Ok(credentials),
+            Ok(Some(credentials)) => return Ok(Some(credentials)),
+            Ok(None) => {}
             Err(display) => {
                 first_error.get_or_insert(display);
             }
         }
     }
-    Err(ProviderFetchFailure::terminal(
-        first_error.unwrap_or_else(|| CLAUDE_DESKTOP_READ_ERROR.to_string()),
-    ))
+    match first_error {
+        Some(display) => Err(ProviderFetchFailure::terminal(display)),
+        None => Ok(None),
+    }
 }
 
 /// A read or JSON-parse failure of a credential file another program
@@ -3936,15 +3945,24 @@ impl ClaudeDesktopCandidate {
 /// Tolerant parse of the decrypted token cache, whose shape Claude Desktop
 /// does not document. Picks the most plausible token object: one granting
 /// `user:profile` (the usage endpoint needs it), then one with token metadata
-/// over a bare token, then the latest expiry (none ranks lowest).
+/// over a bare token, then the latest expiry (none ranks lowest). `Ok(None)`
+/// for an empty object or array: the cache holds no login.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_claude_desktop_token_cache(
     plaintext: &[u8],
     config_path: &Path,
     cache_key: &'static str,
-) -> Result<ClaudeCredentials, String> {
+) -> Result<Option<ClaudeCredentials>, String> {
     let root: Value =
         serde_json::from_slice(plaintext).map_err(|_| CLAUDE_DESKTOP_READ_ERROR.to_string())?;
+    let empty = match &root {
+        Value::Object(object) => object.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        _ => false,
+    };
+    if empty {
+        return Ok(None);
+    }
     let mut candidates = Vec::new();
     collect_claude_desktop_candidates(&root, 0, &mut candidates);
     let Some(best) = candidates
@@ -3953,7 +3971,7 @@ fn parse_claude_desktop_token_cache(
     else {
         return Err(claude_desktop_unrecognized_error(cache_key, &root));
     };
-    Ok(ClaudeCredentials {
+    Ok(Some(ClaudeCredentials {
         access_token: best.access_token,
         refresh_token: best.refresh_token,
         expires_at: best.expires_at,
@@ -3971,7 +3989,7 @@ fn parse_claude_desktop_token_cache(
             )
             .map_err(|_| CLAUDE_DESKTOP_READ_ERROR.to_string())?,
         },
-    })
+    }))
 }
 
 fn collect_claude_desktop_candidates(
@@ -8724,6 +8742,7 @@ mod tests {
             &desktop_fixture_config_path(),
             CLAUDE_DESKTOP_TOKEN_CACHE_KEY,
         )
+        .map(|credentials| credentials.expect("fixture is not an empty cache"))
     }
 
     #[test]
@@ -8829,9 +8848,20 @@ mod tests {
         assert!(!error.contains("key_k"));
 
         assert_eq!(
-            parse_desktop("[]").unwrap_err(),
+            parse_desktop("[1]").unwrap_err(),
             "Claude Desktop login format is not recognized (cache: oauth:tokenCache, keys: none)."
         );
+        // An empty object or array is no login, not an unrecognized format.
+        for empty in ["{}", "[]", " { } "] {
+            assert!(matches!(
+                parse_claude_desktop_token_cache(
+                    empty.as_bytes(),
+                    &desktop_fixture_config_path(),
+                    CLAUDE_DESKTOP_TOKEN_CACHE_KEY,
+                ),
+                Ok(None)
+            ));
+        }
     }
 
     /// Key selection without crypto: each cache value here is the plaintext
@@ -8854,8 +8884,8 @@ mod tests {
                 ))
             })
         };
-        let token = |result: Result<ClaudeCredentials, ProviderFetchFailure>| {
-            let credentials = result.unwrap();
+        let token = |result: Result<Option<ClaudeCredentials>, ProviderFetchFailure>| {
+            let credentials = result.unwrap().unwrap();
             let record = credentials
                 .scope_slot
                 .canonical_location
@@ -8897,19 +8927,43 @@ mod tests {
             }))),
             ("v1-token".to_string(), "oauth:tokenCache".to_string())
         );
-        // Both empty: the format error names the first key read.
-        assert_eq!(
+        // Signed out of Desktop 2.16120.0: both caches hold `{}`. No login,
+        // so no Desktop card — not a format error.
+        assert!(matches!(
             select(serde_json::json!({
                 "oauth:tokenCache": "{}",
+                "oauth:tokenCacheV2": "{}",
+            })),
+            Ok(None)
+        ));
+        assert!(matches!(
+            select(serde_json::json!({ "oauth:tokenCacheV2": "{}" })),
+            Ok(None)
+        ));
+        // A non-empty cache without a token keeps the named format error,
+        // even after an empty one.
+        let unrecognized = |cache: &str| {
+            (
+                false,
+                format!(
+                    "Claude Desktop login format is not recognized (cache: {cache}, keys: unknown)."
+                ),
+            )
+        };
+        assert_eq!(
+            select(serde_json::json!({ "oauth:tokenCacheV2": r#"{"unknown":1}"# }))
+                .map_err(desktop_failure_kind)
+                .unwrap_err(),
+            unrecognized("oauth:tokenCacheV2")
+        );
+        assert_eq!(
+            select(serde_json::json!({
+                "oauth:tokenCache": r#"{"unknown":1}"#,
                 "oauth:tokenCacheV2": "{}",
             }))
             .map_err(desktop_failure_kind)
             .unwrap_err(),
-            (
-                false,
-                "Claude Desktop login format is not recognized (cache: oauth:tokenCacheV2, keys: none)."
-                    .to_string()
-            )
+            unrecognized("oauth:tokenCache")
         );
         // A decrypt failure stops instead of trying the other key.
         let calls = std::cell::Cell::new(0);
@@ -8926,6 +8980,32 @@ mod tests {
         assert!(failure.is_err());
         assert_eq!(calls.get(), 1);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A signed-out Desktop (every cache `{}`) is Absent: the run plans the
+    /// primary alone, which asks for no profile, so a single-account payload
+    /// stays byte-identical.
+    #[test]
+    fn signed_out_claude_desktop_adds_no_card_and_no_profile_request() {
+        let caches = vec![
+            (CLAUDE_DESKTOP_TOKEN_CACHE_KEY_V2, "{}".to_string()),
+            (CLAUDE_DESKTOP_TOKEN_CACHE_KEY, "{}".to_string()),
+        ];
+        let desktop = select_claude_desktop_token_cache(caches, |cache_key, value| {
+            Ok(parse_claude_desktop_token_cache(
+                value.as_bytes(),
+                &desktop_fixture_config_path(),
+                cache_key,
+            ))
+        });
+        assert!(matches!(desktop, Ok(None)));
+        let requests = claude_account_requests(Vec::new(), desktop);
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            requests[0],
+            ClaudeAccountRequest::Primary { identify: false }
+        ));
+        assert!(!ClaudeAccount::Primary { identify: false }.wants_profile());
     }
 
     /// `(transient, display)` so desktop load results can be compared.
@@ -9059,6 +9139,28 @@ mod tests {
             .scope_slot
             .canonical_location
             .ends_with("\0oauth:tokenCacheV2"));
+
+        // Signed out: Desktop leaves both keys holding an encrypted `{}`.
+        fs::write(
+            &config,
+            serde_json::json!({
+                "oauth:tokenCache": v10_value(&key, &[10u8; 12], b"{}"),
+                "oauth:tokenCacheV2": v10_value(&key, &[11u8; 12], b"{}"),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(matches!(
+            load_claude_desktop_credentials_from(&config, &local_state),
+            Ok(None)
+        ));
+        // Restore a login for the failure cases below.
+        fs::write(
+            &config,
+            serde_json::json!({ "oauth:tokenCacheV2": v10_value(&key, &[9u8; 12], v2_plaintext) })
+                .to_string(),
+        )
+        .unwrap();
 
         let load = || {
             load_claude_desktop_credentials_from(&config, &local_state)
