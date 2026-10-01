@@ -3,6 +3,7 @@ using H.NotifyIcon.Core;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using TokenBar.Core;
+using TokenBar.Interop;
 
 namespace TokenBar.App;
 
@@ -479,7 +480,7 @@ public sealed class TrayService : IDisposable
                 source.Items.Add(new Microsoft.UI.Xaml.Controls.MenuFlyoutSeparator());
                 source.Items.Add(new Microsoft.UI.Xaml.Controls.MenuFlyoutItem
                 {
-                    Text = ClientRegistry.ShortName(agent.ClientId),
+                    Text = AccountLabel.Of(agent, payload),
                     IsEnabled = false,
                 });
                 foreach (var window in agent.UniqueCardWindows)
@@ -489,7 +490,7 @@ public sealed class TrayService : IDisposable
                         MidpointRounding.AwayFromZero);
                     AddQuotaChoice(
                         source, "{0} — {1}% left".Localized(window.Label.Localized(), left),
-                        QuotaResolver.Selection(agent.ClientId, window.CardId), selection);
+                        QuotaResolver.Selection(agent.ClientId, window.CardId, agent.Account.AccountKey), selection);
                 }
             }
         }
@@ -553,7 +554,7 @@ public sealed class TrayService : IDisposable
         {
             var left = Math.Clamp(pick.Window.RemainingPercent, 0, 100);
             lines.Add("{0} {1} {2}% left".Localized(
-                ClientRegistry.ShortName(pick.ClientId),
+                AccountLabel.Of(AccountIdentity.Of(pick.ClientId, pick.AccountKey), _feed.Quota),
                 pick.Window.Label.Localized(),
                 left.ToString("F0", System.Globalization.CultureInfo.CurrentCulture)));
         }

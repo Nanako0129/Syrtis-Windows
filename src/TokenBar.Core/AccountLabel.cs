@@ -1,0 +1,76 @@
+using TokenBar.Interop;
+
+namespace TokenBar.Core;
+
+/// <summary>
+/// The one place a quota card's account becomes words (macOS
+/// <c>AccountIdentity.accountLabel</c>). Every surface that names a card —
+/// menus, pickers, section headers, summary lines, chart labels — calls this,
+/// so they cannot disagree.
+/// </summary>
+public static class AccountLabel
+{
+    /// <summary>The core's fixed key for Claude Desktop. Not an absolute path,
+    /// so it cannot collide with a configured directory.</summary>
+    public const string ClaudeDesktopKey = "claude-desktop";
+
+    /// <summary>Primary: the client's existing name (<paramref name="full"/>
+    /// picks the display name over the short one, as each caller always did),
+    /// so a single-account label is unchanged. Desktop: "Claude Desktop".
+    /// Config dir: "Claude · &lt;directory name&gt;". When
+    /// <paramref name="payload"/> holds another config-dir card of the same
+    /// client whose directory name is the same (case-insensitive), both widen
+    /// to "&lt;parent&gt;\&lt;name&gt;", further up only while still equal.
+    /// Without a payload (the summary lines carry none) the bare directory
+    /// name is used.</summary>
+    public static string Of(AccountIdentity account, AgentUsagePayload? payload = null, bool full = false)
+    {
+        if (account.AccountKey is null)
+        {
+            return full
+                ? ClientRegistry.Style(account.ClientId).DisplayName
+                : ClientRegistry.ShortName(account.ClientId);
+        }
+
+        if (account.AccountKey == ClaudeDesktopKey)
+        {
+            return "Claude Desktop";
+        }
+
+        var others = (payload?.Agents ?? [])
+            .Select(a => a.Account)
+            .Where(a => a.ClientId == account.ClientId && a.AccountKey is not null
+                && a.AccountKey != ClaudeDesktopKey && a.AccountKey != account.AccountKey)
+            .Select(a => Parts(a.AccountKey!))
+            .ToList();
+        var mine = Parts(account.AccountKey);
+        var depth = 1;
+        while (depth < mine.Length
+            && others.Any(o => SameTail(mine, o, depth)))
+        {
+            depth++;
+        }
+
+        return $"{ClientRegistry.ShortName(account.ClientId)} · {string.Join('\\', mine[^depth..])}";
+    }
+
+    public static string Of(AgentUsageSnapshot agent, AgentUsagePayload? payload = null, bool full = false) =>
+        Of(agent.Account, payload, full);
+
+    /// <summary>The full path for a config-dir account's tooltip; null for
+    /// the primary and for Desktop (nothing more to say).</summary>
+    public static string? Detail(AccountIdentity account) =>
+        account.AccountKey is { } key && key != ClaudeDesktopKey ? key : null;
+
+    // Either separator: the key is a Windows path, but this must not depend
+    // on the OS the tests run on. A key that is all separators keeps itself.
+    private static string[] Parts(string path)
+    {
+        var parts = path.Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length == 0 ? [path] : parts;
+    }
+
+    private static bool SameTail(string[] a, string[] b, int depth) =>
+        b.Length >= depth
+        && a[^depth..].SequenceEqual(b[^depth..], StringComparer.OrdinalIgnoreCase);
+}

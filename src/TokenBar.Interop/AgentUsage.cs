@@ -723,6 +723,20 @@ public sealed class AgentUsageTransportDiagnosticJsonConverter :
             : null;
 }
 
+/// <summary>One quota card's identity: the client plus which of its accounts.
+/// <see cref="AccountKey"/> null = the primary account.</summary>
+public sealed record AccountIdentity(string ClientId, string? AccountKey)
+{
+    /// <summary>The one normalization of an account key (mirrors the core's
+    /// <c>account_key_component</c>): null and "" are the primary (null);
+    /// anything else, whitespace included, is a distinct account.</summary>
+    public static string? Normalize(string? accountKey) =>
+        string.IsNullOrEmpty(accountKey) ? null : accountKey;
+
+    public static AccountIdentity Of(string clientId, string? accountKey) =>
+        new(clientId, Normalize(accountKey));
+}
+
 public sealed record AgentUsageSnapshot(
     string ClientId,
     string Source,
@@ -744,8 +758,22 @@ public sealed record AgentUsageSnapshot(
     /// string a stored <c>QuotaHistorySeries.AccountScope</c> carries, and so
     /// the one to join a live agent to its stored series by. Null only when
     /// this snapshot predates the field.</summary>
-    AccountScopeStatus? HistoryScope = null) : IJsonOnDeserialized
+    AccountScopeStatus? HistoryScope = null,
+    /// <summary>Which account of <see cref="ClientId"/> this card is: absent
+    /// (null) for the primary account, <c>claude-desktop</c> for Claude
+    /// Desktop, the configured directory path for a CLAUDE_CONFIG_DIR
+    /// account. Absent from an older core's payload, which only ever
+    /// publishes the primary. Read it through <see cref="Account"/>, never
+    /// compare it raw: null and "" both mean primary.</summary>
+    string? AccountKey = null) : IJsonOnDeserialized
 {
+    /// <summary>The identity of this card — a pair, never an encoded string
+    /// (mirrors the core's <c>account_key_component</c>: null and "" are the
+    /// primary, anything else, whitespace included, is a distinct
+    /// account).</summary>
+    [JsonIgnore]
+    public AccountIdentity Account => AccountIdentity.Of(ClientId, AccountKey);
+
     void IJsonOnDeserialized.OnDeserialized()
     {
         if (ClientId is null || Source is null || UpdatedAt is null || Windows is null)
