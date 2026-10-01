@@ -84,17 +84,19 @@ before you go looking for a missing card:
 
 Claude Code running inside WSL writes transcripts to the Linux home, not to
 `%USERPROFILE%\.claude\projects`, so Syrtis may show 0 tokens today while quota
-still updates. Point the scanner at the WSL directory with `TOKSCALE_EXTRA_DIRS`
-(comma-separated `client:path` entries; this replaces any value you already have):
+still updates. Point the scanner at the WSL directory with `TOKSCALE_EXTRA_DIRS` (comma-separated
+`client:path` entries; this replaces any value you already have). 
+
+In **Windows PowerShell**, replace `<distro>` with your WSL
+distribution name (see `wsl --list --quiet`) and `<user>` with your Linux
+username (see `wsl -d <distro> -e whoami`), then run: 
 
 ```powershell
 [Environment]::SetEnvironmentVariable('TOKSCALE_EXTRA_DIRS',
   'claude:\\wsl.localhost\<distro>\home\<user>\.claude\projects', 'User')
 ```
 
-Fully quit Syrtis from the tray and relaunch it. Paths containing commas are not
-supported. This reads local WSL transcripts only; syncing another machine is
-tracked in [#1](https://github.com/Nanako0129/Syrtis-Windows/issues/1).
+Fully quit Syrtis from the tray and relaunch it.
 
 ## Architecture
 
