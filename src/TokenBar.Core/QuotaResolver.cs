@@ -3,27 +3,37 @@ using TokenBar.Interop;
 namespace TokenBar.Core;
 
 /// <summary>Carries the picked snapshot itself, not just its ClientId: two
-/// snapshots can share a ClientId (a future multi-account payload), and a
+/// snapshots share a ClientId when one client has several accounts, and a
 /// caller that re-searched <c>payload.Agents</c> by ClientId (as
 /// <c>QuotaSelectionPolicy.ResolvedAt</c> used to) could match the wrong
-/// one.</summary>
+/// one. <see cref="AccountKey"/> is the card's account within
+/// <see cref="ClientId"/> (null = primary); (ClientId, AccountKey) is the
+/// card's identity.</summary>
 public sealed record QuotaPick(AgentUsageSnapshot Agent, UsageWindow Window)
 {
     public string ClientId => Agent.ClientId;
+    public string? AccountKey => Agent.Account.AccountKey;
 }
 
 /// <summary>
 /// Picks which quota window the tray displays (port of
 /// TokenBarCore/QuotaResolver.swift). The selection string is "auto" (the
 /// tightest window — lowest remaining percent — across every agent) or
-/// "&lt;clientId&gt;|&lt;cardId&gt;" for an explicit pick.
+/// "&lt;clientId&gt;|&lt;cardId&gt;" for an explicit pick of the primary
+/// account, or "&lt;clientId&gt;|&lt;cardId&gt;|&lt;accountKey&gt;" for another
+/// account's card (an account key never contains '|'; a build that predates
+/// accounts finds no card by that string and simply shows nothing). The
+/// primary form is byte-identical to what earlier builds persisted.
 /// </summary>
 public static class QuotaResolver
 {
     public const string Auto = "auto";
 
     /// <summary>Builds the canonical persisted selection for one quota card.</summary>
-    public static string Selection(string clientId, string cardId) => $"{clientId}|{cardId}";
+    public static string Selection(string clientId, string cardId, string? accountKey = null) =>
+        AccountIdentity.Normalize(accountKey) is { } key
+            ? $"{clientId}|{cardId}|{key}"
+            : $"{clientId}|{cardId}";
 
     /// <summary>
     /// Canonicalizes a persisted selection against the current payload. Empty,
@@ -44,7 +54,7 @@ public static class QuotaResolver
             return selection;
         }
 
-        var agent = payload.Agents.FirstOrDefault(a => a.ClientId == parsed.Value.ClientId);
+        var (agent, value) = Locate(payload, parsed.Value);
         if (agent is null)
         {
             return selection;
@@ -59,15 +69,15 @@ public static class QuotaResolver
         // value this returns is unchanged for every selection that was
         // already unique.
         var windows = agent.RawCardWindows;
-        var exact = windows.FirstOrDefault(w => w.CardId == parsed.Value.Value);
+        var exact = windows.FirstOrDefault(w => w.CardId == value);
         if (exact is not null)
         {
-            return Selection(agent.ClientId, exact.CardId);
+            return Selection(agent.ClientId, exact.CardId, agent.Account.AccountKey);
         }
 
-        var labelMatches = windows.Where(w => w.Label == parsed.Value.Value).ToArray();
+        var labelMatches = windows.Where(w => w.Label == value).ToArray();
         return labelMatches.Length == 1
-            ? Selection(agent.ClientId, labelMatches[0].CardId)
+            ? Selection(agent.ClientId, labelMatches[0].CardId, agent.Account.AccountKey)
             : selection;
     }
 
@@ -97,8 +107,8 @@ public static class QuotaResolver
             return null;
         }
 
-        var agent = payload.Agents.FirstOrDefault(a => a.ClientId == parsed.Value.ClientId);
-        var window = agent?.UniqueCardWindows.FirstOrDefault(w => w.CardId == parsed.Value.Value);
+        var (agent, value) = Locate(payload, parsed.Value);
+        var window = agent?.UniqueCardWindows.FirstOrDefault(w => w.CardId == value);
         return window is null ? null : new QuotaPick(agent!, window);
     }
 
@@ -160,6 +170,12 @@ public static class QuotaResolver
         return best;
     }
 
+    /// <summary>The card with this exact (client, account) identity.</summary>
+    private static AgentUsageSnapshot? Find(
+        AgentUsagePayload payload, string clientId, string? accountKey) =>
+        payload.Agents.FirstOrDefault(a =>
+            a.ClientId == clientId && a.Account.AccountKey == accountKey);
+
     private static (string ClientId, string Value)? ParseExplicitSelection(string raw)
     {
         if (raw.Length == 0 || raw == Auto)
@@ -178,5 +194,28 @@ public static class QuotaResolver
         return string.IsNullOrWhiteSpace(clientId) || string.IsNullOrWhiteSpace(value)
             ? null
             : (clientId, value);
+    }
+
+    /// <summary>Finds the card a parsed selection names, and the card-id (or
+    /// legacy label) part of it. Card ids may themselves contain '|'
+    /// (<c>model.gpt|preview.v1</c>), so "cardId|accountKey" cannot be split
+    /// blindly: an account key never contains '|', which makes the text after
+    /// the LAST '|' the account key exactly when a non-primary card of that
+    /// client carries it; otherwise the whole rest is the primary card's
+    /// id.</summary>
+    private static (AgentUsageSnapshot? Agent, string Value) Locate(
+        AgentUsagePayload payload, (string ClientId, string Value) parsed)
+    {
+        var last = parsed.Value.LastIndexOf('|');
+        if (last > 0 && last < parsed.Value.Length - 1)
+        {
+            var extra = Find(payload, parsed.ClientId, parsed.Value[(last + 1)..]);
+            if (extra is not null)
+            {
+                return (extra, parsed.Value[..last]);
+            }
+        }
+
+        return (Find(payload, parsed.ClientId, null), parsed.Value);
     }
 }

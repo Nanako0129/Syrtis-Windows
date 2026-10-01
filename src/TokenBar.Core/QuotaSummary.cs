@@ -29,11 +29,9 @@ public sealed record BurnWarning(
 public sealed record QuotaSummary(
     string TightestClient,
     // Which account of TightestClient the tightest window belongs to — null
-    // for the primary account. Windows has no multi-account support yet, so
-    // this is null on every build today; it is carried through so that slice
-    // does not have to revisit identity here. Needed to tell the tightest
-    // window apart from a second account's window of the same client and
-    // card id when folding OtherWindows/OthersComfortable below.
+    // for the primary account. Needed to tell the tightest window apart from
+    // a second account's window of the same client and card id when folding
+    // OtherWindows/OthersComfortable below.
     string? TightestAccountKey,
     string TightestLabel,
     double RemainingPercent,
@@ -128,20 +126,18 @@ public static class QuotaSummaryFold
                 {
                     var shown = UsagePace.Presentation(window, paceMode, pace);
                     burning = new BurnWarning(
-                        agent.ClientId, AccountKey: null, window.Label,
+                        agent.ClientId, agent.Account.AccountKey, window.Label,
                         pace.DeltaPercent, shown.EtaText, shown.RiskText);
                 }
 
                 // Identity is (clientId, accountKey, cardId), not the label
                 // or the client-cardId pair alone: two subscriptions can
-                // both call a window "Weekly", and (once Windows has
-                // multi-account) two accounts of the SAME client could both
-                // offer a "session.v1" card id — either collapse would drop
-                // the other one's window from the tally, or worse, skip it
-                // here and never count it as tightest either. AccountKey is
-                // always null today, so this compares only clientId+cardId
-                // for now, matching the resolver's own current identity.
+                // both call a window "Weekly", and two accounts of the SAME
+                // client both offer a "session.v1" card id — either collapse
+                // would drop the other one's window from the tally, or worse,
+                // skip it here and never count it as tightest either.
                 if (agent.ClientId == tightest.ClientId
+                    && agent.Account.AccountKey == tightest.AccountKey
                     && window.CardId == tightest.Window.CardId)
                 {
                     continue;
@@ -153,7 +149,7 @@ public static class QuotaSummaryFold
 
         return new QuotaSummary(
             TightestClient: tightest.ClientId,
-            TightestAccountKey: null,
+            TightestAccountKey: tightest.AccountKey,
             TightestLabel: tightest.Window.Label,
             RemainingPercent: tightest.Window.RemainingPercent,
             ResetsAt: tightest.Window.ResetsAt,

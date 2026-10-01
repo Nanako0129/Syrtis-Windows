@@ -28,15 +28,17 @@ public enum QuotaCacheWrite
 /// <summary>One resolution of the tray's quota reading, shared by the tray
 /// icon and the Settings preview so neither duplicates the branching in
 /// <see cref="ResolveReading"/>. <see cref="PickedClientId"/>/
-/// <see cref="PickedCardId"/> are set only for <see cref="QuotaCacheWrite.Write"/>
-/// (diagnostic detail for the tray's DevLog line; nothing was picked in the
-/// other cases).</summary>
+/// <see cref="PickedCardId"/>/<see cref="PickedOtherAccount"/> are set only for
+/// <see cref="QuotaCacheWrite.Write"/> (diagnostic detail for the tray's DevLog
+/// line; nothing was picked in the other cases). A flag, not the account key:
+/// a config-dir key is a path with the user's name.</summary>
 public readonly record struct QuotaReading(
     double? Remaining,
     string EffectiveSelection,
     DateTimeOffset? ResolvedAt,
     string? PickedClientId,
     string? PickedCardId,
+    bool PickedOtherAccount,
     QuotaCacheWrite CacheWrite);
 
 public static class QuotaSelectionPolicy
@@ -78,15 +80,13 @@ public static class QuotaSelectionPolicy
     /// the snapshot <see cref="Resolve"/> picked. Rust's same-binding
     /// last_good fallback keeps the original fetch's updated_at, so an
     /// explicit selection served from it reports its real age. Port of
-    /// macOS QuotaSelectionPolicy.swift:64-77 (<c>resolvedAt</c>) — macOS
-    /// matches the picked snapshot by clientId+accountKey; Windows's
-    /// AgentUsageSnapshot has no AccountKey field yet (always null on this
-    /// platform, see QuotaSummary.cs). <see cref="QuotaPick"/> carries the
-    /// picked snapshot itself (not just its ClientId), so this reads that
-    /// snapshot directly rather than re-searching the payload by ClientId —
-    /// a re-search would pick the wrong snapshot's updatedAt if two ever
-    /// shared a ClientId. Null when nothing resolves or its updatedAt
-    /// doesn't parse.</summary>
+    /// macOS QuotaSelectionPolicy.swift:64-77 (<c>resolvedAt</c>), which
+    /// matches the picked snapshot by clientId+accountKey.
+    /// <see cref="QuotaPick"/> carries the picked snapshot itself, so this
+    /// reads that snapshot directly rather than re-searching the payload by
+    /// ClientId — a re-search would pick another account's updatedAt when one
+    /// client has several accounts. Null when nothing resolves or its
+    /// updatedAt doesn't parse.</summary>
     public static DateTimeOffset? ResolvedAt(
         AgentUsagePayload payload,
         string persistedSelection,
@@ -136,7 +136,7 @@ public static class QuotaSelectionPolicy
         {
             return new QuotaReading(
                 MatchingLastGoodRemaining(selection, cachedSelection, cachedRemaining),
-                selection, null, null, null, QuotaCacheWrite.Unchanged);
+                selection, null, null, null, false, QuotaCacheWrite.Unchanged);
         }
 
         // Port of macOS QuotaSelectionPolicy.swift:49-54's `remaining.isFinite`
@@ -150,14 +150,14 @@ public static class QuotaSelectionPolicy
             var remaining = Math.Clamp(pick.Window.RemainingPercent, 0, 100);
             return new QuotaReading(
                 remaining, selection, ResolvedAt(pick), pick.ClientId, pick.Window.CardId,
-                QuotaCacheWrite.Write);
+                pick.AccountKey is not null, QuotaCacheWrite.Write);
         }
 
         if (QuotaResolver.ExcludedAllCandidates(payload, selection, excluding))
         {
-            return new QuotaReading(null, selection, null, null, null, QuotaCacheWrite.Unchanged);
+            return new QuotaReading(null, selection, null, null, null, false, QuotaCacheWrite.Unchanged);
         }
 
-        return new QuotaReading(null, selection, null, null, null, QuotaCacheWrite.Clear);
+        return new QuotaReading(null, selection, null, null, null, false, QuotaCacheWrite.Clear);
     }
 }

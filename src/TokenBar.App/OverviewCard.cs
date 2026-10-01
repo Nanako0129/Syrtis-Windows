@@ -66,7 +66,7 @@ internal static class OverviewScope
     /// <para>
     /// Mapped through <see cref="ClientRegistry.QuotaOwner"/>, not the raw tab
     /// id: <c>BuildLimits</c> filters on <c>agent.ClientId == clientId</c>
-    /// against the quota payload, and a client that spends another
+    /// against the quota payload (every account of that client passes), and a client that spends another
     /// subscription's allowance is keyed there under the owner.
     /// <c>antigravity-cli</c> is the one such client today — its rows arrive as
     /// <c>antigravity</c>, so passing the tab id straight through matched

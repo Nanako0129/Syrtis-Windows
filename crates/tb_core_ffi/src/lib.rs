@@ -24,12 +24,15 @@ mod agent_quota_history;
 mod agent_storage_windows;
 mod agent_usage;
 mod agents_report;
+mod claude_config_dirs;
 mod filter_parity_probe;
 mod hourly_report;
 mod model_report;
 mod opencode_integrations;
 mod usage_graph;
 mod usage_tail;
+#[cfg(target_os = "windows")]
+mod win_safe_storage;
 mod window_usage;
 
 use std::collections::HashMap;
@@ -705,6 +708,42 @@ pub extern "C" fn tb_window_usage(from_ms: i64, until_ms: i64) -> *mut c_char {
                 .and_then(|context| window_usage::cached(&context, from_ms, until_ms)),
         )
     })
+}
+
+/// Replace the registry of extra Claude config directories
+/// (`CLAUDE_CONFIG_DIR`-isolated accounts) with a JSON array of absolute drive
+/// paths, e.g. `["C:\\Users\\me\\.claude-work"]`. Full-replace: `[]`
+/// clears every extra account. Each registered directory becomes its own
+/// Claude quota card on the next `tb_agent_usage`, read only from
+/// `<dir>\.credentials.json`; a removed directory's cached state is dropped
+/// here.
+///
+/// Success data is `{"registeredCount":N,"rejected":[{"index":i,"reason":code}]}`.
+/// Every error and reason is a fixed code (`nullPayload`, `invalidUtf8`,
+/// `invalidJson`; `empty`, `unsupportedPath`, `rootDirectory`,
+/// `invalidComponent`, `duplicate`, `limitExceeded`); the input is never
+/// echoed. On an error envelope the registry is unchanged.
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_set_claude_config_dirs(json: *const c_char) -> *mut c_char {
+    guarded("tb_set_claude_config_dirs", || {
+        envelope(unsafe { set_claude_config_dirs_from_c(json) })
+    })
+}
+
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+unsafe fn set_claude_config_dirs_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
+    if json.is_null() {
+        return Err("nullPayload".to_string());
+    }
+    let raw = unsafe { CStr::from_ptr(json) }
+        .to_str()
+        .map_err(|_| "invalidUtf8".to_string())?;
+    agent_usage::replace_claude_config_dirs(|| claude_config_dirs::set_from_json(raw))
+        .map_err(str::to_string)
 }
 
 /// Release a string returned by any tb_* entry point.

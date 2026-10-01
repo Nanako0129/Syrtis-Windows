@@ -406,8 +406,8 @@ public sealed class SettingsWindow : Window
                 foreach (var window in agent.UniqueCardWindows)
                 {
                     choices.Add((
-                        QuotaResolver.Selection(agent.ClientId, window.CardId),
-                        $"{ClientRegistry.ShortName(agent.ClientId)} · {window.Label.Localized()}"));
+                        QuotaResolver.Selection(agent.ClientId, window.CardId, agent.Account.AccountKey),
+                        $"{AccountLabel.Of(agent, payload)} · {window.Label.Localized()}"));
                 }
             }
         }

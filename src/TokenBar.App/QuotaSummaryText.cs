@@ -1,4 +1,5 @@
 using TokenBar.Core;
+using TokenBar.Interop;
 
 namespace TokenBar.App;
 
@@ -108,16 +109,10 @@ public static class QuotaSummaryText
         };
 
 
-    /// <summary>Who a window belongs to, qualified by account when the
-    /// client has more than one. Windows has no AccountIdentity/account-label
-    /// surface yet (no multi-account support), so accountKey is always null
-    /// today and this degrades to the bare client name; once accountKey stops
-    /// being null this is where the qualified label is composed.</summary>
-    private static string AccountQualifiedName(string clientId, string? accountKey)
-    {
-        var name = ClientRegistry.Style(clientId).DisplayName;
-        return accountKey is null ? name : $"{name} {accountKey}";
-    }
+    /// <summary>Who a window belongs to: the primary keeps the bare client
+    /// name; another account is named by <see cref="AccountLabel"/>.</summary>
+    private static string AccountQualifiedName(string clientId, string? accountKey) =>
+        AccountLabel.Of(AccountIdentity.Of(clientId, accountKey), full: true);
 
     public static string TightestName(QuotaSummary summary) =>
         AccountQualifiedName(summary.TightestClient, summary.TightestAccountKey);

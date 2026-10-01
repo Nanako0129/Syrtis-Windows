@@ -183,4 +183,49 @@ public class QuotaReadingTests
             DateTimeOffset.Parse("2026-07-10T12:00:00.000Z"),
             QuotaSelectionPolicy.ResolvedAt(payload, QuotaResolver.Auto, NoneHidden));
     }
+
+    // An explicit pick of a non-primary account: the reading, its age and the
+    // cached selection all belong to that account, not to the primary card
+    // that shares its ClientId and card id.
+    [Fact]
+    public void ResolveReading_ExplicitOtherAccountReadsThatAccountsSnapshot()
+    {
+        var primary = new AgentUsageSnapshot(
+            "claude", "oauth", "2020-01-01T00:00:00.000Z",
+            new[] { new UsageWindow("Session", 20, 80, CardId: "session.v1") });
+        var desktop = new AgentUsageSnapshot(
+            "claude", "oauth", "2026-07-10T12:00:00.000Z",
+            new[] { new UsageWindow("Session", 70, 30, CardId: "session.v1") },
+            AccountKey: "claude-desktop");
+        var selection = QuotaResolver.Selection("claude", "session.v1", "claude-desktop");
+
+        var reading = QuotaSelectionPolicy.ResolveReading(
+            new AgentUsagePayload("now", new[] { primary, desktop }), selection, NoneHidden,
+            cachedSelection: null, cachedRemaining: null);
+
+        Assert.Equal(QuotaCacheWrite.Write, reading.CacheWrite);
+        Assert.Equal(30, reading.Remaining);
+        Assert.Equal(DateTimeOffset.Parse("2026-07-10T12:00:00.000Z"), reading.ResolvedAt);
+        Assert.Equal(selection, reading.EffectiveSelection);
+        Assert.True(reading.PickedOtherAccount);
+    }
+
+    // That account signs out (its card leaves the payload) while the primary
+    // keeps the same card id: the pick must not fall back to the primary's
+    // reading; the pair is cleared.
+    [Fact]
+    public void ResolveReading_ExplicitOtherAccountGoneClearsInsteadOfShowingThePrimary()
+    {
+        var primary = new AgentUsageSnapshot(
+            "claude", "oauth", "2026-07-10T12:00:00.000Z",
+            new[] { new UsageWindow("Session", 20, 80, CardId: "session.v1") });
+        var selection = QuotaResolver.Selection("claude", "session.v1", "claude-desktop");
+
+        var reading = QuotaSelectionPolicy.ResolveReading(
+            new AgentUsagePayload("now", new[] { primary }), selection, NoneHidden,
+            cachedSelection: selection, cachedRemaining: 30);
+
+        Assert.Equal(QuotaCacheWrite.Clear, reading.CacheWrite);
+        Assert.Null(reading.Remaining);
+    }
 }

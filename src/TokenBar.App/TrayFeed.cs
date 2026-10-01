@@ -358,7 +358,9 @@ public sealed class TrayFeed : IDisposable
         if (reading.CacheWrite == QuotaCacheWrite.Write
             && reading.Remaining != QuotaRemaining && reading.Remaining is { } resolved)
         {
-            DevLog.Write($"tray quota pick: {reading.PickedClientId}|{reading.PickedCardId} {resolved:F1}%");
+            DevLog.Write(
+                $"tray quota pick: {reading.PickedClientId}|{reading.PickedCardId}"
+                + $"{(reading.PickedOtherAccount ? " (other account)" : "")} {resolved:F1}%");
         }
 
         QuotaRemaining = reading.Remaining;
