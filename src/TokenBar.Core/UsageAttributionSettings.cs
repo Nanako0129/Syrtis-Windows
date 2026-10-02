@@ -152,6 +152,13 @@ public static class UsageAttributionSettings
                 "moonshot", "minimax", "zhipu", "alibaba", "open-weights"),
             ["cline"] = Providers("zhipu", "moonshot", "deepseek", "minimax", "alibaba", "open-weights"),
             ["qwen"] = Providers("alibaba", "zhipu", "moonshot", "minimax"),
+
+            // Deliberately absent: the clients added by the 2026-10-02 engine
+            // sync (zcode, augment, hindsight, muse, reasonix, kimchi, senpi,
+            // omp). Which vendors their plans pay for, if they are plans at
+            // all, has not been verified, and an unverified row here would
+            // misattribute spend; they attribute like any unmapped client
+            // until it is.
         };
 
     /// <summary>Clients that route through subscriptions they do not own, keyed

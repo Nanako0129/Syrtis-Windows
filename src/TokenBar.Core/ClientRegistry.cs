@@ -63,6 +63,18 @@ public static class ClientRegistry
         ["micode"] = ("MiMo Code", "#fb923c"),
         ["gjc"] = ("gjc", "#e11d48"),
         ["grok"] = ("Grok Build", "#1f2937"),
+        // Clients added by the 2026-10-02 engine sync. Names and colors are
+        // upstream tokscale's frontend values (packages/frontend/src/lib/
+        // constants.ts at fe72e1f9: SOURCE_NAMES / SOURCE_COLORS), since
+        // neither this port nor macOS had chosen its own for them.
+        ["zcode"] = ("ZCode", "#3b5bdb"),
+        ["augment"] = ("Augment Code", "#9333ea"),
+        ["hindsight"] = ("Hindsight", "#0891b2"),
+        ["muse"] = ("Muse Code", "#0064e0"),
+        ["reasonix"] = ("Reasonix", "#6366f1"),
+        ["kimchi"] = ("Kimchi", "#14b8a6"),
+        ["senpi"] = ("Senpi (OmO Native)", "#2f6f63"),
+        ["omp"] = ("Oh My Pi", "#e11d48"),
     };
 
     /// <summary>Every registered client id, sorted. Demo fixtures use this

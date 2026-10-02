@@ -34,6 +34,10 @@ public static class AgentIcons
         "antigravity", "kiro", "cursor", "warp", "amp", "pi", "kimi",
         "cline", "jcode", "micode", "gjc", "grok",
         "hermes", "roocode", "mux", "crush", "goose", "zed", "trae", "openclaw",
+        // 2026-10-02 engine sync: upstream SOURCE_LOGOS marks (org avatars
+        // and upstream assets; hindsight and omp cropped from the vendors'
+        // banners), all full-colour.
+        "zcode", "augment", "hindsight", "muse", "reasonix", "kimchi", "senpi", "omp",
     ];
 
     // AgentIconView.swift:29-33 — clients that share another client's icon.

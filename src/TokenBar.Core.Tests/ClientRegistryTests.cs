@@ -76,6 +76,24 @@ public class ClientRegistryTests : IDisposable
         Assert.Equal(expected, ClientRegistry.Style(id).DisplayName);
     }
 
+    // Each carries its own brand color, unlike the grey the unregistered
+    // fallback uses, so removing an entry changes Style() even where the
+    // fallback's title-casing would reproduce the name ("kimchi" → "Kimchi").
+    [Theory]
+    [InlineData("zcode", "ZCode", "#3b5bdb")]
+    [InlineData("augment", "Augment Code", "#9333ea")]
+    [InlineData("hindsight", "Hindsight", "#0891b2")]
+    [InlineData("muse", "Muse Code", "#0064e0")]
+    [InlineData("reasonix", "Reasonix", "#6366f1")]
+    [InlineData("kimchi", "Kimchi", "#14b8a6")]
+    [InlineData("senpi", "Senpi (OmO Native)", "#2f6f63")]
+    [InlineData("omp", "Oh My Pi", "#e11d48")]
+    public void EngineSyncClientsAreRegisteredWithUpstreamStyle(string id, string name, string color)
+    {
+        Assert.Contains(id, ClientRegistry.AllIds);
+        Assert.Equal(new ClientStyle(id, name, color), ClientRegistry.Style(id));
+    }
+
     [Theory]
     [InlineData("claude-code", "claude")]
     [InlineData("codex-cli", "codex")]
