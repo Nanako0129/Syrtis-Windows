@@ -249,6 +249,32 @@ mod tests {
     /// the table's inputs: a pin advance that changes the result for any of
     /// them fails here. A change on inputs the table does not list is not
     /// caught.
+    /// `Fixtures/engine-client-ids.json` is the engine's client list as the
+    /// C# side sees it (`ClientRegistryTests.EveryEngineClientIsRegistered`).
+    /// Keeping it equal to `ClientId::ALL` here makes a pin advance that adds
+    /// a client fail until the list, and then the registry, catch up.
+    #[test]
+    fn engine_client_ids_match_the_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../Fixtures/engine-client-ids.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("client id list missing at {}: {e}", path.display()));
+        let doc: serde_json::Value = serde_json::from_str(&text).expect("client id list parses");
+        let listed: Vec<&str> = doc["ids"]
+            .as_array()
+            .expect("`ids` is an array")
+            .iter()
+            .map(|id| id.as_str().expect("id is a string"))
+            .collect();
+        let engine: Vec<&str> = tokscale_core::ClientId::iter()
+            .map(|client| client.as_str())
+            .collect();
+        assert_eq!(
+            listed, engine,
+            "update Fixtures/engine-client-ids.json to the engine's ClientId::ALL"
+        );
+    }
+
     #[test]
     fn model_grouping_cases_match_the_engine() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

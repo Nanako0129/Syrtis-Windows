@@ -113,6 +113,11 @@
     <None Include="..\..\Fixtures\model-grouping-cases.json"
           Link="Fixtures\model-grouping-cases.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <!-- The pinned engine's client ids, kept equal to ClientId::ALL by a
+         tb_core_ffi test. -->
+    <None Include="..\..\Fixtures\engine-client-ids.json"
+          Link="Fixtures\engine-client-ids.json"
+          CopyToOutputDirectory="PreserveNewest" />
     <!-- Read by UpdateFlowTests.PackageIdMatchesPackagingScript: the Velopack
          pack id is an independent literal in the packaging script and in
          UpdateFlow, and a silent divergence would ship packages no installed

@@ -76,6 +76,22 @@ public class ClientRegistryTests : IDisposable
         Assert.Equal(expected, ClientRegistry.Style(id).DisplayName);
     }
 
+    // Every client the pinned engine can emit is registered, so none renders
+    // through the title-cased grey fallback. The list is kept equal to the
+    // engine's ClientId::ALL by tb_core_ffi's engine_client_ids_match_the_fixture.
+    [Fact]
+    public void EveryEngineClientIsRegistered()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "engine-client-ids.json");
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+        var ids = doc.RootElement.GetProperty("ids").EnumerateArray()
+            .Select(id => id.GetString()!).ToList();
+
+        // Control: an empty list must not pass vacuously.
+        Assert.True(ids.Count >= 38, $"engine client list has {ids.Count} ids");
+        Assert.Empty(ids.Except(ClientRegistry.AllIds));
+    }
+
     // Each carries its own brand color, unlike the grey the unregistered
     // fallback uses, so removing an entry changes Style() even where the
     // fallback's title-casing would reproduce the name ("kimchi" → "Kimchi").
