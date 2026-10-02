@@ -55,6 +55,23 @@ public class SubscriptionTrendTests
         Assert.Equal(2.0, points.Sum(p => p.Cost), 6);
     }
 
+    // Attribution matches the raw id; the bucket groups by display identity.
+    [Fact]
+    public void GrokBuildRowsBucketUnderTheGroupedModel()
+    {
+        var points = AttributedDailySeries.Points(
+            [Day(
+                "2026-08-30",
+                Client("grok", "xai", "grok-4.6-build", 100, 2.0),
+                Client("grok", "xai", "grok-4.6", 50, 1.0))],
+            []);
+
+        var point = Assert.Single(points);
+        Assert.Equal("grok-4.6", point.Model);
+        Assert.Equal(150, point.Tokens);
+        Assert.Equal(3.0, point.Cost, 6);
+    }
+
     // A merged provider id names more than one provider, so no declaration
     // about a single one can speak for the row.
     [Fact]

@@ -21,6 +21,22 @@ public class DayBarsTests
             [],
             days);
 
+    // Stacked by model, Grok Build's raw -build stripe and the session's
+    // grok-<version> are one segment, as in the Models view.
+    [Fact]
+    public void ModelStackingGroupsGrokBuildUnderTheDisplayModel()
+    {
+        ContributionClient Grok(string model, long tokens) =>
+            new("grok", model, "xai", new TokenBreakdown(tokens, 0, 0, 0, 0), 1, 1);
+        var bars = DayBars.Build(
+            Payload("2026-06-02", Day("2026-06-02", Grok("grok-4.6-build", 100), Grok("grok-4.6", 30))),
+            ["grok"], StackBy.Model, ChartMetric.Tokens, new ModelColorMap([]), "2026-06-02");
+
+        var segment = Assert.Single(bars.Single(bar => bar.Date == "2026-06-02").Segments);
+        Assert.Equal("grok-4.6", segment.Key);
+        Assert.Equal(130L, segment.Tokens);
+    }
+
     [Fact]
     public void RangeEndOverrideAnchorsWindowToSelectedClients()
     {

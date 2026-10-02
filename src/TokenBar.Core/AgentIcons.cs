@@ -34,6 +34,10 @@ public static class AgentIcons
         "antigravity", "kiro", "cursor", "warp", "amp", "pi", "kimi",
         "cline", "jcode", "micode", "gjc", "grok",
         "hermes", "roocode", "mux", "crush", "goose", "zed", "trae", "openclaw",
+        // 2026-10-02 engine sync: upstream SOURCE_LOGOS marks (org avatars
+        // and upstream assets; hindsight and omp cropped from the vendors'
+        // banners), all full-colour.
+        "zcode", "augment", "hindsight", "muse", "reasonix", "kimchi", "senpi", "omp",
     ];
 
     // AgentIconView.swift:29-33 — clients that share another client's icon.
@@ -52,6 +56,9 @@ public static class AgentIcons
         ["hermes"] = "#ffffff",
         ["mux"] = "#000000",
         ["amp"] = "#000000",
+        // senpi.png is a dark mark on a canvas that is 66.9% transparent
+        // (measured), the same shape as cline and hermes.
+        ["senpi"] = "#ffffff",
     };
 
     // AgentIconView.swift:50-52 — full marks whose art reaches the edge of
