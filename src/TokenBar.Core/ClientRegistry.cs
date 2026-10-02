@@ -66,15 +66,19 @@ public static class ClientRegistry
         // Clients added by the 2026-10-02 engine sync. Names and colors are
         // upstream tokscale's frontend values (packages/frontend/src/lib/
         // constants.ts at fe72e1f9: SOURCE_NAMES / SOURCE_COLORS), since
-        // neither this port nor macOS had chosen its own for them.
+        // neither this port nor macOS had chosen its own for them, except
+        // three upstream colors that duplicated an existing client here
+        // (omp = gjc, reasonix = antigravity-cli, kimchi = goose). Those are
+        // replaced, shared with macOS, by colors at least 22 CIE76 ΔE from
+        // every other registered color (measured).
         ["zcode"] = ("ZCode", "#3b5bdb"),
         ["augment"] = ("Augment Code", "#9333ea"),
         ["hindsight"] = ("Hindsight", "#0891b2"),
         ["muse"] = ("Muse Code", "#0064e0"),
-        ["reasonix"] = ("Reasonix", "#6366f1"),
-        ["kimchi"] = ("Kimchi", "#14b8a6"),
+        ["reasonix"] = ("Reasonix", "#808000"),
+        ["kimchi"] = ("Kimchi", "#7f1d1d"),
         ["senpi"] = ("Senpi (OmO Native)", "#2f6f63"),
-        ["omp"] = ("Oh My Pi", "#e11d48"),
+        ["omp"] = ("Oh My Pi", "#d946ef"),
     };
 
     /// <summary>Every registered client id, sorted. Demo fixtures use this

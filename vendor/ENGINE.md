@@ -31,9 +31,11 @@ Measured on this advance, not relayed:
 - `CACHE_FORMAT_VERSION` stays 4. `RESOLVER_CONTRACT_VERSION` moves 1→3: 2
   for the Kimi Work scan roots (#56), 3 for removing `~/.omp/agent/sessions`
   from `pi` (#62). Every source-context identity changes once; nothing on this
-  side persists one. The only `pub` items added are the new client modules
+  side persists one. The `pub` items added are the new client modules
   (`augment`, `hindsight`, `kimchi`, `muse`, `omp`, `reasonix`, `senpi`,
-  `zcode`); `ClientId` grows from 33 to 41.
+  `zcode`), `pricing::aliases::uses_cursor_pricing` and
+  `ScanResult::zcode_db`; this crate uses none of them. `ClientId` grows from
+  33 to 41.
 - Among existing clients the parser identities that move are Kiro (1→2, #51)
   and Pi (2→3, #62), so those namespaces re-parse once. Pi's parse itself is
   unchanged; the bump drops shards cached for OMP files under `pi`. New clients

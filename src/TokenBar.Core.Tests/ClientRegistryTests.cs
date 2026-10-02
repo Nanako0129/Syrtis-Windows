@@ -100,10 +100,10 @@ public class ClientRegistryTests : IDisposable
     [InlineData("augment", "Augment Code", "#9333ea")]
     [InlineData("hindsight", "Hindsight", "#0891b2")]
     [InlineData("muse", "Muse Code", "#0064e0")]
-    [InlineData("reasonix", "Reasonix", "#6366f1")]
-    [InlineData("kimchi", "Kimchi", "#14b8a6")]
+    [InlineData("reasonix", "Reasonix", "#808000")]
+    [InlineData("kimchi", "Kimchi", "#7f1d1d")]
     [InlineData("senpi", "Senpi (OmO Native)", "#2f6f63")]
-    [InlineData("omp", "Oh My Pi", "#e11d48")]
+    [InlineData("omp", "Oh My Pi", "#d946ef")]
     public void EngineSyncClientsAreRegisteredWithUpstreamStyle(string id, string name, string color)
     {
         Assert.Contains(id, ClientRegistry.AllIds);
