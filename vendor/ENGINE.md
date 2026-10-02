@@ -10,20 +10,49 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `6712ed8a0ff67bf1b2d0a97c41d2d94821b507fa` |
-| TokenBar alignment | macOS `main` pins `319ffa8` (engine PR #46), an ancestor of this pin; the macOS advance to the same engine head is in progress |
-| Engine alignment | `bb9a2a9ac787344bb4bd3120d645208217b21016` → `6712ed8a0ff67bf1b2d0a97c41d2d94821b507fa` (engine `main`) |
+| Reviewed pin | `726efd7038727055bf8915d98939b973c3db17fe` |
+| TokenBar alignment | macOS `main` pins `6712ed8a` (engine PR #62), an ancestor of this pin |
+| Engine alignment | `6712ed8a0ff67bf1b2d0a97c41d2d94821b507fa` → `726efd7038727055bf8915d98939b973c3db17fe` (engine `main`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/6712ed8a0ff67bf1b2d0a97c41d2d94821b507fa/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/726efd7038727055bf8915d98939b973c3db17fe/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `6712ed8a`, the 2026-10-02 upstream sync (engine PRs #41–#62)
+## Current pin: `726efd70`, lazy cache namespaces (engine PRs #63, #64)
 
-The reviewed pin is the merge commit of tokscale-core PR #62 on the engine's
+The reviewed pin is the merge commit of tokscale-core PR #64 on the engine's
+`main`, two merges after `6712ed8a`. The diff touches `src/lib.rs`,
+`src/message_cache.rs` and `UPSTREAM.md` only.
+
+- #63 makes the engine's streaming scan load each source-cache namespace on
+  its lane's first lookup and release that namespace's clean entries once the lane is done (Claude is never released).
+  Report output is byte-identical to `6712ed8a` on the engine side (#63).
+  #64 is documentation only.
+- Measured on this advance, not relayed: `CACHE_FORMAT_VERSION` stays 4, no
+  `parser_version` moves, `ClientId` is unchanged (the
+  `engine_client_ids_match_the_fixture` guard passes without a fixture change),
+  and no `pub` item changes (the new cache functions are `pub(crate)`).
+  `crates/tb_core_ffi` needed no change.
+- Memory, as measured in #63 on macOS (warm scan, maintainer corpus snapshot,
+  frozen pricing, median of 3; warm peak RSS before → after): all clients
+  329.0 → 301.9 MiB (−8.2%), cursor only 153.2 → 17.8 MiB (−88%), claude only
+  218.1 → 148.6 MiB (−32%), codex only 219.9 → 155.4 MiB (−29%). Cold scans
+  are unchanged. All clients drops only 8% because the Claude namespace stays
+  resident while the Codex lane runs; reordering the lanes is recorded in
+  `UPSTREAM.md` as the next candidate. These figures were not re-measured on
+  Windows.
+- The slice's bar of an all-clients drop of about 10% was waived by the user on
+  2026-10-03, citing the single-client gains: `tb_hourly_report` takes a client
+  filter, so a filtered call gets the per-client drops above.
+- No Windows real-machine numeric comparison was run for this advance: the
+  change is memory-only and the engine side showed byte-identical output.
+
+## Historical: `6712ed8a`, the 2026-10-02 upstream sync (engine PRs #41–#62)
+
+The pin was the merge commit of tokscale-core PR #62 on the engine's
 `main`, 19 merges after `bb9a2a9`.
 
 Measured on this advance, not relayed:
