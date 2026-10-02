@@ -107,7 +107,8 @@ public static class QuotaLensProjection
         string? SelectedAccount,
         // True for any non-primary account: Mine/LiveEquivalence/History
         // carry no local usage and the view prints the fixed line instead.
-        bool LocalUsageUnattributed);
+        bool LocalUsageUnattributed,
+        string? AccountLabel);
 
     /// <summary>Site 6 on its own: the window-history card's rows and its
     /// pooled ≈ line.</summary>
@@ -321,7 +322,8 @@ public static class QuotaLensProjection
         return new Client(
             owner, tabs, selected, messages, mine, liveEquivalence,
             unattributed ? 0 : windowUsage?.UndatedCount ?? 0, windowHistory, quotaHistoryOutcome,
-            WindowCardText.AccountPills(quota, owner), account, unattributed);
+            WindowCardText.AccountPills(quota, owner), account, unattributed,
+            WindowCardText.HeaderAccountLabel(quota, owner, account));
     }
 
     /// <summary>Which tab opens when the user has no explicit pick for this

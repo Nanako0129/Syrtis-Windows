@@ -382,6 +382,27 @@ public class AccountIdentityTests
     }
 
     [Fact]
+    public void HeaderNamesTheResolvedAccountOnlyWhenItIsNotThePrimary()
+    {
+        Assert.Null(WindowCardText.HeaderAccountLabel(TwoAccounts(), "claude", null));
+        // Primary errored, exactly one other account live: no pills, still labelled.
+        var desktopOnly = Payload(
+            Card(null, "P", error: "x"),
+            Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
+        Assert.Empty(WindowCardText.AccountPills(desktopOnly, "claude"));
+        Assert.Equal("Claude Desktop", WindowCardText.HeaderAccountLabel(
+            desktopOnly, "claude", WindowCardText.WindowCardAccount(desktopOnly, "claude")));
+        var withDir = Payload(
+            Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")),
+            Card(Dir, "D", null, Window("session.v1", "Session", 60, "session.v1")));
+        Assert.Equal("Claude · team-b", WindowCardText.HeaderAccountLabel(withDir, "claude", Dir));
+        Assert.Equal("Claude Desktop · 5h", WindowCardText.WithAccountLabel("5h", "Claude Desktop"));
+        Assert.Equal("5h", WindowCardText.WithAccountLabel("5h", null));
+        Assert.Equal("Claude Desktop", ClientFor(Desktop).AccountLabel);
+        Assert.Null(ClientFor(null).AccountLabel);
+    }
+
+    [Fact]
     public void AStoredTabOfAnotherAccountFallsBackToTheChosenAccountsDefaultTab()
     {
         // The stored tab names the PRIMARY's window; the Desktop account does

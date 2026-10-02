@@ -449,7 +449,8 @@ public sealed partial class DashboardView
             return Ui.Card(
                 WindowCardText.Title(selected),
                 body,
-                WindowCardText.Subtitle(state, selected, DateTimeOffset.Now));
+                WindowCardText.WithAccountLabel(
+                    WindowCardText.Subtitle(state, selected, DateTimeOffset.Now), client.AccountLabel));
         }
 
         var active = selected!.Active!;
@@ -506,7 +507,8 @@ public sealed partial class DashboardView
         return Ui.Card(
             WindowCardText.Title(selected),
             body,
-            WindowCardText.Subtitle(state, selected, DateTimeOffset.Now),
+            WindowCardText.WithAccountLabel(
+                WindowCardText.Subtitle(state, selected, DateTimeOffset.Now), client.AccountLabel),
             WindowMetricToggle());
     }
 

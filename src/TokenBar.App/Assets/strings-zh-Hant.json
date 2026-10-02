@@ -133,7 +133,7 @@
   "Loading hourly data…": "正在載入每小時資料…",
   "Loading quotas…": "正在載入額度…",
   "Loading…": "載入中…",
-  "Local usage can't be attributed to this account yet.": "此帳號的本機用量目前無法歸屬。",
+  "Local usage can't be attributed to this account yet.": "無法將本機用量歸屬到這個帳號。",
   "Local usage could not be read.": "無法讀取本機用量。",
   "Low": "偏低",
   "Main": "主要",
