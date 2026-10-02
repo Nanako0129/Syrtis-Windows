@@ -64,7 +64,8 @@ public static class QuotaLensProjection
         string ActiveClientTab,
         string WindowCardTab,
         string? HistoryShownWindow = null,
-        int HistoryShownCount = WindowHistoryText.VisibleRows);
+        int HistoryShownCount = WindowHistoryText.VisibleRows,
+        string? WindowCardAccount = null);
 
     /// <summary>Everything the Quota lens's seven sites decided, assembled
     /// once. <see cref="Client"/> is null exactly when <see cref="Selection.ActiveClientTab"/>
@@ -101,7 +102,12 @@ public static class QuotaLensProjection
         // its own copy because the two are built from different snapshot
         // reads (BuildOverview vs BuildClient) and neither may read the
         // other's field.
-        WindowEquivalence.FetchOutcome QuotaHistoryOutcome);
+        WindowEquivalence.FetchOutcome QuotaHistoryOutcome,
+        IReadOnlyList<WindowCardText.AccountPill> Accounts,
+        string? SelectedAccount,
+        // True for any non-primary account: Mine/LiveEquivalence/History
+        // carry no local usage and the view prints the fixed line instead.
+        bool LocalUsageUnattributed);
 
     /// <summary>Site 6 on its own: the window-history card's rows and its
     /// pooled ≈ line.</summary>
@@ -276,18 +282,21 @@ public static class QuotaLensProjection
         var owner = ClientRegistry.QuotaOwner(clientId);
         // One card per client: the primary when it has windows, else the
         // first other account that does (Desktop-only users).
-        var tabs = WindowCardText.Tabs(
-            history, quota, owner, WindowCardText.WindowCardAccount(quota, owner));
+        var account = WindowCardText.WindowCardAccount(quota, owner, selection.WindowCardAccount);
+        var unattributed = account is not null;
+        var tabs = WindowCardText.Tabs(history, quota, owner, account);
         var selected = tabs.FirstOrDefault(tab => WindowId(tab.Id) == windowCardTab)
             ?? DefaultTab(tabs);
-        var messages = windowUsage?.Messages ?? [];
+        // Windows has no per-account scan: a non-primary account reads no
+        // local usage at all (never the primary's).
+        IReadOnlyList<WindowMessage> messages = unattributed ? [] : windowUsage?.Messages ?? [];
         var mine = WindowCardText.Mine(messages, owner, confirmed.Records);
 
         // Only when the selected tab has a placed running cycle — the same
         // condition WindowCardText.State resolves to WindowCardState.Chart
         // for, which is the only state the view draws this line under.
         WindowEquivalence.Row? liveEquivalence = null;
-        if (selected?.Active is { IsPlaced: true } active)
+        if (!unattributed && selected?.Active is { IsPlaced: true } active)
         {
             // The card and this line must describe the same interval:
             // WindowCardGeometry.Chart already clips its bars and curve to
@@ -311,7 +320,8 @@ public static class QuotaLensProjection
             history, selected, messages, confirmed, owner, windowUsageOutcome, selection);
         return new Client(
             owner, tabs, selected, messages, mine, liveEquivalence,
-            windowUsage?.UndatedCount ?? 0, windowHistory, quotaHistoryOutcome);
+            unattributed ? 0 : windowUsage?.UndatedCount ?? 0, windowHistory, quotaHistoryOutcome,
+            WindowCardText.AccountPills(quota, owner), account, unattributed);
     }
 
     /// <summary>Which tab opens when the user has no explicit pick for this

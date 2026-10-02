@@ -80,6 +80,30 @@ public static class WindowCardText
     /// picker does not offer.</summary>
     public const string TabKey = "tokenbar.windowcard.window";
 
+    /// <summary>Per-client choice of which account the card shows; the value
+    /// is the account key, "" = primary. Append the quota OWNER client id.</summary>
+    public const string AccountKeyPrefix = "tokenbar.windowcard.account.";
+
+    /// <summary>Rule 6: Windows has no per-account transcript scan, so local
+    /// usage can only be attributed to the primary account.</summary>
+    public static string LocalUsageUnattributed() =>
+        "Local usage can't be attributed to this account yet.".Localized();
+
+    /// <summary>One account pill: <see cref="Key"/> null = primary.</summary>
+    public sealed record AccountPill(string? Key, string Label);
+
+    /// <summary>The account pills for a client: payload order, one per card
+    /// with live windows, and only when there are at least two — otherwise
+    /// empty and the card is exactly the single-account card.</summary>
+    public static IReadOnlyList<AccountPill> AccountPills(AgentUsagePayload? quota, string clientId)
+    {
+        var pills = (quota?.Agents ?? [])
+            .Where(a => a.ClientId == clientId && a.Windows.Count > 0)
+            .Select(a => new AccountPill(a.Account.AccountKey, AccountLabel.Of(a.Account, quota)))
+            .ToList();
+        return pills.Count >= 2 ? pills : [];
+    }
+
     /// <summary>The account scope a live window's tab carries when neither a
     /// stored series nor the live payload itself can supply one — the live
     /// agent's own <see cref="AgentUsageSnapshot.HistoryScope"/> resolution
@@ -362,10 +386,21 @@ public static class WindowCardText
     /// <summary>Which account's card the per-client window card shows: the
     /// primary when it has windows to draw; otherwise the first non-primary
     /// card of the client (payload order) that has; otherwise the primary.
-    /// Returns the account key (null = primary), for <see cref="Tabs"/>.</summary>
-    public static string? WindowCardAccount(AgentUsagePayload? quota, string clientId)
+    /// Returns the account key (null = primary), for <see cref="Tabs"/>.
+    /// <paramref name="storedAccountKey"/> (null/"" = primary, as stored) wins
+    /// when that account is in the payload WITH windows; otherwise the rule
+    /// above applies. The stored value is never touched here.</summary>
+    public static string? WindowCardAccount(
+        AgentUsagePayload? quota, string clientId, string? storedAccountKey = null)
     {
         var cards = (quota?.Agents ?? []).Where(a => a.ClientId == clientId).ToList();
+        var stored = AccountIdentity.Normalize(storedAccountKey);
+        if (storedAccountKey is not null
+            && cards.Any(a => a.Account.AccountKey == stored && a.Windows.Count > 0))
+        {
+            return stored;
+        }
+
         if (cards.Any(a => a.Account.AccountKey is null && a.Windows.Count > 0))
         {
             return null;

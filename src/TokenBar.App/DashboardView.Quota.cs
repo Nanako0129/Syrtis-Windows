@@ -109,7 +109,9 @@ public sealed partial class DashboardView
             UsageAttribution.Confirmed(AppSettings.Store),
             _model?.Year,
             new QuotaLensProjection.Selection(
-                _activeClientTab, _windowCardTab, _historyShownWindow, _historyShownCount));
+                _activeClientTab, _windowCardTab, _historyShownWindow, _historyShownCount,
+                AppSettings.Store.GetString(
+                    WindowCardText.AccountKeyPrefix + ClientRegistry.QuotaOwner(_activeClientTab))));
 
         // A client tab asks about one subscription, so it gets that
         // subscription's own three cards rather than the all-clients four.
@@ -429,6 +431,11 @@ public sealed partial class DashboardView
         var selected = client.Selected;
         var state = WindowCardText.State(selected, client.QuotaHistoryOutcome);
         var body = new StackPanel { Spacing = 4 };
+        if (client.Accounts.Count > 1)
+        {
+            body.Children.Add(AccountTabs(client));
+        }
+
         if (tabs.Count > 1)
         {
             body.Children.Add(WindowTabs(tabs, selected));
@@ -480,7 +487,11 @@ public sealed partial class DashboardView
         // null here: WindowCardText.State only reaches Chart when the
         // projection's own guard for LiveEquivalence (a placed active cycle)
         // already held.
-        var equivalenceLine = Ui.Text(WindowEquivalenceText.Line(client.LiveEquivalence!), 9, 0.6);
+        var equivalenceLine = Ui.Text(
+            client.LocalUsageUnattributed
+                ? WindowCardText.LocalUsageUnattributed()
+                : WindowEquivalenceText.Line(client.LiveEquivalence!),
+            9, 0.6);
         equivalenceLine.TextWrapping = TextWrapping.Wrap;
         equivalenceLine.Margin = new Thickness(0, 2, 0, 0);
         body.Children.Add(equivalenceLine);
@@ -497,6 +508,26 @@ public sealed partial class DashboardView
             body,
             WindowCardText.Subtitle(state, selected, DateTimeOffset.Now),
             WindowMetricToggle());
+    }
+
+    /// <summary>One pill per account with live windows; the choice is stored
+    /// per client and never touches the window-tab key.</summary>
+    private FrameworkElement AccountTabs(QuotaLensProjection.Client client)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
+        foreach (var account in client.Accounts)
+        {
+            var pill = LensPill(account.Label, account.Key == client.SelectedAccount);
+            var key = account.Key ?? string.Empty;
+            pill.Click += (_, _) =>
+            {
+                AppSettings.Store.SetString(WindowCardText.AccountKeyPrefix + client.Owner, key);
+                RenderContent(animated: false);
+            };
+            row.Children.Add(pill);
+        }
+
+        return row;
     }
 
     /// <summary>One sub-tab per window this client has recorded. Pills rather
@@ -801,7 +832,11 @@ public sealed partial class DashboardView
         // the card-level QuotaHistoryOutcome `state` above — see
         // QuotaLensProjection.BuildHistory's own comment for why (the quota
         // samples and the message export are two separate fetches).
-        var equivalenceLine = Ui.Text(WindowEquivalenceText.Line(history.Equivalence), 9, 0.6);
+        var equivalenceLine = Ui.Text(
+            client.LocalUsageUnattributed
+                ? WindowCardText.LocalUsageUnattributed()
+                : WindowEquivalenceText.Line(history.Equivalence),
+            9, 0.6);
         equivalenceLine.TextWrapping = TextWrapping.Wrap;
         equivalenceLine.Margin = new Thickness(0, 0, 0, 6);
         body.Children.Add(equivalenceLine);
@@ -809,7 +844,7 @@ public sealed partial class DashboardView
         var colors = new ModelColorMap(snapshot.Models, snapshot.CostAuthoritative);
         foreach (var row in rows)
         {
-            body.Children.Add(HistoryRow(row, history.ByResetAt[row.ResetAtMs], colors));
+            body.Children.Add(HistoryRow(row, history.ByResetAt[row.ResetAtMs], colors, client.LocalUsageUnattributed));
         }
 
         // The grow control, above the disclaimer so it reads as belonging to
@@ -850,7 +885,8 @@ public sealed partial class DashboardView
         return Ui.Card(WindowHistoryText.Title(), body, WindowHistoryText.Subtitle(rows));
     }
 
-    private FrameworkElement HistoryRow(WindowHistoryRow row, QuotaHistoryRow historyRow, ModelColorMap colors)
+    private FrameworkElement HistoryRow(
+        WindowHistoryRow row, QuotaHistoryRow historyRow, ModelColorMap colors, bool noLocalUsage)
     {
         var open = _historyExpanded == row.ResetAtMs;
         var block = new StackPanel { Spacing = 4, Margin = new Thickness(0, 5, 0, 5) };
@@ -863,16 +899,23 @@ public sealed partial class DashboardView
         };
         head.Children.Add(Ui.Text(open ? "▾" : "▸", 8, 0.45));
         head.Children.Add(Ui.Text(row.Stamp, 9, 0.6));
-        head.Children.Add(HistoryBars(row, historyRow, colors));
+        if (!noLocalUsage)
+        {
+            head.Children.Add(HistoryBars(row, historyRow, colors));
+        }
+
         var percent = Ui.Text(WindowHistoryText.Percent(row), 9);
         percent.Width = 30;
         percent.TextAlignment = TextAlignment.Right;
         head.Children.Add(percent);
-        head.Children.Add(Ui.Text(WindowHistoryText.Tokens(row), 9, 0.6));
-        var cost = Ui.Text(WindowHistoryText.Cost(row), 9);
-        cost.Width = 54;
-        cost.TextAlignment = TextAlignment.Right;
-        head.Children.Add(cost);
+        if (!noLocalUsage)
+        {
+            head.Children.Add(Ui.Text(WindowHistoryText.Tokens(row), 9, 0.6));
+            var cost = Ui.Text(WindowHistoryText.Cost(row), 9);
+            cost.Width = 54;
+            cost.TextAlignment = TextAlignment.Right;
+            head.Children.Add(cost);
+        }
         var id = row.ResetAtMs;
         head.Tapped += (_, _) =>
         {
@@ -884,8 +927,12 @@ public sealed partial class DashboardView
         // hit-test background for its expand tap.
         var cycle = historyRow.Cycle;
         var headHost = WithRowGlow(head);
-        HoverTip.AttachRich(headHost, () => BreakdownTip(
-            WindowHistoryText.HoverHeading(cycle.StartMs, cycle.ResetAtMs), historyRow.MineBreakdown));
+        if (!noLocalUsage)
+        {
+            HoverTip.AttachRich(headHost, () => BreakdownTip(
+                WindowHistoryText.HoverHeading(cycle.StartMs, cycle.ResetAtMs), historyRow.MineBreakdown));
+        }
+
         block.Children.Add(headHost);
 
         if (open)
@@ -913,7 +960,11 @@ public sealed partial class DashboardView
             // choice rather than adding a second wait state the row above it
             // does not have.
             var topModels = WindowHistoryText.TopModels(historyRow);
-            if (topModels.Count == 0)
+            if (noLocalUsage)
+            {
+                // No per-account scan: the card-level line already says so.
+            }
+            else if (topModels.Count == 0)
             {
                 detail.Children.Add(Ui.Text(WindowHistoryText.NothingChargedNote(), 10, 0.45));
             }
@@ -928,7 +979,7 @@ public sealed partial class DashboardView
             // The line that explains a flat quota bar: everything else
             // recorded in the same hours, named by which attribution states
             // it actually holds.
-            if (WindowHistoryText.SameHoursLine(historyRow) is { } sameHours)
+            if (!noLocalUsage && WindowHistoryText.SameHoursLine(historyRow) is { } sameHours)
             {
                 var line = Ui.Text(sameHours, 9, 0.45);
                 line.TextWrapping = TextWrapping.Wrap;

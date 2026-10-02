@@ -133,6 +133,7 @@
   "Loading hourly data…": "正在加载每小时数据…",
   "Loading quotas…": "正在加载额度…",
   "Loading…": "加载中…",
+  "Local usage can't be attributed to this account yet.": "此账号的本地用量暂时无法归属。",
   "Local usage could not be read.": "无法读取本地用量。",
   "Low": "较低",
   "Main": "主要",
