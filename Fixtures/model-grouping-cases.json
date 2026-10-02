@@ -1,0 +1,22 @@
+{
+  "note": "Display-grouping cases for the built-in Grok Build rule (#118). Checked against the engine's normalize_model_for_grouping by crates/tb_core_ffi (model_grouping_cases test) and against ModelGrouping.groupID by SelfTest. Inputs are canonical_model_id spellings.",
+  "cases": [
+    ["grok-4.6-build", "grok-4.6"],
+    ["grok-4.7-build", "grok-4.7"],
+    ["grok-4.5-build", "grok-4.5"],
+    ["grok-5-build", "grok-5"],
+    ["grok-4.6", "grok-4.6"],
+    ["grok-4.5-build-preview", "grok-4.5-build-preview"],
+    ["grok-4.5-mini-build", "grok-4.5-mini-build"],
+    ["my-grok-4.5-build", "my-grok-4.5-build"],
+    ["grok--build", "grok--build"],
+    ["grok-build", "grok-build"],
+    ["grok-.5-build", "grok-.5-build"],
+    ["grok-4.-build", "grok-4.-build"],
+    ["grok-4..6-build", "grok-4..6-build"],
+    ["grok-code-fast-1", "grok-code-fast-1"],
+    ["grok-unknown", "grok-unknown"],
+    ["gpt-5.4", "gpt-5.4"],
+    ["claude-fable-5-1", "claude-fable-5-1"]
+  ]
+}

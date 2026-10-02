@@ -218,8 +218,10 @@ fn local_cost_estimate(
         // The asymmetry is not theoretical. The macOS port first passed 0
         // here (price everything at the 5m rate), and that produced a real
         // false-positive path: a 1h write is charged at 2x base input,
-        // derived from `input_cost_per_token` because no table publishes a 1h
-        // key, while the 5m rate is the table's `cache_creation_input_token_cost`
+        // derived from `input_cost_per_token` (LiteLLM does publish a 1h key,
+        // but the engine's `ModelPricing` does not carry it; every published
+        // value equals 2x input — see `compute_cost` in the engine's
+        // `pricing/lookup.rs`), while the 5m rate is the table's `cache_creation_input_token_cost`
         // — which some entries omit. The provider hint steers
         // `claude-haiku-4-5` to a resale entry with no such key, so a
         // 5m-priced estimate dropped that row's cache write while tokscale
@@ -240,6 +242,34 @@ fn local_cost_estimate(
 
 #[cfg(test)]
 mod tests {
+    /// The display-grouping case table is shared with macOS (a verbatim copy
+    /// of its `Tests/fixtures/model-grouping-cases.json`) and with
+    /// `ModelGroupingTests` on the C# side. Asserting it against the engine's
+    /// own grouping function ties `ModelGrouping.GroupId` to the Rust fold on
+    /// the table's inputs: a pin advance that changes the result for any of
+    /// them fails here. A change on inputs the table does not list is not
+    /// caught.
+    #[test]
+    fn model_grouping_cases_match_the_engine() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../Fixtures/model-grouping-cases.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("case table missing at {}: {e}", path.display()));
+        let table: serde_json::Value = serde_json::from_str(&text).expect("case table parses");
+        let cases = table["cases"].as_array().expect("`cases` is an array");
+        // Control: an empty or truncated table must not pass vacuously.
+        assert!(cases.len() >= 17, "case table has {} rows, expected >= 17", cases.len());
+        for case in cases {
+            let input = case[0].as_str().expect("input is a string");
+            let expected = case[1].as_str().expect("expected is a string");
+            assert_eq!(
+                tokscale_core::normalize_model_for_grouping(input),
+                expected,
+                "engine grouping for {input}"
+            );
+        }
+    }
+
     use super::*;
 
     /// #766 clamps corrupt Antigravity varints to `i64::MAX` per bucket. Two

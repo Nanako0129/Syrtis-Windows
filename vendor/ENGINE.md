@@ -10,18 +10,67 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `bb9a2a9ac787344bb4bd3120d645208217b21016` |
+| Reviewed pin | `6712ed8a` (engine `main`; full hash in the gitlink) |
 | TokenBar alignment | `v1.17.0` (engine `8a88602b`) → ahead of it; macOS `main` pins `3eec5846`, both ancestors of this pin |
 | Engine alignment | `be0861d4ec5331a97410b5eb747ffc92db002d2f` → `bb9a2a9ac787344bb4bd3120d645208217b21016` (engine `main`, the same advance macOS TokenBar took in its PR #389) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/bb9a2a9ac787344bb4bd3120d645208217b21016/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/6712ed8a/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `bb9a2a9`, engine PRs #42, #30, #43
+## Current pin: `6712ed8a`, the 2026-10-02 upstream sync (engine PRs #41–#62)
+
+The reviewed pin is the merge commit of tokscale-core PR #62 on the engine's
+`main`, 19 merges after `bb9a2a9`.
+
+Measured on this advance, not relayed:
+
+- `CACHE_FORMAT_VERSION` stays 4. `RESOLVER_CONTRACT_VERSION` moves 1→3: 2
+  for the Kimi Work scan roots (#56), 3 for removing `~/.omp/agent/sessions`
+  from `pi` (#62). Every source-context identity changes once; nothing on this
+  side persists one. The only `pub` items added are the new client modules
+  (`augment`, `hindsight`, `kimchi`, `muse`, `omp`, `reasonix`, `senpi`,
+  `zcode`); `ClientId` grows from 33 to 41.
+- Among existing clients the parser identities that move are Kiro (1→2, #51)
+  and Pi (2→3, #62), so those namespaces re-parse once. Pi's parse itself is
+  unchanged; the bump drops shards cached for OMP files under `pi`. New clients
+  start at 1.
+- `crates/tb_core_ffi` needed no production change: its exhaustive
+  `TokenBreakdown` literal already fills `cache_write_1h` with
+  `entry.cache_write` (the upper-bound rule above). One test was added that
+  checks the shared model-grouping case table against the engine.
+
+What reaches the figures:
+
+- New clients: ZCode v2 CLI usage database (#49), Augment Code (#50),
+  Hindsight (#54), Muse Code (#57), Reasonix (#58), and three Pi-format
+  clients on the shared Pi parser: Kimchi Coding (#60), Senpi (#61) and
+  Oh My Pi (#62).
+- Oh My Pi usage moves from `pi` to `omp` (#62): the `pi` client no longer
+  scans `~/.omp/agent/sessions`. Totals are unchanged when the two trees share
+  no records. A record present under both `~/.pi` and `~/.omp` (a session
+  copied during a move, say) used to count once in `pi` and now counts once in
+  each client, as upstream: there is no cross-client dedup. The same holds for
+  a session under both the Pi root and the Kimchi or Senpi root. Kimi Desktop ("Kimi Work")
+  sessions are scanned as Kimi on Windows and macOS (#56; `%APPDATA%` or the
+  relocated `shareDir` when environment roots are on).
+- Grok Build turn usage keyed `grok-<version>-build` groups with the session's
+  `grok-<version>` in the engine's reports (#46); this consumer applies the same
+  display fold to graph-derived rows (`ModelGrouping`).
+- Pi transcripts that start with a UTF-8 BOM are no longer dropped whole (#47).
+- Kiro conversations that report credits carry them as a provider-reported cost
+  (credits × $0.04) on the turn that spent them; IDE and SQLite turns take their
+  request counts from the source. Token counts are unchanged (#51).
+- Pricing (#48, #52, #53, #55, #59): Kimi Work ids priced and
+  `kimi-for-coding` retargeted, Daybreak Blue and Cursor-tier aliases; GPT-5.6 /
+  GPT-6 billed above 272K request-wide, including on hinted rows; OpenRouter
+  models priced at the author's standard service tier; Composer 2 cache creation
+  free.
+
+## Historical: `bb9a2a9`, engine PRs #42, #30, #43
 
 The reviewed pin is the merge commit of tokscale-core PR #43 on the engine's
 `main`, 13 commits after `be0861d`:
