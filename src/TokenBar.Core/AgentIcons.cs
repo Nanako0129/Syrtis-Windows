@@ -56,6 +56,9 @@ public static class AgentIcons
         ["hermes"] = "#ffffff",
         ["mux"] = "#000000",
         ["amp"] = "#000000",
+        // senpi.png is a dark mark on a canvas that is 66.9% transparent
+        // (measured), the same shape as cline and hermes.
+        ["senpi"] = "#ffffff",
     };
 
     // AgentIconView.swift:50-52 — full marks whose art reaches the edge of

@@ -242,13 +242,6 @@ fn local_cost_estimate(
 
 #[cfg(test)]
 mod tests {
-    /// The display-grouping case table is shared with macOS (a verbatim copy
-    /// of its `Tests/fixtures/model-grouping-cases.json`) and with
-    /// `ModelGroupingTests` on the C# side. Asserting it against the engine's
-    /// own grouping function ties `ModelGrouping.GroupId` to the Rust fold on
-    /// the table's inputs: a pin advance that changes the result for any of
-    /// them fails here. A change on inputs the table does not list is not
-    /// caught.
     /// `Fixtures/engine-client-ids.json` is the engine's client list as the
     /// C# side sees it (`ClientRegistryTests.EveryEngineClientIsRegistered`).
     /// Keeping it equal to `ClientId::ALL` here makes a pin advance that adds
@@ -275,6 +268,13 @@ mod tests {
         );
     }
 
+    /// The display-grouping case table is shared with macOS (its case list copied
+    /// verbatim from `Tests/fixtures/model-grouping-cases.json`) and with
+    /// `ModelGroupingTests` on the C# side. Asserting it against the engine's
+    /// own grouping function ties `ModelGrouping.GroupId` to the Rust fold on
+    /// the table's inputs: a pin advance that changes the result for any of
+    /// them fails here. A change on inputs the table does not list is not
+    /// caught.
     #[test]
     fn model_grouping_cases_match_the_engine() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

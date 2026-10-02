@@ -10,12 +10,12 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `6712ed8a` (engine `main`; full hash in the gitlink) |
-| TokenBar alignment | `v1.17.0` (engine `8a88602b`) → ahead of it; macOS `main` pins `3eec5846`, both ancestors of this pin |
-| Engine alignment | `be0861d4ec5331a97410b5eb747ffc92db002d2f` → `bb9a2a9ac787344bb4bd3120d645208217b21016` (engine `main`, the same advance macOS TokenBar took in its PR #389) |
+| Reviewed pin | `6712ed8a0ff67bf1b2d0a97c41d2d94821b507fa` |
+| TokenBar alignment | macOS `main` pins `319ffa8` (engine PR #46), an ancestor of this pin; the macOS advance to the same engine head is in progress |
+| Engine alignment | `bb9a2a9ac787344bb4bd3120d645208217b21016` → `6712ed8a0ff67bf1b2d0a97c41d2d94821b507fa` (engine `main`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/6712ed8a/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/6712ed8a0ff67bf1b2d0a97c41d2d94821b507fa/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
@@ -40,8 +40,12 @@ Measured on this advance, not relayed:
   start at 1.
 - `crates/tb_core_ffi` needed no production change: its exhaustive
   `TokenBreakdown` literal already fills `cache_write_1h` with
-  `entry.cache_write` (the upper-bound rule above). One test was added that
-  checks the shared model-grouping case table against the engine.
+  `entry.cache_write` (the upper-bound rule above). Two tests were added:
+  `model_grouping_cases_match_the_engine` checks the shared model-grouping
+  case table against the engine, and `engine_client_ids_match_the_fixture`
+  keeps `Fixtures/engine-client-ids.json` equal to `ClientId::ALL`, so a later
+  advance that adds a client fails until the list, and then the C# registry
+  (`ClientRegistryTests.EveryEngineClientIsRegistered`), catch up.
 
 What reaches the figures:
 

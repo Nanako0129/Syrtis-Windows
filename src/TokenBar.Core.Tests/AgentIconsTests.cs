@@ -74,6 +74,7 @@ public class AgentIconsTests
     [InlineData("hermes", "#ffffff")]
     [InlineData("mux", "#000000")]
     [InlineData("amp", "#000000")]
+    [InlineData("senpi", "#ffffff")]
     public void BackgroundFillsMatchTheBrandBackdrop(string clientId, string expectedHex)
     {
         var info = AgentIcons.Resolve(clientId);
