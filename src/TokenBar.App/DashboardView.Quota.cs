@@ -472,7 +472,7 @@ public sealed partial class DashboardView
 
         headline.Children.Add(Ui.Dim(caption));
         body.Children.Add(headline);
-        body.Children.Add(WindowChart(geometry, mine));
+        body.Children.Add(WindowChart(geometry, mine, client.LocalUsageUnattributed));
         body.Children.Add(WindowLegend(geometry));
 
         // "10% of quota ~ X tokens · $Y", live off this window's own samples —
@@ -484,10 +484,11 @@ public sealed partial class DashboardView
         // usage" rather than "nothing was recorded", and the outcome is the
         // quota-samples fetch's own, not the card's QuotaHistoryOutcome
         // (client.QuotaHistoryOutcome, used for `state` above), because the
-        // two are separate fetches. Never
-        // null here: WindowCardText.State only reaches Chart when the
-        // projection's own guard for LiveEquivalence (a placed active cycle)
-        // already held.
+        // two are separate fetches. LiveEquivalence is non-null here for an
+        // attributable (primary) card, because WindowCardText.State only
+        // reaches Chart when the projection's guard (a placed active cycle)
+        // held. For a non-primary card it is null by design and never
+        // dereferenced: LocalUsageUnattributed short-circuits below.
         var equivalenceLine = Ui.Text(
             client.LocalUsageUnattributed
                 ? WindowCardText.LocalUsageUnattributed()
@@ -578,7 +579,7 @@ public sealed partial class DashboardView
     /// <summary>Three series in one box: the hatched no-sample regions, the
     /// usage bars, and the quota line with its sample dots.</summary>
     private FrameworkElement WindowChart(
-        ChartGeometry geometry, IReadOnlyList<WindowMessage> mine)
+        ChartGeometry geometry, IReadOnlyList<WindowMessage> mine, bool unattributed)
     {
         var canvas = new Canvas { Height = WindowChartHeight };
         var accent = AccentColor();
@@ -691,7 +692,7 @@ public sealed partial class DashboardView
                             accent, isHovered ? WindowBarHoverOpacity : WindowBarRestOpacity)));
                 }
 
-                HoverTip.AttachRich(overlay, () => WindowZoneTip(hovered, mine));
+                HoverTip.AttachRich(overlay, () => WindowZoneTip(hovered, mine, unattributed));
                 canvas.Children.Add(overlay);
             }
         }
@@ -744,7 +745,8 @@ public sealed partial class DashboardView
         return host;
     }
 
-    private UIElement WindowZoneTip(HitZone zone, IReadOnlyList<WindowMessage> mine)
+    private UIElement WindowZoneTip(
+        HitZone zone, IReadOnlyList<WindowMessage> mine, bool unattributed)
     {
         var panel = new StackPanel { Spacing = 3, MinWidth = 186 };
         panel.Children.Add(TipText(
@@ -755,7 +757,8 @@ public sealed partial class DashboardView
             panel.Children.Add(TipText(consumed, 9));
         }
 
-        var (tokens, money, empty) = WindowCardText.ZoneUsage(WindowCardText.InZone(mine, zone));
+        var (tokens, money, empty) = WindowCardText.ZoneUsage(
+            WindowCardText.InZone(mine, zone), unattributed);
         if (empty is not null)
         {
             panel.Children.Add(TipText(empty, 9, 0.6));

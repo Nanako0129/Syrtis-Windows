@@ -660,10 +660,17 @@ public static class WindowCardText
     }
 
     /// <summary>The tokens and money a zone's own messages carry, or the line
-    /// that says it carries none.</summary>
+    /// that says it carries none. For a card whose local usage cannot be
+    /// attributed (<paramref name="unattributed"/>), the fixed line instead:
+    /// an empty list there means "unknown", not "none".</summary>
     public static (string? Tokens, string? Money, string? Empty) ZoneUsage(
-        IReadOnlyList<WindowMessage> messages)
+        IReadOnlyList<WindowMessage> messages, bool unattributed = false)
     {
+        if (unattributed)
+        {
+            return (null, null, LocalUsageUnattributed());
+        }
+
         if (messages.Count == 0)
         {
             return (null, null, "No usage in this interval".Localized());

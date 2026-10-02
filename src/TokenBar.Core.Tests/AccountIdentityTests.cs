@@ -428,6 +428,14 @@ public class AccountIdentityTests
     }
 
     [Fact]
+    public void ZoneUsageSaysUnattributedNotNoneForANonPrimaryCard()
+    {
+        Assert.Equal("No usage in this interval", WindowCardText.ZoneUsage([]).Empty);
+        Assert.Equal(
+            WindowCardText.LocalUsageUnattributed(), WindowCardText.ZoneUsage([], unattributed: true).Empty);
+    }
+
+    [Fact]
     public void AStoredTabOfAnotherAccountFallsBackToTheChosenAccountsDefaultTab()
     {
         // The stored tab names the PRIMARY's window; the Desktop account does
