@@ -140,7 +140,7 @@ public static class DayBars
                 continue;
             }
 
-            var model = client.ModelId.Length == 0 ? "unknown" : client.ModelId;
+            var model = client.ModelId.Length == 0 ? "unknown" : ModelGrouping.GroupId(client.ModelId);
             var key = stackBy == StackBy.Model ? model : client.Client;
             if (!grouped.TryGetValue(key, out var slot))
             {

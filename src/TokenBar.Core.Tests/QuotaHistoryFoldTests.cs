@@ -382,6 +382,29 @@ public class QuotaHistoryFoldTests
             row.Models.Select(m => m.ModelId).ToArray());
     }
 
+    // QH-GROUP: the per-model breakdown is display, so raw grok-4.6-build and
+    // grok-4.6 are one row; scope and attribution still match the raw id.
+    [Fact]
+    public void ModelsGroupGrokBuildUnderTheDisplayModel()
+    {
+        var confirmed = new List<UsageAttribution.Record>
+        {
+            new("mine", "xai", UsageAttribution.State.Assigned("grok")),
+        };
+        var cycles = new[] { HistoryCycle(1000, 2000, 40) };
+        var messages = new[]
+        {
+            Message(1500, "mine", "xai", "grok-4.6-build", 100, 1.0),
+            Message(1600, "mine", "xai", "grok-4.6", 7, 0.5),
+        };
+
+        var row = Assert.Single(QuotaHistoryFold.Rows(cycles, messages, "grok", null, confirmed));
+
+        var model = Assert.Single(row.Models);
+        Assert.Equal("grok-4.6", model.ModelId);
+        Assert.Equal(107L, model.Tokens);
+    }
+
     // A model scope that covers nothing leaves the row present — the cycle is
     // still real — but empty: no messages counted as this subscription's, and
     // no span evidence either. This is the "nothing charged to this

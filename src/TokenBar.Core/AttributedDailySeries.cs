@@ -44,7 +44,12 @@ public static class AttributedDailySeries
                     ? UsageAttribution.State.Unassigned
                     : UsageAttribution.Resolve(
                         client.Client, client.ProviderId, client.ModelId, confirmed);
-                rows.Add((new Key(contribution.Date, state, client.ModelId), tokens, client.Cost));
+                // Attribution matched the raw id above; the bucket groups by
+                // display identity so it agrees with the Models view.
+                rows.Add((
+                    new Key(contribution.Date, state, ModelGrouping.GroupId(client.ModelId)),
+                    tokens,
+                    client.Cost));
             }
         }
 

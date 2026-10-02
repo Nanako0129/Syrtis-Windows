@@ -46,6 +46,28 @@ public class ModelColorsTests
         Assert.Equal("#06b6d4", map.Color(null, "gemini-3-pro")); // unseen → provider base
     }
 
+    // Grouped on both sides: a table built from a raw -build entry is found by
+    // the grouped and the raw lookup alike, and its cost ranks with the group.
+    // The group sits at rank 1, so its shade differs from the rank-0 base an
+    // unmatched lookup falls back to.
+    [Fact]
+    public void GrokBuildEntriesAndLookupsMeetOnTheGroupedModel()
+    {
+        var map = new ModelColorMap(
+        [
+            ("xai", "grok-5", 1000.0),
+            ("xai", "grok-4.6-build", 60.0),
+            ("xai", "grok-4.6", 60.0),
+            ("xai", "grok-4.5", 100.0),
+        ]);
+
+        var grouped = map.Color("xai", "grok-4.6");
+        Assert.Equal(grouped, map.Color("xai", "grok-4.6-build"));
+        // 60 + 60 = 120 outranks grok-4.5's 100: rank 1, not rank 2.
+        Assert.Equal(ModelColors.ShadeFromBase(map.Color("xai", "grok-5"), 1), grouped);
+        Assert.NotEqual(map.Color("xai", "grok-unseen"), grouped);
+    }
+
     [Fact]
     public void CheckingRankingUsesLexicalModelOrder()
     {

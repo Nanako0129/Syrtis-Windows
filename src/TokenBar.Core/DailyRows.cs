@@ -3,7 +3,9 @@ using TokenBar.Interop;
 namespace TokenBar.Core;
 
 /// <summary>UI-free projection for one active contribution day. Clients retain
-/// the payload's raw stripe ids for drill-down; turn scope ids are canonical.</summary>
+/// the payload's raw client ids for drill-down; turn scope ids are canonical.
+/// Model ids are display-grouped (<see cref="ModelGrouping"/>), so two stripes
+/// of one client that differ only by a grouped-away suffix are one row.</summary>
 public sealed record DailyRow(
     string Date,
     long Tokens,
@@ -32,9 +34,9 @@ public static class DailyRows
 
         foreach (var contribution in payload.Contributions)
         {
-            var clients = contribution.Clients
-                .Where(client => selected.Contains(
-                    ClientRegistry.CanonicalClient(client.Client)))
+            var clients = GroupStripes(contribution.Clients
+                    .Where(client => selected.Contains(
+                        ClientRegistry.CanonicalClient(client.Client))))
                 .OrderByDescending(client => client.Cost)
                 .ToList();
             long tokens = 0;
@@ -83,6 +85,32 @@ public static class DailyRows
             .Where(SupportedTurnClients.Contains)
             .Distinct(StringComparer.Ordinal)
             .ToList();
+
+    /// <summary>Fold a day's stripes onto their display-grouped model id, keyed
+    /// by raw client id plus grouped model and provider, as
+    /// <see cref="MonthlyRows"/> keys a month. A stripe whose id does not
+    /// group passes through unchanged.</summary>
+    private static IEnumerable<ContributionClient> GroupStripes(IEnumerable<ContributionClient> clients)
+    {
+        var grouped = new Dictionary<(string, string, string), ContributionClient>();
+        var order = new List<(string, string, string)>();
+        foreach (var client in clients)
+        {
+            var model = ModelGrouping.GroupId(client.ModelId);
+            var key = (client.Client, model, client.ProviderId);
+            if (grouped.TryGetValue(key, out var merged))
+            {
+                grouped[key] = MonthlyRows.Merge(merged, client);
+            }
+            else
+            {
+                grouped[key] = model == client.ModelId ? client : client with { ModelId = model };
+                order.Add(key);
+            }
+        }
+
+        return order.Select(key => grouped[key]);
+    }
 
     private static long SumTurns(
         IReadOnlyDictionary<string, long>? turnsByClient,

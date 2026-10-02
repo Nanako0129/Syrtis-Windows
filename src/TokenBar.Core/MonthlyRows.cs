@@ -67,15 +67,7 @@ public static class MonthlyRows
                 var stripe = (client.Client, client.ModelId, client.ProviderId);
                 if (slot.Clients.TryGetValue(stripe, out var merged))
                 {
-                    slot.Clients[stripe] = merged with
-                    {
-                        Tokens = Add(merged.Tokens, client.Tokens),
-                        Cost = merged.Cost + client.Cost,
-                        // ContributionClient.Messages is int, so this cannot
-                        // use the long SaturatingAdd the rest of the fold does.
-                        Messages = (int)Math.Min(
-                            (long)merged.Messages + client.Messages, int.MaxValue),
-                    };
+                    slot.Clients[stripe] = Merge(merged, client);
                 }
                 else
                 {
@@ -95,6 +87,19 @@ public static class MonthlyRows
                 [.. entry.Value.Clients.Values.OrderByDescending(c => c.Cost)]))
             .OrderByDescending(row => row.Month, StringComparer.Ordinal)];
     }
+
+    /// <summary>One stripe's sums for two stripes of the same key. Shared with
+    /// <see cref="DailyRows"/>, which merges the stripes that model display
+    /// grouping folds together within a day.</summary>
+    internal static ContributionClient Merge(ContributionClient merged, ContributionClient client) =>
+        merged with
+        {
+            Tokens = Add(merged.Tokens, client.Tokens),
+            Cost = merged.Cost + client.Cost,
+            // ContributionClient.Messages is int, so this cannot use the long
+            // SaturatingAdd the rest of the fold does.
+            Messages = (int)Math.Min((long)merged.Messages + client.Messages, int.MaxValue),
+        };
 
     private static TokenBreakdown Add(TokenBreakdown a, TokenBreakdown b) =>
         new(

@@ -107,6 +107,12 @@
     <None Include="..\..\crosscheck\fixtures\provider-quota-pace-v3.json"
           Link="Fixtures\provider-quota-pace-v3.json"
           CopyToOutputDirectory="PreserveNewest" />
+    <!-- The model display-grouping case table, a verbatim copy of macOS
+         Tests/fixtures/model-grouping-cases.json. Also read by the
+         tb_core_ffi test that checks it against the engine. -->
+    <None Include="..\..\Fixtures\model-grouping-cases.json"
+          Link="Fixtures\model-grouping-cases.json"
+          CopyToOutputDirectory="PreserveNewest" />
     <!-- Read by UpdateFlowTests.PackageIdMatchesPackagingScript: the Velopack
          pack id is an independent literal in the packaging script and in
          UpdateFlow, and a silent divergence would ship packages no installed

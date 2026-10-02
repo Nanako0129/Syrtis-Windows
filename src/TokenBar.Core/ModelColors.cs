@@ -118,7 +118,9 @@ public sealed class ModelColorMap
                 byProvider[key] = models;
             }
 
-            models[e.Model] = models.GetValueOrDefault(e.Model) + cost;
+            // Grouped on both sides so a raw entry and a raw lookup still meet.
+            var model = ModelGrouping.GroupId(e.Model);
+            models[model] = models.GetValueOrDefault(model) + cost;
         }
 
         foreach (var (providerKey, models) in byProvider)
@@ -149,7 +151,11 @@ public sealed class ModelColorMap
     public string Color(string? providerId, string modelId)
     {
         var key = ModelColors.ProviderColorKey(providerId, modelId);
-        if (_colorByKeyModel.TryGetValue($"{key} {modelId}", out var hit))
+        // The table is built from model-report rows, which the engine has
+        // already grouped, while graph and window callers pass raw ids;
+        // looking up the grouped id lets a raw grok-4.6-build find the
+        // grok-4.6 shade.
+        if (_colorByKeyModel.TryGetValue($"{key} {ModelGrouping.GroupId(modelId)}", out var hit))
         {
             return hit;
         }

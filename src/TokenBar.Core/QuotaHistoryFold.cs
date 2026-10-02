@@ -612,7 +612,10 @@ public static class QuotaHistoryFold
                     mineCacheWrite = mineCacheWrite.SaturatingAdd(message.CacheWrite);
                     mineReasoning = mineReasoning.SaturatingAdd(message.Reasoning);
                     mineCost += message.Cost;
-                    var key = new ModelKey(message.ProviderId, message.ModelId);
+                    // The per-model breakdown is display, not matching, so it
+                    // groups by display identity; scope and attribution above
+                    // keep the raw id.
+                    var key = new ModelKey(message.ProviderId, ModelGrouping.GroupId(message.ModelId));
                     var current = byModel.GetValueOrDefault(
                         key, (Tokens: 0L, Cost: 0.0, Breakdown: new TokenBreakdown(0, 0, 0, 0, 0)));
                     byModel[key] = (

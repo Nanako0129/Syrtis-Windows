@@ -21,6 +21,34 @@ public class DailyRowsTests
             new UsageMeta("g", "v", new DateRange("2026-06-01", "2026-06-30"), PricingMode.BestEffort, CostCoverage.Complete),
             new UsageSummary(0, 0, 0, 0, 0, 0, [], []), [], days);
 
+    // Grok Build keys turn usage by grok-<version>-build while the session
+    // names grok-<version>: one client's two stripes are one display model,
+    // while another client's stripe of the same model stays its own row.
+    [Fact]
+    public void GroupedModelStripesOfOneClientMergeAndMonthlyFollows()
+    {
+        ContributionClient Grok(string client, string model, long tokens, double cost) =>
+            new(client, model, "xai", new TokenBreakdown(tokens, 0, 0, 0, 0), cost, 1);
+        var payload = Payload(Day(
+            "2026-06-05",
+            [Grok("grok", "grok-4.6-build", 100, 2.0), Grok("grok", "grok-4.6", 30, 1.0),
+             Grok("opencode", "grok-4.6-build", 5, 0.5)]));
+
+        var day = Assert.Single(DailyRows.Build(payload, ["grok", "opencode"]));
+        Assert.Equal(2, day.Clients.Count);
+        var grok = Assert.Single(day.Clients, c => c.Client == "grok");
+        Assert.Equal("grok-4.6", grok.ModelId);
+        Assert.Equal(130L, grok.Tokens.Total);
+        Assert.Equal(3.0, grok.Cost, 6);
+        Assert.Equal(2, grok.Messages);
+        Assert.Equal("grok-4.6", Assert.Single(day.Clients, c => c.Client == "opencode").ModelId);
+
+        var month = Assert.Single(MonthlyRows.Build(payload, ["grok", "opencode"]));
+        Assert.Equal(
+            ["grok-4.6", "grok-4.6"],
+            month.Clients.Select(c => c.ModelId));
+    }
+
     [Fact]
     public void MessageAndCostOnlyRowsAreActiveAndOrdinalDescending()
     {
