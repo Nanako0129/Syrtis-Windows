@@ -880,10 +880,13 @@ public sealed partial class DashboardView
 
         // The line that keeps the money column from reading as a bill.
         // client.Owner, not clientId — see BuildClientQuota's own comment.
-        var disclaimer = Ui.Text(WindowHistoryText.Disclaimer(client.Owner), 9, 0.45);
-        disclaimer.TextWrapping = TextWrapping.Wrap;
-        disclaimer.Margin = new Thickness(0, 6, 0, 0);
-        body.Children.Add(disclaimer);
+        if (!client.LocalUsageUnattributed)
+        {
+            var disclaimer = Ui.Text(WindowHistoryText.Disclaimer(client.Owner), 9, 0.45);
+            disclaimer.TextWrapping = TextWrapping.Wrap;
+            disclaimer.Margin = new Thickness(0, 6, 0, 0);
+            body.Children.Add(disclaimer);
+        }
         return Ui.Card(WindowHistoryText.Title(), body, WindowHistoryText.Subtitle(rows));
     }
 

@@ -403,6 +403,31 @@ public class AccountIdentityTests
     }
 
     [Fact]
+    public void OverviewEquivalenceSkipsNonPrimaryAndUnmatchedSeriesOfMultiCardClients()
+    {
+        var quota = TwoAccounts(); // primary scope P, Desktop scope S
+        Assert.True(QuotaLensProjection.LocalUsageScopable(quota, Series("P")));
+        Assert.False(QuotaLensProjection.LocalUsageScopable(quota, Series("S")));
+        Assert.False(QuotaLensProjection.LocalUsageScopable(quota, Series("old")));
+        // Single-card client / no payload: unchanged.
+        var one = Payload(Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")));
+        Assert.True(QuotaLensProjection.LocalUsageScopable(one, Series("old")));
+        Assert.True(QuotaLensProjection.LocalUsageScopable(null, Series("S")));
+
+        var graph = new UsagePayload(
+            new UsageMeta("g", "v", new DateRange("2026-01-01", "2026-01-01"),
+                PricingMode.BestEffort, CostCoverage.Complete),
+            new UsageSummary(0, 0, 0, 0, 0, 0, [], []), [], []);
+        var model = QuotaLensProjection.Build(
+            [Series("P"), Series("S")], quota, graph, new WindowUsage([], 0, 0),
+            WindowEquivalence.FetchOutcome.Succeeded, WindowEquivalence.FetchOutcome.Succeeded,
+            new UsageAttribution.Table([], IsWritable: true), year: null,
+            new QuotaLensProjection.Selection(ClientRegistry.OverviewTab, ""));
+        var id = Assert.Single(model.Overview.Equivalences).Key;
+        Assert.Equal("P", id.AccountScope);
+    }
+
+    [Fact]
     public void AStoredTabOfAnotherAccountFallsBackToTheChosenAccountsDefaultTab()
     {
         // The stored tab names the PRIMARY's window; the Desktop account does

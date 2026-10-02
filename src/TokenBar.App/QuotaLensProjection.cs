@@ -214,9 +214,23 @@ public static class QuotaLensProjection
         // with no key rather than computing one from a read that did not
         // land; see this method's own doc comment on `windowUsageOutcome`.
         var equivalences = windowUsageOutcome == WindowEquivalence.FetchOutcome.Succeeded
-            ? QuotaEquivalenceFold.Build(history ?? [], windowUsage?.Messages ?? [], confirmed)
+            ? QuotaEquivalenceFold.Build(
+                [.. (history ?? []).Where(s => LocalUsageScopable(quota, s))],
+                windowUsage?.Messages ?? [], confirmed)
             : new Dictionary<QuotaWindowIdentity, WindowEquivalence.Row>();
         return new Overview(summaries, windows, grids, quotaHistoryOutcome, equivalences);
+    }
+
+    /// <summary>Whether a stored series may get a local-usage equivalence.
+    /// A client with one card keeps every series (as before). With several
+    /// cards only the PRIMARY's series qualify: Windows has no per-account
+    /// scan, so a non-primary (or unmatched) series would be priced from the
+    /// primary's messages.</summary>
+    internal static bool LocalUsageScopable(AgentUsagePayload? quota, QuotaHistorySeries series)
+    {
+        var cards = (quota?.Agents ?? []).Where(a => a.ClientId == series.ProviderId).ToList();
+        return cards.Count <= 1
+            || cards.Any(a => a.Account.AccountKey is null && a.HistoryScope?.Scope == series.AccountScope);
     }
 
     /// <summary>
