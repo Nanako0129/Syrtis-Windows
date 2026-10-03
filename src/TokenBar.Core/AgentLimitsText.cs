@@ -37,10 +37,13 @@ public static class LimitsCardOrder
     public static IReadOnlyList<AgentUsageSnapshot> Apply(
         IReadOnlyList<AgentUsageSnapshot> agents, string orderRaw)
     {
-        var primaries = agents.Where(static a => a.Account.AccountKey is null)
+        // A list for the payload order (Dictionary enumeration order is not
+        // a contract), a dictionary for lookup. One primary per client.
+        var primaryList = agents.Where(static a => a.Account.AccountKey is null)
             .DistinctBy(static a => a.ClientId)
-            .ToDictionary(static a => a.ClientId);
-        var ordered = ClientRegistry.OrderedClients([.. primaries.Keys], orderRaw);
+            .ToList();
+        var primaries = primaryList.ToDictionary(static a => a.ClientId);
+        var ordered = ClientRegistry.OrderedClients([.. primaryList.Select(static a => a.ClientId)], orderRaw);
         var output = new List<AgentUsageSnapshot>(agents.Count);
         foreach (var id in ordered)
         {
