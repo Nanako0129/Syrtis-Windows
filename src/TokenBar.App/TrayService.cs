@@ -603,6 +603,9 @@ public sealed class TrayService : IDisposable
             + "|" + AppSettings.Store.GetString(MenuBarTextColor.CriticalColorKey);
         var signature =
             $"{mode}|{styleRaw}|{coloring}|{dark}|{title}|{remaining:F1}|{animate}|{stale}"
+            // A still sand icon is the level's dune, so it follows usage too
+            // (macOS updateAnimationSpeedIfPresented).
+            + (styleRaw == SandShoal.Style ? $"|sand{_animator.SandLevel()}" : "")
             + $"|{textColorMode}|{textColorHex}";
         if (signature == _iconSignature)
         {
@@ -613,7 +616,7 @@ public sealed class TrayService : IDisposable
 
         // Hidden mode with an animation style hands the icon to the
         // animator; every other state renders one static frame here.
-        if (mode == TrayMode.Hidden && styleRaw is "cat" or "parrot")
+        if (mode == TrayMode.Hidden && SandShoal.IsAnimated(styleRaw))
         {
             _animator.Start(styleRaw, dark,
                 animate: animate);

@@ -382,12 +382,13 @@ public sealed class SettingsWindow : Window
         icon.Children.Add(RadioGroup(
             "tray.style",
             [
-                ("cat", "Cat".Localized()), ("parrot", "Parrot".Localized()), ("bars", "Signal bars".Localized()),
+                ("cat", "Cat".Localized()), ("parrot", "Parrot".Localized()),
+                (SandShoal.Style, SandShoal.Label), ("bars", "Signal bars".Localized()),
                 ("ring", "Ring gauge".Localized()), ("popsicle", "Melting popsicle".Localized()),
             ],
             styleRaw,
             raw => store.SetString("tokenbar.tray.animationStyle", raw)));
-        if (styleRaw is "cat" or "parrot")
+        if (SandShoal.IsAnimated(styleRaw))
         {
             var animate = new ToggleSwitch
             {
@@ -398,9 +399,16 @@ public sealed class SettingsWindow : Window
             animate.Toggled += (_, _) =>
                 store.SetBool("tokenbar.tray.animate", animate.IsOn);
             icon.Children.Add(ToggleRow("Animate with token rate".Localized(), animate));
-            icon.Children.Add(Hint(
-                ("Idle purrs at 2 fps; a heavy session sprints. Shown only in "
-                    + "the icon-only tray mode.").Localized()));
+            // The cat and parrot speed up with the rate; the sand plays at a
+            // fixed 24 fps and shows usage by how much falls, so this hint
+            // would describe the wrong animation for it (macOS shows no such
+            // hint for the sand).
+            if (styleRaw != SandShoal.Style)
+            {
+                icon.Children.Add(Hint(
+                    ("Idle purrs at 2 fps; a heavy session sprints. Shown only in "
+                        + "the icon-only tray mode.").Localized()));
+            }
             // macOS SettingsPanel.swift:309-316: the pace applies only while
             // the animation follows the rate, so it is offered only then.
             if (animate.IsOn)
@@ -420,7 +428,8 @@ public sealed class SettingsWindow : Window
                     }));
                 icon.Children.Add(detail);
                 icon.Children.Add(Hint(
-                    ("The cat and parrot speed up as the live token rate climbs. The pace "
+                    ("The cat and parrot speed up and the sand gets busier as the live token "
+                        + "rate climbs. The pace "
                         + "sets how much traffic reaches the top: Light at 600K tokens/min, "
                         + "Moderate at 3M, Heavy at 10M.").Localized()));
             }
@@ -1686,8 +1695,11 @@ public sealed class SettingsWindow : Window
         {
             var dir = Path.Combine(
                 AppContext.BaseDirectory, "Assets",
-                $"anim-{(styleRaw == "parrot" ? "parrot" : "cat2")}{(dark ? "" : "-light")}");
-            using var raw = new System.Drawing.Bitmap(Path.Combine(dir, "frame-00.png"));
+                SandShoal.AssetDirectory(styleRaw + "0", dark)
+                    ?? $"anim-{(styleRaw == "parrot" ? "parrot" : "cat2")}{(dark ? "" : "-light")}");
+            // Sand frames are numbered frame-000; first file either way.
+            using var raw = new System.Drawing.Bitmap(
+                Directory.GetFiles(dir, "frame-*.png").OrderBy(f => f).First());
             using var g = System.Drawing.Graphics.FromImage(canvas);
             g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
             var scale = Math.Min(32.0 / raw.Width, 32.0 / raw.Height);
