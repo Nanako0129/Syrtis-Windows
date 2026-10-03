@@ -336,6 +336,25 @@ public static class ClientRegistry
     public static IReadOnlySet<string> HiddenLimitsClients(SettingsStore store) =>
         ParseIdSet(store.GetString(LimitsHiddenKey) ?? "");
 
+    /// <summary>The Settings write path for <see cref="LimitsHiddenKey"/>:
+    /// adds or removes one client id, member-specific (no group fold — each
+    /// group member keeps its own quota card), stored sorted and comma-joined
+    /// as macOS writes it.</summary>
+    public static void SetLimitsHidden(SettingsStore store, string clientId, bool hidden)
+    {
+        var set = new SortedSet<string>(HiddenLimitsClients(store), StringComparer.Ordinal);
+        if (hidden)
+        {
+            set.Add(clientId);
+        }
+        else
+        {
+            set.Remove(clientId);
+        }
+
+        store.SetString(LimitsHiddenKey, string.Join(',', set));
+    }
+
     /// <summary>Clients excluded from the menu-bar quota AUTO pick: tab-hidden
     /// ∪ limits-hidden. A client hidden from either surface must not drive
     /// the tray quota % (an explicit tray selection is honored separately).

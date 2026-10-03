@@ -1001,11 +1001,17 @@ public sealed partial class DashboardView : UserControl
                     ? BuildQuotaSummary(snapshot)
                     : null,
                 OverviewCard.Chart => BuildUsageChartCard(snapshot),
-                OverviewCard.Limits => Ui.Card(
-                    limitsClientId is { } cid
-                        ? "{0} limits".Localized(ClientRegistry.ShortName(cid))
-                        : "Agent limits".Localized(),
-                    BuildLimits(snapshot, limitsClientId)),
+                OverviewCard.Limits => limitsClientId is { } hiddenCid
+                    && LimitsCardFilter.HidesClientCard(
+                        snapshot.Quota?.Agents ?? [],
+                        hiddenCid,
+                        ClientRegistry.HiddenLimitsClients(AppSettings.Store))
+                    ? null
+                    : Ui.Card(
+                        limitsClientId is { } cid
+                            ? "{0} limits".Localized(ClientRegistry.ShortName(cid))
+                            : "Agent limits".Localized(),
+                        BuildLimits(snapshot, limitsClientId)),
                 // Absent when there is no live session, or when this tab is
                 // scoped to one client — the trace answers "across everything
                 // right now", which a single-client tab did not ask.
@@ -1602,12 +1608,14 @@ public sealed partial class DashboardView : UserControl
         DashboardModel.Snapshot snapshot, string? clientId = null)
     {
         var panel = new StackPanel { Spacing = 10 };
-        var agents = snapshot.Quota?.Agents ?? [];
-        if (clientId is not null)
-        {
-            // Every account of the client: hiding or narrowing is per client.
-            agents = [.. agents.Where(agent => agent.ClientId == clientId)];
-        }
+        // Narrowed to the tab's client, then the per-client limits toggle and
+        // (Overview only) tab visibility applied, before any exit below reads
+        // the list (LimitsCardFilter).
+        var agents = LimitsCardFilter.Visible(
+            snapshot.Quota?.Agents ?? [],
+            clientId,
+            ClientRegistry.HiddenTabClients(AppSettings.Store),
+            ClientRegistry.HiddenLimitsClients(AppSettings.Store));
 
         // Round 11's P2 finding, corrected: retained data wins over a failed
         // refetch — QuotaSummaryText.LimitsState checks `agents.Count > 0`
@@ -1615,6 +1623,17 @@ public sealed partial class DashboardView : UserControl
         // BuildQuotaSummary already applies to the sibling summary card. See
         // that method's own doc comment for why the earlier ordering (outcome
         // checked first) was wrong.
+        // Overview with every card switched off while the payload has cards:
+        // say so, not "No quota data yet" (macOS "No supported agents yet"
+        // for an empty visible list). A client tab whose card is off draws no
+        // card at all (LimitsCardFilter.HidesClientCard, at the callers).
+        var payloadHasCards = (snapshot.Quota?.Agents.Count ?? 0) > 0;
+        if (clientId is null && payloadHasCards && agents.Count == 0)
+        {
+            panel.Children.Add(Ui.Dim("No supported agents yet".Localized()));
+            return panel;
+        }
+
         switch (QuotaSummaryText.LimitsState(agents.Count > 0, snapshot.QuotaOutcome))
         {
             case AgentLimitsState.Failed:
