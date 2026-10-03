@@ -636,12 +636,9 @@ public sealed partial class DashboardView : UserControl
         RateValue.Text = Format.CompactTokens((long)rate);
         CostLine.Text = CostSurfaceProjection.HeaderCostLine(
             today?.Cost ?? 0, stats, snapshot.CostAuthoritative);
-        // While the graph on screen is a restored snapshot, "updated" is its
-        // capture time: FetchedAt is re-stamped by every quota / trace / model
-        // publish, which land long before the live graph does.
-        FooterText.Text = "updated {0}".Localized(
-            (snapshot.RestoredAt?.ToLocalTime() ?? snapshot.FetchedAt).ToString(
-                "HH:mm:ss", System.Globalization.CultureInfo.CurrentCulture));
+        // A restored snapshot reads as its age: FetchedAt is re-stamped by
+        // every quota / trace / model publish long before the live graph lands.
+        FooterText.Text = RefreshTip.Footer(snapshot.RestoredAt, snapshot.FetchedAt, DateTimeOffset.Now);
     }
 
     private string _yearPickerSignature = "";
