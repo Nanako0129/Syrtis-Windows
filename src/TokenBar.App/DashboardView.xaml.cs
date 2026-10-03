@@ -59,7 +59,6 @@ public sealed partial class DashboardView : UserControl
     public DashboardView()
     {
         InitializeComponent();
-        ProductTitle.Text = ProductIdentity.Name;
         SetLiveRate(0);
         // WinUI otherwise synthesizes a tooltip containing "Esc" for the
         // dashboard-wide Escape accelerator whenever the pointer rests over
