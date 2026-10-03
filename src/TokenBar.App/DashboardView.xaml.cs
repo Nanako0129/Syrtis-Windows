@@ -2351,13 +2351,29 @@ public sealed partial class DashboardView : UserControl
         if (CostSurfaceProjection.FavoriteModel(SelectedModelEntries(snapshot), authoritative)
             is { } favorite)
         {
-            var name = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5 };
+            // Label, then the dot and a name that trims rather than pushing
+            // the label out: a model id can outrun the card (macOS truncates
+            // it in the middle). The name's star column takes what the label
+            // leaves, so it trims at any card width.
+            var row = new Grid { ColumnSpacing = 8 };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.Children.Add(Ui.Dim("Favorite model".Localized(), 11));
+            var name = new Grid { ColumnSpacing = 5, HorizontalAlignment = HorizontalAlignment.Right };
+            name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            name.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var disc = Ui.Disc(
                 new ModelColorMap(snapshot.Models, authoritative).Color(favorite.Provider, favorite.Model), 7);
             disc.VerticalAlignment = VerticalAlignment.Center;
             name.Children.Add(disc);
-            name.Children.Add(Ui.Text(favorite.Model, 11));
-            lines.Children.Add(Ui.Row(Ui.Dim("Favorite model".Localized(), 11), name));
+            var text = Ui.Text(favorite.Model, 11);
+            text.TextTrimming = TextTrimming.CharacterEllipsis;
+            text.TextWrapping = TextWrapping.NoWrap;
+            Grid.SetColumn(text, 1);
+            name.Children.Add(text);
+            Grid.SetColumn(name, 1);
+            row.Children.Add(name);
+            lines.Children.Add(row);
         }
 
         if (StatsSummary.BestDay(stats, authoritative) is { } bestDay)
