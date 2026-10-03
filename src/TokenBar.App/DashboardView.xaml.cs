@@ -899,7 +899,7 @@ public sealed partial class DashboardView : UserControl
         {
             Content = content,
             FontSize = 11,
-            Padding = new Thickness(9, 4, 9, 4),
+            Padding = TabPadding,
             FontWeight = active
                 ? Microsoft.UI.Text.FontWeights.SemiBold
                 : Microsoft.UI.Text.FontWeights.Normal,
@@ -948,6 +948,8 @@ public sealed partial class DashboardView : UserControl
     /// <summary>The drop line drawn on the hovered tab's leading or trailing
     /// edge: 2 px of the accent, as macOS draws an accent Capsule 2 wide.</summary>
     private const double TabDropLineWidth = 2;
+
+    private static readonly Thickness TabPadding = new(9, 4, 9, 4);
 
     /// <summary>Drag a client tab onto another to reorder the row; the order is
     /// written to the same tabs.order key the Settings ↑/↓ buttons write, through
@@ -1074,6 +1076,15 @@ public sealed partial class DashboardView : UserControl
                 -1 => new Thickness(TabDropLineWidth, 0, 0, 0),
                 1 => new Thickness(0, 0, TabDropLineWidth, 0),
                 _ => new Thickness(0),
+            };
+            // Give back the line's width from the padding on the same side,
+            // so the tab does not grow 2 px and shift the hit boundary under
+            // the pointer.
+            child.Padding = edge switch
+            {
+                -1 => new Thickness(TabPadding.Left - TabDropLineWidth, TabPadding.Top, TabPadding.Right, TabPadding.Bottom),
+                1 => new Thickness(TabPadding.Left, TabPadding.Top, TabPadding.Right - TabDropLineWidth, TabPadding.Bottom),
+                _ => TabPadding,
             };
         }
     }
