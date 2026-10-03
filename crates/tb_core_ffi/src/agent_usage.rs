@@ -15761,7 +15761,9 @@ mod grokbot_tests {
     /// re-read refuses, the marker is published and the mock gets nothing.
     #[tokio::test]
     async fn consent_withdrawn_before_send_sends_nothing() {
-        let (desktop_url, desktop) = mock(vec![reply(200, USAGE_OK)]).await;
+        // No scripted reply: `mock` would wait forever for a connection the
+        // correct code never makes; a stray request is still recorded.
+        let (desktop_url, desktop) = mock(vec![]).await;
         let (cursor_url, cursor) = mock(vec![]).await;
         let harness = Harness::new("withdrawn-before-send", cursor_url);
         harness.install_grok_bot(|path| {
