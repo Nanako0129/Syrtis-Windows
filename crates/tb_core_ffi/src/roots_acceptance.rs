@@ -265,6 +265,19 @@ fn a_registered_root_never_reaches_the_primary_window() {
     let extra = call_window(Some(&work_text), WINDOW_FROM, WINDOW_UNTIL);
     assert_eq!(claude_output(&extra), EXTRA);
     assert!(extra["data"]["messages"].as_array().unwrap().iter().all(|m| m["client"] == "claude"));
+
+    // The race, made deterministic: a primary request holds the context
+    // captured with the root, then a setter clears the roots before the
+    // request looks at the registry. The answer is still the primary's only
+    // (its publish is dropped as stale; the returned value must not mix).
+    let held = crate::LocalSourceContext::process().unwrap();
+    crate::apply_scan_roots_for_test(std::collections::BTreeMap::new()).unwrap();
+    let raced = crate::window_usage::cached(&held, &None, WINDOW_FROM, WINDOW_UNTIL).unwrap();
+    assert_eq!(
+        claude_output(&serde_json::json!({ "data": raced })),
+        PRIMARY,
+        "a context captured with roots must not answer for the primary"
+    );
 }
 
 // ---- 4′: the gate, everywhere (empty setters still move the generation) --

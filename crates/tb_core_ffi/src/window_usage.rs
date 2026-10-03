@@ -177,7 +177,6 @@ fn scoped_context(
     account: &Option<String>,
 ) -> Result<crate::LocalSourceContext, String> {
     let registry = crate::extra_scan_paths::snapshot();
-    let roots = registry.get(CLAUDE).cloned().unwrap_or_default();
     // The primary window scans exactly what it scanned before W4b: the
     // process context when no extra root is registered, otherwise a context
     // captured with the same inputs `main` uses for it (`user_home_dir()`,
@@ -189,7 +188,13 @@ fn scoped_context(
     // naming an extra account's directory, `TOKSCALE_EXTRA_DIRS`) are still
     // counted for the primary, exactly as on `main`; closing them needs that
     // engine fix (Plan slice W4c).
-    if account.is_none() && roots.is_empty() {
+    //
+    // Whether the process context can serve the primary as is is read from
+    // the context itself, not from the registry: a request holding a context
+    // captured with roots, racing a setter that just cleared them, would
+    // otherwise see an empty registry and scan the old context with the
+    // removed roots under primary scope (CodeRabbit security review, #167).
+    if account.is_none() && context.resolved().scanner_settings().extra_scan_paths.is_empty() {
         return Ok(context.clone());
     }
     let memo_key = (context.generation(), account.as_deref().map(account_identity));
