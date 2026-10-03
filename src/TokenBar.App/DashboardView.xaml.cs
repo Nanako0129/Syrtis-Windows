@@ -39,12 +39,14 @@ public sealed partial class DashboardView : UserControl
     private ChartMetric _chartMetric =
         AppSettings.Store.GetString("tokenbar.chart.metric") == "cost"
             ? ChartMetric.Cost : ChartMetric.Tokens;
-    private bool _chartView3D =
-        AppSettings.Store.GetString("tokenbar.chart.view", "2d") == "3d";
-
+    private ChartView _chartView =
+        ChartViews.Parse(AppSettings.Store.GetString(ChartViews.Key, "2d"));
     // Ctrl-held number hints on the tab row (macOS cmdHeld/cmdHintTask).
     private readonly CtrlHintGate _hintGate = new();
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _hintTimer;
+    // The heatmap's horizontal scroller while it is on screen, so the wheel
+    // router can scroll it like the tab rows; null otherwise.
+    private ScrollViewer? _heatmapScroll;
 
     public DashboardView()
     {
@@ -242,7 +244,7 @@ public sealed partial class DashboardView : UserControl
     private Graph3DPanel EnsureGraph3D() => _graph3d ??= new Graph3DPanel();
 
     private bool Graph3DShouldBeActive =>
-        _graph3dDevMode || (_chartView3D
+        _graph3dDevMode || (_chartView == ChartView.ThreeD
             && _view is AppView.Overview or AppView.Stats);
 
     private void SyncGraph3DActivity()
@@ -264,11 +266,8 @@ public sealed partial class DashboardView : UserControl
             return;
         }
 
-        var stats = _selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet);
-        var year = _model?.Year ?? Format.TodayKey()[..4];
-        var grid = TokenBar.Core.Grid.Build(year, stats.PerDayMap);
         _graph3d.SetData(
-            grid,
+            CurrentGrid(snapshot),
             ActualTheme == ElementTheme.Dark,
             snapshot.CostAuthoritative);
     }
@@ -284,22 +283,32 @@ public sealed partial class DashboardView : UserControl
         _graph3dContentHost = null;
     }
 
-    private void ToggleChartView() => SetChartView(!_chartView3D);
+    private string GridYear => _model?.Year ?? Format.TodayKey()[..4];
 
-    private void SetChartView(bool use3D)
+    /// <summary>The year grid for the selected clients. The 3D graph and the
+    /// flat heatmap both read it, so they cannot show different data.</summary>
+    private TokenBar.Core.GridLayout CurrentGrid(DashboardModel.Snapshot snapshot)
     {
-        if (_chartView3D == use3D)
+        var stats = _selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet);
+        return TokenBar.Core.Grid.Build(GridYear, stats.PerDayMap);
+    }
+
+    private void ToggleChartView() => SetChartView(_chartView.Next());
+
+    private void SetChartView(ChartView view)
+    {
+        if (_chartView == view)
         {
             return;
         }
 
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        _chartView3D = use3D;
-        AppSettings.Store.SetString("tokenbar.chart.view", use3D ? "3d" : "2d");
+        _chartView = view;
+        AppSettings.Store.SetString(ChartViews.Key, view.Raw());
         RenderContent(animated: false);
         SyncGraph3DActivity();
         var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-        DevLog.Write($"graph3d: toggle view={(use3D ? "3d" : "2d")} "
+        DevLog.Write($"graph3d: toggle view={view.Raw()} "
             + $"elapsed={elapsed:F1}ms");
     }
 
@@ -425,91 +434,6 @@ public sealed partial class DashboardView : UserControl
         SwitchTo(_view);
     }
 
-member: [ and ]
-    /// step the tab row, comma opens Settings. Kept as raw virtual-key codes
-    /// rather than characters, so the binding follows the physical key the
-    /// same way the accelerator-based shortcuts do.</summary>
-    private void OnOemShortcut(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
-    {
-        const int VkOem4 = 0xDB;  // [
-        const int VkOem6 = 0xDD;  // ]
-        const int VkOemComma = 0xBC;
-
-        var ctrl = Microsoft.UI.Input.InputKeyboardSource
-            .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control)
-            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
-        if (!ctrl)
-        {
-            return;
-        }
-
-        switch ((int)e.Key)
-        {
-            case VkOem4:
-                StepTab(-1);
-                break;
-            case VkOem6:
-                StepTab(1);
-                break;
-            case VkOemComma:
-                TrayService.OpenSettings?.Invoke();
-                break;
-            default:
-                return;
-        }
-
-        e.Handled = true;
-        DevLog.Write($"oem shortcut: key=0x{(int)e.Key:X2}");
-    }
-
-    private void AddAccel(
-        Windows.System.VirtualKey key, Windows.System.VirtualKeyModifiers mods,
-        Action action)
-    {
-        var accel = new Microsoft.UI.Xaml.Input.KeyboardAccelerator
-        {
-            Key = key,
-            Modifiers = mods,
-        };
-        accel.Invoked += (_, e) =>
-        {
-            action();
-            e.Handled = true;
-        };
-        KeyboardAccelerators.Add(accel);
-    }
-
-    /// <summary>Push the hidden-lens set into the tab row. Buttons are built
-    /// once in the constructor, so this toggles Visibility rather than
-    /// rebuilding, and then re-runs the current selection through SwitchTo —
-    /// whose Effective() guard moves us off a lens that was just hidden.
-    /// Hiding the lens you are looking at must not leave it on screen with no
-    /// tab to return to.</summary>
-    private void ApplyLensVisibility()
-    {
-        var visible = AppViews.Visible(AppSettings.Store);
-        foreach (var (view, button) in _tabs)
-        {
-            button.Visibility = visible.Contains(view)
-                ? Visibility.Visible
-                : Visibility.Collapsed;
-        }
-
-        SwitchTo(_view);
-    }
-
-    private void CycleLens(int step)
-    {
-        var lenses = AppViews.Visible(AppSettings.Store);
-        var index = lenses.IndexOf(_view);
-        if (index < 0)
-        {
-            index = 0;
-        }
-
-        SwitchTo(lenses[(index + step + lenses.Count) % lenses.Count]);
-    }
-
     /// <summary>One control, two states (macOS refreshButton): the glyph
     /// while idle, a spinner while a forced re-read or the initial load runs.</summary>
     private void UpdateRefreshControl(bool loading = false)
@@ -587,6 +511,7 @@ member: [ and ]
         ClientTabsPanel.Children.Clear();
 
         DetachGraph3DContentHost();
+        _heatmapScroll = null;
         ContentHost.Content = null;
         if (!_graph3dDevMode)
         {
@@ -746,14 +671,14 @@ member: [ and ]
         }
     }
 
-    /// <summary>A vertical wheel over either tab row scrolls that row
+    /// <summary>A vertical wheel over either tab row (or the heatmap) scrolls it
     /// horizontally (macOS HorizontalWheelScroll). Returns false when the row
     /// is already at the end it is being pushed toward, so the wheel falls
     /// through to the dashboard's vertical scroll instead of dying under the
     /// cursor.</summary>
     private bool TryScrollTabRowAt(Windows.Foundation.Point point, int delta)
     {
-        foreach (var row in new[] { ClientTabsScroll, TabsScroll })
+        foreach (var row in new[] { ClientTabsScroll, TabsScroll, _heatmapScroll })
         {
             if (row is null || row.Visibility != Visibility.Visible)
             {
@@ -946,6 +871,7 @@ member: [ and ]
         }
 
         DetachGraph3DContentHost();
+        _heatmapScroll = null;
         UIElement content = _view switch
         {
             AppView.Quota => BuildQuota(_snapshot),
@@ -1043,7 +969,7 @@ member: [ and ]
         Ui.Card(
             "Token Usage".Localized(),
             BuildChart(snapshot),
-            (_chartView3D ? "Full year" : "30 days").Localized(),
+            (_chartView == ChartView.Bars ? "30 days" : "Full year").Localized(),
             BuildChartViewToggle());
 
     private FrameworkElement BuildChartViewToggle()
@@ -1053,12 +979,19 @@ member: [ and ]
             Orientation = Orientation.Horizontal,
             Spacing = 2,
         };
-        var twoD = LensPill("2D", !_chartView3D);
-        var threeD = LensPill("3D", _chartView3D);
-        twoD.Click += (_, _) => SetChartView(false);
-        threeD.Click += (_, _) => SetChartView(true);
-        row.Children.Add(twoD);
-        row.Children.Add(threeD);
+        // Picker order is the Ctrl+G cycle order (bars, heatmap, 3D).
+        foreach (var (view, label) in new[]
+        {
+            (ChartView.Bars, "Bars".Localized()),
+            (ChartView.Heatmap, "Heatmap".Localized()),
+            (ChartView.ThreeD, "3D"),
+        })
+        {
+            var pill = LensPill(label, _chartView == view);
+            pill.Click += (_, _) => SetChartView(view);
+            row.Children.Add(pill);
+        }
+
         return row;
     }
 
@@ -1069,10 +1002,12 @@ member: [ and ]
             return Ui.Dim("No visible client usage.".Localized());
         }
 
-        if (_chartView3D)
+        if (_chartView == ChartView.ThreeD)
         {
             return BuildGraph3D(snapshot);
         }
+
+        var heatmap = _chartView == ChartView.Heatmap;
 
         var holder = new StackPanel();
 
@@ -1103,9 +1038,14 @@ member: [ and ]
                 SetMetric(ChartMetric.Cost);
             }
         };
-        toggles.Children.Add(byModel);
-        toggles.Children.Add(byAgent);
-        toggles.Children.Add(new Border { Width = 8 });
+        if (!heatmap)
+        {
+            // Model/Agent stacking has nowhere to go in a one-colour cell.
+            toggles.Children.Add(byModel);
+            toggles.Children.Add(byAgent);
+            toggles.Children.Add(new Border { Width = 8 });
+        }
+
         toggles.Children.Add(byTokens);
         toggles.Children.Add(byCost);
 
@@ -1134,6 +1074,12 @@ member: [ and ]
                 snapshot.CostAuthoritative, _chartMetric))
         {
             holder.Children.Add(Ui.Dim(CostSurfaceProjection.ChartChecking));
+            return holder;
+        }
+
+        if (heatmap)
+        {
+            holder.Children.Add(BuildHeatmap(snapshot, _chartMetric));
             return holder;
         }
 
@@ -1271,6 +1217,109 @@ member: [ and ]
 
         canvas.SizeChanged += (_, _) => Draw();
         return holder;
+    }
+
+    /// <summary>The flat, Sunday-first year heatmap (macOS ContributionHeatmap):
+    /// a cell per day of the same grid the 3D graph reads, a five-step blue ramp
+    /// by the chosen metric, month labels above, opening scrolled to the most
+    /// recent day. All decisions come from <see cref="HeatmapMath"/>.</summary>
+    private FrameworkElement BuildHeatmap(DashboardModel.Snapshot snapshot, ChartMetric metric)
+    {
+        var grid = CurrentGrid(snapshot);
+        var cutoff = HeatmapMath.Cutoff(GridYear, Format.TodayKey());
+        var labels = HeatmapMath.MonthLabels(grid, cutoff);
+        var max = HeatmapMath.MaxValue(grid, metric, cutoff);
+        var dark = ActualTheme == ElementTheme.Dark;
+        var canvas = new Canvas
+        {
+            Width = HeatmapMath.ContentWidth(HeatmapMath.VisibleCols(grid, cutoff), labels),
+            Height = HeatmapMath.ContentHeight,
+        };
+
+        foreach (var (col, month) in labels)
+        {
+            var label = Ui.Text(HeatmapMath.MonthAbbrev[month - 1].Localized(), 10, 0.6);
+            Canvas.SetLeft(label, HeatmapMath.GridLeading + col * HeatmapMath.Step);
+            Canvas.SetTop(label, 0);
+            canvas.Children.Add(label);
+        }
+
+        // One shared hover ring, sitting in the gap around the hovered cell
+        // (macOS hoverRingInset -1).
+        var ring = new Rectangle
+        {
+            Width = HeatmapMath.Cell + 2,
+            Height = HeatmapMath.Cell + 2,
+            RadiusX = 3,
+            RadiusY = 3,
+            Stroke = HoverOutlineBrush(),
+            StrokeThickness = 1,
+            Visibility = Visibility.Collapsed,
+            IsHitTestVisible = false,
+        };
+
+        foreach (var cell in grid.Cells)
+        {
+            if (!HeatmapMath.IsRenderable(cell, cutoff))
+            {
+                continue;
+            }
+
+            var (a, r, g, b) = HeatmapMath.Fill(
+                HeatmapMath.Level(HeatmapMath.Value(cell, metric), max), dark);
+            var (x, y) = HeatmapMath.CellOrigin(cell.Col, cell.Row);
+            var rect = new Rectangle
+            {
+                Width = HeatmapMath.Cell,
+                Height = HeatmapMath.Cell,
+                RadiusX = 2,
+                RadiusY = 2,
+                Fill = new SolidColorBrush(Color.FromArgb(a, r, g, b)),
+            };
+            Canvas.SetLeft(rect, x);
+            Canvas.SetTop(rect, y);
+            canvas.Children.Add(rect);
+
+            if (HeatmapMath.HasData(cell, metric))
+            {
+                var captured = cell;
+                AttachHoverOutline(rect, hovered =>
+                {
+                    Canvas.SetLeft(ring, x - 1);
+                    Canvas.SetTop(ring, y - 1);
+                    ring.Visibility = hovered ? Visibility.Visible : Visibility.Collapsed;
+                });
+                HoverTip.AttachRich(rect, () => HeatmapTip(captured, snapshot.CostAuthoritative));
+            }
+        }
+
+        canvas.Children.Add(ring);
+
+        var scroll = new ScrollViewer
+        {
+            Content = canvas,
+            HorizontalScrollMode = ScrollMode.Enabled,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            VerticalScrollMode = ScrollMode.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Margin = new Thickness(0, 6, 0, 0),
+        };
+        // Land on the most recent columns, not Jan 1 (ChangeView clamps).
+        scroll.Loaded += (_, _) => DispatcherQueue.TryEnqueue(
+            Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () => scroll.ChangeView(canvas.Width, null, null, disableAnimation: true));
+        _heatmapScroll = scroll;
+        return scroll;
+    }
+
+    private UIElement HeatmapTip(TokenBar.Core.GridCell cell, bool costAuthoritative)
+    {
+        var panel = new StackPanel { Spacing = 5, MinWidth = 170 };
+        panel.Children.Add(TipText(Format.MonthDay(cell.Date), 12, bold: true));
+        panel.Children.Add(TipRow(
+            TipText("{0} tokens".Localized(Format.ExactTokens(cell.Tokens)), 11, 0.9),
+            CostSurfaceProjection.DayTipCost(cell.Tokens, cell.Cost, costAuthoritative), 0.9));
+        return panel;
     }
 
     private FrameworkElement BuildGraph3D(DashboardModel.Snapshot snapshot)
