@@ -78,4 +78,17 @@ public class TooltipPlacementTests
         Assert.True(at.Y >= TooltipPlacement.EdgeInset);
         Assert.True(at.Y + 520 <= Window.Bottom - TooltipPlacement.EdgeInset);
     }
+
+    // A viewport narrower than the card hands it to the window rather than
+    // letting it run off the viewport's side (verifier counterexample).
+    [Fact]
+    public void ACardWiderThanTheViewportShowsInFullInTheWindow()
+    {
+        var narrow = new Box(200, 60, 200, 500);
+
+        var at = TooltipPlacement.Origin(300, 300, 300, 50, narrow, narrow, Window)!.Value;
+
+        Assert.True(at.X >= TooltipPlacement.EdgeInset);
+        Assert.True(at.X + 300 <= Window.Right - TooltipPlacement.EdgeInset);
+    }
 }

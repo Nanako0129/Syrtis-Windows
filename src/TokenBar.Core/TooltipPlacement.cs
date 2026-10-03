@@ -64,20 +64,22 @@ public static class TooltipPlacement
             return null;
         }
 
-        var visible = area.Inset(EdgeInset);
-        if (visible.IsEmpty)
-        {
-            return null;
-        }
-
-        // A card taller than the scroll area is placed in the whole window
-        // instead, so it still shows in full rather than hanging over the
-        // footer (macOS pins it to the viewport top; there the popover's
+        // A card the scroll area cannot hold (taller or wider than it, or an
+        // area too small to inset) is placed in the whole window instead, so
+        // it still shows in full rather than hanging over the footer or off
+        // the side (macOS pins it to the viewport top; there the popover's
         // viewport is the only space).
-        if (tipHeight >= visible.Height && area != window && !window.IsEmpty)
+        var visible = area.Inset(EdgeInset);
+        if (area != window
+            && (visible.IsEmpty || tipHeight >= visible.Height || tipWidth > visible.Width))
         {
             area = window;
             visible = area.Inset(EdgeInset);
+        }
+
+        if (visible.IsEmpty)
+        {
+            return null;
         }
 
         // Horizontally within the hovered element and the visible area; an
