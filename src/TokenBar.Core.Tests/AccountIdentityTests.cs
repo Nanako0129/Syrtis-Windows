@@ -337,7 +337,8 @@ public class AccountIdentityTests
         Assert.Equal(Desktop, WindowCardText.WindowCardAccount(desktopOnly, "claude", ""));
     }
 
-    private static QuotaLensProjection.Client ClientFor(string? stored, string? storedTab = null)
+    private static QuotaLensProjection.Client ClientFor(
+        string? stored, string? storedTab = null, IReadOnlyCollection<string>? localClients = null)
     {
         var messages = new[] { new WindowMessage(97 * Hour * 1000 + 1, "claude", "anthropic", "m", 10, 0, 0, 0, 0, 1.0, true) };
         var history = new[]
@@ -356,7 +357,7 @@ public class AccountIdentityTests
                 [new UsageAttribution.Record("claude", "anthropic", UsageAttribution.State.Assigned("claude"))],
                 IsWritable: true),
             year: null,
-            new QuotaLensProjection.Selection("claude", storedTab ?? "", WindowCardAccount: stored)).Client!;
+            new QuotaLensProjection.Selection("claude", storedTab ?? "", WindowCardAccount: stored, LocalUsageClients: localClients)).Client!;
     }
 
     [Fact]
@@ -379,6 +380,47 @@ public class AccountIdentityTests
         Assert.Null(desktop.LiveEquivalence);
         Assert.Equal(0, desktop.UndatedCount);
         Assert.Equal("Local usage can't be attributed to this account yet.", WindowCardText.LocalUsageUnattributed());
+    }
+
+    [Fact]
+    public void QuotaOnlyTabTreatsEvenThePrimaryAsUnattributed()
+    {
+        var primary = ClientFor(null, localClients: ["codex"]);
+        Assert.True(primary.LocalUsageUnattributed);
+        Assert.Empty(primary.Mine);
+        Assert.Empty(primary.Messages);
+        Assert.Null(primary.LiveEquivalence);
+        Assert.Equal(0, primary.UndatedCount);
+        Assert.Equal(WindowCardText.LocalUsageUnattributed(), WindowCardText.ZoneUsage([], unattributed: primary.LocalUsageUnattributed).Empty);
+    }
+
+    [Fact]
+    public void TabWithRecordsOrUnknownPresenceKeepsThePrimaryScanned()
+    {
+        foreach (var known in new[] { new[] { "claude" }, ["claude-code"] })
+        {
+            var withRecords = ClientFor(null, localClients: known);
+            Assert.False(withRecords.LocalUsageUnattributed);
+            Assert.NotEmpty(withRecords.Mine);
+        }
+
+        var unknown = ClientFor(null, localClients: null);
+        Assert.False(unknown.LocalUsageUnattributed);
+        Assert.NotEmpty(unknown.Mine);
+        // Non-primary stays unattributed whatever the presence says.
+        Assert.True(ClientFor(Desktop, localClients: ["claude"]).LocalUsageUnattributed);
+    }
+
+    [Fact]
+    public void GroupedTabCountsAnyMemberAsHavingRecords()
+    {
+        // Antigravity tab = antigravity + antigravity-cli; the CLI carries the usage.
+        Assert.False(QuotaLensProjection.TabHasNoLocalRecords("antigravity", ["antigravity-cli"]));
+        Assert.False(QuotaLensProjection.TabHasNoLocalRecords("antigravity-cli", ["antigravity-cli"]));
+        Assert.False(QuotaLensProjection.TabHasNoLocalRecords("antigravity", ["antigravity"]));
+        Assert.True(QuotaLensProjection.TabHasNoLocalRecords("antigravity", ["claude"]));
+        Assert.True(QuotaLensProjection.TabHasNoLocalRecords("antigravity-cli", []));
+        Assert.False(QuotaLensProjection.TabHasNoLocalRecords("antigravity", null));
     }
 
     [Fact]

@@ -54,6 +54,10 @@ public static class QuotaLensProjection
     /// window moves: a stored preference belonging to another client leaves
     /// this one's window alone, and a window vanishing from the payload moves
     /// it with no click at all.</param>
+    /// <param name="LocalUsageClients">Client ids with local usage records
+    /// (the loaded graph's <c>Summary.Clients</c> — the same list that decides
+    /// which tabs are quota-only), or null while that is unknown. See
+    /// <see cref="TabHasNoLocalRecords"/>.</param>
     /// <param name="HistoryShownCount">How many history rows the reader has
     /// grown the card to. Not a display-only toggle despite looking like one:
     /// it decides which cycles are folded, and the ≈ line and the usage bar's
@@ -65,7 +69,8 @@ public static class QuotaLensProjection
         string WindowCardTab,
         string? HistoryShownWindow = null,
         int HistoryShownCount = WindowHistoryText.VisibleRows,
-        string? WindowCardAccount = null);
+        string? WindowCardAccount = null,
+        IReadOnlyCollection<string>? LocalUsageClients = null);
 
     /// <summary>Everything the Quota lens's seven sites decided, assembled
     /// once. <see cref="Client"/> is null exactly when <see cref="Selection.ActiveClientTab"/>
@@ -105,8 +110,9 @@ public static class QuotaLensProjection
         WindowEquivalence.FetchOutcome QuotaHistoryOutcome,
         IReadOnlyList<WindowCardText.AccountPill> Accounts,
         string? SelectedAccount,
-        // True for any non-primary account: Mine/LiveEquivalence/History
-        // carry no local usage and the view prints the fixed line instead.
+        // True for any non-primary account, and for every account of a tab
+        // with no local records: Mine/LiveEquivalence/History carry no local
+        // usage and the view prints the fixed line instead.
         bool LocalUsageUnattributed,
         string? AccountLabel,
         // The selected window is model-scoped and none of this
@@ -309,7 +315,7 @@ public static class QuotaLensProjection
         // One card per client: the primary when it has windows, else the
         // first other account that does (Desktop-only users).
         var account = WindowCardText.WindowCardAccount(quota, owner, selection.WindowCardAccount);
-        var unattributed = account is not null;
+        var unattributed = account is not null || TabHasNoLocalRecords(clientId, selection.LocalUsageClients);
         var tabs = WindowCardText.Tabs(history, quota, owner, account);
         var selected = tabs.FirstOrDefault(tab => WindowId(tab.Id) == windowCardTab)
             ?? DefaultTab(tabs);
@@ -377,6 +383,17 @@ public static class QuotaLensProjection
             WindowCardText.HeaderAccountLabel(quota, owner, account),
             scopeMatchedNothing);
     }
+
+    /// <summary>True only when presence is KNOWN and no member of the tab group
+    /// behind <paramref name="clientId"/> has local records: a scan of such a
+    /// tab returns zeros that read as "nothing used", so every account of it is
+    /// unattributed. Null (not loaded) keeps today's behaviour. Members come
+    /// from <see cref="ClientRegistry.TabSlice"/>, so an Antigravity tab with
+    /// records only under antigravity-cli still counts as having records.</summary>
+    internal static bool TabHasNoLocalRecords(string clientId, IReadOnlyCollection<string>? localClients) =>
+        localClients is not null
+        && !ClientRegistry.TabSlice(ClientRegistry.QuotaOwner(clientId))
+            .Any(member => localClients.Select(ClientRegistry.CanonicalClient).Contains(member));
 
     /// <summary>Which tab opens when the user has no explicit pick for this
     /// client — port of macOS's <c>WindowCardLoader.pick</c> (its
