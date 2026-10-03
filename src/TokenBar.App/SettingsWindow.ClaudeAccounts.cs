@@ -164,7 +164,8 @@ public sealed partial class SettingsWindow
         }
 
         var dirs = ClaudeExtraRoots.Load(store);
-        if (ClaudeExtraRoots.UiRejection(path, dirs) is { } reason)
+        // The check is a blocking native call; keep it off the UI thread.
+        if (await Task.Run(() => ClaudeExtraRoots.UiRejection(path, dirs)) is { } reason)
         {
             _claudeAccountsNotice = ClaudeAccountsCopy.Reason(reason).Localized();
             FillClaudeAccounts(store);
