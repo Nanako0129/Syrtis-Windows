@@ -228,6 +228,37 @@ fn scoped_context(
             if own.is_empty() {
                 return Err(NO_REGISTERED_ROOTS.to_string());
             }
+            // Every other account is excluded, as the primary excludes them
+            // all: this window is captured with `dir` as home, and the engine
+            // scans `<home>/.claude/projects`, `<home>/.claude/transcripts`,
+            // `.cc-mirror` variants and cowork trees under it on its own, so
+            // an account nested at `<dir>\.claude` was counted here and in
+            // its own window (#175 deferred). An account whose directory
+            // contains this one is not excluded: its prefix would remove this
+            // account's own files. Nothing to exclude → no exclusion, so an
+            // account with no nested neighbour scans exactly what it did.
+            let me = account_identity(dir);
+            let contains_me = |path: &str| {
+                let other = account_identity(path);
+                other == me || me.starts_with(&format!("{other}\\"))
+            };
+            let mut excluded: Vec<std::path::PathBuf> = config_dirs
+                .iter()
+                .filter(|other| !contains_me(other))
+                .map(std::path::PathBuf::from)
+                .collect();
+            excluded.extend(
+                registry
+                    .get(CLAUDE)
+                    .into_iter()
+                    .flatten()
+                    .filter(|root| !own.contains(root) && !contains_me(&root.to_string_lossy()))
+                    .cloned(),
+            );
+            let mut excluded_scan_paths = std::collections::BTreeMap::new();
+            if !excluded.is_empty() {
+                excluded_scan_paths.insert(CLAUDE.to_string(), excluded);
+            }
             // `use_env_roots = false`: `TOKSCALE_EXTRA_DIRS` can name `claude:`
             // roots of its own and would pour another account's files into
             // this one's window (macOS `account_options`).
@@ -236,6 +267,7 @@ fn scoped_context(
                 false,
                 tokscale_core::ScannerSettings {
                     extra_scan_paths: std::collections::BTreeMap::from([(CLAUDE.to_string(), own)]),
+                    excluded_scan_paths,
                     ..Default::default()
                 },
             )
