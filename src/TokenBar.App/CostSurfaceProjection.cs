@@ -215,6 +215,22 @@ public static class CostSurfaceProjection
     public static double AgentBarValue(AgentReportEntry entry, bool authoritative) =>
         authoritative ? FiniteOrZero(entry.Cost) : entry.Total;
 
+    /// <summary>An Agents row's share of the listed total, "12.3%", on the same
+    /// measure as its bar: cost once costs are confirmed, tokens before (macOS
+    /// AgentsView.swift:45, which has only the cost measure).</summary>
+    public static string AgentShare(
+        AgentReportEntry entry, IReadOnlyList<AgentReportEntry> entries, bool authoritative)
+    {
+        var total = entries.Sum(e => AgentBarValue(e, authoritative));
+        var share = total > 0 ? AgentBarValue(entry, authoritative) / total * 100 : 0;
+        return share.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "%";
+    }
+
+    /// <summary>The Agents card's trailing "N agents · $" (AgentsView.swift:22).</summary>
+    public static string AgentsHeader(IReadOnlyList<AgentReportEntry> entries, bool authoritative) =>
+        (entries.Count == 1 ? "{0} agent · {1}" : "{0} agents · {1}").Localized(
+            entries.Count, CostText(entries.Sum(e => FiniteOrZero(e.Cost)), authoritative));
+
     public static string AgentsTitle(bool authoritative) =>
         authoritative ? "Agents by cost".Localized() : "Agents by tokens".Localized();
 
