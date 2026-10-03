@@ -105,12 +105,21 @@ public static class WindowCardText
 
     /// <summary>The account pills for a client: payload order, one per card
     /// with live windows, and only when there are at least two — otherwise
-    /// empty and the card is exactly the single-account card.</summary>
+    /// empty and the card is exactly the single-account card.
+    /// <para>The primary's pill names its <c>identity.email</c> when the
+    /// payload carries one (macOS <c>CardAccountContext.pillLabel</c>). Only
+    /// here: <see cref="AccountLabel.Of(AccountIdentity, AgentUsagePayload?, bool)"/>
+    /// also feeds the tray menu and tooltip, which must not show an
+    /// email.</para></summary>
     public static IReadOnlyList<AccountPill> AccountPills(AgentUsagePayload? quota, string clientId)
     {
         var pills = (quota?.Agents ?? [])
             .Where(a => a.ClientId == clientId && a.Windows.Count > 0)
-            .Select(a => new AccountPill(a.Account.AccountKey, AccountLabel.Of(a.Account, quota)))
+            .Select(a => new AccountPill(
+                a.Account.AccountKey,
+                a.Account.AccountKey is null && a.Identity?.Email?.Trim() is { Length: > 0 } email
+                    ? email
+                    : AccountLabel.Of(a.Account, quota)))
             .ToList();
         return pills.Count >= 2 ? pills : [];
     }
