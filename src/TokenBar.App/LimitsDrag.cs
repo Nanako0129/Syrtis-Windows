@@ -133,31 +133,34 @@ internal sealed class LimitsDrag
         IsHitTestVisible = false,
     };
 
-    /// <summary>The group the pointer is over, counting the gap under a
-    /// group (where its drop line is drawn) and anything above the first or
-    /// below the last as the nearest group, so there is no dead zone in
-    /// which the line vanishes and a release silently does nothing.</summary>
+    /// <summary>The group a release here would drop onto. The drop line is
+    /// drawn in the gap on the side the card moves toward (under the target
+    /// when dragging down, over it when dragging up), so each gap belongs to
+    /// the group whose line it shows: below the dragged card, the last group
+    /// whose top is at or above the pointer; above it, the first group whose
+    /// bottom is at or below it. Every point maps to a group, so there is no
+    /// dead zone in which the line vanishes and a release silently does
+    /// nothing.</summary>
     private string? CardAt(double y)
     {
-        string? hit = null;
-        var hitTop = double.NegativeInfinity;
-        string? first = null;
-        var firstTop = double.PositiveInfinity;
-        foreach (var (id, card) in _cards)
+        var spans = _cards
+            .Select(pair =>
+            {
+                var top = pair.Value.Host.TransformToVisual(_panel).TransformPoint(default).Y;
+                return (Id: pair.Key, Top: top, Bottom: top + pair.Value.Host.ActualHeight);
+            })
+            .OrderBy(static span => span.Top)
+            .ToList();
+        if (_dragId is null || !_cards.ContainsKey(_dragId))
         {
-            var top = card.Host.TransformToVisual(_panel).TransformPoint(default).Y;
-            if (top <= y && top > hitTop)
-            {
-                (hit, hitTop) = (id, top);
-            }
-
-            if (top < firstTop)
-            {
-                (first, firstTop) = (id, top);
-            }
+            return null;
         }
 
-        return hit ?? first;
+        var dragged = spans.First(span => span.Id == _dragId);
+        // Never empty: the dragged group itself satisfies whichever side applies.
+        return y >= dragged.Top
+            ? spans.Last(span => span.Top <= y).Id
+            : spans.First(span => span.Bottom >= y).Id;
     }
 
     private void Over(string? target)
