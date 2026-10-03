@@ -1710,7 +1710,9 @@ public sealed partial class DashboardView : UserControl
             // label unbounded, so a long config-dir label was clipped with no
             // ellipsis. The label column is bounded and trims in the middle
             // (macOS AgentLimitsCard.swift:751), keeping the directory name.
-            var header = new Grid { ColumnSpacing = 6 };
+            // Left-aligned so the plan follows a short label instead of being
+            // pushed to the card's right edge by the star column.
+            var header = new Grid { ColumnSpacing = 6, HorizontalAlignment = HorizontalAlignment.Left };
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });

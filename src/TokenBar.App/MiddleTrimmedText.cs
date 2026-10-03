@@ -1,5 +1,7 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using TokenBar.Core;
 using Windows.Foundation;
 
@@ -23,6 +25,9 @@ public sealed partial class MiddleTrimmedText : Panel
         _text.TextTrimming = TextTrimming.None;
         _text.TextWrapping = TextWrapping.NoWrap;
         Full = text.Text;
+        // Screen readers get the whole id, not the truncated one: two dated
+        // model ids must stay distinguishable there too.
+        AutomationProperties.SetName(_text, Full);
         Children.Add(_text);
     }
 
@@ -32,7 +37,10 @@ public sealed partial class MiddleTrimmedText : Panel
     protected override Size MeasureOverride(Size availableSize)
     {
         var width = availableSize.Width;
-        if (width != _fittedWidth)
+        // Refit on a new width, or when the cached cut no longer fits at the
+        // same width (text scale or a font fallback changed the metrics).
+        _text.Measure(Unbounded);
+        if (width != _fittedWidth || _text.DesiredSize.Width > width)
         {
             _fittedWidth = width;
             _text.Text = double.IsInfinity(width)
@@ -53,6 +61,9 @@ public sealed partial class MiddleTrimmedText : Panel
     protected override Size ArrangeOverride(Size finalSize)
     {
         _text.Arrange(new Rect(0, 0, finalSize.Width, finalSize.Height));
+        // Even "…" alone can be wider than a very narrow slot; never paint
+        // into the neighbouring column.
+        Clip = new RectangleGeometry { Rect = new Rect(0, 0, finalSize.Width, finalSize.Height) };
         return finalSize;
     }
 }
