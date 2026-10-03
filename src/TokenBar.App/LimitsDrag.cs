@@ -78,7 +78,8 @@ internal sealed class LimitsDrag
         HoverTip.Attach(grip, () => "Drag to reorder".Localized());
         grip.PointerPressed += (_, e) =>
         {
-            if (grip.CapturePointer(e.Pointer))
+            // Primary button only, as macOS DragGesture.
+            if (e.GetCurrentPoint(grip).Properties.IsLeftButtonPressed && grip.CapturePointer(e.Pointer))
             {
                 _dragId = id;
                 _active = this;

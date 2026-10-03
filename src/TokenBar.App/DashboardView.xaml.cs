@@ -553,6 +553,8 @@ public sealed partial class DashboardView : UserControl
 
     private void RenderLoadingState()
     {
+        // Clears the content directly, past RenderContent's drag hold.
+        LimitsDrag.CancelActive();
         TodayValue.Text = "—";
         TotalValue.Text = "—";
         RateValue.Text = "—";
