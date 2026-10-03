@@ -22,6 +22,16 @@ internal sealed class LimitsDrag
     /// <summary>The dragged card's opacity, as on macOS.</summary>
     private const double DraggedOpacity = 0.5;
 
+    /// <summary>Whether a card is being dragged. The dashboard re-renders on
+    /// every model update (the 10 s fast refresh among them), and rebuilding
+    /// this panel takes the grip — and its pointer capture — away mid-drag;
+    /// macOS keeps its drag in view state that survives a refresh. The
+    /// dashboard holds its render while this is set and catches up on
+    /// <see cref="Finished"/>.</summary>
+    public static bool InProgress { get; private set; }
+
+    public static event Action? Finished;
+
     private readonly Panel _panel;
     private readonly List<string> _visible;
     private readonly Dictionary<string, (Grid Host, Rectangle Top, Rectangle Bottom)> _cards = [];
@@ -63,6 +73,7 @@ internal sealed class LimitsDrag
             if (grip.CapturePointer(e.Pointer))
             {
                 _dragId = id;
+                InProgress = true;
                 if (_cards.TryGetValue(id, out var card))
                 {
                     card.Host.Opacity = DraggedOpacity;
@@ -144,5 +155,8 @@ internal sealed class LimitsDrag
             AppSettings.Store.SetString(
                 ClientRegistry.TabOrderKey, LimitsCardOrder.Dropped(raw, _visible, from, to));
         }
+
+        InProgress = false;
+        Finished?.Invoke();
     }
 }

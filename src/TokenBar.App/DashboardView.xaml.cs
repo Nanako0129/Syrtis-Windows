@@ -19,6 +19,10 @@ namespace TokenBar.App;
 public sealed partial class DashboardView : UserControl
 {
     private DashboardModel.Snapshot? _snapshot;
+
+    /// <summary>A model update arrived while a limits card was being dragged
+    /// (<see cref="LimitsDrag.InProgress"/>) and is rendered when it ends.</summary>
+    private bool _renderHeldForDrag;
     private DashboardModel? _model;
     private AppView _view = AppView.Overview;
     private readonly Dictionary<AppView, Button> _tabs = [];
@@ -114,6 +118,15 @@ public sealed partial class DashboardView : UserControl
 
         // Limits/trace settings re-render the open flyout live (the macOS
         // panel's right-column preview equivalent is the flyout itself).
+        LimitsDrag.Finished += () =>
+        {
+            if (_renderHeldForDrag)
+            {
+                _renderHeldForDrag = false;
+                Render(_snapshot);
+            }
+        };
+
         AppSettings.Store.Changed += key =>
         {
             if (key is ClientRegistry.TabHiddenKey or ClientRegistry.TabOrderKey)
@@ -519,6 +532,12 @@ public sealed partial class DashboardView : UserControl
     public void Render(DashboardModel.Snapshot? snapshot)
     {
         _snapshot = snapshot;
+        if (LimitsDrag.InProgress)
+        {
+            _renderHeldForDrag = true;
+            return;
+        }
+
         UpdateRefreshControl(loading: snapshot is null);
         if (snapshot is null)
         {
