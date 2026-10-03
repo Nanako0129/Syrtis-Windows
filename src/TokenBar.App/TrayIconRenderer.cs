@@ -130,25 +130,53 @@ internal static class TrayIconRenderer
         return Color.FromArgb(255, level, level, level);
     }
 
-    /// <summary>A pictorial gauge icon (Hidden mode's "icon only").
-    /// <paramref name="stale"/> (macOS #8) drops the coloring policy for an
-    /// opaque grey fill — a green or red reading that is half an hour old
-    /// would still read as a live verdict; with no reading there is nothing
-    /// to be stale, so the flag is ignored (TrayIcons.swift:85-91).</summary>
+    /// <summary>The grey a stale reading is drawn in: the gauge fill and,
+    /// as on macOS since #420, a quota-left value drawn as the icon, so the
+    /// two read as one state (TrayIcons.swift:63-65).</summary>
+    public static Color StaleInk(bool dark) => StaleFill(dark);
+
+    /// <summary>A pictorial gauge icon (Hidden mode's "icon only"). What it
+    /// draws is <see cref="TrayGlyph.Gauge"/>: a stale reading drops the
+    /// coloring policy for the opaque grey, and no reading draws the faded
+    /// shape with a slash whatever the stamp says (TrayIcons.swift:85-117).</summary>
     public static Bitmap RenderGauge(
         QuotaIconStyle style, double? remaining, bool dark, IconColoring coloring,
         bool stale = false)
     {
         var bmp = new Bitmap(Size, Size, PixelFormat.Format32bppArgb);
-        using var g = Graphics.FromImage(bmp);
+        using var g = NewGridGraphics(bmp);
+        var mono = dark ? Color.White : Color.Black;
+        switch (TrayGlyph.Gauge(remaining, stale))
+        {
+            case GaugeAppearance.NoReading:
+                DrawNoReading(g, style, mono);
+                break;
+            case GaugeAppearance.Stale:
+                DrawShape(g, style, remaining!.Value, mono, StaleFill(dark));
+                break;
+            default:
+                DrawShape(g, style, remaining!.Value, mono, Ink(remaining, dark, coloring));
+                break;
+        }
+
+        return bmp;
+    }
+
+    /// <summary>A Graphics on the macOS bottom-left-origin 16-grid: the
+    /// routines assume that origin, so flip once and the geometry ports
+    /// verbatim.</summary>
+    private static Graphics NewGridGraphics(Bitmap bmp)
+    {
+        var g = Graphics.FromImage(bmp);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        // The macOS routines assume a bottom-left origin; flip once so the
-        // geometry ports verbatim.
         g.TranslateTransform(0, Size);
         g.ScaleTransform(Scale, -Scale);
-        var mono = dark ? Color.White : Color.Black;
-        var fill = stale && remaining is not null ? StaleFill(dark) : Ink(remaining, dark, coloring);
-        var level = remaining ?? 100; // no data draws full, macOS TrayIcons.image
+        return g;
+    }
+
+    private static void DrawShape(
+        Graphics g, QuotaIconStyle style, double level, Color mono, Color fill)
+    {
         switch (style)
         {
             case QuotaIconStyle.Bars:
@@ -161,8 +189,53 @@ internal static class TrayIconRenderer
                 DrawPopsicle(g, level, mono, fill);
                 break;
         }
+    }
 
-        return bmp;
+    /// <summary>macOS <c>drawNoReading</c> (TrayIcons.swift:131-157, #419):
+    /// the full shape in mono, faded as a whole, with a "no signal" slash.
+    /// macOS fades a transparency layer and punches the gap with
+    /// destinationOut; here the shape is drawn opaque into its own bitmap,
+    /// clipped to exclude the gap band, then composited at
+    /// <see cref="TrayGlyph.NoReadingAlpha"/> — the same whole-shape fade, so
+    /// the popsicle's overlapping stick and body do not show through each
+    /// other.</summary>
+    private static void DrawNoReading(Graphics g, QuotaIconStyle style, Color mono)
+    {
+        var (fx, fy) = TrayGlyph.NoReadingSlashFrom;
+        var (tx, ty) = TrayGlyph.NoReadingSlashTo;
+        using var layer = new Bitmap(Size, Size, PixelFormat.Format32bppArgb);
+        using (var lg = NewGridGraphics(layer))
+        using (var gap = new GraphicsPath())
+        using (var gapPen = new Pen(Color.Black, (float)TrayGlyph.NoReadingSlashGap)
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round,
+        })
+        {
+            gap.AddLine(P(fx, fy), P(tx, ty));
+            gap.Widen(gapPen);
+            lg.SetClip(gap, CombineMode.Exclude);
+            DrawShape(lg, style, 100, mono, mono);
+        }
+
+        var state = g.Save();
+        g.ResetTransform();
+        using (var fade = new ImageAttributes())
+        {
+            fade.SetColorMatrix(new ColorMatrix { Matrix33 = (float)TrayGlyph.NoReadingAlpha });
+            g.DrawImage(layer, new Rectangle(0, 0, Size, Size),
+                0, 0, Size, Size, GraphicsUnit.Pixel, fade);
+        }
+
+        g.Restore(state);
+        using var slash = new Pen(
+            Color.FromArgb((int)Math.Round(255 * TrayGlyph.NoReadingSlashAlpha), mono),
+            (float)TrayGlyph.NoReadingSlashWidth)
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round,
+        };
+        g.DrawLine(slash, P(fx, fy), P(tx, ty));
     }
 
     /// <summary>The mode's short value drawn as the icon itself (57%, 12.3K,
@@ -291,7 +364,10 @@ internal static class TrayIconRenderer
             }
 
             var state = g.Save();
-            g.SetClip(new RectangleF((float)x, 1f, (float)visible, (float)h));
+            // Intersect, not replace: the no-reading glyph draws the bars
+            // inside a clip that excludes the slash gap, and a replaced clip
+            // would paint the fill straight through it.
+            g.SetClip(new RectangleF((float)x, 1f, (float)visible, (float)h), CombineMode.Intersect);
             using (var ink = new SolidBrush(fill))
             {
                 g.FillPath(ink, path);

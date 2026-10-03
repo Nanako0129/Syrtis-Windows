@@ -419,5 +419,12 @@
   "Show cost as a figure instead of a range": "用具体金额而非区间显示费用",
   "A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend.": "区间会将你和该范围内的其他人归为一组。具体金额会取整到美元，不显示美分，但仍会每天透露更多信息。若上方指定一个客户端，该金额就是该工具的每日费用。",
   "Whichever client you used most": "用量最多的客户端",
-  "Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones Syrtis does not recognise. The cost becomes that one tool's daily spend rather than the whole day's.": "指定一个客户端后只会发布该客户端的用量，因此总数可能与菜单栏不同；菜单栏会统计所有客户端，包括 Syrtis 尚未识别的客户端。费用也会变为该工具当日的费用，而不是全天总费用。"
+  "Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones Syrtis does not recognise. The cost becomes that one tool's daily spend rather than the whole day's.": "指定一个客户端后只会发布该客户端的用量，因此总数可能与菜单栏不同；菜单栏会统计所有客户端，包括 Syrtis 尚未识别的客户端。费用也会变为该工具当日的费用，而不是全天总费用。",
+  "Light pace": "轻度",
+  "Moderate pace": "中度",
+  "Heavy pace": "重度",
+  "Occasional use, or a plan like Claude Pro": "偶尔使用，或像 Claude Pro 这类方案",
+  "A few agents at once, or a plan like Claude Max 5x": "几个 agent 同时跑，或像 Claude Max 5x 这类方案",
+  "Lots of agents at once, such as Claude Code's ultracode, or a plan like Claude Max 20x": "超多 agent 同时跑（例如 Claude Code 的 ultracode），或像 Claude Max 20x 这类方案",
+  "The cat and parrot speed up as the live token rate climbs. The pace sets how much traffic reaches the top: Light at 600K tokens/min, Moderate at 3M, Heavy at 10M.": "实时 token 速率越高，猫和鹦鹉跑得越快。动画速度决定多大的流量会到顶：轻度是每分钟 60 万 token、中度 300 万、重度 1,000 万。"
 }

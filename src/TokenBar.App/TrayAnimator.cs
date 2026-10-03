@@ -1,11 +1,13 @@
 using Microsoft.UI.Dispatching;
+using TokenBar.Core;
 
 namespace TokenBar.App;
 
 /// <summary>
 /// RunCat-style tray animation (macOS TrayAnimator, itself a port of the
-/// Tauri animation.rs): cat or parrot frames spin with the live token rate —
-/// idle 2 fps, 1M tok/min pegs 40 fps. Runs only while the tray is in
+/// Tauri animation.rs): cat or parrot frames spin with the live token rate,
+/// scaled by the Settings pace (<see cref="TrayAnimationSpeed"/>: idle 2 fps
+/// below 50K tok/min, 40 fps at 3M after scaling). Runs only while the tray is in
 /// Hidden ("icon only") mode with an animation style; every other state
 /// stops the timer cold so the resident process stays quiet.
 /// </summary>
@@ -94,17 +96,14 @@ internal sealed class TrayAnimator : IDisposable
 
         _index = (_index + 1) % frames.Count;
         _apply(frames[_index]);
-        // Retune to the current rate every frame, macOS animationLoop parity:
-        // load = min(rate/10k, 100), speed = max(1, load/5), 500ms/speed.
+        // Retune to the current rate every frame (macOS animationLoop), so a
+        // pace change in Settings applies on the next frame.
         _timer.Interval = IntervalFor(_rate());
     }
 
-    private static TimeSpan IntervalFor(double? rate)
-    {
-        var load = Math.Min((rate ?? 0) / 10_000, 100);
-        var speed = Math.Max(1, load / 5);
-        return TimeSpan.FromMilliseconds(500 / speed);
-    }
+    private static TimeSpan IntervalFor(double? rate) =>
+        TimeSpan.FromMilliseconds(TrayAnimationSpeed.IntervalMilliseconds(
+            rate, AnimationPaces.Current(AppSettings.Store)));
 
     /// <summary>Frames land as 32x32 letterboxed HICONs (parrot is 48x36),
     /// composed once and cached for the process lifetime.</summary>
