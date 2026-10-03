@@ -396,10 +396,14 @@ public static class QuotaLensProjection
     /// pills a client tab draws: the tab's quota owner when it has a tab to
     /// show, else the first other member of its <see cref="ClientRegistry.TabSlice"/>
     /// that has (a Grok Bot-only user gets the grok-bot weekly window on the
-    /// "Grok Build &amp; Bot" tab), else the owner. One card, as macOS: with
-    /// both members reporting, the owner's card is drawn and the other's
-    /// windows stay on the limits card and the all-agent lens (QuotaView.swift,
-    /// <c>windowCard == nil</c> branch). Antigravity's other member,
+    /// "Grok Build &amp; Bot" tab), else the owner. At most one card per tab,
+    /// as macOS: with both members reporting, the owner's card is drawn and
+    /// the other's windows stay on the limits card and the all-agent lens.
+    /// The Bot-only case deliberately differs from macOS, which draws no
+    /// window card there (<c>WindowCardGate.clients</c> returns nil when the
+    /// tab id is not a card client) and only the history strip and heatmap;
+    /// Windows shows the Bot's weekly card instead (maintainer's decision,
+    /// 2026-10-04, with macOS to follow). Antigravity's other member,
     /// antigravity-cli, is never a quota provider, so that tab is
     /// unchanged.</summary>
     internal static string WindowCardOwner(
