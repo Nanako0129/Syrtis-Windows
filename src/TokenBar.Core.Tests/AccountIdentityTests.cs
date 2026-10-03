@@ -381,6 +381,12 @@ public class AccountIdentityTests
             "codex", present, [R("opencode", UsageAttribution.State.Assigned("claude"))]));
         Assert.True(QuotaLensProjection.TabHasNoLocalRecords(
             "codex", present, [R("kimi", UsageAttribution.State.Assigned("codex"))]));
+        // The client is matched raw, as Resolve/Mine match it: an alias the
+        // messages never carry does not open the gate.
+        Assert.True(QuotaLensProjection.TabHasNoLocalRecords(
+            "gemini", ["codex"], [R("codex-cli", UsageAttribution.State.Assigned("gemini"))]));
+        Assert.True(QuotaLensProjection.TabHasNoLocalRecords(
+            "codex", ["opencode"], [R("OpenCode", UsageAttribution.State.Assigned("codex"))]));
 
         // Through the projection: the primary Claude card with only OpenCode
         // present is unattributed unless OpenCode usage is confirmed as Claude's.

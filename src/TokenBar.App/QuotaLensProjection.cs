@@ -413,16 +413,17 @@ public static class QuotaLensProjection
             return false;
         }
 
-        // A present client whose usage is confirmed as this tab's (the same
-        // records WindowCardText.Mine credits to the owner) counts too: a
-        // Codex used only through OpenCode (confirmed opencode·openai → codex)
-        // otherwise read as quota-only and hid that usage (macOS #468).
-        // Excluded records never count.
+        // A present client with a confirmed record assigning it to a member
+        // counts too (macOS #468 WindowCardGate.tabHasLocalRecords, same
+        // form): a Codex used only through OpenCode (confirmed
+        // opencode·openai → codex) otherwise read as quota-only and hid that
+        // usage. The client is matched raw, as UsageAttribution.Resolve (which
+        // Mine uses) matches it. This is coarser than Mine: it does not check
+        // the record's provider/model against local messages, and it accepts
+        // any slice member while Mine credits the owner.
         return !confirmed.Any(record =>
-            record.State.Kind == UsageAttribution.StateKind.Assigned
-            && record.State.Target is { } target
-            && slice.Contains(target)
-            && present.Contains(ClientRegistry.CanonicalClient(record.Client)));
+            localClients.Contains(record.Client)
+            && slice.Any(member => record.State == UsageAttribution.State.Assigned(member)));
     }
 
     /// <summary>Which tab opens when the user has no explicit pick for this
