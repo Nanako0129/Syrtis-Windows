@@ -77,7 +77,10 @@ public static class ClientRegistry
         ["muse"] = ("Muse Code", "#0064e0"),
         ["reasonix"] = ("Reasonix", "#808000"),
         ["kimchi"] = ("Kimchi", "#7f1d1d"),
-        ["senpi"] = ("Senpi (OmO Native)", "#2f6f63"),
+        // Upstream labels it "Senpi (OmO Native)"; Syrtis names the client
+        // only, since the engine reads the base client and not OmO's children
+        // (macOS ClientRegistry.swift:76-78).
+        ["senpi"] = ("Senpi", "#2f6f63"),
         ["omp"] = ("Oh My Pi", "#d946ef"),
     };
 
@@ -332,6 +335,25 @@ public static class ClientRegistry
     /// hidden, independent of top-tab visibility.</summary>
     public static IReadOnlySet<string> HiddenLimitsClients(SettingsStore store) =>
         ParseIdSet(store.GetString(LimitsHiddenKey) ?? "");
+
+    /// <summary>The Settings write path for <see cref="LimitsHiddenKey"/>:
+    /// adds or removes one client id, member-specific (no group fold — each
+    /// group member keeps its own quota card), stored sorted and comma-joined
+    /// as macOS writes it.</summary>
+    public static void SetLimitsHidden(SettingsStore store, string clientId, bool hidden)
+    {
+        var set = new SortedSet<string>(HiddenLimitsClients(store), StringComparer.Ordinal);
+        if (hidden)
+        {
+            set.Add(clientId);
+        }
+        else
+        {
+            set.Remove(clientId);
+        }
+
+        store.SetString(LimitsHiddenKey, string.Join(',', set));
+    }
 
     /// <summary>Clients excluded from the menu-bar quota AUTO pick: tab-hidden
     /// ∪ limits-hidden. A client hidden from either surface must not drive

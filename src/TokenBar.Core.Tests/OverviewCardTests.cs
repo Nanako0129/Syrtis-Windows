@@ -100,6 +100,48 @@ public class OverviewScopeTests
         Assert.Equal("claude", OverviewScope.LimitsClientId("claude"));
         Assert.Null(OverviewScope.LimitsClientId(null));
     }
+
+    // macOS ModelBreakdownCard: eight rows, then "Show N more" / "Show less".
+    [Fact]
+    public void ModelsCardCapsAtEightRowsBehindAShowMoreToggle()
+    {
+        Localization.Load("en", AppContext.BaseDirectory);
+        Assert.Equal((8, (string?)null), OverviewScope.ModelRows(8, expanded: false));
+        Assert.Equal((3, (string?)null), OverviewScope.ModelRows(3, expanded: true));
+        Assert.Equal((8, "Show 1 more"), OverviewScope.ModelRows(9, expanded: false));
+        Assert.Equal((8, "Show 4 more"), OverviewScope.ModelRows(12, expanded: false));
+        Assert.Equal((12, "Show less"), OverviewScope.ModelRows(12, expanded: true));
+
+        Localization.Load("zh-Hant", AppContext.BaseDirectory);
+        try
+        {
+            Assert.Equal((8, "再顯示 4 筆"), OverviewScope.ModelRows(12, expanded: false));
+            Assert.Equal((12, "收合"), OverviewScope.ModelRows(12, expanded: true));
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
+    }
+
+    // macOS OverviewView: "<client> models" on a client tab.
+    [Fact]
+    public void ModelsCardTitleNamesTheClientOnAClientTab()
+    {
+        Localization.Load("en", AppContext.BaseDirectory);
+        Assert.Equal("Models", OverviewScope.ModelsTitle(null));
+        Assert.Equal("Claude Code models", OverviewScope.ModelsTitle("claude"));
+
+        Localization.Load("zh-Hant", AppContext.BaseDirectory);
+        try
+        {
+            Assert.Equal("Claude Code 模型", OverviewScope.ModelsTitle("claude"));
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
+    }
 }
 
 // Hiding Overview cards and the Agent-limits master switch (macOS

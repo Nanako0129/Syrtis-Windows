@@ -79,6 +79,33 @@ internal static class OverviewScope
     /// </para></summary>
     internal static string? LimitsClientId(string? singleClient) =>
         singleClient is null ? null : ClientRegistry.QuotaOwner(singleClient);
+
+    /// <summary>The Models card's title: "&lt;client&gt; models" on a client
+    /// tab (macOS <c>OverviewView.card(.models)</c>), else "Models".</summary>
+    internal static string ModelsTitle(string? singleClient) =>
+        singleClient is null
+            ? "Models".Localized()
+            : "{0} models".Localized(ClientRegistry.Style(singleClient).DisplayName);
+
+    /// <summary>Rows the collapsed Models card shows (macOS
+    /// <c>ModelBreakdownCard.maxRows</c>).</summary>
+    internal const int ModelRowCap = 8;
+
+    /// <summary>How many of <paramref name="count"/> model rows to draw, and
+    /// the toggle under them: "Show N more" collapsed, "Show less" expanded,
+    /// none when every row already fits (macOS <c>ModelBreakdownCard</c>).</summary>
+    internal static (int Shown, string? Toggle) ModelRows(int count, bool expanded)
+    {
+        var hidden = count - Math.Min(count, ModelRowCap);
+        if (hidden == 0)
+        {
+            return (count, null);
+        }
+
+        return expanded
+            ? (count, "Show less".Localized())
+            : (ModelRowCap, "Show {0} more".Localized(hidden));
+    }
 }
 
 internal static class OverviewCards
