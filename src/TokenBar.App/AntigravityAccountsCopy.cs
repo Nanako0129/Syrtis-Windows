@@ -25,9 +25,11 @@ internal static class AntigravityAccountsCopy
         "Automatic capture is paused because Credential Manager didn't answer. Press Capture to resume.";
 
     /// <summary>Shown only while automatic capture is off (macOS 2da830c9).
-    /// "usually within an hour" is macOS's measurement of agy's refresh
-    /// interval; the Windows interval is not measured yet, so this sentence
-    /// may change on its own.</summary>
+    /// "usually within an hour": measured on the Windows test machine
+    /// (2026-10-04, 13 samples over 2 h): agy rewrote gemini:antigravity's
+    /// LastWritten every hour at the same minute (18:43:47, 19:43:47,
+    /// 20:43:47 UTC), plus one extra write about two minutes before each
+    /// (19:41:25, 20:41:05).</summary>
     internal const string MergeOnlyUntilRefresh =
         "Turn this on to keep agy's current account merged into one card. With it off, a Capture merges it only until agy next refreshes its sign-in, usually within an hour.";
 
