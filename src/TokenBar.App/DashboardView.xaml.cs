@@ -485,8 +485,7 @@ public sealed partial class DashboardView : UserControl
     }
 
     /// <summary>The model powers lazy lens loading, told which lens is
-    /// active by <see cref="SwitchTo"/>.</summary>
-    /// <summary>Tells the model which lens is open from the start. SwitchTo
+    /// active here and then by <see cref="SwitchTo"/>. Here because SwitchTo
     /// returns early for the lens already showing, and Overview is that lens
     /// at launch, so without this the model never learns Overview's lazy
     /// lanes (its quota history) until the user leaves and comes back. Cheap
