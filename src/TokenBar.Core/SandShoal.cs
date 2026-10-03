@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+
 namespace TokenBar.Core;
 
 /// <summary>The "Sand shoal" tray style. Port of macOS TrayAnimator.swift
@@ -27,8 +29,10 @@ public static class SandShoal
     public static string Label => "Sand shoal".Localized();
 
     /// <summary>Every style that animates (the others are gauges): macOS
-    /// <c>animatedStyles</c>. One list for the tray and Settings.</summary>
-    public static bool IsAnimated(string? style) => style is "cat" or "parrot" or Style;
+    /// <c>animatedStyles</c>. One list for the tray and Settings. True implies a
+    /// non-null style, which callers that pass it on rely on.</summary>
+    public static bool IsAnimated([NotNullWhen(true)] string? style) =>
+        style is "cat" or "parrot" or Style;
 
     public static TimeSpan FrameInterval => TimeSpan.FromSeconds(1.0 / Fps);
 
