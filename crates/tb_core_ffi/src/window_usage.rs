@@ -116,7 +116,17 @@ static WINDOW_USAGE_CACHE: LazyLock<Mutex<HashMap<CacheKey, CacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) fn cache_key(account: &Option<String>, from_ms: i64) -> CacheKey {
-    (account.clone(), from_ms)
+    (account.as_deref().map(account_identity), from_ms)
+}
+
+/// One account directory however it is spelled: folded like both registries
+/// (`duplicate_key`) with trailing separators trimmed, so `C:\Acct`,
+/// `c:/acct` and `C:\acct\` share one cache entry, one scoped context and
+/// the same registered roots.
+fn account_identity(dir: &str) -> String {
+    crate::claude_config_dirs::duplicate_key(dir)
+        .trim_end_matches('\\')
+        .to_string()
 }
 
 const CLAUDE: &str = "claude";
@@ -142,8 +152,7 @@ fn registered_roots_under(
     dir: &str,
     registry: &std::collections::BTreeMap<String, Vec<std::path::PathBuf>>,
 ) -> Vec<std::path::PathBuf> {
-    let owner = crate::claude_config_dirs::duplicate_key(dir);
-    let prefix = format!("{owner}\\");
+    let prefix = format!("{}\\", account_identity(dir));
     registry
         .get(CLAUDE)
         .map(|roots| {
@@ -183,7 +192,7 @@ fn scoped_context(
     if account.is_none() && roots.is_empty() {
         return Ok(context.clone());
     }
-    let memo_key = (context.generation(), account.clone());
+    let memo_key = (context.generation(), account.as_deref().map(account_identity));
     if let Some(found) = SCOPED_CONTEXTS
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -531,6 +540,31 @@ mod tests {
         ));
         crate::LocalSourceContext::capture(Some(home), false, tokscale_core::ScannerSettings::default())
             .unwrap()
+    }
+
+    /// An account directory spelled with a trailing separator, other case or
+    /// forward slashes still owns its registered roots and shares one cache
+    /// key; a nested directory's roots and a sibling are not its own.
+    #[test]
+    fn an_account_matches_its_roots_however_it_is_spelled() {
+        let own = std::path::PathBuf::from(r"C:\Acct\projects");
+        let registry = std::collections::BTreeMap::from([(
+            CLAUDE.to_string(),
+            vec![
+                own.clone(),
+                std::path::PathBuf::from(r"C:\Acct\nested\projects"),
+                std::path::PathBuf::from(r"C:\Acct2\projects"),
+            ],
+        )]);
+        for spelling in [r"C:\Acct", r"C:\Acct\", "c:/acct/", r"c:\ACCT\\"] {
+            assert_eq!(registered_roots_under(spelling, &registry), vec![own.clone()], "{spelling}");
+            assert_eq!(
+                cache_key(&Some(spelling.to_string()), 0),
+                cache_key(&Some(r"C:\Acct".to_string()), 0),
+                "{spelling}"
+            );
+        }
+        assert_eq!(cache_key(&None, 0).0, None);
     }
 
     // The half of the original bug that keying by `from_ms` alone still

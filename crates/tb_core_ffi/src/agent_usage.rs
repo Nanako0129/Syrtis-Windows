@@ -3938,10 +3938,31 @@ fn load_claude_config_dir_credentials(
 /// joined task (security review R5).
 const CLAUDE_CONFIG_DIR_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Config directories (folded) whose credential read is still running on the
+/// blocking pool, including reads whose caller already timed out.
+static CLAUDE_CONFIG_DIR_READS_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Removes its directory from the in-flight set when the blocking read ends
+/// (returns, panics, or is never run).
+struct ConfigDirReadInFlight(String);
+
+impl Drop for ConfigDirReadInFlight {
+    fn drop(&mut self) {
+        CLAUDE_CONFIG_DIR_READS_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.0);
+    }
+}
+
 /// Run the synchronous credential read on the blocking pool with a timeout.
 /// A timed-out read is reported as the existing transient "Retrying
 /// automatically" failure; the blocking thread finishes on its own and its
-/// result is discarded.
+/// result is discarded. `timeout` stops the wait, not the read, so while an
+/// earlier read of the same directory is still running no new one starts:
+/// the poll gets the same retry failure, and a stalled drive holds at most
+/// one blocking thread per directory.
 async fn load_claude_config_dir_credentials_bounded<L>(
     dir: String,
     timeout: std::time::Duration,
@@ -3950,7 +3971,20 @@ async fn load_claude_config_dir_credentials_bounded<L>(
 where
     L: FnOnce(&str) -> Result<ClaudeCredentials, ProviderFetchFailure> + Send + 'static,
 {
-    match tokio::time::timeout(timeout, tokio::task::spawn_blocking(move || load(&dir))).await {
+    let key = crate::claude_config_dirs::duplicate_key(&dir);
+    if !CLAUDE_CONFIG_DIR_READS_IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key.clone())
+    {
+        return Err(claude_read_retry_failure(CLAUDE_CONFIG_DIR_READ_RETRY_ERROR));
+    }
+    let in_flight = ConfigDirReadInFlight(key);
+    let read = move || {
+        let _in_flight = in_flight;
+        load(&dir)
+    };
+    match tokio::time::timeout(timeout, tokio::task::spawn_blocking(read)).await {
         Ok(Ok(loaded)) => loaded,
         Ok(Err(_)) | Err(_) => Err(claude_read_retry_failure(CLAUDE_CONFIG_DIR_READ_RETRY_ERROR)),
     }
@@ -8423,6 +8457,73 @@ mod tests {
             Err(ProviderFetchFailure::Terminal { display })
                 if display == CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR
         ));
+    }
+
+    /// While a timed-out read of a directory is still running, a later poll of
+    /// the same directory (in any case or separator) starts no second read; a
+    /// different directory is unaffected, and once the stalled read ends the
+    /// directory is read again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_config_dir_read_is_not_started_twice() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let stalled = load_claude_config_dir_credentials_bounded(
+            "C:\\dedup\\a".to_string(),
+            std::time::Duration::from_millis(50),
+            move |_| {
+                let _ = released.recv();
+                Err(ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR))
+            },
+        )
+        .await;
+        assert!(matches!(stalled, Err(ProviderFetchFailure::Transient { .. })));
+
+        let started = Arc::new(AtomicBool::new(false));
+        let flag = started.clone();
+        let second = load_claude_config_dir_credentials_bounded(
+            "c:/DEDUP/A".to_string(),
+            std::time::Duration::from_secs(5),
+            move |_| {
+                flag.store(true, Ordering::SeqCst);
+                Err(ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR))
+            },
+        )
+        .await;
+        assert!(matches!(
+            second,
+            Err(ProviderFetchFailure::Transient { display, .. })
+                if display == CLAUDE_CONFIG_DIR_READ_RETRY_ERROR
+        ));
+        assert!(!started.load(Ordering::SeqCst), "a second read started while the first still ran");
+
+        // Control: another directory is read normally.
+        let other = load_claude_config_dir_credentials_bounded(
+            "C:\\dedup\\b".to_string(),
+            std::time::Duration::from_secs(5),
+            |_| Err(ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR)),
+        )
+        .await;
+        assert!(matches!(other, Err(ProviderFetchFailure::Terminal { .. })));
+
+        // Once the stalled read ends (its guard drops on the blocking thread
+        // right after), the directory is read again.
+        release.send(()).unwrap();
+        let mut read_again = false;
+        for _ in 0..200 {
+            let result = load_claude_config_dir_credentials_bounded(
+                "C:\\dedup\\a".to_string(),
+                std::time::Duration::from_secs(5),
+                |_| Err(ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR)),
+            )
+            .await;
+            if matches!(result, Err(ProviderFetchFailure::Terminal { .. })) {
+                read_again = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(read_again, "the directory was never read again after the stall ended");
     }
 
     #[test]
