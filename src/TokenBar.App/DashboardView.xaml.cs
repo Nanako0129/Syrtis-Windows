@@ -1771,12 +1771,14 @@ public sealed partial class DashboardView : UserControl
 
     /// <summary>The model rows. <paramref name="collapsible"/> (the Overview
     /// card) caps them at <see cref="OverviewScope.ModelRowCap"/> behind a
-    /// "Show N more" / "Show less" toggle; the Models lens lists every row.</summary>
+    /// "Show N more" / "Show less" toggle; the Models lens lists every row,
+    /// each with its cost share and an In·Out·CR·CW line (macOS ModelsView).</summary>
     private FrameworkElement BuildModelRows(DashboardModel.Snapshot snapshot, bool collapsible)
     {
         var panel = new StackPanel { Spacing = 8 };
         var entries = CostSurfaceProjection.OrderModels(
             SelectedModelEntries(snapshot), snapshot.CostAuthoritative).ToList();
+        var listed = entries;
         var toggle = (string?)null;
         if (collapsible)
         {
@@ -1795,10 +1797,28 @@ public sealed partial class DashboardView : UserControl
         foreach (var entry in entries)
         {
             var block = new StackPanel { Spacing = 3 };
-            var name = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+            // A Grid, not a horizontal StackPanel: a StackPanel measures the
+            // name unbounded so it never trims, and a long model id would push
+            // the share out of the column. Left-aligned so the share sits right
+            // after a short name (macOS ModelsView: name truncates, share stays).
+            var name = new Grid { ColumnSpacing = 6, HorizontalAlignment = HorizontalAlignment.Left };
+            name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            name.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var (discHost, discGlow) = GlowingDisc(colors.Color(entry.Provider, entry.Model));
             name.Children.Add(discHost);
-            name.Children.Add(Ui.Text(entry.Model, 11));
+            var modelText = Ui.Text(entry.Model, 11);
+            Grid.SetColumn(modelText, 1);
+            name.Children.Add(modelText);
+            if (!collapsible
+                && CostSurfaceProjection.ModelShare(entry, listed, snapshot.CostAuthoritative) is { } share)
+            {
+                var shareText = Ui.Text(share, 10, 0.5);
+                shareText.VerticalAlignment = VerticalAlignment.Center;
+                Grid.SetColumn(shareText, 2);
+                name.Children.Add(shareText);
+            }
+
             // Right column, macOS style: tokens over cost.
             var trailing = new StackPanel { HorizontalAlignment = HorizontalAlignment.Right };
             var tokensText = Ui.Text(Format.CompactTokens(entry.Total), 11, 0.9);
@@ -1813,7 +1833,37 @@ public sealed partial class DashboardView : UserControl
             trailing.Children.Add(ModelCostCell(
                 costText,
                 CostSurfaceProjection.CostWarning(entry, snapshot.CostAuthoritative)));
-            block.Children.Add(Ui.Row(name, trailing));
+            if (collapsible)
+            {
+                block.Children.Add(Ui.Row(name, trailing));
+            }
+            else
+            {
+                // The name and its token split stack in the left column, beside
+                // the two-line trailing column (macOS ModelsView's VStack). In
+                // the stack the name row is one line high, so the share centres
+                // on the name rather than on the taller row.
+                // Indented past the disc (8) and its gap (6), under the name.
+                var split = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    Spacing = 8,
+                    Margin = new Thickness(14, 0, 0, 0),
+                };
+                foreach (var (label, value) in CostSurfaceProjection.ModelTokenSplit(entry))
+                {
+                    var kind = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 3 };
+                    kind.Children.Add(Ui.Text(label, 10, 0.45));
+                    kind.Children.Add(Ui.Text(value, 10, 0.7));
+                    split.Children.Add(kind);
+                }
+
+                var left = new StackPanel { Spacing = 2 };
+                left.Children.Add(name);
+                left.Children.Add(split);
+                block.Children.Add(Ui.Row(left, trailing));
+            }
+
             var tokenBar = TokenKindBar(entry);
             var barHost = new Grid { Height = 4 };
             // White alpha brightens each segment; the accent edge reads as a halo.
