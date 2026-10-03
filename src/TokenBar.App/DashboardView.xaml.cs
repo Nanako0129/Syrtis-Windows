@@ -1972,7 +1972,8 @@ public sealed partial class DashboardView : UserControl
     // ── Daily lens ───────────────────────────────────────────────────────
 
     /// <summary>One model stripe inside an expanded Daily or Monthly card:
-    /// provider-tinted disc, model and client name, tokens and cost, with the
+    /// provider-tinted disc, model (merged across clients by
+    /// <see cref="DailyRows.ByModel"/>), tokens and cost, with the
     /// disc and the row outline lighting together on hover so the rich tooltip
     /// points at an unambiguous row. Shared so the two lenses cannot drift —
     /// the hover/glow/tooltip wiring is the fiddly part, and a copy of it is

@@ -471,7 +471,7 @@
   "How often Syrtis rereads all logs in full. In between, new activity still shows up within 5 minutes.": "Syrtis 多久完整重读一次所有日志。两次之间，新的用量仍会在 5 分钟内出现。",
   "Syrtis started as a fork of tokcat by handlecusion. Log parsing and pricing come from tokscale by Junho Yeo, the menu bar design draws on CodexBar by Peter Steinberger, and the running cat comes from RunCat by Takuto Nakamura. MIT licensed.": "Syrtis 最初是从 handlecusion 的 tokcat 分支出来的。日志解析和计价来自 Junho Yeo 的 tokscale；菜单栏设计参考 Peter Steinberger 的 CodexBar；奔跑的猫来自 Takuto Nakamura 的 RunCat。采用 MIT 授权。",
   "{0} active day": "{0} 天有用量",
-  "{0} active days": "{0} 个活跃日",
+  "{0} active days": "{0} 天有用量",
   "{0} active month": "{0} 个月有用量",
   "{0} active months": "{0} 个月有用量"
 }
