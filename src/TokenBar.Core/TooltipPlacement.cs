@@ -23,8 +23,14 @@ public static class TooltipPlacement
     /// <summary>Kept clear of the viewport's edges (macOS edgeInset).</summary>
     public const double EdgeInset = 4;
 
-    /// <summary>Between the pointer and the tooltip (macOS cursorGap).</summary>
+    /// <summary>Between the pointer and a tooltip above it (macOS cursorGap).</summary>
     public const double CursorGap = 12;
+
+    /// <summary>Between the pointer's hotspot and a tooltip below it. Larger
+    /// than macOS's 12 because the cursor hangs below its hotspot: the Windows
+    /// arrow is about 19 DIP tall, so at 12 it covered the tooltip's first
+    /// line.</summary>
+    public const double CursorGapBelow = 20;
 
     /// <summary>Above this fraction of the hovered element's height the tooltip
     /// prefers to sit above the pointer, below it under (macOS preferAboveRatio,
@@ -91,7 +97,7 @@ public static class TooltipPlacement
 
         var minY = visible.Y;
         var maxY = visible.Bottom - tipHeight;
-        var belowY = pointerY + CursorGap;
+        var belowY = pointerY + CursorGapBelow;
         var aboveY = pointerY - tipHeight - CursorGap;
         // The region dodge reads the hovered element, not the whole viewport:
         // "below while the viewport has room" would always win on a tall
