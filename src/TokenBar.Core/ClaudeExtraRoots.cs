@@ -52,23 +52,24 @@ public static class ClaudeExtraRoots
 
     /// <summary>Why the picker refuses <paramref name="path"/> before saving,
     /// or null, so a path the registries would refuse anyway never reaches the
-    /// list. Mirrors the native rules on the folded form: a drive root; a
-    /// network/UNC path;
-    /// the profile folder itself; the primary's <c>.claude</c>, anything under
-    /// it or any folder above it (security review R2); a duplicate; a ninth
-    /// folder. Rust stays authoritative for everything else.</summary>
+    /// list. Mirrors the native rules: anything but an absolute drive path
+    /// (<c>X:\</c> or <c>X:/</c>; UNC, WSL, rooted and drive-relative paths); a
+    /// drive root; the profile folder itself; the primary's <c>.claude</c>,
+    /// anything under it or any folder above it (security review R2); a
+    /// duplicate; a ninth folder. Rust stays authoritative for everything else
+    /// (components, reserved names).</summary>
     public static string? UiRejection(string path, IReadOnlyList<string> existing, string? userProfile)
     {
-        var key = Fold(path);
-        // A drive root folds to "x:" (the native rootDirectory rule).
-        if (key.Length == 2 && char.IsAsciiLetter(key[0]) && key[1] == ':')
-        {
-            return "rootDirectory";
-        }
-
-        if (key.StartsWith("\\\\", StringComparison.Ordinal))
+        // The same shape test as the native normalize, on the raw string.
+        if (path.Length < 3 || !char.IsAsciiLetter(path[0]) || path[1] != ':' || path[2] is not ('\\' or '/'))
         {
             return "unsupportedPath";
+        }
+
+        var key = Fold(path);
+        if (key.Length == 2)
+        {
+            return "rootDirectory";
         }
 
         if (!string.IsNullOrEmpty(userProfile))
