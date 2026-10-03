@@ -58,6 +58,9 @@ public class OverviewCardsParityTests
     {
         Assert.True(OverviewScope.HasNoLocalUsage("kiro", ["kiro"], ["claude", "codex"]));
         Assert.False(OverviewScope.HasNoLocalUsage("claude", ["claude"], ["claude"]));
+        // Stats keep raw stripe ids; a Claude tab whose stripes say
+        // claude-code has local usage.
+        Assert.False(OverviewScope.HasNoLocalUsage("claude", ["claude"], ["claude-code"]));
         // The Overview tab draws its chart whatever is present.
         Assert.False(OverviewScope.HasNoLocalUsage(null, [], []));
     }
