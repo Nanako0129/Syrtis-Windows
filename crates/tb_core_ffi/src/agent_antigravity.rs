@@ -2975,6 +2975,176 @@ mod credential_manager {
     }
 }
 
+/// The fake `CapturedIo` backend never runs `credential_manager`, so a wrong
+/// struct field, flag or blob length there would pass every other test. This
+/// one writes, reads and deletes a real Credential Manager entry through the
+/// production builder and dispatcher. Ignored because it mutates the running
+/// user's Credential Manager; run it on a Windows host with
+/// `cargo test -p tb_core_ffi -- --ignored credential_manager_round_trip`.
+#[cfg(all(windows, test))]
+mod credential_manager_tests {
+    use super::{
+        credential_manager, write_item_call, CredCall, CredOutcome, CAPTURED_TARGET_PREFIX,
+        CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+    };
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
+    use windows_sys::Win32::Security::Credentials::{
+        self as wincred, CredDeleteW, CredEnumerateW, CredFree, CredReadW, CREDENTIALW,
+    };
+
+    /// Differs from `CAPTURED_TARGET_PREFIX` by `-test` before the colon, so
+    /// the test can never name a real captured account.
+    const TEST_PREFIX: &str = "com.nyanako.tokenbar.antigravity-account-test:";
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// 64 lowercase hex, unique per run. No RNG crate is a direct dependency,
+    /// so it is SHA-256 of the process id and the current time.
+    fn random_hex() -> String {
+        use sha2::{Digest, Sha256};
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let mut hasher = Sha256::new();
+        hasher.update(std::process::id().to_le_bytes());
+        hasher.update(nanos.to_le_bytes());
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// Removes the test entry even when an assertion panics.
+    struct DeleteOnDrop(Vec<u16>);
+
+    impl Drop for DeleteOnDrop {
+        fn drop(&mut self) {
+            // SAFETY: the target is NUL-terminated and outlives the call. The
+            // result is ignored: the test may already have deleted it.
+            unsafe { CredDeleteW(self.0.as_ptr(), wincred::CRED_TYPE_GENERIC, 0) };
+        }
+    }
+
+    #[test]
+    #[ignore = "writes to the real Credential Manager; run on Windows with --ignored"]
+    fn credential_manager_round_trip() {
+        let key = random_hex();
+        let target = format!("{TEST_PREFIX}{key}");
+        assert!(!target.starts_with("gemini:"));
+        assert!(!target.starts_with(CAPTURED_TARGET_PREFIX));
+        assert!(!target.starts_with("com.nyanako.tokenbar.antigravity-account:"));
+        let _guard = DeleteOnDrop(wide(&target));
+
+        // Fake, clearly non-secret data the size of a real agy item.
+        const BLOB_LEN: usize = 1434;
+        let mut text = String::from(r#"{"tokenbar_test":"not a secret","pad":""#);
+        text.push_str(&"x".repeat(BLOB_LEN - text.len() - 2));
+        text.push_str(r#""}"#);
+        let blob = text.into_bytes();
+        assert_eq!(blob.len(), BLOB_LEN);
+
+        // Type and persist come from the production builder; only the target
+        // is swapped for the test one.
+        let Some(CredCall::Write {
+            cred_type,
+            persist,
+            blob: built_blob,
+            ..
+        }) = write_item_call(&key, blob.clone())
+        else {
+            panic!("write_item_call refused a valid key and blob");
+        };
+        let write = CredCall::Write {
+            target: target.clone(),
+            cred_type,
+            persist,
+            blob: built_blob,
+        };
+        assert!(
+            matches!(credential_manager::call(write), CredOutcome::Ok(_)),
+            "write failed"
+        );
+
+        match credential_manager::call(CredCall::Read {
+            target: target.clone(),
+            cred_type,
+        }) {
+            CredOutcome::Ok(read) => assert!(*read == *blob, "read-back blob differs"),
+            CredOutcome::NotFound => panic!("read after write: not found"),
+            CredOutcome::Failed => panic!("read after write: failed"),
+        }
+
+        // What Windows actually stored, read independently of production.
+        let wide_target = wide(&target);
+        // SAFETY: `wide_target` is NUL-terminated and outlives the call; the
+        // allocation is read only here and freed exactly once.
+        let (stored_type, stored_persist, stored_size) = unsafe {
+            let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
+            let ok = CredReadW(
+                wide_target.as_ptr(),
+                wincred::CRED_TYPE_GENERIC,
+                0,
+                &mut credential,
+            );
+            assert!(ok != 0 && !credential.is_null(), "raw CredReadW failed");
+            let fields = (
+                (*credential).Type,
+                (*credential).Persist,
+                (*credential).CredentialBlobSize,
+            );
+            CredFree(credential.cast::<core::ffi::c_void>());
+            fields
+        };
+        assert_eq!(stored_type, wincred::CRED_TYPE_GENERIC);
+        assert_eq!(stored_type, CRED_TYPE_GENERIC);
+        assert_eq!(stored_persist, wincred::CRED_PERSIST_LOCAL_MACHINE);
+        assert_eq!(stored_persist, CRED_PERSIST_LOCAL_MACHINE);
+        assert_eq!(stored_size as usize, blob.len());
+
+        assert!(
+            matches!(
+                credential_manager::call(CredCall::Delete {
+                    target: target.clone(),
+                    cred_type,
+                }),
+                CredOutcome::Ok(_)
+            ),
+            "delete failed"
+        );
+        assert!(
+            matches!(
+                credential_manager::call(CredCall::Read {
+                    target: target.clone(),
+                    cred_type,
+                }),
+                CredOutcome::NotFound
+            ),
+            "read after delete must be NotFound"
+        );
+
+        // No test entry left behind, from this run or an earlier one. The
+        // filter is required: never enumerate the user's whole vault.
+        let filter = wide(&format!("{TEST_PREFIX}*"));
+        let mut count: u32 = 0;
+        let mut credentials: *mut *mut CREDENTIALW = std::ptr::null_mut();
+        // SAFETY: `filter` is NUL-terminated and outlives the call. On success
+        // the array is one allocation, freed once and never dereferenced.
+        let ok = unsafe { CredEnumerateW(filter.as_ptr(), 0, &mut count, &mut credentials) };
+        // SAFETY: reads the calling thread's last-error value only, right
+        // after the call that set it.
+        let error = unsafe { GetLastError() };
+        if ok != 0 {
+            unsafe { CredFree(credentials.cast::<core::ffi::c_void>()) };
+            panic!("{count} test credential(s) left behind");
+        }
+        assert_eq!(error, ERROR_NOT_FOUND, "filtered CredEnumerateW failed");
+    }
+}
+
 pub(crate) struct SystemCapturedIo;
 
 impl CapturedIo for SystemCapturedIo {
