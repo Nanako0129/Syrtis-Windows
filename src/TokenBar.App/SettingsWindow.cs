@@ -20,7 +20,7 @@ namespace TokenBar.App;
 /// re-read from the registry, quota windows from the tray feed). Every
 /// control binds the same tokenbar.* keys the cards and tray read.
 /// </summary>
-public sealed class SettingsWindow : Window
+public sealed partial class SettingsWindow : Window
 {
     private static SettingsWindow? _shared;
     private readonly Func<AgentUsagePayload?> _quota;
@@ -953,6 +953,8 @@ public sealed class SettingsWindow : Window
             raw => store.SetInt("tokenbar.refresh.intervalMin", int.Parse(raw))));
         refresh.Children.Add(Hint(SettingsCopy.RefreshHint.Localized()));
         panel.Children.Add(Section("Data refresh".Localized(), refresh));
+
+        panel.Children.Add(Section(ClaudeAccountsCopy.Section.Localized(), BuildClaudeAccounts(store)));
 
         // ── Discord (macOS SettingsPanel :944-1007) ─────────────────────
         _discordSection = Section(DiscordCopy.Section.Localized(), BuildDiscord(store));
