@@ -374,6 +374,86 @@ public class AntigravityAccountsTests
         Assert.Equal((KeyA, "M1"), new AntigravityAutoCapture(io.Io, store).Current);
     }
 
+    // ---- parity rules of the state machine (mac SW:267-415) -------------------
+
+    /// <summary>An attempt that lands while the toggle is off (an owed poll
+    /// finishing after the toggle was turned off) adds the account but never
+    /// binds it as agy's current account.</summary>
+    [Fact]
+    public async Task AnAttemptWhileTheToggleIsOffNeverBinds()
+    {
+        var store = TempStore();
+        var io = new FakeIo();
+        var capture = new AntigravityAutoCapture(io.Io, store);
+
+        await capture.Poll();
+
+        Assert.Contains("auto", io.Calls);
+        Assert.Equal([new AntigravityAccount(KeyA, "a@example.com")], AntigravityAccounts.Load(store));
+        Assert.Null(capture.Current.Key);
+        Assert.Null(store.GetString(AntigravityAutoCapture.CurrentKey));
+    }
+
+    /// <summary>Maintainer decision (mac SW:354-367): turning the toggle off
+    /// keeps the current binding, still bound to its marker.</summary>
+    [Fact]
+    public async Task TurningTheToggleOffKeepsTheBinding()
+    {
+        var store = TempStore();
+        var capture = new AntigravityAutoCapture(new FakeIo().Io, store);
+        await capture.ManualCapture();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+
+        await capture.SetEnabled(false);
+
+        Assert.Equal((KeyA, "M1"), capture.Current);
+        Assert.False(capture.IsEnabled);
+    }
+
+    /// <summary>A <c>paused</c> result pauses and leaves no binding.</summary>
+    [Fact]
+    public async Task APausedResultPausesAndClearsTheBinding()
+    {
+        var store = TempStore();
+        var io = new FakeIo();
+        var capture = new AntigravityAutoCapture(io.Io, store);
+        await capture.ManualCapture(); // binds (KeyA, M1)
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        io.AutoResult = () => throw new TbCoreException("paused");
+        io.Markers.Enqueue("M2");
+
+        await capture.Poll();
+
+        Assert.True(capture.Paused);
+        Assert.Null(capture.Current.Key);
+        Assert.Null(store.GetString(AntigravityAutoCapture.CurrentKey));
+    }
+
+    /// <summary>A successful manual Capture ends a pause, forgets the last
+    /// attempted marker and, with the toggle on, polls again at once.</summary>
+    [Fact]
+    public async Task AManualCaptureEndsAPauseAndResumesPolling()
+    {
+        var store = TempStore();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        var io = new FakeIo();
+        var attempts = 0;
+        io.AutoResult = () => ++attempts == 1
+            ? throw new TbCoreException("paused")
+            : new AntigravityAutoCaptureResult("unchanged", KeyA, "a@example.com");
+        var capture = new AntigravityAutoCapture(io.Io, store);
+        await capture.Poll();
+        Assert.True(capture.Paused);
+        Assert.Equal("M1", capture.LastAttemptedMarker);
+
+        await capture.ManualCapture();
+
+        Assert.False(capture.Paused);
+        Assert.Equal(2, attempts); // the resumed poll re-attempted the same marker
+        Assert.Equal("M1", capture.LastAttemptedMarker);
+        Assert.Equal((KeyA, "M1"), capture.Current);
+    }
+
     // ---- 8. remove ------------------------------------------------------------
 
     [Theory]
