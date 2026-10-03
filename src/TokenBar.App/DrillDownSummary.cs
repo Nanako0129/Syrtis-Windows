@@ -22,6 +22,14 @@ public static class DrillDownSummary
     public static string Text(MonthlyRow row, bool authoritative) =>
         Compose(row.Messages, row.Turns, row.Tokens, row.Cost, authoritative);
 
+    /// <summary>The card header's trailing count, macOS DailyView/MonthlyView
+    /// <c>"%lld active day(s)"</c> / <c>"%lld active month(s)"</c>.</summary>
+    public static string ActiveDays(int count) =>
+        (count == 1 ? "{0} active day" : "{0} active days").Localized(count);
+
+    public static string ActiveMonths(int count) =>
+        (count == 1 ? "{0} active month" : "{0} active months").Localized(count);
+
     private static string Compose(
         long messages,
         long? turns,
