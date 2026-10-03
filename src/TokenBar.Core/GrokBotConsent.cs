@@ -70,7 +70,8 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
 
     /// <summary>Launch: re-install a stored yes. Anything else is already what
     /// the empty registry does. Never throws — a failure here must not take
-    /// down the first fetch; the card then simply asks again.</summary>
+    /// down the first fetch; the grant is then not installed and the card
+    /// asks again.</summary>
     public void ApplyIfGranted()
     {
         lock (_gate)
@@ -100,10 +101,6 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
         /// <summary>The full explanation with Allow / Not now.</summary>
         Ask,
 
-        /// <summary>A stored yes the core has not acted on yet: the short
-        /// "Allowed" line, Allow kept so the grant can be re-sent.</summary>
-        AskAllowed,
-
         /// <summary>The one-line "isn't reading" row, Allow kept.</summary>
         Declined,
     }
@@ -111,17 +108,13 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     /// <summary>The projection the limits card renders: only a
     /// <c>grok-bot</c> snapshot the core marked <c>keychain-consent</c> becomes
     /// a consent card. A stored no is <see cref="Card.Declined"/>; never asked
-    /// is <see cref="Card.Ask"/>; a stored yes is <see cref="Card.AskAllowed"/>
-    /// (the fetch that honours it has not landed yet, or the yes never reached
-    /// the core), which keeps Allow so the answer can be sent again.</summary>
+    /// and a stored yes are both <see cref="Card.Ask"/> (macOS parity): a yes
+    /// the core has not acted on — no fetch since it, or it never reached the
+    /// core — keeps the full card and Allow, so the grant can be sent
+    /// again.</summary>
     public static Card CardFor(AgentUsageSnapshot agent, bool? answer) =>
         agent.ClientId == "grok-bot" && agent.Source == "keychain-consent"
-            ? answer switch
-            {
-                false => Card.Declined,
-                true => Card.AskAllowed,
-                null => Card.Ask,
-            }
+            ? answer == false ? Card.Declined : Card.Ask
             : Card.None;
 
     /// <summary>The card's line for <paramref name="card"/> (English source;
@@ -129,7 +122,6 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     public static string TextFor(Card card) => card switch
     {
         Card.Declined => Copy.Declined,
-        Card.AskAllowed => Copy.Allowed,
         _ => Copy.Explanation,
     };
 
@@ -152,8 +144,9 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
 
         public const string Declined = "Syrtis isn't reading your Grok Bot limits.";
 
-        public const string Allowed =
-            "Allowed. Syrtis reads your Grok Bot limits at the next refresh.";
+        /// <summary>The Allow button after a grant the core accepted, until the
+        /// next quota payload rebuilds the card (macOS "Waiting for macOS…").</summary>
+        public const string Waiting = "Waiting…";
 
         public const string Allow = "Allow";
 

@@ -126,10 +126,10 @@ public sealed partial class DashboardView : UserControl
             }
             else if (key == GrokBotConsent.StorageKey)
             {
-                // The card's buttons and the Settings switch both land here.
-                // A yes asks for a quota refresh; one already in flight gets
-                // exactly one follow-up fetch when it ends, which honours the
-                // answer. Either answer re-renders the card.
+                // The card's buttons and the Settings switch both land here,
+                // after the core took the answer. A yes forces a fresh quota
+                // fetch, and any fetch begun before it is discarded
+                // (RefreshQuotaNow). Either answer re-renders the card.
                 _ = DispatcherQueue.TryEnqueue(() =>
                 {
                     if (AppSettings.GrokBotConsent.Stored == true)
@@ -1670,7 +1670,7 @@ public sealed partial class DashboardView : UserControl
             var consent = GrokBotConsent.CardFor(agent, AppSettings.GrokBotConsent.Stored);
             if (consent != GrokBotConsent.Card.None)
             {
-                section.Children.Add(BuildGrokBotConsent(consent));
+                section.Children.Add(BuildGrokBotConsent(consent, snapshot.Quota));
                 panel.Children.Add(section);
                 continue;
             }
@@ -1711,14 +1711,20 @@ public sealed partial class DashboardView : UserControl
         return panel;
     }
 
+    // The Allow click that the core accepted, and the quota payload the card
+    // showed then: the button reads "Waiting…" until a different one arrives.
+    private bool _grokBotGranting;
+    private AgentUsagePayload? _grokBotGrantedOver;
+
     /// <summary>The Grok Bot consent prompt (source "keychain-consent"). On
     /// Windows this is the only question before Syrtis decrypts Grok Bot's
     /// sign-in — DPAPI never asks — so it states what is read, where it goes
     /// and how to stop. After "Not now" it collapses to one line and keeps
     /// Allow: a decline has to be reversible where it was made. A stored yes
-    /// the core has not acted on yet shows the short "Allowed" line, Allow
-    /// kept to re-send it.</summary>
-    private FrameworkElement BuildGrokBotConsent(GrokBotConsent.Card state)
+    /// the core has not acted on yet shows the full card again, Allow kept to
+    /// re-send it (macOS parity).</summary>
+    private FrameworkElement BuildGrokBotConsent(
+        GrokBotConsent.Card state, AgentUsagePayload? shownQuota)
     {
         var body = new StackPanel { Spacing = 6 };
         var text = Ui.Dim(GrokBotConsent.TextFor(state).Localized(), 11);
@@ -1733,12 +1739,22 @@ public sealed partial class DashboardView : UserControl
         var notNow = new Button { Content = GrokBotConsent.Copy.NotNow.Localized(), FontSize = 12 };
         allow.Click += (_, _) =>
         {
-            // A changed answer also reaches the store's Changed handler, which
-            // re-renders this card. Allowing again over a stored yes (one the
-            // core never received) changes nothing in the store, so the
-            // refresh is asked for here as well: the grant is re-sent and a
-            // fetch after it honours it (coalesced with the Changed path's).
-            if (TryAnswerGrokBotConsent(true))
+            // A changed answer reaches the store's Changed handler, which
+            // forces the refresh and re-renders this card. Allowing again over
+            // a stored yes (one the core never received) re-sends the grant
+            // but changes nothing in the store, so Changed does not fire; only
+            // then is the refresh forced here, so the two never both force.
+            // A failed setter leaves Allow enabled.
+            var alreadyYes = AppSettings.GrokBotConsent.Stored == true;
+            if (!TryAnswerGrokBotConsent(true))
+            {
+                return;
+            }
+
+            _grokBotGrantedOver = shownQuota;
+            _grokBotGranting = true;
+            ShowWaiting(allow);
+            if (alreadyYes)
             {
                 _model?.RefreshQuotaNow();
             }
@@ -1753,6 +1769,15 @@ public sealed partial class DashboardView : UserControl
             text.Text = GrokBotConsent.Copy.Declined.Localized();
             notNow.Visibility = Visibility.Collapsed;
         };
+        // macOS: "Waiting for macOS…" until a new payload re-renders the
+        // card. Each successful quota fetch publishes a new payload object (a
+        // failed one leaves Quota as it was), so the button returns once the
+        // card is built over a different one.
+        if (_grokBotGranting && ReferenceEquals(shownQuota, _grokBotGrantedOver))
+        {
+            ShowWaiting(allow);
+        }
+
         buttons.Children.Add(allow);
         if (state != GrokBotConsent.Card.Declined)
         {
@@ -1761,6 +1786,12 @@ public sealed partial class DashboardView : UserControl
 
         body.Children.Add(buttons);
         return body;
+    }
+
+    private static void ShowWaiting(Button allow)
+    {
+        allow.IsEnabled = false;
+        allow.Content = GrokBotConsent.Copy.Waiting.Localized();
     }
 
     private static bool TryAnswerGrokBotConsent(bool granted)

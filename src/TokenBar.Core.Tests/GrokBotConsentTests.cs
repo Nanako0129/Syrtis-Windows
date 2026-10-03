@@ -150,12 +150,12 @@ public class GrokBotConsentTests : IDisposable
     {
         var marked = Snapshot("grok-bot", "keychain-consent");
         Assert.Equal(GrokBotConsent.Card.Ask, GrokBotConsent.CardFor(marked, null));
-        // A stored yes the core has not acted on (the fetch that honours it
-        // has not landed, or the yes never reached the core) shows the short
-        // "Allowed" line, not the full question, and keeps Allow to re-send.
-        Assert.Equal(GrokBotConsent.Card.AskAllowed, GrokBotConsent.CardFor(marked, true));
+        // A stored yes the core has not acted on (no fetch since the yes, or
+        // the yes never reached the core) keeps the full card and Allow, as on
+        // macOS: never the declined line.
+        Assert.Equal(GrokBotConsent.Card.Ask, GrokBotConsent.CardFor(marked, true));
         Assert.Equal(GrokBotConsent.Card.Declined, GrokBotConsent.CardFor(marked, false));
-        Assert.Equal(GrokBotConsent.Copy.Allowed, GrokBotConsent.TextFor(GrokBotConsent.CardFor(marked, true)));
+        Assert.Equal(GrokBotConsent.Copy.Explanation, GrokBotConsent.TextFor(GrokBotConsent.CardFor(marked, true)));
         Assert.Equal(GrokBotConsent.Copy.Explanation, GrokBotConsent.TextFor(GrokBotConsent.CardFor(marked, null)));
         Assert.Equal(GrokBotConsent.Copy.Declined, GrokBotConsent.TextFor(GrokBotConsent.CardFor(marked, false)));
         Assert.Equal(GrokBotConsent.Card.None, GrokBotConsent.CardFor(Snapshot("grok-bot", "oauth"), null));
@@ -187,7 +187,7 @@ public class GrokBotConsentTests : IDisposable
     [
         GrokBotConsent.Copy.Explanation,
         GrokBotConsent.Copy.Declined,
-        GrokBotConsent.Copy.Allowed,
+        GrokBotConsent.Copy.Waiting,
         GrokBotConsent.Copy.Allow,
         GrokBotConsent.Copy.NotNow,
         GrokBotConsent.Copy.SettingsToggle,

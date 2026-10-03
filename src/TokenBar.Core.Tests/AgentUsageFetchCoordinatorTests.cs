@@ -53,4 +53,37 @@ public class AgentUsageFetchCoordinatorTests
         Assert.Same(payload, await coordinator.FetchAsync());
         Assert.Equal(2, Volatile.Read(ref calls));
     }
+
+    // The Grok Bot grant: a fetch begun before Invalidate was built without
+    // it. The next caller must get a new core fetch, not join the old one, and
+    // the old fetch's payload must fail the publish check while the new one's
+    // passes.
+    [Fact]
+    public async Task InvalidateStartsAFreshFetchAndDiscardsTheOlderOne()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var coordinator = new AgentUsageFetchCoordinator(() =>
+        {
+            Interlocked.Increment(ref calls);
+            started.TrySetResult();
+            release.Task.GetAwaiter().GetResult();
+            return new AgentUsagePayload("now", []);
+        });
+
+        var before = coordinator.Generation;
+        var old = coordinator.FetchAsync();
+        await started.Task;
+        coordinator.Invalidate();
+        var after = coordinator.Generation;
+        var fresh = coordinator.FetchAsync();
+
+        Assert.NotSame(old, fresh);
+        release.SetResult();
+        Assert.NotSame(await old, await fresh);
+        Assert.Equal(2, Volatile.Read(ref calls));
+        Assert.False(coordinator.IsCurrent(before));
+        Assert.True(coordinator.IsCurrent(after));
+    }
 }

@@ -296,9 +296,15 @@ public sealed class TrayFeed : IDisposable
         {
             try
             {
+                var generation = AgentUsageFetchCoordinator.Shared.Generation;
                 var quota = TryFetch(
                     () => AgentUsageFetchCoordinator.Shared.FetchAsync().GetAwaiter().GetResult(),
                     "tray quota");
+                if (!AgentUsageFetchCoordinator.Shared.IsCurrent(generation))
+                {
+                    return; // Begun before the Grok Bot grant: never published.
+                }
+
 
                 _ = _dispatcher.TryEnqueue(() =>
                 {
