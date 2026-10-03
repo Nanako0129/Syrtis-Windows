@@ -288,6 +288,167 @@ public class AccountIdentityTests
         Assert.Null(WindowCardText.WindowCardAccount(null, "claude"));
     }
 
+    // ---- window-card account switcher --------------------------------------
+
+    [Fact]
+    public void AccountPillsListEveryAccountWithWindowsInPayloadOrderOnlyWhenThereAreTwo()
+    {
+        var pills = WindowCardText.AccountPills(TwoAccounts(), "claude");
+        Assert.Equal([null, Desktop], pills.Select(p => p.Key));
+        Assert.Equal(["Claude", "Claude Desktop"], pills.Select(p => p.Label));
+
+        var withDir = Payload(
+            Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")),
+            Card(Dir, "D", null, Window("session.v1", "Session", 60, "session.v1")),
+            Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
+        Assert.Equal(
+            ["Claude", "Claude · team-b", "Claude Desktop"],
+            WindowCardText.AccountPills(withDir, "claude").Select(p => p.Label));
+
+        // One account (or one with windows) => no row; the card stays as it was.
+        Assert.Empty(WindowCardText.AccountPills(
+            Payload(Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1"))), "claude"));
+        Assert.Empty(WindowCardText.AccountPills(
+            Payload(
+                Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")),
+                Card(Desktop, "S", error: "expired")), "claude"));
+        Assert.Empty(WindowCardText.AccountPills(null, "claude"));
+    }
+
+    [Fact]
+    public void StoredAccountWinsWhenPresentWithWindowsElseTheDefaultRuleApplies()
+    {
+        var both = TwoAccounts();
+        Assert.Equal(Desktop, WindowCardText.WindowCardAccount(both, "claude", Desktop));
+        Assert.Null(WindowCardText.WindowCardAccount(both, "claude", ""));
+        Assert.Null(WindowCardText.WindowCardAccount(both, "claude", null));
+
+        // Stored account gone from the payload => today's rule (primary).
+        Assert.Null(WindowCardText.WindowCardAccount(both, "claude", Dir));
+        // Stored account present but errored with no windows => fallback.
+        var errored = Payload(
+            Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")),
+            Card(Desktop, "S", error: "expired"));
+        Assert.Null(WindowCardText.WindowCardAccount(errored, "claude", Desktop));
+        // Stored primary without windows => first other account with windows.
+        var desktopOnly = Payload(
+            Card(null, "P", error: "x"),
+            Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
+        Assert.Equal(Desktop, WindowCardText.WindowCardAccount(desktopOnly, "claude", ""));
+    }
+
+    private static QuotaLensProjection.Client ClientFor(string? stored, string? storedTab = null)
+    {
+        var messages = new[] { new WindowMessage(97 * Hour * 1000 + 1, "claude", "anthropic", "m", 10, 0, 0, 0, 0, 1.0, true) };
+        var history = new[]
+        {
+            new QuotaHistorySeries("claude", "P", "session.v1", [Sample(40, 96, true), Sample(50, 97, true)]),
+            new QuotaHistorySeries("claude", "S", "session.v1", [Sample(5, 96, true), Sample(9, 97, true)]),
+        };
+        var graph = new UsagePayload(
+            new UsageMeta("g", "v", new DateRange("2026-01-01", "2026-01-01"),
+                PricingMode.BestEffort, CostCoverage.Complete),
+            new UsageSummary(0, 0, 0, 0, 0, 0, [], []), [], []);
+        return QuotaLensProjection.Build(
+            history, TwoAccounts(), graph, new WindowUsage(messages, 3, 0),
+            WindowEquivalence.FetchOutcome.Succeeded, WindowEquivalence.FetchOutcome.Succeeded,
+            new UsageAttribution.Table(
+                [new UsageAttribution.Record("claude", "anthropic", UsageAttribution.State.Assigned("claude"))],
+                IsWritable: true),
+            year: null,
+            new QuotaLensProjection.Selection("claude", storedTab ?? "", WindowCardAccount: stored)).Client!;
+    }
+
+    [Fact]
+    public void NonPrimaryCardReadsOnlyItsOwnEntriesAndShowsNoLocalUsage()
+    {
+        var primary = ClientFor(null);
+        Assert.False(primary.LocalUsageUnattributed);
+        Assert.Null(primary.SelectedAccount);
+        Assert.Equal("P", primary.Selected!.Id.AccountScope);
+        Assert.NotEmpty(primary.Mine);
+        Assert.Equal(2, primary.Accounts.Count);
+
+        var desktop = ClientFor(Desktop);
+        Assert.True(desktop.LocalUsageUnattributed);
+        Assert.Equal(Desktop, desktop.SelectedAccount);
+        Assert.All(desktop.Tabs, tab => Assert.Equal("S", tab.Id.AccountScope));
+        Assert.Equal("S", desktop.Selected!.Id.AccountScope);
+        Assert.Empty(desktop.Mine);
+        Assert.Empty(desktop.Messages);
+        Assert.Null(desktop.LiveEquivalence);
+        Assert.Equal(0, desktop.UndatedCount);
+        Assert.Equal("Local usage can't be attributed to this account yet.", WindowCardText.LocalUsageUnattributed());
+    }
+
+    [Fact]
+    public void HeaderNamesTheResolvedAccountOnlyWhenItIsNotThePrimary()
+    {
+        Assert.Null(WindowCardText.HeaderAccountLabel(TwoAccounts(), "claude", null));
+        // Primary errored, exactly one other account live: no pills, still labelled.
+        var desktopOnly = Payload(
+            Card(null, "P", error: "x"),
+            Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
+        Assert.Empty(WindowCardText.AccountPills(desktopOnly, "claude"));
+        Assert.Equal("Claude Desktop", WindowCardText.HeaderAccountLabel(
+            desktopOnly, "claude", WindowCardText.WindowCardAccount(desktopOnly, "claude")));
+        var withDir = Payload(
+            Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")),
+            Card(Dir, "D", null, Window("session.v1", "Session", 60, "session.v1")));
+        Assert.Equal("Claude · team-b", WindowCardText.HeaderAccountLabel(withDir, "claude", Dir));
+        Assert.Equal("Claude Desktop · 5h", WindowCardText.WithAccountLabel("5h", "Claude Desktop"));
+        Assert.Equal("5h", WindowCardText.WithAccountLabel("5h", null));
+        Assert.Equal("Claude Desktop", ClientFor(Desktop).AccountLabel);
+        Assert.Null(ClientFor(null).AccountLabel);
+    }
+
+    [Fact]
+    public void OverviewEquivalenceSkipsNonPrimaryAndUnmatchedSeriesOfMultiCardClients()
+    {
+        var quota = TwoAccounts(); // primary scope P, Desktop scope S
+        Assert.True(QuotaLensProjection.LocalUsageScopable(quota, Series("P")));
+        Assert.False(QuotaLensProjection.LocalUsageScopable(quota, Series("S")));
+        Assert.False(QuotaLensProjection.LocalUsageScopable(quota, Series("old")));
+        // Single-card client / no payload: unchanged.
+        var one = Payload(Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")));
+        Assert.True(QuotaLensProjection.LocalUsageScopable(one, Series("old")));
+        Assert.True(QuotaLensProjection.LocalUsageScopable(null, Series("S")));
+        Assert.True(QuotaLensProjection.LocalUsageScopable(Payload(), Series("S")));
+        // A lone non-primary card: nothing is scopable, not even its own series.
+        var lone = Payload(Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
+        Assert.False(QuotaLensProjection.LocalUsageScopable(lone, Series("S")));
+        Assert.False(QuotaLensProjection.LocalUsageScopable(lone, Series("P")));
+
+        var graph = new UsagePayload(
+            new UsageMeta("g", "v", new DateRange("2026-01-01", "2026-01-01"),
+                PricingMode.BestEffort, CostCoverage.Complete),
+            new UsageSummary(0, 0, 0, 0, 0, 0, [], []), [], []);
+        var model = QuotaLensProjection.Build(
+            [Series("P"), Series("S")], quota, graph, new WindowUsage([], 0, 0),
+            WindowEquivalence.FetchOutcome.Succeeded, WindowEquivalence.FetchOutcome.Succeeded,
+            new UsageAttribution.Table([], IsWritable: true), year: null,
+            new QuotaLensProjection.Selection(ClientRegistry.OverviewTab, ""));
+        var id = Assert.Single(model.Overview.Equivalences).Key;
+        Assert.Equal("P", id.AccountScope);
+    }
+
+    [Fact]
+    public void ZoneUsageSaysUnattributedNotNoneForANonPrimaryCard()
+    {
+        Assert.Equal("No usage in this interval", WindowCardText.ZoneUsage([]).Empty);
+        Assert.Equal(
+            WindowCardText.LocalUsageUnattributed(), WindowCardText.ZoneUsage([], unattributed: true).Empty);
+    }
+
+    [Fact]
+    public void AStoredTabOfAnotherAccountFallsBackToTheChosenAccountsDefaultTab()
+    {
+        // The stored tab names the PRIMARY's window; the Desktop account does
+        // not have that id, so its own default tab shows.
+        var desktop = ClientFor(Desktop, storedTab: "claude|P|session.v1");
+        Assert.Equal("S", desktop.Selected!.Id.AccountScope);
+    }
+
     [Fact]
     public void ThePrimaryFallsBackToStoredSeriesOnlyWithoutAPayload()
     {

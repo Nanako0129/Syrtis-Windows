@@ -80,6 +80,41 @@ public static class WindowCardText
     /// picker does not offer.</summary>
     public const string TabKey = "tokenbar.windowcard.window";
 
+    /// <summary>Per-client choice of which account the card shows; the value
+    /// is the account key, "" = primary. Append the quota OWNER client id.</summary>
+    public const string AccountKeyPrefix = "tokenbar.windowcard.account.";
+
+    /// <summary>Rule 6: Windows has no per-account transcript scan, so local
+    /// usage can only be attributed to the primary account.</summary>
+    public static string LocalUsageUnattributed() =>
+        "Local usage can't be attributed to this account yet.".Localized();
+
+    /// <summary>The header label naming the resolved account: null for the
+    /// primary (header unchanged), else the same label the pills use — shown
+    /// with or without pills.</summary>
+    public static string? HeaderAccountLabel(AgentUsagePayload? quota, string clientId, string? accountKey) =>
+        accountKey is null ? null : AccountLabel.Of(new AccountIdentity(clientId, accountKey), quota);
+
+    /// <summary>Folds the header label into the subtitle slot (the header's
+    /// secondary text); unchanged when there is no label.</summary>
+    public static string? WithAccountLabel(string? subtitle, string? accountLabel) =>
+        accountLabel is null ? subtitle : subtitle is null ? accountLabel : $"{accountLabel} · {subtitle}";
+
+    /// <summary>One account pill: <see cref="Key"/> null = primary.</summary>
+    public sealed record AccountPill(string? Key, string Label);
+
+    /// <summary>The account pills for a client: payload order, one per card
+    /// with live windows, and only when there are at least two — otherwise
+    /// empty and the card is exactly the single-account card.</summary>
+    public static IReadOnlyList<AccountPill> AccountPills(AgentUsagePayload? quota, string clientId)
+    {
+        var pills = (quota?.Agents ?? [])
+            .Where(a => a.ClientId == clientId && a.Windows.Count > 0)
+            .Select(a => new AccountPill(a.Account.AccountKey, AccountLabel.Of(a.Account, quota)))
+            .ToList();
+        return pills.Count >= 2 ? pills : [];
+    }
+
     /// <summary>The account scope a live window's tab carries when neither a
     /// stored series nor the live payload itself can supply one — the live
     /// agent's own <see cref="AgentUsageSnapshot.HistoryScope"/> resolution
@@ -362,10 +397,21 @@ public static class WindowCardText
     /// <summary>Which account's card the per-client window card shows: the
     /// primary when it has windows to draw; otherwise the first non-primary
     /// card of the client (payload order) that has; otherwise the primary.
-    /// Returns the account key (null = primary), for <see cref="Tabs"/>.</summary>
-    public static string? WindowCardAccount(AgentUsagePayload? quota, string clientId)
+    /// Returns the account key (null = primary), for <see cref="Tabs"/>.
+    /// <paramref name="storedAccountKey"/> (null/"" = primary, as stored) wins
+    /// when that account is in the payload WITH windows; otherwise the rule
+    /// above applies. The stored value is never touched here.</summary>
+    public static string? WindowCardAccount(
+        AgentUsagePayload? quota, string clientId, string? storedAccountKey = null)
     {
         var cards = (quota?.Agents ?? []).Where(a => a.ClientId == clientId).ToList();
+        var stored = AccountIdentity.Normalize(storedAccountKey);
+        if (storedAccountKey is not null
+            && cards.Any(a => a.Account.AccountKey == stored && a.Windows.Count > 0))
+        {
+            return stored;
+        }
+
         if (cards.Any(a => a.Account.AccountKey is null && a.Windows.Count > 0))
         {
             return null;
@@ -625,10 +671,17 @@ public static class WindowCardText
     }
 
     /// <summary>The tokens and money a zone's own messages carry, or the line
-    /// that says it carries none.</summary>
+    /// that says it carries none. For a card whose local usage cannot be
+    /// attributed (<paramref name="unattributed"/>), the fixed line instead:
+    /// an empty list there means "unknown", not "none".</summary>
     public static (string? Tokens, string? Money, string? Empty) ZoneUsage(
-        IReadOnlyList<WindowMessage> messages)
+        IReadOnlyList<WindowMessage> messages, bool unattributed = false)
     {
+        if (unattributed)
+        {
+            return (null, null, LocalUsageUnattributed());
+        }
+
         if (messages.Count == 0)
         {
             return (null, null, "No usage in this interval".Localized());

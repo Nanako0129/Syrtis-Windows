@@ -64,7 +64,8 @@ public static class QuotaLensProjection
         string ActiveClientTab,
         string WindowCardTab,
         string? HistoryShownWindow = null,
-        int HistoryShownCount = WindowHistoryText.VisibleRows);
+        int HistoryShownCount = WindowHistoryText.VisibleRows,
+        string? WindowCardAccount = null);
 
     /// <summary>Everything the Quota lens's seven sites decided, assembled
     /// once. <see cref="Client"/> is null exactly when <see cref="Selection.ActiveClientTab"/>
@@ -102,6 +103,12 @@ public static class QuotaLensProjection
         // reads (BuildOverview vs BuildClient) and neither may read the
         // other's field.
         WindowEquivalence.FetchOutcome QuotaHistoryOutcome,
+        IReadOnlyList<WindowCardText.AccountPill> Accounts,
+        string? SelectedAccount,
+        // True for any non-primary account: Mine/LiveEquivalence/History
+        // carry no local usage and the view prints the fixed line instead.
+        bool LocalUsageUnattributed,
+        string? AccountLabel,
         // The selected window is model-scoped and none of this
         // subscription's usage inside it matched the scope, though some
         // unscoped usage did (macOS WindowUsageHalf.scopeMatchedNothing,
@@ -214,13 +221,27 @@ public static class QuotaLensProjection
         // land; see this method's own doc comment on `windowUsageOutcome`.
         var equivalences = windowUsageOutcome == WindowEquivalence.FetchOutcome.Succeeded
             ? QuotaEquivalenceFold.Build(
-                history ?? [], windowUsage?.Messages ?? [], confirmed,
+                [.. (history ?? []).Where(s => LocalUsageScopable(quota, s))],
+                windowUsage?.Messages ?? [], confirmed,
                 // Each window's estimate narrowed to its OWN scope, not to
                 // whichever window a card happens to show (macOS
                 // DashboardModel.swift:1836-1843).
                 series => ModelScope.Of(quota, series.ProviderId, series.AccountScope, series.WindowKey))
             : new Dictionary<QuotaWindowIdentity, WindowEquivalence.Row>();
         return new Overview(summaries, windows, grids, quotaHistoryOutcome, equivalences);
+    }
+
+    /// <summary>Whether a stored series may get a local-usage equivalence.
+    /// A client with no non-primary card keeps every series (as before). With
+    /// any non-primary card only the PRIMARY's series qualify (none when there
+    /// is no primary card or it has no scope): Windows has no per-account
+    /// scan, so a non-primary (or unmatched) series would be priced from the
+    /// primary's messages.</summary>
+    internal static bool LocalUsageScopable(AgentUsagePayload? quota, QuotaHistorySeries series)
+    {
+        var cards = (quota?.Agents ?? []).Where(a => a.ClientId == series.ProviderId).ToList();
+        return cards.All(a => a.Account.AccountKey is null)
+            || cards.Any(a => a.Account.AccountKey is null && a.HistoryScope?.Scope == series.AccountScope);
     }
 
     /// <summary>
@@ -287,11 +308,14 @@ public static class QuotaLensProjection
         var owner = ClientRegistry.QuotaOwner(clientId);
         // One card per client: the primary when it has windows, else the
         // first other account that does (Desktop-only users).
-        var tabs = WindowCardText.Tabs(
-            history, quota, owner, WindowCardText.WindowCardAccount(quota, owner));
+        var account = WindowCardText.WindowCardAccount(quota, owner, selection.WindowCardAccount);
+        var unattributed = account is not null;
+        var tabs = WindowCardText.Tabs(history, quota, owner, account);
         var selected = tabs.FirstOrDefault(tab => WindowId(tab.Id) == windowCardTab)
             ?? DefaultTab(tabs);
-        var messages = windowUsage?.Messages ?? [];
+        // Windows has no per-account scan: a non-primary account reads no
+        // local usage at all (never the primary's).
+        IReadOnlyList<WindowMessage> messages = unattributed ? [] : windowUsage?.Messages ?? [];
         // The selected window's model scope, looked up once (ModelScope.Of)
         // and handed to every surface of this card: the bars and live line
         // (`mine`), and the history rows (BuildHistory). Port of macOS
@@ -307,8 +331,11 @@ public static class QuotaLensProjection
         var mine = QuotaHistoryFold.InScope(subscription, modelScope);
         var scopeMatchedNothing = false;
         // Only from a read that landed: a failed refetch keeps stale messages,
-        // and the note is a claim about this subscription's usage.
-        if (modelScope is not null
+        // and the note is a claim about this subscription's usage. Never for
+        // an unattributed account: it reads no messages, so "nothing matched"
+        // would be a claim about usage it cannot see.
+        if (!unattributed
+            && modelScope is not null
             && windowUsageOutcome == WindowEquivalence.FetchOutcome.Succeeded
             && selected?.Active is { IsPlaced: true } placed)
         {
@@ -321,7 +348,7 @@ public static class QuotaLensProjection
         // condition WindowCardText.State resolves to WindowCardState.Chart
         // for, which is the only state the view draws this line under.
         WindowEquivalence.Row? liveEquivalence = null;
-        if (selected?.Active is { IsPlaced: true } active)
+        if (!unattributed && selected?.Active is { IsPlaced: true } active)
         {
             // The card and this line must describe the same interval:
             // WindowCardGeometry.Chart already clips its bars and curve to
@@ -345,7 +372,9 @@ public static class QuotaLensProjection
             history, selected, messages, confirmed, owner, windowUsageOutcome, selection, modelScope);
         return new Client(
             owner, tabs, selected, messages, mine, liveEquivalence,
-            windowUsage?.UndatedCount ?? 0, windowHistory, quotaHistoryOutcome,
+            unattributed ? 0 : windowUsage?.UndatedCount ?? 0, windowHistory, quotaHistoryOutcome,
+            WindowCardText.AccountPills(quota, owner), account, unattributed,
+            WindowCardText.HeaderAccountLabel(quota, owner, account),
             scopeMatchedNothing);
     }
 
