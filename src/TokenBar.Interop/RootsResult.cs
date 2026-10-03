@@ -9,3 +9,5 @@ public sealed record RootsResult(
     IReadOnlyList<RootRejection> Rejected);
 
 public sealed record RootRejection(int Index, string Reason);
+
+public sealed record ClaudeConfigDirCheck(string? Reason);

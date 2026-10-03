@@ -209,6 +209,8 @@ Step("tb_set_claude_config_dirs", () =>
     $"ok registered={TbCore.SetClaudeConfigDirs([]).RegisteredCount}");
 Step("tb_set_extra_scan_paths", () =>
     $"ok registered={TbCore.SetExtraClaudeScanPaths([]).RegisteredCount}");
+Step("tb_validate_claude_config_dir", () =>
+    $"ok reason={TbCore.ValidateClaudeConfigDir("C:work", []) ?? "none"}");
 
 if (skipNetwork)
 {
