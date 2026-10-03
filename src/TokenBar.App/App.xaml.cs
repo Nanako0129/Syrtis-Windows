@@ -25,6 +25,19 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        // Offline tool, not a launch: render the gallery to %TEMP%\tray-icons
+        // and exit before anything that touches the user's running instance or
+        // data — settings (AppLanguage reads settings.json), the single-instance
+        // mutex (a running Syrtis would make it exit without dumping), windows,
+        // tray and polling. The renderer reads no localized string, so skipping
+        // AppLanguage changes no pixel.
+        if (Environment.GetCommandLineArgs().Contains("--dump-tray-icons"))
+        {
+            TrayIconGallery.Dump();
+            Current.Exit();
+            return;
+        }
+
         // A stray UI-thread exception (a render / hover / animation callback)
         // shouldn't take the whole tray-resident app down once it's up; during
         // startup we let it propagate so a broken launch stays visible.
@@ -70,11 +83,6 @@ public partial class App : Application
             DevLog.Write("launch: creating tray");
             _tray = new TrayService(_flyout, _graphCoordinator);
             DevLog.Write("launch: tray up");
-
-            if (Environment.GetCommandLineArgs().Contains("--dump-tray-icons"))
-            {
-                TrayIconGallery.Dump();
-            }
 
             // Debug flag, macOS --settings parity.
             if (Environment.GetCommandLineArgs().Contains("--settings"))
