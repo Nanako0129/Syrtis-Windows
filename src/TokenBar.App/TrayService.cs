@@ -733,7 +733,8 @@ public sealed class TrayService : IDisposable
                 // default (EcoQoS + IDLE priority class). That silently undid
                 // ProcessPower.EnsureNormalPriority, and once a Boost scope
                 // handed throttling back to the system only the Idle class
-                // remained (188: Idle from launch, throttling 0x0). Power is
+                // remained (observed on a Windows 11 host: Idle from about one
+                // second after launch, throttling 0x0). Power is
                 // ProcessPower's job, so the library must not touch it. The
                 // shipping argument cannot be observed in a unit test; it is
                 // checked on a Windows host by polling the process priority.
