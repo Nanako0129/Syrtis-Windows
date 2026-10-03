@@ -153,6 +153,18 @@ public sealed class GraphRequestCoordinator
         Func<string?, UsagePayload>? refreshGraph = null,
         Func<DateTimeOffset>? utcNow = null)
     {
+        // The app's scans wait for the launch push of the saved extra Claude
+        // roots, so the first graph already includes them.
+        localFirst ??= year =>
+        {
+            ClaudeExtraRoots.AwaitLaunch();
+            return TbCore.GraphLocalFirst(year);
+        };
+        refreshGraph ??= graph ?? (year =>
+        {
+            ClaudeExtraRoots.AwaitLaunch();
+            return TbCore.RefreshGraph(year);
+        });
         try
         {
             var root = getFolderPath is null
@@ -174,20 +186,37 @@ public sealed class GraphRequestCoordinator
                 createDirectory(profile);
             }
 
-            var sourceId = sourceContextId is null
-                ? TbCore.SourceContextId()
-                : sourceContextId();
-            if (string.IsNullOrWhiteSpace(sourceId))
+            // Read on every access, never once per process: the id changes
+            // when the extra Claude scan roots do, so a snapshot written
+            // before a root was removed must stop matching (security review
+            // R4). Both run off the UI thread, after the launch push.
+            var currentId = sourceContextId ?? (() =>
             {
-                throw new InvalidOperationException();
+                ClaudeExtraRoots.AwaitLaunch();
+                return TbCore.SourceContextId();
+            });
+            string? SourceId()
+            {
+                try
+                {
+                    var id = currentId();
+                    return string.IsNullOrWhiteSpace(id) ? null : id;
+                }
+                catch
+                {
+                    return null;
+                }
             }
 
             var store = new GraphSnapshotStore(
                 Path.Combine(profile, "graph-snapshot.json"));
             var snapshot = new SnapshotAccess(
-                year => store.Read(sourceId, year),
-                (year, capturedAt, payload, commitFence) =>
-                    store.Write(sourceId, year, capturedAt, payload, commitFence));
+                year => SourceId() is { } id
+                    ? store.Read(id, year)
+                    : new GraphSnapshotReadResult(GraphSnapshotReadStatus.Missing),
+                (year, capturedAt, payload, commitFence) => SourceId() is { } id
+                    ? store.Write(id, year, capturedAt, payload, commitFence)
+                    : GraphSnapshotWriteStatus.Skipped);
             return new GraphRequestCoordinator(
                 localFirst,
                 graph,
