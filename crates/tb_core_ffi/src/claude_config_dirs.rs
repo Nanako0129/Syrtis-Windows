@@ -207,25 +207,46 @@ fn register(
 }
 
 /// Why appending `candidate` to the saved list `existing` would not give a
-/// working extra account, or `None` if it would. The config registry's own
-/// answer for that position ([`register`]), then the scan registry's
-/// stricter rule: nothing at or under the primary's `<home>\.claude`, since
-/// the account's `projects`/`transcripts` would be refused there. Touches no
-/// filesystem (no stat, so a `\\wsl.localhost` path cannot wake WSL) and
-/// changes no registry. Returns a fixed reason code, never the input.
+/// working extra account, or `None` if it would. In order:
+/// - the config registry's own answer for that position ([`register`]),
+///   with `homeDirectory` in place of `defaultConfigDir` when the candidate
+///   is the home folder itself (so the copy can say "pick the folder inside");
+/// - the scan registry's rule for the account's two roots,
+///   `<dir>\projects` and `<dir>\transcripts`
+///   ([`crate::extra_scan_paths::path_rule`]);
+/// - `nestedConfigDir` when the candidate contains, or is inside, a directory
+///   the saved list registers, whose transcripts would then be scanned twice.
+///
+/// Touches no filesystem (no stat, so a `\\wsl.localhost` path cannot wake
+/// WSL) and changes no registry. Returns a fixed reason code, never the input.
 pub(crate) fn validate(
     candidate: &str,
     existing: &[String],
     home: Option<&std::path::Path>,
 ) -> Option<&'static str> {
+    let is_home = |dir: &str| {
+        home.is_some_and(|home| duplicate_key(dir) == duplicate_key(&home.to_string_lossy()))
+    };
     let mut all = existing.to_vec();
     all.push(candidate.to_string());
     let (_, rejected) = register(&all, home);
     if let Some((_, reason)) = rejected.iter().find(|(index, _)| *index == existing.len()) {
-        return Some(reason);
+        let home_itself = *reason == "defaultConfigDir"
+            && normalize(candidate).is_ok_and(|dir| is_home(&dir));
+        return Some(if home_itself { "homeDirectory" } else { reason });
     }
     let dir = normalize(candidate).ok()?;
-    is_at_or_under_default_config_dir(&dir, home).then_some("defaultConfigDir")
+    for root in ["projects", "transcripts"] {
+        if let Err(reason) = crate::extra_scan_paths::path_rule(&format!("{dir}\\{root}"), home) {
+            return Some(reason);
+        }
+    }
+    let key = duplicate_key(&dir);
+    let (registered, _) = register(existing, home);
+    let nested = registered.iter().map(|other| duplicate_key(other)).any(|other| {
+        other.starts_with(&format!("{key}\\")) || key.starts_with(&format!("{other}\\"))
+    });
+    nested.then_some("nestedConfigDir")
 }
 
 /// One process-wide mutex for every test that writes the static, so parallel
@@ -272,13 +293,18 @@ mod tests {
                 Some("defaultConfigDir"),
             ),
             (r"C:\Users", empty.clone(), Some("defaultConfigDir")),
-            (r"C:\Users\Me", empty.clone(), Some("defaultConfigDir")),
+            (r"C:\Users\Me", empty.clone(), Some("homeDirectory")),
+            (r"c:/users/me/", empty.clone(), Some("homeDirectory")),
             // Accepted by the config registry, refused by the scan registry.
             (
                 r"C:\Users\Me\.claude\work",
                 empty.clone(),
                 Some("defaultConfigDir"),
             ),
+            (r"D:\a\projects", some(&[r"D:\a"]), Some("nestedConfigDir")),
+            (r"D:\", some(&[r"D:\a"]), Some("rootDirectory")),
+            (r"D:\x", some(&[r"D:\x\y"]), Some("nestedConfigDir")),
+            (r"D:\ab", some(&[r"D:\a"]), None),
             (
                 r"d:/WORK/.claude/",
                 some(&[r"D:\work\.claude"]),

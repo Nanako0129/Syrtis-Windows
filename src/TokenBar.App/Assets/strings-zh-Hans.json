@@ -487,5 +487,7 @@
   "Windows can't open this path as written.": "Windows 无法按这个写法打开该路径。",
   "Up to 8 folders can be added.": "最多只能添加 8 个目录。",
   "This isn't a folder.": "这不是目录。",
-  "This folder can't be added.": "这个目录无法添加。"
+  "This folder can't be added.": "这个目录无法添加。",
+  "That's your user folder. Pick the Claude config folder inside it.": "这是你的用户目录，请选择其中的 Claude 配置目录。",
+  "That folder is inside, or contains, a folder you already added.": "这个目录位于已添加的目录之内，或包含了已添加的目录。"
 }

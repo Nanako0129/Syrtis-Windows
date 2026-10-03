@@ -5,13 +5,12 @@ namespace TokenBar.Core;
 
 /// <summary>
 /// The extra Claude config directories (<c>CLAUDE_CONFIG_DIR</c> accounts) the
-/// user added in Settings: persistence, the UI-only path rules, and the push
-/// into the native registries. Port of macOS <c>ClaudeExtraRoots.swift</c>.
+/// user added in Settings: persistence, the pre-save check, and the push into
+/// the native registries. Port of macOS <c>ClaudeExtraRoots.swift</c>.
 /// <para>
-/// Rust's <c>claude_config_dirs::normalize</c> is the authoritative path rule
-/// (drive paths only, the primary's own <c>.claude</c> refused); this side adds
-/// macOS's UI rules only, so the picker can refuse the obvious mistakes before
-/// anything is saved.
+/// No path rule lives here: the pre-save check is the registries' own answer
+/// (<c>tb_validate_claude_config_dir</c>, built on the same Rust functions the
+/// setters use).
 /// </para>
 /// </summary>
 public static class ClaudeExtraRoots
@@ -47,8 +46,22 @@ public static class ClaudeExtraRoots
     /// <paramref name="existing"/> (<c>tb_validate_claude_config_dir</c>), so
     /// a path they would refuse never reaches the list and the rule lives only
     /// in Rust. Touches no filesystem.</summary>
-    public static string? UiRejection(string path, IReadOnlyList<string> existing) =>
-        TbCore.ValidateClaudeConfigDir(path, existing);
+    /// <remarks>Blocking FFI: call off the UI thread. Never throws: if the
+    /// check itself fails (a stale DLL, a native error) it logs the exception
+    /// type and returns <c>checkFailed</c>, so the caller refuses the save
+    /// with the generic sentence instead of silently doing nothing.</remarks>
+    public static string? UiRejection(string path, IReadOnlyList<string> existing)
+    {
+        try
+        {
+            return TbCore.ValidateClaudeConfigDir(path, existing);
+        }
+        catch (Exception ex)
+        {
+            Log($"claudeRoots validate failed: {ex.GetType().Name}");
+            return "checkFailed";
+        }
+    }
 
     /// <summary>Whether Settings may check that a saved <paramref name="dir"/>
     /// exists: only one the registries accept on its own. A refused one

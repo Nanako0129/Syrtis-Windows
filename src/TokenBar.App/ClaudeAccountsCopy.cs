@@ -40,6 +40,8 @@ internal static class ClaudeAccountsCopy
     /// code gets the generic sentence.</summary>
     internal static string Reason(string code) => code switch
     {
+        "homeDirectory" => "That's your user folder. Pick the Claude config folder inside it.",
+        "nestedConfigDir" => "That folder is inside, or contains, a folder you already added.",
         "defaultConfigDir" => "That folder overlaps your main Claude account's folder, which is already shown.",
         "duplicate" => "Already added.",
         "unsupportedPath" => "Only a full folder path that starts with a drive letter, like D:\\folder, can be added. Network paths can't, and WSL paths can't yet.",
@@ -52,7 +54,7 @@ internal static class ClaudeAccountsCopy
 
     internal static readonly string[] ReasonCodes =
     [
-        "defaultConfigDir", "duplicate", "unsupportedPath", "rootDirectory",
+        "homeDirectory", "nestedConfigDir", "defaultConfigDir", "duplicate", "unsupportedPath", "rootDirectory",
         "invalidComponent", "limitExceeded", "notDirectory", "empty",
     ];
 

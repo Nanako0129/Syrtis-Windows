@@ -108,6 +108,7 @@ public class ClaudeRootsNativeTests
         Assert.Equal("limitExceeded", ClaudeExtraRoots.UiRejection(@"D:\b", eight));
         // A refused saved entry takes no slot.
         Assert.Null(ClaudeExtraRoots.UiRejection(@"D:\b", [.. eight.Take(7), @"\\server\share"]));
+        Assert.Equal("nestedConfigDir", ClaudeExtraRoots.UiRejection(@"D:\work\.claude\sub", [@"D:\work\.claude"]));
     }
 
     /// <summary>Security review R2 against the real profile: the primary's
@@ -122,15 +123,20 @@ public class ClaudeRootsNativeTests
             return;
         }
 
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        // The native home resolution: HOME when set, else the profile folder.
+        var home = Environment.GetEnvironmentVariable("HOME") is { Length: > 0 } set
+            ? set
+            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         foreach (var path in new[]
                  {
-                     home, home + @"\.claude", (home + @"/.CLAUDE/").ToLowerInvariant(),
+                     home + @"\.claude", (home + @"/.CLAUDE/").ToLowerInvariant(),
                      home + @"\.claude\work", Path.GetDirectoryName(home)!,
                  })
         {
             Assert.Equal("defaultConfigDir", ClaudeExtraRoots.UiRejection(path, []));
         }
+
+        Assert.Equal("homeDirectory", ClaudeExtraRoots.UiRejection(home, []));
 
         Assert.Null(ClaudeExtraRoots.UiRejection(home + @"\.claude-work", []));
     }
