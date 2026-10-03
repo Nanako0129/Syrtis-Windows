@@ -188,9 +188,15 @@ pub(crate) fn set_from_json(raw: &str) -> Result<(serde_json::Value, Vec<String>
 /// check gives the setter's answer for the config registry. Besides the path
 /// rule: the home folder itself (`homeDirectory`) and the primary's `.claude`
 /// or any folder above it (`defaultConfigDir`, security review R2); a folded
-/// duplicate; more than eight. A directory nested in another is allowed:
-/// their `projects`/`transcripts` roots are disjoint unless one sits inside
-/// the other's roots, which the scan registry refuses (`overlappingRoot`).
+/// duplicate; more than eight. A directory nested in another is allowed (the
+/// window_usage direct-children rule and macOS support it). The registered
+/// `projects`/`transcripts` roots overlap only when one sits inside the
+/// other's roots, which the scan registry refuses (`overlappingRoot`).
+/// Known gap, not handled here: an account's window is captured with the
+/// account directory as home, and the engine also scans
+/// `<home>\.claude\projects`, so an inner account at `<outer>\.claude` is
+/// counted in both windows (read from the code, not measured; pre-existing;
+/// deferred).
 fn register(
     input: &[String],
     home: Option<&std::path::Path>,
@@ -305,9 +311,8 @@ mod tests {
     use super::*;
 
     /// The setter refuses the home folder itself and the primary's .claude
-    /// even when HOME ends in a separator, and keeps a nested account (its
-    /// roots are disjoint from the outer one's; window_usage and macOS
-    /// support it).
+    /// even when HOME ends in a separator, and keeps a nested account
+    /// (window_usage and macOS support it).
     #[test]
     fn register_refuses_home_and_keeps_nested_accounts() {
         let home = std::path::Path::new(r"C:\Users\Me\");
@@ -363,7 +368,7 @@ mod tests {
                 empty.clone(),
                 Some("defaultConfigDir"),
             ),
-            // A nested account keeps disjoint roots; one inside the other's
+            // A nested account's registered roots are disjoint; one inside the other's
             // roots (or holding them) would scan files twice.
             (r"D:\claude\alt", some(&[r"D:\claude"]), None),
             (r"D:\a\projects", some(&[r"D:\a"]), Some("overlappingRoot")),

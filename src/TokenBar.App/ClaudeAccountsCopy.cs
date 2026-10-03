@@ -42,7 +42,7 @@ internal static class ClaudeAccountsCopy
     {
         "checkFailed" => "Syrtis couldn't check this folder. Try again, or restart Syrtis.",
         "homeDirectory" => "That's your user folder. Pick the Claude config folder inside it.",
-        "overlappingRoot" => "That folder's transcripts overlap those of a folder you already added.",
+        "overlappingRoot" => "That folder overlaps the projects or transcripts folder of a folder you already added.",
         "defaultConfigDir" => "That folder overlaps your main Claude account's folder, which is already shown.",
         "duplicate" => "Already added.",
         "unsupportedPath" => "Only a full folder path that starts with a drive letter, like D:\\folder, can be added. Network paths can't, and WSL paths can't yet.",

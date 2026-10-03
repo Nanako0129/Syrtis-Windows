@@ -504,6 +504,6 @@
   "This isn't a folder.": "这不是目录。",
   "This folder can't be added.": "这个目录无法添加。",
   "That's your user folder. Pick the Claude config folder inside it.": "这是你的用户目录，请选择其中的 Claude 配置目录。",
-  "That folder's transcripts overlap those of a folder you already added.": "这个目录的对话记录与已添加的目录重叠。",
+  "That folder overlaps the projects or transcripts folder of a folder you already added.": "这个目录与已添加目录的 projects 或 transcripts 目录重叠。",
   "Syrtis couldn't check this folder. Try again, or restart Syrtis.": "Syrtis 无法检查这个目录。请再试一次，或重新启动 Syrtis。"
 }
