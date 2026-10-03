@@ -60,7 +60,8 @@ public sealed partial class DashboardView : UserControl
     public DashboardView()
     {
         InitializeComponent();
-        ProductTitle.Text = ProductIdentity.Name;
+        // The wordmark reads Σύρτις; a screen reader names the product.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ProductTitle, ProductIdentity.Name);
         SetLiveRate(0);
         // WinUI otherwise synthesizes a tooltip containing "Esc" for the
         // dashboard-wide Escape accelerator whenever the pointer rests over
