@@ -322,6 +322,15 @@ public class OnboardingSetupTests : IDisposable
         Assert.Equal(["claude", "codex", "copilot"], present);
     }
 
+    // A CLI alias and its product are one agent, as on the tab row
+    // (ClientRegistry.CanonicalClient): the card must not list Claude twice.
+    [Fact]
+    public void PresentTabClientsFoldCliAliasesIntoOneAgent()
+    {
+        var present = OnboardingSetup.PresentTabClients(["claude-code", "claude", "codex-cli"], []);
+        Assert.Equal(["claude", "codex"], present);
+    }
+
     // ---- copy -------------------------------------------------------------------
 
     [Fact]
