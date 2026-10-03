@@ -185,14 +185,15 @@ public static class WindowCardText
     /// Antigravity local IDE key history on an authoritative owner ID (the
     /// ChatGPT account ID; the signed-in email), so two accounts there keep
     /// two series and the previous account's series stays out of the new
-    /// one's tab. Claude, Copilot, Grok and Antigravity's remote OAuth route
-    /// have no owner ID in anything fetched, so their history scope is one
+    /// one's tab. Claude, Copilot, Grok, Kiro and Antigravity's remote OAuth
+    /// route have no owner ID in anything fetched, so their history scope is one
     /// constant per installation and provider: every account signed in on
     /// this installation records into, and is shown, the same series. That
     /// is macOS's trade, accepted for Windows on 2026-09-25 — the curve
     /// models the operator, not the billing account — and it is what stops a
     /// credential rotation from starting the history over. Before it, those
-    /// providers keyed history on the credential lineage and this filter
+    /// providers except Kiro (added after, never lineage-keyed) keyed history
+    /// on the credential lineage and this filter
     /// isolated accounts for them too; the series that rule left behind are
     /// merged into the history-scope series once, by the Rust store's
     /// one-time schema-3 fold (a window whose merge fails validation keeps

@@ -76,6 +76,8 @@ macOS 159 個 commit，Windows 37 個——四倍以上的落差。對應到檔�
 只存在 macOS 的檔案：`agent_grokbot.rs`、`agent_kiro.rs`、
 `agent_opencode_go.rs`、`kiro_integrations.rs`、`keychain_consent.rs`、
 `macos_safe_storage.rs`、`claude_config_dirs.rs`、`extra_scan_paths.rs`。
+（這份清單和下方的 `comm` 輸出是撰寫當時的量測；之後 `claude_config_dirs.rs`、
+`extra_scan_paths.rs` 由 W4 補上，`agent_kiro.rs`、`kiro_integrations.rs` 由 #176 補上。）
 
 只存在 Windows 的檔案：`agent_history.rs`——macOS 在 2ea81af1（#121，2026-07-31）
 退休了這個模組（沒有出貨路徑呼叫它），把裡面唯一還在用的
@@ -92,7 +94,7 @@ macOS 159 個 commit，Windows 37 個——四倍以上的落差。對應到檔�
 | OAuth client id 最後連字號錨點 | （未附獨立 commit） | 缺 | S4 |
 | Grok 週額度改從 credit pool 讀，pace 系列 v2 | `774e6410`、`822bf5e8`、`b18fe7cf` | 缺 | S4 |
 | Antigravity OAuth client 候選路徑只列 macOS `.app` 路徑 | — | Windows 上無法 refresh；這是 Windows 自己的缺口，不是落後 macOS，macOS 那邊本來就沒有這個問題要解 | S5 |
-| Kiro／OpenCode Go 額度卡 | `3f543ed2`、`37b52739` | 缺；Windows 端的憑證存放位置還沒量測過 | S6 |
+| Kiro／OpenCode Go 額度卡 | `3f543ed2`、`37b52739` | Kiro：已補（#176），讀 Kiro IDE 的 token 檔，Windows 上的檔案位置還沒在實機量測過；OpenCode Go：缺 | S6 |
 | Grok Bot（Keychain + Electron `safeStorage` v10） | — | 缺；Windows 需要對應的 DPAPI 設計，不能照搬 Keychain | 暫緩 |
 | 多帳號（`extra_scan_paths`、`CLAUDE_CONFIG_DIR`、`tb_window_usage` 的 `account_key`、`tb_quota_curve`） | — | 部分：Rust 核心已支援 `CLAUDE_CONFIG_DIR` 帳號與 Claude Desktop 各自一張卡（`tb_set_claude_config_dirs`、payload `accountKey`、同帳號合併）；UI（選取、標籤、設定頁）待做；`extra_scan_paths`、`tb_window_usage` 的 `account_key`、`tb_quota_curve` 仍缺 | 進行中 |
 
