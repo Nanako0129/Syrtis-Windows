@@ -1833,9 +1833,16 @@ public sealed partial class DashboardView : UserControl
             trailing.Children.Add(ModelCostCell(
                 costText,
                 CostSurfaceProjection.CostWarning(entry, snapshot.CostAuthoritative)));
-            block.Children.Add(Ui.Row(name, trailing));
-            if (!collapsible)
+            if (collapsible)
             {
+                block.Children.Add(Ui.Row(name, trailing));
+            }
+            else
+            {
+                // The name and its token split stack in the left column, beside
+                // the two-line trailing column (macOS ModelsView's VStack). In
+                // the stack the name row is one line high, so the share centres
+                // on the name rather than on the taller row.
                 // Indented past the disc (8) and its gap (6), under the name.
                 var split = new StackPanel
                 {
@@ -1851,7 +1858,10 @@ public sealed partial class DashboardView : UserControl
                     split.Children.Add(kind);
                 }
 
-                block.Children.Add(split);
+                var left = new StackPanel { Spacing = 2 };
+                left.Children.Add(name);
+                left.Children.Add(split);
+                block.Children.Add(Ui.Row(left, trailing));
             }
 
             var tokenBar = TokenKindBar(entry);
