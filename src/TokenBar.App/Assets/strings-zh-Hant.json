@@ -470,5 +470,18 @@
   "Set up in Settings…": "到「設定」設定…",
   "How busy are your agents?": "你的 agent 平常有多忙？",
   "The menu-bar animation follows your live token rate. Pick the range that fits how you work; you can change it later in Settings.": "選單列動畫會跟著即時的 token 速率變化。選一個符合你使用習慣的範圍，之後可以在「設定」裡修改。",
-  "Most people: Moderate": "大多數人適合「中度」"
+  "Most people: Moderate": "大多數人適合「中度」",
+  "Set up": "待設定",
+  "Allow": "待授權",
+  "Error": "錯誤",
+  "Live": "使用中",
+  "No quota": "無額度",
+  "Recent consumption": "最近的消耗",
+  "At this rate it runs out before reset · projected {0}% used": "照這個速度會在重置前用完・預計已用 {0}%",
+  "At this rate it reaches {0}% used by reset": "照這個速度，重置時約已用 {0}%",
+  "The pace line beside it compares you with your usual pattern instead.": "旁邊那行步調比的是「跟你平常相比」，兩者回答不同問題。",
+  "Recently: runs out": "近期：會用完",
+  "{0} used": "已用 {0}",
+  "{0} less left": "剩餘少 {0}",
+  "{0} more left": "剩餘多 {0}"
 }

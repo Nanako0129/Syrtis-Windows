@@ -1635,6 +1635,7 @@ public sealed partial class DashboardView : UserControl
         var paceMode = CurrentPaceMode();
 
         var now = DateTimeOffset.Now;
+        var liveClients = AgentLimitsText.LiveClients(snapshot.Trace);
         foreach (var agent in agents)
         {
             var section = new StackPanel { Spacing = 5 };
@@ -1652,7 +1653,8 @@ public sealed partial class DashboardView : UserControl
                 header.Children.Add(Ui.Dim(plan, 10));
             }
 
-            section.Children.Add(header);
+            var badge = AgentLimitsText.StatusBadge(agent, liveClients.Contains(agent.ClientId));
+            section.Children.Add(Ui.Row(header, ToneText(badge.Text, 10, badge.Tone)));
             if (agent.Error is { } error)
             {
                 section.Children.Add(Ui.Dim(error, 11));
@@ -1670,17 +1672,22 @@ public sealed partial class DashboardView : UserControl
             // cannot be true), so a plain index zip against UniqueCardWindows
             // lines each tab up with the window it belongs to.
             var windows = agent.UniqueCardWindows;
-            var chartTabs = layout == LimitsLayout.Chart
-                ? WindowCardText.Tabs(
-                    snapshot.QuotaHistory, snapshot.Quota, agent.ClientId, agent.Account.AccountKey)
-                : [];
+            // The same tabs feed the trend, which is information rather than a
+            // density option, so it appears in every layout and on every
+            // surface — macOS passes the curves to the client tab's card too
+            // (OverviewView.swift, QuotaView.swift:74).
+            var tabs = WindowCardText.Tabs(
+                snapshot.QuotaHistory, snapshot.Quota, agent.ClientId, agent.Account.AccountKey);
             for (var i = 0; i < windows.Count; i++)
             {
                 var window = windows[i];
                 var row = UsagePace.RowPresentation(
                     window, paceMode, asUsed, classic, now);
-                var chartSamples = i < chartTabs.Count ? chartTabs[i].Active?.Samples : null;
-                section.Children.Add(QuotaRow(window, row, classic, metric, chartSamples));
+                var samples = i < tabs.Count ? tabs[i].Active?.Samples : null;
+                var trend = AgentLimitsText.Trend(window, samples, now.ToUnixTimeMilliseconds());
+                section.Children.Add(QuotaRow(
+                    window, row, classic, metric,
+                    layout == LimitsLayout.Chart ? samples : null, trend));
             }
 
             panel.Children.Add(section);
@@ -2695,13 +2702,32 @@ public sealed partial class DashboardView : UserControl
 
     internal const string PaceOrange = "#ff9500"; // macOS Color.orange
 
+    /// <summary>A limits-card label in Core's <see cref="LimitsTone"/>. Red and
+    /// green are the gauge's own hexes.</summary>
+    private static TextBlock ToneText(string text, double size, LimitsTone tone)
+    {
+        var block = Ui.Text(text, size, tone switch
+        {
+            LimitsTone.Secondary => 0.75,
+            LimitsTone.Tertiary => 0.5,
+            _ => 1.0,
+        });
+        if (tone is LimitsTone.Red or LimitsTone.Green)
+        {
+            block.Foreground = Ui.BrushFromHex(tone == LimitsTone.Red ? "#ef4444" : AttributionAmountGreen);
+        }
+
+        return block;
+    }
+
     /// <summary>Render one complete quota window row from Core's precomputed
     /// display values. The responsive footer is built once and only toggles
     /// visibility when the actual row width crosses its measured threshold.</summary>
     internal static FrameworkElement QuotaRow(
         UsageWindow window, UsagePaceRowPresentation row, bool classic,
         QuotaMetric metric = QuotaMetric.Remaining,
-        IReadOnlyList<QuotaSample>? chartSamples = null)
+        IReadOnlyList<QuotaSample>? chartSamples = null,
+        QuotaTrend? trend = null)
     {
         var root = new StackPanel { Spacing = 3 };
         // Derive the countdown from the structured timestamp so it follows the
@@ -2714,8 +2740,22 @@ public sealed partial class DashboardView : UserControl
             10, 0.6);
         // Display only. The raw Label is what QuotaResolver matches a persisted
         // legacy selection against, so it must never be translated on that path.
-        root.Children.Add(Ui.Row(
-            Ui.Text(window.Label.Localized(), 11, bold: true), headerTrailing));
+        FrameworkElement headerLeading = Ui.Text(window.Label.Localized(), 11, bold: true);
+        if (trend is not null
+            && AgentLimitsText.TrendLabel(trend, metric == QuotaMetric.Used) is { } trendLabel)
+        {
+            var indicator = ToneText(
+                AgentLimitsText.TrendGlyph(trendLabel.Direction)
+                + (trendLabel.Text is { } text ? " " + text : ""),
+                10, trendLabel.Tone);
+            HoverTip.Attach(indicator, () => AgentLimitsText.TrendTooltip(trend));
+            var leading = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+            leading.Children.Add(headerLeading);
+            leading.Children.Add(indicator);
+            headerLeading = leading;
+        }
+
+        root.Children.Add(Ui.Row(headerLeading, headerTrailing));
 
         // Chart layout: the line replaces the bar only when the row was
         // handed samples AND enough of them fall inside the window's current
