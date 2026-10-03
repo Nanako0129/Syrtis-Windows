@@ -63,6 +63,15 @@ public sealed partial class DashboardView : UserControl
         // The wordmark reads Σύρτις; a screen reader names the product.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ProductTitle, ProductIdentity.Name);
         SetLiveRate(0);
+        // Hover tooltips stay inside the cards' scroll area, so none sits
+        // under the header or the footer (macOS popoverScrollViewport).
+        Loaded += (_, _) =>
+        {
+            if (XamlRoot is { } root)
+            {
+                HoverTip.RegisterViewport(root, () => HoverTip.BoundsInRoot(CardsScroll));
+            }
+        };
         // WinUI otherwise synthesizes a tooltip containing "Esc" for the
         // dashboard-wide Escape accelerator whenever the pointer rests over
         // the graph. The accelerator remains active; only its automatic
