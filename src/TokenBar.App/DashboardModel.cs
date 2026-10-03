@@ -54,6 +54,12 @@ public sealed class DashboardModel
     private volatile List<string> _knownYears = [];
     private volatile UsagePayload? _allTimeGraph;
     private GraphRequestId? _snapshotRequestId;
+
+    /// <summary>The last graph request whose completion the UI thread has
+    /// applied. A restored snapshot published for it after that point (the
+    /// restore runs beside the live pipeline and can land after a failed
+    /// live pass completed) is marked failed on arrival.</summary>
+    private GraphRequestId? _settledRequestId;
     private GraphRequestId? _pendingModelRequestId;
     private ModelReport? _pendingModel;
 
@@ -942,7 +948,8 @@ public sealed class DashboardModel
                 CostAuthoritative = _graphState.CostAuthoritative,
                 FetchedAt = DateTimeOffset.Now,
                 RestoredAt = publication.RestoredFrom,
-                RestoreFailed = false,
+                RestoreFailed = publication.RestoredFrom is not null
+                    && _settledRequestId == publication.RequestId,
             };
             _lastSnapshot = Current;
             Updated?.Invoke();
@@ -1023,11 +1030,14 @@ public sealed class DashboardModel
         // Always repaint on a settled request: the header spinner follows
         // GraphInFlight, and a live pass that ended without replacing a
         // restored graph marks it failed (macOS restoredSnapshot.failed).
-        // Queued behind the request's own publications, so Current already
-        // reflects any live graph it published.
+        // Queued behind the live pipeline's own publications, so Current
+        // already reflects any live graph it published. The restore is a
+        // separate task and can publish after this; `_settledRequestId`
+        // makes that late restore arrive already marked failed.
         var requestId = completion.RequestId;
         _ = _dispatcher.TryEnqueue(() =>
         {
+            _settledRequestId = requestId;
             if (_graphState.IsCurrent(requestId)
                 && Current is { RestoredAt: not null, RestoreFailed: false } restored)
             {
