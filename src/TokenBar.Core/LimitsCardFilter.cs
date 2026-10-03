@@ -25,4 +25,17 @@ public static class LimitsCardFilter
         [.. agents.Where(agent =>
             (clientId is null ? !tabHidden.Contains(agent.ClientId) : agent.ClientId == clientId)
             && !(agent.Account.AccountKey is null && limitsHidden.Contains(agent.ClientId)))];
+
+    /// <summary>Whether a client tab draws no Agent-limits card at all (macOS
+    /// <c>allRestrictedClientsHidden</c>): the user switched the client's card
+    /// off and it has no extra account to keep showing. Read from the setting,
+    /// not inferred from an empty <see cref="Visible"/> list, which is also
+    /// empty before the first quota payload arrives; that card must keep its
+    /// loading state, while a hidden one must not claim to be loading.</summary>
+    public static bool HidesClientCard(
+        IReadOnlyList<AgentUsageSnapshot> agents,
+        string clientId,
+        IReadOnlySet<string> limitsHidden) =>
+        limitsHidden.Contains(clientId)
+        && !agents.Any(agent => agent.ClientId == clientId && agent.Account.AccountKey is not null);
 }

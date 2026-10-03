@@ -57,4 +57,19 @@ public sealed class LimitsCardFilterTests
         Assert.Equal(
             ["codex"],
             Ids(LimitsCardFilter.Visible(Agents, "codex", new HashSet<string> { "codex" }, None)));
+
+    /// <summary>A client tab whose card is switched off draws no card, rather
+    /// than one saying "No quota data yet" over a payload that exists (macOS
+    /// allRestrictedClientsHidden). An extra account keeps the card; a client
+    /// not switched off keeps it even while the payload is still empty.</summary>
+    [Fact]
+    public void ClientTabCardIsDroppedOnlyWhenSwitchedOffWithNoExtraAccount()
+    {
+        var hidden = new HashSet<string> { "codex", "claude" };
+        Assert.True(LimitsCardFilter.HidesClientCard(Agents, "codex", hidden));
+        Assert.True(LimitsCardFilter.HidesClientCard([], "codex", hidden));
+        Assert.False(LimitsCardFilter.HidesClientCard(Agents, "claude", hidden));
+        Assert.False(LimitsCardFilter.HidesClientCard(Agents, "gemini", hidden));
+        Assert.False(LimitsCardFilter.HidesClientCard([], "gemini", hidden));
+    }
 }

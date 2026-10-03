@@ -1001,11 +1001,17 @@ public sealed partial class DashboardView : UserControl
                     ? BuildQuotaSummary(snapshot)
                     : null,
                 OverviewCard.Chart => BuildUsageChartCard(snapshot),
-                OverviewCard.Limits => Ui.Card(
-                    limitsClientId is { } cid
-                        ? "{0} limits".Localized(ClientRegistry.ShortName(cid))
-                        : "Agent limits".Localized(),
-                    BuildLimits(snapshot, limitsClientId)),
+                OverviewCard.Limits => limitsClientId is { } hiddenCid
+                    && LimitsCardFilter.HidesClientCard(
+                        snapshot.Quota?.Agents ?? [],
+                        hiddenCid,
+                        ClientRegistry.HiddenLimitsClients(AppSettings.Store))
+                    ? null
+                    : Ui.Card(
+                        limitsClientId is { } cid
+                            ? "{0} limits".Localized(ClientRegistry.ShortName(cid))
+                            : "Agent limits".Localized(),
+                        BuildLimits(snapshot, limitsClientId)),
                 // Absent when there is no live session, or when this tab is
                 // scoped to one client — the trace answers "across everything
                 // right now", which a single-client tab did not ask.
@@ -1617,6 +1623,17 @@ public sealed partial class DashboardView : UserControl
         // BuildQuotaSummary already applies to the sibling summary card. See
         // that method's own doc comment for why the earlier ordering (outcome
         // checked first) was wrong.
+        // Overview with every card switched off while the payload has cards:
+        // say so, not "No quota data yet" (macOS "No supported agents yet"
+        // for an empty visible list). A client tab whose card is off draws no
+        // card at all (LimitsCardFilter.HidesClientCard, at the callers).
+        var payloadHasCards = (snapshot.Quota?.Agents.Count ?? 0) > 0;
+        if (clientId is null && payloadHasCards && agents.Count == 0)
+        {
+            panel.Children.Add(Ui.Dim("No supported agents yet".Localized()));
+            return panel;
+        }
+
         switch (QuotaSummaryText.LimitsState(agents.Count > 0, snapshot.QuotaOutcome))
         {
             case AgentLimitsState.Failed:
