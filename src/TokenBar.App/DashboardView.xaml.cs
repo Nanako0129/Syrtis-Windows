@@ -1706,18 +1706,28 @@ public sealed partial class DashboardView : UserControl
         foreach (var agent in agents)
         {
             var section = new StackPanel { Spacing = 5 };
-            var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-            header.Children.Add(AgentIcon.Create(agent.ClientId, 14));
-            var title = Ui.Text(AccountLabel.Of(agent, snapshot.Quota), 12, bold: true);
-            if (AccountLabel.Detail(agent.Account) is { } fullPath)
-            {
-                ToolTipService.SetToolTip(title, fullPath);
-            }
-
+            // A Grid, not a horizontal StackPanel: the StackPanel measured the
+            // label unbounded, so a long config-dir label was clipped with no
+            // ellipsis. The label column is bounded and trims in the middle
+            // (macOS AgentLimitsCard.swift:751), keeping the directory name.
+            var header = new Grid { ColumnSpacing = 6 };
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var icon = AgentIcon.Create(agent.ClientId, 14);
+            header.Children.Add(icon);
+            var title = Ui.MiddleText(AccountLabel.Of(agent, snapshot.Quota), 12, bold: true);
+            title.HorizontalAlignment = HorizontalAlignment.Left;
+            title.VerticalAlignment = VerticalAlignment.Center;
+            ToolTipService.SetToolTip(title, AccountLabel.Detail(agent.Account) ?? title.Full);
+            Grid.SetColumn(title, 1);
             header.Children.Add(title);
             if (agent.Identity?.Plan is { } plan)
             {
-                header.Children.Add(Ui.Dim(plan, 10));
+                var planText = Ui.Dim(plan, 10);
+                planText.VerticalAlignment = VerticalAlignment.Center;
+                Grid.SetColumn(planText, 2);
+                header.Children.Add(planText);
             }
 
             section.Children.Add(header);
@@ -1875,7 +1885,7 @@ public sealed partial class DashboardView : UserControl
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var (discHost, discGlow) = GlowingDisc(colors.Color(entry.Provider, entry.Model));
             name.Children.Add(discHost);
-            var modelText = Ui.Text(entry.Model, 11);
+            var modelText = Ui.MiddleText(entry.Model, 11);
             Grid.SetColumn(modelText, 1);
             name.Children.Add(modelText);
             if (!collapsible
@@ -2049,16 +2059,20 @@ public sealed partial class DashboardView : UserControl
     private FrameworkElement ModelStripeRow(
         ContributionClient client, ModelColorMap colors, bool authoritative)
     {
-        var name = new StackPanel
+        var name = new Grid
         {
-            Orientation = Orientation.Horizontal,
-            Spacing = 6,
+            ColumnSpacing = 6,
             Margin = new Thickness(12, 0, 0, 0),
         };
+        name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        name.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         var (subDiscHost, subDiscGlow) =
             GlowingDisc(colors.Color(client.ProviderId, client.ModelId), 6);
         name.Children.Add(subDiscHost);
-        name.Children.Add(Ui.Text(client.ModelId, 10, 0.85));
+        // Middle-trimmed (macOS DailyView.swift:210) in a bounded column.
+        var subName = Ui.MiddleText(client.ModelId, 10, 0.85);
+        Grid.SetColumn(subName, 1);
+        name.Children.Add(subName);
         // Token-aware, like the Models row: this sub-row's hover card is the
         // same ModelTip (attached below), which reads "—" for an unpriced model,
         // and a row must not say "$0.00" while its own tooltip says "—".
@@ -2422,9 +2436,7 @@ public sealed partial class DashboardView : UserControl
                 new ModelColorMap(snapshot.Models, authoritative).Color(favorite.Provider, favorite.Model), 7);
             disc.VerticalAlignment = VerticalAlignment.Center;
             name.Children.Add(disc);
-            var text = Ui.Text(favorite.Model, 11);
-            text.TextTrimming = TextTrimming.CharacterEllipsis;
-            text.TextWrapping = TextWrapping.NoWrap;
+            var text = Ui.MiddleText(favorite.Model, 11);
             Grid.SetColumn(text, 1);
             name.Children.Add(text);
             Grid.SetColumn(name, 1);
@@ -2622,7 +2634,7 @@ public sealed partial class DashboardView : UserControl
             // clients beside messages · tokens · cost.
             var block = new StackPanel { Spacing = 3 };
             block.Children.Add(Ui.Row(
-                Ui.Text(CostSurfaceProjection.AgentLabel(entry.Agent), 11, bold: true),
+                Ui.MiddleText(CostSurfaceProjection.AgentLabel(entry.Agent), 11, bold: true),
                 Ui.Text(
                     CostSurfaceProjection.AgentShare(entry, entries, snapshot.CostAuthoritative),
                     10,
