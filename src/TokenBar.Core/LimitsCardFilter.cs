@@ -27,49 +27,44 @@ public static class LimitsCardFilter
             (clientIds is null ? !tabHidden.Contains(agent.ClientId) : clientIds.Contains(agent.ClientId))
             && !(agent.Account.AccountKey is null && limitsHidden.Contains(agent.ClientId)))];
 
-    /// <summary>Whether a client tab draws no Agent-limits card at all (macOS
-    /// <c>allRestrictedClientsHidden</c>): the user switched the client's card
-    /// off and it has no extra account to keep showing. Read from the setting,
-    /// not inferred from an empty <see cref="Visible"/> list, which is also
-    /// empty before the first quota payload arrives; that card must keep its
-    /// loading state, while a hidden one must not claim to be loading.
-    /// Grouped tab rule, as macOS: the card is hidden only when EVERY member is
-    /// switched off AND no member has an extra account
-    /// (<c>AgentLimitsCard.allRestrictedClientsHidden</c>, AgentLimitsCard.swift
-    /// :502-510; per-member row filtering <c>baseClients</c> :402-413, :445-447;
-    /// Settings toggles each id on its own, SettingsPanel.swift :477-503). One
-    /// visible member keeps the card, which then lists just that member's
-    /// rows.    /// <para>An empty <paramref name="clientIds"/> hides nothing
-    /// (<c>guard restrict, !clients.isEmpty else { return false }</c>,
-    /// AgentLimitsCard.swift:502-504); a vacuous <c>All</c> would hide it.</para></summary>
+    /// <summary>Whether a client tab draws no Agent-limits card at all: the
+    /// ONE rule both call sites (Overview lens, Quota lens) ask.
+    /// <para>macOS procedure (AgentLimitsCard.swift): a restricted card lists
+    /// <c>clients.filter(known)</c> (<c>baseClients</c> :444-447), where
+    /// <c>known(id)</c> is <c>placeholderRows[id] != nil || snapshots[primary(id)]
+    /// != nil</c> (:437-439; <c>placeholderRows</c> :228-234); the per-member
+    /// limits toggle then drops hidden primaries, except that an extra account
+    /// always stays (<c>expandedWithExtraAccounts</c>). The card is not drawn
+    /// when <c>allRestrictedClientsHidden</c> (:502-510: every member hidden and
+    /// none with an extra account) or when <c>restrict, visibleClients.isEmpty,
+    /// usageAttempted</c> (:529); a card with no rows yet and no answer waits
+    /// (:547), and a known client with no snapshot draws placeholder rows
+    /// (:784-787). An empty client list hides nothing (:502-504).</para>
+    /// <para>Windows has no placeholder rows, so a member with no snapshot can
+    /// never be shown. Rule here: consider only the members that have at least
+    /// one snapshot in <paramref name="agents"/>; hide the card iff that set is
+    /// non-empty, every member in it is limits-hidden, and none has an extra
+    /// account. No member with a snapshot (still loading, failed, or a client
+    /// with no data) returns false, so the card keeps its own "No quota data
+    /// yet." / could-not-check states. Where macOS draws placeholder rows,
+    /// Windows differs: a codex/claude tab with no snapshot draws the card's
+    /// own "No quota data yet." (macOS: placeholder rows), and a Grok tab with
+    /// grok hidden and no grok-bot snapshot is hidden here, while macOS draws a
+    /// grok-bot placeholder row (:228-234, :784-787). Every other case matches. To align after G3b lands: once Windows has placeholder rows,
+    /// switch the member set from "members with a snapshot" to macOS's known()
+    /// (placeholder or snapshot).</para>
+    /// <para>Read from the setting plus the payload, not from an empty
+    /// <see cref="Visible"/> list, which is also empty before the first payload;
+    /// that card must keep its loading state.</para></summary>
     public static bool HidesClientCard(
         IReadOnlyList<AgentUsageSnapshot> agents,
         IReadOnlyList<string> clientIds,
-        IReadOnlySet<string> limitsHidden) =>
-        clientIds.Count > 0
-        && clientIds.All(clientId =>
-            limitsHidden.Contains(clientId)
-            && !agents.Any(agent => agent.ClientId == clientId && agent.Account.AccountKey is not null));
-
-    /// <summary>Whether a client tab draws no Agent-limits card: either
-    /// <see cref="HidesClientCard"/>, or macOS's second empty branch,
-    /// <c>restrict, visibleClients.isEmpty, usageAttempted → EmptyView</c>
-    /// (AgentLimitsCard.swift:529): nothing is left to list once the per-member
-    /// toggle is applied and the fetch has been answered. That is the
-    /// Antigravity tab with antigravity hidden (antigravity-cli has no snapshot
-    /// and can never be hidden, so the first rule never fires) and a Grok user
-    /// with no Grok Bot snapshot who hides grok. Before the first answer
-    /// (<see cref="WindowEquivalence.FetchOutcome.NotAttempted"/>) an empty
-    /// list is "still loading" and keeps its card. Not for the Overview card
-    /// (<paramref name="clientIds"/> null), which says "No supported agents
-    /// yet".</summary>
-    public static bool HidesClientCard(
-        IReadOnlyList<AgentUsageSnapshot> agents,
-        IReadOnlyList<string> clientIds,
-        IReadOnlySet<string> limitsHidden,
-        WindowEquivalence.FetchOutcome outcome) =>
-        HidesClientCard(agents, clientIds, limitsHidden)
-        || (clientIds.Count > 0
-            && outcome != WindowEquivalence.FetchOutcome.NotAttempted
-            && Visible(agents, clientIds, new HashSet<string>(), limitsHidden).Count == 0);
+        IReadOnlySet<string> limitsHidden)
+    {
+        var members = clientIds.Where(id => agents.Any(agent => agent.ClientId == id)).ToList();
+        return members.Count > 0
+            && members.All(id =>
+                limitsHidden.Contains(id)
+                && !agents.Any(agent => agent.ClientId == id && agent.Account.AccountKey is not null));
+    }
 }

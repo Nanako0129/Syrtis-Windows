@@ -1052,8 +1052,7 @@ public sealed partial class DashboardView : UserControl
                     && LimitsCardFilter.HidesClientCard(
                         snapshot.Quota?.Agents ?? [],
                         limitsClients,
-                        ClientRegistry.HiddenLimitsClients(AppSettings.Store),
-                        snapshot.QuotaOutcome)
+                        ClientRegistry.HiddenLimitsClients(AppSettings.Store))
                     ? null
                     : Ui.Card(
                         // macOS "%@ limits" over tabDisplayName(singleClient)

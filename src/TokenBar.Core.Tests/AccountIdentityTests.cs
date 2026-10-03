@@ -375,12 +375,13 @@ public class AccountIdentityTests
         Assert.Null(WindowCardText.WindowCardAccount(both, "claude", null));
 
         // A key saved while on another member of a shared-key group names no
-        // card of THIS owner (a grok extra account vs the grok-bot card) =>
-        // the owner's primary, not a stale pick.
-        var bot = new AgentUsageSnapshot(
-            "grok-bot", "oauth", "2026-08-31T00:00:00Z",
-            [Window("session.v1", "Session", 50, "session.v1")]);
-        Assert.Null(WindowCardText.WindowCardAccount(Payload(bot), "grok-bot", Dir));
+        // card of THIS owner: a grok snapshot carrying AccountKey Dir, stored
+        // Dir, read on the grok-bot card => the primary, not the grok account.
+        var grokExtra = new AgentUsageSnapshot(
+            "grok", "oauth", "2026-08-31T00:00:00Z",
+            [Window("session.v1", "Session", 50, "session.v1")], AccountKey: Dir);
+        Assert.Equal(Dir, WindowCardText.WindowCardAccount(Payload(grokExtra), "grok", Dir)); // control
+        Assert.Null(WindowCardText.WindowCardAccount(Payload(grokExtra), "grok-bot", Dir));
         // Stored account gone from the payload => today's rule (primary).
         Assert.Null(WindowCardText.WindowCardAccount(both, "claude", Dir));
         // Stored account present but errored with no windows => fallback.

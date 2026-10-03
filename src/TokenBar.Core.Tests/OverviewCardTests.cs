@@ -110,10 +110,9 @@ public class OverviewScopeTests
         Assert.Equal(["antigravity"], Shown("antigravity-cli", "antigravity", "codex"));
         Assert.Equal(["claude"], Shown("claude", "claude", "grok-bot"));
         Assert.Null(OverviewScope.LimitsClients(null));
-        Assert.Equal("Grok Build & Bot", ClientRegistry.TabLabel(OverviewScope.LimitsClientId("grok")!));
-        Assert.Equal(
-            ClientRegistry.ShortName("antigravity"),
-            ClientRegistry.TabLabel(OverviewScope.LimitsClientId("antigravity-cli")!));
+        // The card title is what ships: TabDisplayName of the tab's own id.
+        Assert.Equal("Grok Build & Bot", ClientRegistry.TabDisplayName("grok"));
+        Assert.Equal(ClientRegistry.TabLabel("antigravity"), ClientRegistry.TabDisplayName("antigravity-cli"));
     }
 
     [Fact]

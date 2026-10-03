@@ -63,10 +63,9 @@ internal static class OverviewScope
     internal static bool ShowsTrace(string? singleClient) => singleClient is null;
 
     /// <summary>The quota owner of the tab's client, or null on Overview.
-    /// Since <see cref="LimitsClients"/> became the one derivation of the
-    /// limits card's client set, this only feeds the card title's owner and
-    /// <see cref="LimitsClients"/> itself; callers filter on
-    /// <see cref="LimitsClients"/>.
+    /// Its only production consumer is <see cref="LimitsClients"/>, the one
+    /// derivation of the limits card's client set; the card title reads
+    /// <see cref="ClientRegistry.TabDisplayName"/> of the tab, not this.
     /// <para>
     /// Mapped through <see cref="ClientRegistry.QuotaOwner"/>, not the raw tab
     /// id: <c>antigravity-cli</c>'s rows arrive keyed <c>antigravity</c>, so

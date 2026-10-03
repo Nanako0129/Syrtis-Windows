@@ -541,8 +541,7 @@ public sealed partial class DashboardView
             && !LimitsCardFilter.HidesClientCard(
                 snapshot.Quota?.Agents ?? [],
                 members,
-                ClientRegistry.HiddenLimitsClients(AppSettings.Store),
-                snapshot.QuotaOutcome))
+                ClientRegistry.HiddenLimitsClients(AppSettings.Store)))
         {
             stack.Children.Add(Ui.Card(
                 // macOS QuotaView.swift:72: tabDisplayName(singleClient).
