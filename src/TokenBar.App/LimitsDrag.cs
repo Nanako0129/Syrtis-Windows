@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using TokenBar.Core;
 using TokenBar.Interop;
+using Grid = Microsoft.UI.Xaml.Controls.Grid;
 
 namespace TokenBar.App;
 
