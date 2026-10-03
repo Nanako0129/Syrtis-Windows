@@ -504,5 +504,6 @@
   "This isn't a folder.": "这不是目录。",
   "This folder can't be added.": "这个目录无法添加。",
   "That's your user folder. Pick the Claude config folder inside it.": "这是你的用户目录，请选择其中的 Claude 配置目录。",
-  "That folder is inside, or contains, a folder you already added.": "这个目录位于已添加的目录之内，或包含了已添加的目录。"
+  "That folder is inside, or contains, a folder you already added.": "这个目录位于已添加的目录之内，或包含了已添加的目录。",
+  "Syrtis couldn't check this folder. Try again, or restart Syrtis.": "Syrtis 无法检查这个目录。请再试一次，或重新启动 Syrtis。"
 }

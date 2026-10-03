@@ -150,15 +150,18 @@ char *tb_set_extra_scan_paths(const char *json);
 // directory becomes its own Claude card (accountKey = the directory) on the
 // next tb_agent_usage, read only from <dir>\.credentials.json. Success data:
 // {"registeredCount":N,"rejected":[{"index":i,"reason":code}]}. Errors and
-// reasons are fixed codes (including defaultConfigDir for the primary's own
-// <home>\.claude); the input is never echoed. On error the registry is
-// unchanged.
+// reasons are fixed codes: empty, unsupportedPath, rootDirectory,
+// invalidComponent, homeDirectory (the home folder itself), defaultConfigDir
+// (the primary's <home>\.claude or a folder above it), duplicate,
+// nestedConfigDir (inside, or containing, an earlier entry), limitExceeded.
+// The input is never echoed. On error the registry is unchanged.
 char *tb_set_claude_config_dirs(const char *json);
 
 // Pre-save check for one extra Claude config directory:
 // {"candidate":"<dir>","existing":["<dir>",...]} -> data {"reason":null} or
-// {"reason":"<code>"}: the config registry's code for that position, or
-// defaultConfigDir for anything at or under <home>\.claude. Changes no
+// {"reason":"<code>"}: tb_set_claude_config_dirs's code for that position,
+// else defaultConfigDir when the account's projects/transcripts would fall
+// under <home>\.claude (refused by tb_set_extra_scan_paths). Changes no
 // registry and touches no filesystem; the input is never echoed.
 char *tb_validate_claude_config_dir(const char *json);
 

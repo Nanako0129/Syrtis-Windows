@@ -176,8 +176,13 @@ pub(crate) fn set_from_json(raw: &str) -> Result<(serde_json::Value, Vec<String>
 
 /// The registry's per-entry rule, in list order: which directories a replace
 /// with `input` registers, and the index and fixed reason of each one it
-/// refuses. Shared by [`set_from_json`] and [`validate`], so a pre-save check
-/// gives exactly the setter's answer.
+/// refuses. Shared by [`set_from_json`] and [`validate`], so the pre-save
+/// check gives the setter's answer for the config registry. Besides the path
+/// rule: the home folder itself (`homeDirectory`) and the primary's `.claude`
+/// or any folder above it (`defaultConfigDir`, security review R2); a folded
+/// duplicate; a directory inside, or containing, one already registered
+/// (`nestedConfigDir`: its transcripts would be scanned under two accounts);
+/// more than eight.
 fn register(
     input: &[String],
     home: Option<&std::path::Path>,
@@ -186,6 +191,7 @@ fn register(
     let mut rejected: Vec<(usize, &'static str)> = Vec::new();
     for (index, raw_dir) in input.iter().enumerate() {
         let reason = match normalize(raw_dir) {
+            Ok(dir) if is_home(&dir, home) => "homeDirectory",
             Ok(dir) if is_default_config_dir(&dir, home) => "defaultConfigDir",
             Ok(dir)
                 if registered
@@ -193,6 +199,9 @@ fn register(
                     .any(|existing| duplicate_key(existing) == duplicate_key(&dir)) =>
             {
                 "duplicate"
+            }
+            Ok(dir) if registered.iter().any(|existing| nested(existing, &dir)) => {
+                "nestedConfigDir"
             }
             Ok(_) if registered.len() >= MAX_CLAUDE_CONFIG_DIRS => "limitExceeded",
             Ok(dir) => {
@@ -206,47 +215,43 @@ fn register(
     (registered, rejected)
 }
 
+/// The home folder itself, folded like [`duplicate_key`]; a trailing
+/// separator on `home` (e.g. `HOME=C:\Users\me\`) does not matter.
+fn is_home(dir: &str, home: Option<&std::path::Path>) -> bool {
+    home.is_some_and(|home| {
+        duplicate_key(dir) == duplicate_key(&home.to_string_lossy()).trim_end_matches('\\')
+    })
+}
+
+/// Whether one directory is inside the other (folded, by whole components).
+fn nested(a: &str, b: &str) -> bool {
+    let (a, b) = (duplicate_key(a), duplicate_key(b));
+    a.starts_with(&format!("{b}\\")) || b.starts_with(&format!("{a}\\"))
+}
+
 /// Why appending `candidate` to the saved list `existing` would not give a
-/// working extra account, or `None` if it would. In order:
-/// - the config registry's own answer for that position ([`register`]),
-///   with `homeDirectory` in place of `defaultConfigDir` when the candidate
-///   is the home folder itself (so the copy can say "pick the folder inside");
-/// - the scan registry's rule for the account's two roots,
-///   `<dir>\projects` and `<dir>\transcripts`
-///   ([`crate::extra_scan_paths::path_rule`]);
-/// - `nestedConfigDir` when the candidate contains, or is inside, a directory
-///   the saved list registers, whose transcripts would then be scanned twice.
-///
-/// Touches no filesystem (no stat, so a `\\wsl.localhost` path cannot wake
-/// WSL) and changes no registry. Returns a fixed reason code, never the input.
+/// working extra account, or `None` if it would: the config registry's own
+/// answer for that position ([`register`]), then the scan registry's rule for
+/// the account's two roots, `<dir>\projects` and `<dir>\transcripts`
+/// ([`crate::extra_scan_paths::path_rule`]), so a directory the pusher would
+/// drop from both registries is refused before it is saved. Touches no
+/// filesystem (no stat, so a `\\wsl.localhost` path cannot wake WSL) and
+/// changes no registry. Returns a fixed reason code, never the input.
 pub(crate) fn validate(
     candidate: &str,
     existing: &[String],
     home: Option<&std::path::Path>,
 ) -> Option<&'static str> {
-    let is_home = |dir: &str| {
-        home.is_some_and(|home| duplicate_key(dir) == duplicate_key(&home.to_string_lossy()))
-    };
     let mut all = existing.to_vec();
     all.push(candidate.to_string());
     let (_, rejected) = register(&all, home);
     if let Some((_, reason)) = rejected.iter().find(|(index, _)| *index == existing.len()) {
-        let home_itself = *reason == "defaultConfigDir"
-            && normalize(candidate).is_ok_and(|dir| is_home(&dir));
-        return Some(if home_itself { "homeDirectory" } else { reason });
+        return Some(reason);
     }
     let dir = normalize(candidate).ok()?;
-    for root in ["projects", "transcripts"] {
-        if let Err(reason) = crate::extra_scan_paths::path_rule(&format!("{dir}\\{root}"), home) {
-            return Some(reason);
-        }
-    }
-    let key = duplicate_key(&dir);
-    let (registered, _) = register(existing, home);
-    let nested = registered.iter().map(|other| duplicate_key(other)).any(|other| {
-        other.starts_with(&format!("{key}\\")) || key.starts_with(&format!("{other}\\"))
-    });
-    nested.then_some("nestedConfigDir")
+    ["projects", "transcripts"]
+        .into_iter()
+        .find_map(|root| crate::extra_scan_paths::path_rule(&format!("{dir}\\{root}"), home).err())
 }
 
 /// One process-wide mutex for every test that writes the static, so parallel
@@ -278,6 +283,22 @@ pub(crate) fn reset_for_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The setter itself refuses the home folder and a nested directory, so the
+    /// pushed registries never hold what the pre-save check would refuse.
+    #[test]
+    fn register_refuses_home_and_nested_directories() {
+        let home = std::path::Path::new(r"C:\Users\Me\");
+        let input = [r"D:\a", r"D:\a\projects", r"D:\ab", r"c:/users/me", r"D:\"]
+            .map(String::from)
+            .to_vec();
+        let (registered, rejected) = register(&input, Some(home));
+        assert_eq!(registered, [r"D:\a", r"D:\ab"]);
+        assert_eq!(
+            rejected,
+            [(1, "nestedConfigDir"), (3, "homeDirectory"), (4, "rootDirectory")]
+        );
+    }
 
     /// The pre-save check gives the setter's answer for the appended entry,
     /// plus the scan registry's at-or-under rule, without touching the

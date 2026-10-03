@@ -40,6 +40,7 @@ internal static class ClaudeAccountsCopy
     /// code gets the generic sentence.</summary>
     internal static string Reason(string code) => code switch
     {
+        "checkFailed" => "Syrtis couldn't check this folder. Try again, or restart Syrtis.",
         "homeDirectory" => "That's your user folder. Pick the Claude config folder inside it.",
         "nestedConfigDir" => "That folder is inside, or contains, a folder you already added.",
         "defaultConfigDir" => "That folder overlaps your main Claude account's folder, which is already shown.",
@@ -54,7 +55,7 @@ internal static class ClaudeAccountsCopy
 
     internal static readonly string[] ReasonCodes =
     [
-        "homeDirectory", "nestedConfigDir", "defaultConfigDir", "duplicate", "unsupportedPath", "rootDirectory",
+        "checkFailed", "homeDirectory", "nestedConfigDir", "defaultConfigDir", "duplicate", "unsupportedPath", "rootDirectory",
         "invalidComponent", "limitExceeded", "notDirectory", "empty",
     ];
 

@@ -124,13 +124,13 @@ public class ClaudeRootsNativeTests
         }
 
         // The native home resolution: HOME when set, else the profile folder.
-        var home = Environment.GetEnvironmentVariable("HOME") is { Length: > 0 } set
+        var home = (Environment.GetEnvironmentVariable("HOME") is { Length: > 0 } set
             ? set
-            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)).TrimEnd('\\', '/');
         foreach (var path in new[]
                  {
-                     home + @"\.claude", (home + @"/.CLAUDE/").ToLowerInvariant(),
-                     home + @"\.claude\work", Path.GetDirectoryName(home)!,
+                     Path.Combine(home, ".claude"), (home + "/.CLAUDE/").ToLowerInvariant(),
+                     Path.Combine(home, ".claude", "work"), Path.GetDirectoryName(home)!,
                  })
         {
             Assert.Equal("defaultConfigDir", ClaudeExtraRoots.UiRejection(path, []));
@@ -138,7 +138,7 @@ public class ClaudeRootsNativeTests
 
         Assert.Equal("homeDirectory", ClaudeExtraRoots.UiRejection(home, []));
 
-        Assert.Null(ClaudeExtraRoots.UiRejection(home + @"\.claude-work", []));
+        Assert.Null(ClaudeExtraRoots.UiRejection(Path.Combine(home, ".claude-work"), []));
     }
 
     /// <summary>Settings stats only a path the registries accept: never a UNC,

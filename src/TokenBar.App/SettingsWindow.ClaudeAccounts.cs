@@ -163,9 +163,20 @@ public sealed partial class SettingsWindow
             return;
         }
 
-        var dirs = ClaudeExtraRoots.Load(store);
-        // The check is a blocking native call; keep it off the UI thread.
-        if (await Task.Run(() => ClaudeExtraRoots.UiRejection(path, dirs)) is { } reason)
+        // The check is a blocking native call, so it runs off the UI thread;
+        // a Remove during that await changes the list, so check again against
+        // the list that will actually be saved.
+        IReadOnlyList<string> dirs;
+        string? reason;
+        do
+        {
+            dirs = ClaudeExtraRoots.Load(store);
+            var checkedList = dirs;
+            reason = await Task.Run(() => ClaudeExtraRoots.UiRejection(path, checkedList));
+        }
+        while (!ClaudeExtraRoots.Load(store).SequenceEqual(dirs));
+
+        if (reason is not null)
         {
             _claudeAccountsNotice = ClaudeAccountsCopy.Reason(reason).Localized();
             FillClaudeAccounts(store);

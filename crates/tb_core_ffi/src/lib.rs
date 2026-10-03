@@ -854,18 +854,18 @@ pub unsafe extern "C" fn tb_set_extra_scan_paths(json: *const c_char) -> *mut c_
     })
 }
 
-/// The setters' JSON argument as `&str`, with their fixed error codes
-/// (`nullPayload`, `invalidUtf8`); never the input.
+/// The setters' JSON argument, copied out of the caller's buffer, with their
+/// fixed error codes (`nullPayload`, `invalidUtf8`); never the input.
 ///
 /// # Safety
-/// `json` must be NULL or a valid NUL-terminated string that outlives the
-/// returned `&str`.
-unsafe fn json_arg<'a>(json: *const c_char) -> Result<&'a str, String> {
+/// `json` must be NULL or a valid NUL-terminated string.
+unsafe fn json_arg(json: *const c_char) -> Result<String, String> {
     if json.is_null() {
         return Err("nullPayload".to_string());
     }
     unsafe { CStr::from_ptr(json) }
         .to_str()
+        .map(str::to_string)
         .map_err(|_| "invalidUtf8".to_string())
 }
 
@@ -873,7 +873,7 @@ unsafe fn json_arg<'a>(json: *const c_char) -> Result<&'a str, String> {
 /// `json` must be NULL or a valid NUL-terminated string.
 unsafe fn set_extra_scan_paths_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
     let raw = unsafe { json_arg(json) }?;
-    set_extra_scan_paths(raw)
+    set_extra_scan_paths(&raw)
 }
 
 /// The scan-root setter (security review R1). Validates into a candidate,
@@ -928,8 +928,9 @@ pub(crate) fn apply_scan_roots_for_test(
 /// Success data is `{"registeredCount":N,"rejected":[{"index":i,"reason":code}]}`.
 /// Every error and reason is a fixed code (`nullPayload`, `invalidUtf8`,
 /// `invalidJson`; `empty`, `unsupportedPath`, `rootDirectory`,
-/// `invalidComponent`, `duplicate`, `limitExceeded`); the input is never
-/// echoed. On an error envelope the registry is unchanged.
+/// `invalidComponent`, `homeDirectory`, `defaultConfigDir`, `duplicate`,
+/// `nestedConfigDir`, `limitExceeded`); the input is never echoed. On an
+/// error envelope the registry is unchanged.
 ///
 /// # Safety
 /// `json` must be NULL or a valid NUL-terminated string.
@@ -944,7 +945,7 @@ pub unsafe extern "C" fn tb_set_claude_config_dirs(json: *const c_char) -> *mut 
 /// `json` must be NULL or a valid NUL-terminated string.
 unsafe fn set_claude_config_dirs_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
     let raw = unsafe { json_arg(json) }?;
-    set_claude_config_dirs(raw)
+    set_claude_config_dirs(&raw)
 }
 
 /// The config-dir setter. The registry commit and the in-memory purge are
@@ -996,9 +997,11 @@ pub(crate) fn apply_config_dirs_for_test(dirs: Vec<String>) {
 
 /// Whether `{"candidate": "<dir>", "existing": ["<dir>", ...]}` (the saved
 /// list before the candidate) would add a working extra Claude account:
-/// success data `{"reason": null}` or `{"reason": "<code>"}` with the config
-/// registry's code for that position or `defaultConfigDir` for anything at or
-/// under the primary's `<home>\.claude` (`claude_config_dirs::validate`).
+/// success data `{"reason": null}` or `{"reason": "<code>"}`: the config
+/// setter's code for that position (any of `tb_set_claude_config_dirs`'s
+/// reasons), else `defaultConfigDir` when the account's `projects` or
+/// `transcripts` would fall under the primary's `<home>\.claude`, which the
+/// scan setter refuses (`claude_config_dirs::validate`).
 /// Lets Settings refuse a path before saving it without re-implementing the
 /// rule. Changes no registry and touches no filesystem; errors are fixed
 /// codes (`nullPayload`, `invalidUtf8`, `invalidJson`); the input is never
@@ -1024,7 +1027,7 @@ unsafe fn validate_claude_config_dir_from_c(
         existing: Vec<String>,
     }
     let raw = unsafe { json_arg(json) }?;
-    let request: Request = serde_json::from_str(raw).map_err(|_| "invalidJson".to_string())?;
+    let request: Request = serde_json::from_str(&raw).map_err(|_| "invalidJson".to_string())?;
     let reason = claude_config_dirs::validate(
         &request.candidate,
         &request.existing,
