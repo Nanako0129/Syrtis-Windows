@@ -1692,7 +1692,10 @@ public sealed partial class DashboardView : UserControl
             if (agent.IsSetupPlaceholder)
             {
                 // ponytail: placeholder copy stays the raw error until G3b's setup prompt.
-                section.Children.Add(Ui.Dim(agent.Error ?? "", 11));
+                if (!string.IsNullOrEmpty(agent.Error))
+                {
+                    section.Children.Add(Ui.Dim(agent.Error, 11));
+                }
                 panel.Children.Add(host);
                 continue;
             }
