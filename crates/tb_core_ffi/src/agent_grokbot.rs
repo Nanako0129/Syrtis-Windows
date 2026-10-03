@@ -19,8 +19,9 @@
 //! a desktop secret — `plaintext:v1:` values included (Q6-4, a deliberate
 //! divergence from macOS) — and the key loader, which is the only code that
 //! reads `Local State` or calls DPAPI, runs lazily behind that check. Consent
-//! is re-read before the second (team id) decode, so a withdrawal lands at the
-//! next decode rather than the next poll.
+//! is re-read before the second (team id) decode and once more immediately
+//! before the request is sent, so a withdrawal made while a fetch is in flight
+//! stops it before the sign-in leaves the machine, not at the next poll.
 //!
 //! Credentials are read-only and never logged or persisted by Syrtis; only HMAC
 //! fingerprints reach the account-scope store. Every error is a fixed string.
@@ -257,6 +258,7 @@ pub(crate) async fn fetch(
     fetch_with_credentials(
         credentials,
         usage_url,
+        desktop.consent,
         resolve_credential,
         resolve_history_scope,
     )
@@ -267,6 +269,7 @@ pub(crate) async fn fetch(
 async fn fetch_with_credentials(
     credentials: GrokBotCredentials,
     usage_url: &str,
+    consent: &(dyn Fn() -> bool + Send + Sync),
     resolve_credential: &ResolveCredential,
     resolve_history_scope: &ResolveHistoryScope,
 ) -> Result<GrokBotData, ProviderFetchFailure> {
@@ -284,6 +287,14 @@ async fn fetch_with_credentials(
             ProviderFetchFailure::terminal("Grok Bot usage client could not be created.")
         })?;
 
+    // The last consent read before the desktop sign-in leaves the machine:
+    // a Settings withdrawal that landed after the decodes (the scope resolve
+    // and client build sit between) still sends nothing.
+    if matches!(credentials, GrokBotCredentials::Desktop { .. }) && !consent() {
+        return Err(ProviderFetchFailure::terminal(
+            GROK_BOT_KEYCHAIN_CONSENT_REQUIRED,
+        ));
+    }
     let response = usage_request(&client, &credentials, usage_url)
         .send()
         .await
@@ -655,12 +666,11 @@ fn load_desktop_credentials_from(
     let local_state = local_state_path(path);
     let mut key: Option<Box<dyn DesktopKey>> = None;
     let mut decrypt = |value: &str| -> Result<String, String> {
-        if key.is_none() {
-            key = Some(load_key(&local_state)?);
-        }
-        key.as_ref()
-            .ok_or_else(|| GROK_BOT_LOGIN_UNREADABLE.to_string())?
-            .decrypt(value)
+        let key = match &mut key {
+            Some(key) => key,
+            slot => slot.insert(load_key(&local_state)?),
+        };
+        key.decrypt(value)
     };
     let access_token = decode_desktop_secret(
         stored_token.as_str().ok_or_else(malformed)?,

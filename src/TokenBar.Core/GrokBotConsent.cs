@@ -2,8 +2,10 @@ using TokenBar.Interop;
 
 namespace TokenBar.Core;
 
-/// <summary>Whether the user has agreed to let Syrtis read the Grok Bot
-/// desktop sign-in, and the wiring that carries that answer into the core.
+/// <summary>Whether the user has agreed to let Syrtis unlock and use the Grok
+/// Bot desktop sign-in (the secrets file itself is parsed every refresh to
+/// learn whether a signed-in account exists, consent or not), and the wiring
+/// that carries that answer into the core.
 /// Ported from macOS <c>GrokBotKeychainConsent.swift</c> (451b4329) minus the
 /// <c>keychain-denied</c> auto-revoke, which models an OS dialog Windows does
 /// not have (R6-3).
@@ -55,8 +57,9 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
         }
     }
 
-    /// <summary>Settings' "Read Grok Bot's sign-in" switch turned off (Q6-2):
-    /// the core stops reading at the next refresh, and the answer sticks.</summary>
+    /// <summary>Settings' "Use Grok Bot's sign-in" switch turned off (Q6-2):
+    /// the core stops unlocking and sending it at its next consent check (one
+    /// per decode, one just before the request), and the answer sticks.</summary>
     public void Withdraw() => Answer(false);
 
     /// <summary>Launch: re-install a stored yes. Anything else is already what
@@ -93,15 +96,27 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
 
         /// <summary>The one-line "isn't reading" row, Allow kept.</summary>
         Declined,
+
+        /// <summary>Allowed, but this payload predates the answer (the fetch
+        /// that will honour it has not landed yet): a waiting line with the
+        /// buttons disabled instead of asking again.</summary>
+        Waiting,
     }
 
     /// <summary>The projection the limits card renders: only a
     /// <c>grok-bot</c> snapshot the core marked <c>keychain-consent</c> becomes
-    /// a consent card. A stored yes with such a snapshot (the fetch that will
-    /// honour it has not landed yet) still asks, so Allow stays reachable.</summary>
+    /// a consent card, and the stored answer picks which: never asked =
+    /// <see cref="Card.Ask"/>, no = <see cref="Card.Declined"/>, yes =
+    /// <see cref="Card.Waiting"/> (the fetch that will honour it has not
+    /// landed yet — e.g. Allow pressed while a fetch was in flight).</summary>
     public static Card CardFor(AgentUsageSnapshot agent, bool? answer) =>
         agent.ClientId == "grok-bot" && agent.Source == "keychain-consent"
-            ? answer == false ? Card.Declined : Card.Ask
+            ? answer switch
+            {
+                true => Card.Waiting,
+                false => Card.Declined,
+                null => Card.Ask,
+            }
             : Card.None;
 
     /// <summary>English source strings (the localization keys). Windows copy
@@ -110,8 +125,9 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     public static class Copy
     {
         public const string Explanation =
-            "To show your weekly Grok Bot limits, Syrtis needs to unlock Grok Bot's saved "
-            + "sign-in on this PC. Windows does not ask separately, so this is the only prompt. "
+            "To show your weekly Grok Bot limits, Syrtis needs to unlock and use Grok Bot's "
+            + "saved sign-in on this PC. Windows does not ask separately, so this is the only "
+            + "prompt. Until you allow it, Syrtis only checks whether Grok Bot is signed in. "
             + "The sign-in is sent only to Grok Bot's usage service (api2.cursor.sh). Syrtis "
             + "keeps no copy, only a one-way fingerprint to tell accounts apart, and doesn't "
             + "log it. You can stop this any time in Settings.";
@@ -122,11 +138,15 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
 
         public const string NotNow = "Not now";
 
-        public const string SettingsToggle = "Read Grok Bot's sign-in";
+        public const string Waiting = "Waiting for the next refresh…";
+
+        public const string SettingsToggle = "Use Grok Bot's sign-in";
 
         public const string SettingsHint =
             "When on, Syrtis unlocks Grok Bot's saved sign-in each time it refreshes — "
             + "including sign-ins Grok Bot saved without encryption — and sends it only to "
-            + "api2.cursor.sh. Turning this off stops it from the next refresh.";
+            + "api2.cursor.sh. When off, Syrtis still checks Grok Bot's sign-in file each "
+            + "refresh to see whether it is signed in, but does not unlock or send the "
+            + "sign-in. Turning this off takes effect from the next refresh.";
     }
 }

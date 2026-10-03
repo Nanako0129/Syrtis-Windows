@@ -124,6 +124,22 @@ public sealed partial class DashboardView : UserControl
             {
                 _ = DispatcherQueue.TryEnqueue(ApplyLensVisibility);
             }
+            else if (key == GrokBotConsent.StorageKey)
+            {
+                // The card's buttons and the Settings switch both land here.
+                // A yes asks for the payload that honours it now rather than
+                // at the next 60 s tick; either answer re-renders the card
+                // (a yes shows Waiting until that payload arrives).
+                _ = DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (AppSettings.GrokBotConsent.Stored == true)
+                    {
+                        _model?.RefreshQuotaNow();
+                    }
+
+                    RenderContent(animated: false);
+                });
+            }
             else if (key.StartsWith("tokenbar.limits.", StringComparison.Ordinal)
                 || key == "tokenbar.trace.detailed"
                 || key == OverviewCards.HiddenKey
@@ -1699,14 +1715,18 @@ public sealed partial class DashboardView : UserControl
     /// Windows this is the only question before Syrtis decrypts Grok Bot's
     /// sign-in — DPAPI never asks — so it states what is read, where it goes
     /// and how to stop. After "Not now" it collapses to one line and keeps
-    /// Allow: a decline has to be reversible where it was made.</summary>
+    /// Allow: a decline has to be reversible where it was made. Once allowed
+    /// it waits, buttons disabled, for the payload that honours the answer.</summary>
     private FrameworkElement BuildGrokBotConsent(GrokBotConsent.Card state)
     {
         var body = new StackPanel { Spacing = 6 };
         var text = Ui.Dim(
-            (state == GrokBotConsent.Card.Declined
-                ? GrokBotConsent.Copy.Declined
-                : GrokBotConsent.Copy.Explanation).Localized(),
+            (state switch
+            {
+                GrokBotConsent.Card.Declined => GrokBotConsent.Copy.Declined,
+                GrokBotConsent.Card.Waiting => GrokBotConsent.Copy.Waiting,
+                _ => GrokBotConsent.Copy.Explanation,
+            }).Localized(),
             11);
         body.Children.Add(text);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -1724,11 +1744,10 @@ public sealed partial class DashboardView : UserControl
                 return;
             }
 
+            // The store's Changed handler asks for the next payload and
+            // re-renders this card as Waiting.
             allow.IsEnabled = false;
             notNow.IsEnabled = false;
-            // The next payload replaces this card; ask for it now rather than
-            // at the next 60s tick.
-            _model?.RefreshQuotaNow();
         };
         notNow.Click += (_, _) =>
         {
@@ -1744,6 +1763,12 @@ public sealed partial class DashboardView : UserControl
         if (state != GrokBotConsent.Card.Declined)
         {
             buttons.Children.Add(notNow);
+        }
+
+        if (state == GrokBotConsent.Card.Waiting)
+        {
+            allow.IsEnabled = false;
+            notNow.IsEnabled = false;
         }
 
         body.Children.Add(buttons);

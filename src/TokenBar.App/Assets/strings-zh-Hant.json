@@ -468,9 +468,10 @@
   "How busy are your agents?": "你的 agent 平常有多忙？",
   "The menu-bar animation follows your live token rate. Pick the range that fits how you work; you can change it later in Settings.": "選單列動畫會跟著即時的 token 速率變化。選一個符合你使用習慣的範圍，之後可以在「設定」裡修改。",
   "Most people: Moderate": "大多數人適合「中度」",
-  "To show your weekly Grok Bot limits, Syrtis needs to unlock Grok Bot's saved sign-in on this PC. Windows does not ask separately, so this is the only prompt. The sign-in is sent only to Grok Bot's usage service (api2.cursor.sh). Syrtis keeps no copy, only a one-way fingerprint to tell accounts apart, and doesn't log it. You can stop this any time in Settings.": "為了顯示 Grok Bot 的每週額度，Syrtis 需要解開 Grok Bot 存在這台電腦上的登入資料。Windows 不會另外詢問，這是唯一的確認。登入資料只會送到 Grok Bot 的用量服務（api2.cursor.sh）。Syrtis 不保留副本，只留一個無法還原的指紋用來分辨帳號，也不會記錄。之後可以隨時在設定裡停止。",
+  "To show your weekly Grok Bot limits, Syrtis needs to unlock and use Grok Bot's saved sign-in on this PC. Windows does not ask separately, so this is the only prompt. Until you allow it, Syrtis only checks whether Grok Bot is signed in. The sign-in is sent only to Grok Bot's usage service (api2.cursor.sh). Syrtis keeps no copy, only a one-way fingerprint to tell accounts apart, and doesn't log it. You can stop this any time in Settings.": "為了顯示 Grok Bot 的每週額度，Syrtis 需要解開並使用 Grok Bot 存在這台電腦上的登入資料。Windows 不會另外詢問，這是唯一的確認。在你允許之前，Syrtis 只會檢查 Grok Bot 是否已登入。登入資料只會送到 Grok Bot 的用量服務（api2.cursor.sh）。Syrtis 不保留副本，只留一個無法還原的指紋用來分辨帳號，也不會記錄。之後可以隨時在設定裡停止。",
   "Syrtis isn't reading your Grok Bot limits.": "Syrtis 沒有讀取你的 Grok Bot 額度。",
   "Allow": "允許",
-  "Read Grok Bot's sign-in": "讀取 Grok Bot 的登入",
-  "When on, Syrtis unlocks Grok Bot's saved sign-in each time it refreshes — including sign-ins Grok Bot saved without encryption — and sends it only to api2.cursor.sh. Turning this off stops it from the next refresh.": "開啟時，Syrtis 每次更新都會解開 Grok Bot 儲存的登入（包括 Grok Bot 未加密儲存的登入），只送到 api2.cursor.sh。關閉後從下一次更新起停止。"
+  "Use Grok Bot's sign-in": "使用 Grok Bot 的登入",
+  "When on, Syrtis unlocks Grok Bot's saved sign-in each time it refreshes — including sign-ins Grok Bot saved without encryption — and sends it only to api2.cursor.sh. When off, Syrtis still checks Grok Bot's sign-in file each refresh to see whether it is signed in, but does not unlock or send the sign-in. Turning this off takes effect from the next refresh.": "開啟時，Syrtis 每次更新都會解開 Grok Bot 儲存的登入（包括 Grok Bot 未加密儲存的登入），只送到 api2.cursor.sh。關閉時，Syrtis 每次更新仍會檢查 Grok Bot 的登入檔，確認它是否已登入，但不會解開或傳送登入。關閉後從下一次更新起生效。",
+  "Waiting for the next refresh…": "等待下一次更新…"
 }

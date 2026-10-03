@@ -251,6 +251,12 @@ public sealed class SettingsWindow : Window
                     return;
                 }
 
+                if (key == GrokBotConsent.StorageKey)
+                {
+                    // Answered on the card while Settings is open.
+                    SyncGrokBotSwitch();
+                }
+
                 if (rebuildAll)
                 {
                     Rebuild();
@@ -281,6 +287,32 @@ public sealed class SettingsWindow : Window
     }
 
     private const string UsageAttributionKeyPrefix = "tokenbar.usage.attribution.";
+
+    // The Grok Bot consent switch on the current Dashboard page (Rebuild
+    // replaces it), and the guard that keeps a programmatic IsOn from being
+    // read as the user's answer.
+    private ToggleSwitch? _grokBotSwitch;
+    private bool _syncingGrokBotSwitch;
+
+    /// <summary>Show the stored Grok Bot answer without recording a new one.
+    /// UI thread only.</summary>
+    private void SyncGrokBotSwitch()
+    {
+        if (_grokBotSwitch is not { } toggle)
+        {
+            return;
+        }
+
+        _syncingGrokBotSwitch = true;
+        try
+        {
+            toggle.IsOn = AppSettings.GrokBotConsent.Stored == true;
+        }
+        finally
+        {
+            _syncingGrokBotSwitch = false;
+        }
+    }
 
     private void ApplySize()
     {
@@ -566,8 +598,16 @@ public sealed class SettingsWindow : Window
             OnContent = null,
             OffContent = null,
         };
+        _grokBotSwitch = grokBot;
         grokBot.Toggled += (_, _) =>
         {
+            // A programmatic IsOn (SyncGrokBotSwitch) raises Toggled too; it
+            // shows an answer already stored and must not record another.
+            if (_syncingGrokBotSwitch)
+            {
+                return;
+            }
+
             try
             {
                 if (grokBot.IsOn)
@@ -583,7 +623,7 @@ public sealed class SettingsWindow : Window
             {
                 // Nothing was stored; show the state the core is actually in.
                 DevLog.Write($"grok-bot consent: settings toggle failed: {ex.GetType().Name}");
-                grokBot.IsOn = AppSettings.GrokBotConsent.Stored == true;
+                SyncGrokBotSwitch();
             }
         };
         limits.Children.Add(ToggleRow(GrokBotConsent.Copy.SettingsToggle.Localized(), grokBot));

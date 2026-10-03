@@ -1715,7 +1715,9 @@ async fn fetch_kiro_with(deps: &KiroDeps<'_>) -> Option<AgentUsageSnapshot> {
 /// Everything `fetch_grokbot_with` reaches outside itself, sealed the same way
 /// as `KiroDeps`: outside `#[cfg(test)]` the only constructor is
 /// `GrokBotDeps::system()`, so release builds read the real config root and
-/// send only to `GROK_BOT_USAGE_URL`. No environment variable overrides either.
+/// send only to `GROK_BOT_USAGE_URL` (the Cursor route) or
+/// `GROK_BOT_DESKTOP_USAGE_URL` (the Grok Bot desktop route). No environment
+/// variable overrides any of them.
 mod grokbot_deps {
     use super::kiro_deps::{Enrich, ResolveCredential, ResolveHistoryScope};
     use super::*;
@@ -15196,12 +15198,15 @@ mod grokbot_tests {
             let credential_scope = Arc::clone(&scope);
             let history_scope = Arc::clone(&scope);
             let calls = Arc::clone(&enrich_calls);
+            let fixture_root = dir.clone();
             Self {
                 dir,
                 cache: Mutex::new(ProviderLastGoodCache::default()),
                 enrich_calls,
                 resolve_credential: Box::new(move |provider, source, location, marker| {
                     assert_eq!(provider, "grok-bot");
+                    // The login file whose credentials are about to be sent.
+                    assert_fixture_path(&fixture_root, Path::new(location));
                     credential_scope.resolve_current(source, location, marker)
                 }),
                 resolve_history: Box::new(move |provider, authoritative| {
@@ -15225,14 +15230,18 @@ mod grokbot_tests {
         }
 
         fn deps(&self) -> GrokBotDeps<'_> {
-            GrokBotDeps::for_test(
+            let deps = GrokBotDeps::for_test(
                 self.dir.clone(),
                 &*self.resolve_credential,
                 &*self.resolve_history,
                 &self.url,
                 &self.cache,
                 &*self.enrich,
-            )
+            );
+            // Both login files are derived from this root by the production
+            // path functions.
+            assert_fixture_path(&self.dir, deps.config_dir.as_deref().unwrap());
+            deps
         }
 
         fn enrich_calls(&self) -> usize {
@@ -15244,6 +15253,30 @@ mod grokbot_tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.dir);
             self.scope.cleanup();
+        }
+    }
+
+    /// The Windows test machine has a real, signed-in Grok Bot and Cursor
+    /// under `%APPDATA%`. Every path a Grok Bot fetch test reads a login from
+    /// (the config root, `Local State` via the key loader, the credential file
+    /// handed to the scope resolver) must lie under the test's own temp root
+    /// and outside the real config root.
+    fn assert_fixture_path(root: &Path, path: &Path) {
+        let canonical = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        assert!(
+            path.starts_with(root) || canonical(path).starts_with(canonical(root)),
+            "{path:?} is outside the fixture root {root:?}"
+        );
+        assert!(
+            path.starts_with(std::env::temp_dir())
+                || canonical(path).starts_with(canonical(&std::env::temp_dir())),
+            "{path:?} is outside the temp dir"
+        );
+        if let Some(real) = dirs::config_dir() {
+            assert!(
+                !path.starts_with(&real) && !canonical(path).starts_with(canonical(&real)),
+                "{path:?} is under the real config root"
+            );
         }
     }
 
@@ -15468,12 +15501,17 @@ mod grokbot_tests {
         (access, spy)
     }
 
-    /// The production key loader behind a scripted consent answer.
-    fn production_access(answers: &'static [bool]) -> agent_grokbot::DesktopAccess {
+    /// The production key loader behind a scripted consent answer, refusing
+    /// any `Local State` outside `root` (the harness's temp dir).
+    fn production_access(answers: &'static [bool], root: &Path) -> agent_grokbot::DesktopAccess {
         let (spied, _) = spy_access(answers, Ok(()));
+        let root = root.to_path_buf();
         agent_grokbot::DesktopAccess {
             consent: spied.consent,
-            load_key: &agent_grokbot::load_dpapi_key,
+            load_key: Box::leak(Box::new(move |local_state: &Path| {
+                assert_fixture_path(&root, local_state);
+                agent_grokbot::load_dpapi_key(local_state)
+            })),
         }
     }
 
@@ -15597,7 +15635,7 @@ mod grokbot_tests {
             });
             let deps = harness
                 .deps()
-                .with_desktop(&desktop_url, production_access(answers));
+                .with_desktop(&desktop_url, production_access(answers, &harness.dir));
             let snapshot = fetch_grokbot_with(&deps).await.unwrap();
             if expect_marker {
                 assert_consent_card(&snapshot);
@@ -15639,8 +15677,8 @@ mod grokbot_tests {
             let decrypts = if team.is_some() { 2 } else { 1 };
             assert_eq!(
                 spy.counts(),
-                (decrypts, 1, decrypts),
-                "lazy key: loaded once"
+                (decrypts + 1, 1, decrypts),
+                "consent per decode plus once before send; lazy key: loaded once"
             );
             let owner =
                 serde_json::json!([DESKTOP_SUBJECT, team.map(|t| t.parse::<u64>().unwrap())])
@@ -15718,23 +15756,57 @@ mod grokbot_tests {
         assert!(cursor.await.unwrap().is_empty());
     }
 
+    /// Consent withdrawn after both decodes but before the request goes out
+    /// (Settings switched off while the fetch is in flight): the pre-send
+    /// re-read refuses, the marker is published and the mock gets nothing.
+    #[tokio::test]
+    async fn consent_withdrawn_before_send_sends_nothing() {
+        let (desktop_url, desktop) = mock(vec![reply(200, USAGE_OK)]).await;
+        let (cursor_url, cursor) = mock(vec![]).await;
+        let harness = Harness::new("withdrawn-before-send", cursor_url);
+        harness.install_grok_bot(|path| {
+            fs::write(
+                path,
+                desktop_secrets(&sealed(&desktop_jwt()), Some(&sealed("42"))),
+            )
+            .unwrap()
+        });
+        let (access, spy) = spy_access(&[true, true, false], Ok(()));
+        let snapshot = fetch_grokbot_with(&harness.deps().with_desktop(&desktop_url, access))
+            .await
+            .unwrap();
+        assert_consent_card(&snapshot);
+        assert_eq!(
+            spy.counts(),
+            (3, 1, 2),
+            "both decodes ran; the third read is the pre-send one"
+        );
+        assert_eq!(harness.enrich_calls(), 0);
+        assert!(desktop.await.unwrap().is_empty(), "nothing sent");
+        assert!(cursor.await.unwrap().is_empty());
+    }
+
     /// R6-14 with consent given: a key that cannot be loaded, a non-`v10`
     /// value, and the production loader with `Local State` missing are all the
     /// fixed error — never `Ok(None)`, never the Cursor login.
     #[tokio::test]
     async fn desktop_read_failures_are_errors_without_cursor_fallback() {
-        type Case = (&'static str, String, fn() -> agent_grokbot::DesktopAccess);
+        type Case = (
+            &'static str,
+            String,
+            fn(&Path) -> agent_grokbot::DesktopAccess,
+        );
         let cases: [Case; 3] = [
-            ("key-load", sealed(&desktop_jwt()), || {
+            ("key-load", sealed(&desktop_jwt()), |_| {
                 spy_access(&[true], Err(agent_grokbot::GROK_BOT_LOGIN_UNREADABLE)).0
             }),
             (
                 "not-v10",
                 base64::engine::general_purpose::STANDARD.encode(b"v11-not-v10"),
-                || spy_access(&[true], Ok(())).0,
+                |_| spy_access(&[true], Ok(())).0,
             ),
-            ("no-local-state", sealed(&desktop_jwt()), || {
-                production_access(&[true])
+            ("no-local-state", sealed(&desktop_jwt()), |root| {
+                production_access(&[true], root)
             }),
         ];
         for (tag, token, access) in cases {
@@ -15743,9 +15815,13 @@ mod grokbot_tests {
             let harness = Harness::new(&format!("r6-14-{tag}"), cursor_url);
             harness
                 .install_grok_bot(|path| fs::write(path, desktop_secrets(&token, None)).unwrap());
-            let snapshot = fetch_grokbot_with(&harness.deps().with_desktop(&desktop_url, access()))
-                .await
-                .unwrap();
+            let snapshot = fetch_grokbot_with(
+                &harness
+                    .deps()
+                    .with_desktop(&desktop_url, access(&harness.dir)),
+            )
+            .await
+            .unwrap();
             assert_eq!(snapshot.source, "oauth", "{tag}");
             assert_eq!(
                 snapshot.error.as_deref(),
@@ -15858,7 +15934,7 @@ mod grokbot_tests {
             );
             let deps = harness
                 .deps()
-                .with_desktop(&desktop_url, production_access(&[true]));
+                .with_desktop(&desktop_url, production_access(&[true], &harness.dir));
             let snapshot = fetch_grokbot_with(&deps).await.unwrap();
             assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
             let heads = desktop.await.unwrap();
@@ -15907,7 +15983,7 @@ mod grokbot_tests {
                 install(&harness, &token, local_state);
                 let deps = harness
                     .deps()
-                    .with_desktop(&desktop_url, production_access(&[true]));
+                    .with_desktop(&desktop_url, production_access(&[true], &harness.dir));
                 let snapshot = fetch_grokbot_with(&deps).await.unwrap();
                 assert_eq!(
                     snapshot.error.as_deref(),

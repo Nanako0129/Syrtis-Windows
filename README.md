@@ -79,7 +79,7 @@ before you go looking for a missing card:
 | Codex | OAuth via `~/.codex/auth.json` (`$CODEX_HOME` honored) |
 | GitHub Copilot | OAuth via **opencode's** `auth.json` — signing into the GitHub Copilot CLI alone is not enough, and the card is omitted rather than shown as an error |
 | Grok | OAuth via `~/.grok/auth.json` |
-| Grok Bot | The Grok Bot app's sign-in (`%APPDATA%\Grok Bot\sand-secrets.json`, Electron safeStorage via DPAPI), read **only after you choose Allow** on the card; Windows does not ask separately, and Settings → Agent limits can withdraw it. Sent only to `api2.cursor.sh`. Without a Grok Bot app sign-in, the Cursor IDE sign-in (`%APPDATA%\Cursor\User\globalStorage\state.vscdb`, read-only) is used and sent only to `cursor.com`. No copy of either is kept |
+| Grok Bot | The Grok Bot app's sign-in (`%APPDATA%\Grok Bot\sand-secrets.json`, Electron safeStorage via DPAPI). Syrtis checks that file each refresh to see whether Grok Bot is signed in, and unlocks and uses the sign-in **only after you choose Allow** on the card; Windows does not ask separately, and Settings → Agent limits can withdraw it. Sent only to `api2.cursor.sh`. Without a Grok Bot app sign-in, the Cursor IDE sign-in (`%APPDATA%\Cursor\User\globalStorage\state.vscdb`, read-only) is used and sent only to `cursor.com`. Syrtis keeps no copy of either, only a one-way fingerprint to tell accounts apart |
 | Kiro | Bearer token from the Kiro IDE sign-in, expected at `~/.aws/sso/cache/kiro-auth-token.json` (not yet observed on a Windows device; read-only, never refreshed or copied; sent only to `codewhisperer.us-east-1.amazonaws.com`). Kiro CLI's own store is not read on Windows |
 | Antigravity | OAuth or local IDE credentials, whichever the installed client itself uses |
 
