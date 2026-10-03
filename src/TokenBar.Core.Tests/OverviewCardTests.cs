@@ -125,7 +125,7 @@ public class OverviewCardVisibilityTests
     }
 
     [Fact]
-    public void LabelsAreTitleCasedIds()
+    public void LabelsAreSentenceCasedIds()
     {
         Assert.Equal("Quota summary", OverviewCards.Label(OverviewCard.QuotaSummary));
         Assert.Equal("Streaks", OverviewCards.Label(OverviewCard.Streaks));
