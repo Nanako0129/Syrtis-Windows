@@ -368,7 +368,10 @@ public sealed partial class DashboardView : UserControl
 
     private void UpdateHints(bool ctrlAlone)
     {
-        switch (_hintGate.Update(ctrlAlone))
+        // A hidden flyout never shows hints: Ctrl+W hides it synchronously and
+        // a KeyDown for the same press may still arrive with Ctrl held, which
+        // would start the timer behind a window whose KeyUp never comes back.
+        switch (_hintGate.Update(ctrlAlone && _flyoutVisible))
         {
             case HintStep.StartTimer:
                 if (_hintTimer is null)
@@ -378,6 +381,12 @@ public sealed partial class DashboardView : UserControl
                     _hintTimer.IsRepeating = false;
                     _hintTimer.Tick += (_, _) =>
                     {
+                        if (!_flyoutVisible)
+                        {
+                            _hintGate.Update(ctrlAlone: false);
+                            return;
+                        }
+
                         _hintGate.Fire();
                         UpdateClientTabs();
                     };
