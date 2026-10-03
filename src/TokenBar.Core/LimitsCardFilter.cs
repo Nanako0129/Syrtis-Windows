@@ -41,18 +41,23 @@ public static class LimitsCardFilter
     /// (:547), and a known client with no snapshot draws placeholder rows
     /// (:784-787). An empty client list hides nothing (:502-504).</para>
     /// <para>Windows has no placeholder rows, so a member with no snapshot can
-    /// never be shown. Rule here: consider only the members that have at least
-    /// one snapshot in <paramref name="agents"/>; hide the card iff that set is
-    /// non-empty, every member in it is limits-hidden, and none has an extra
-    /// account. No member with a snapshot (still loading, failed, or a client
-    /// with no data) returns false, so the card keeps its own "No quota data
-    /// yet." / could-not-check states. Where macOS draws placeholder rows,
-    /// Windows differs: a codex/claude tab with no snapshot draws the card's
-    /// own "No quota data yet." (macOS: placeholder rows), and a Grok tab with
-    /// grok hidden and no grok-bot snapshot is hidden here, while macOS draws a
-    /// grok-bot placeholder row (:228-234, :784-787). Every other case matches. To align after G3b lands: once Windows has placeholder rows,
-    /// switch the member set from "members with a snapshot" to macOS's known()
-    /// (placeholder or snapshot).</para>
+    /// never be shown. Rule here: the members considered are those with at
+    /// least one snapshot in <paramref name="agents"/>; if none has one (still
+    /// loading, failed, or not signed in), the tab's quota owner (the first
+    /// client id) stands in for the tab. The card is hidden iff every
+    /// considered member is limits-hidden and none has an extra account. So a
+    /// single-client tab behaves exactly as main's #181 (the switch hides the
+    /// card at once, data or not), and an Antigravity tab with antigravity
+    /// hidden is hidden even though antigravity-cli never has a snapshot.
+    /// Known differences from macOS, all from the missing placeholder rows
+    /// (:228-234, :784-787): a codex/claude tab not switched off and with no
+    /// snapshot draws "No quota data yet." where macOS draws placeholder rows;
+    /// a Grok tab with grok hidden and no grok-bot snapshot is hidden where
+    /// macOS draws a grok-bot placeholder row; a tab not switched off whose
+    /// members are all absent from an answered payload keeps "No quota data
+    /// yet." where macOS draws nothing (:529). To align once Windows has
+    /// placeholder rows (G3b): switch the considered set to macOS's known()
+    /// (placeholder or snapshot) and port :529.</para>
     /// <para>Read from the setting plus the payload, not from an empty
     /// <see cref="Visible"/> list, which is also empty before the first payload;
     /// that card must keep its loading state.</para></summary>
@@ -61,9 +66,14 @@ public static class LimitsCardFilter
         IReadOnlyList<string> clientIds,
         IReadOnlySet<string> limitsHidden)
     {
-        var members = clientIds.Where(id => agents.Any(agent => agent.ClientId == id)).ToList();
-        return members.Count > 0
-            && members.All(id =>
+        if (clientIds.Count == 0)
+        {
+            return false;
+        }
+
+        var withSnapshot = clientIds.Where(id => agents.Any(agent => agent.ClientId == id)).ToList();
+        IReadOnlyList<string> members = withSnapshot.Count > 0 ? withSnapshot : [clientIds[0]];
+        return members.All(id =>
                 limitsHidden.Contains(id)
                 && !agents.Any(agent => agent.ClientId == id && agent.Account.AccountKey is not null));
     }

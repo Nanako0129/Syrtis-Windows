@@ -67,7 +67,7 @@ public sealed class LimitsCardFilterTests
     {
         var hidden = new HashSet<string> { "codex", "claude" };
         Assert.True(LimitsCardFilter.HidesClientCard(Agents, ["codex"], hidden));
-        Assert.False(LimitsCardFilter.HidesClientCard([], ["codex"], hidden)); // nothing to hide yet: loading card
+        Assert.True(LimitsCardFilter.HidesClientCard([], ["codex"], hidden)); // switched off: hidden at once, data or not (main #181)
         Assert.False(LimitsCardFilter.HidesClientCard(Agents, ["claude"], hidden));
         Assert.False(LimitsCardFilter.HidesClientCard(Agents, ["gemini"], hidden));
         Assert.False(LimitsCardFilter.HidesClientCard([], ["gemini"], hidden));
@@ -122,10 +122,10 @@ public sealed class LimitsCardFilterTests
         Assert.False(LimitsCardFilter.HidesClientCard(agents, Antigravity, None)); // control
     }
 
-    /// <summary>Single-client tab with no snapshot (any fetch outcome): nothing
-    /// to hide, the card keeps main's loading / could-not-check states. Windows
-    /// has no placeholder rows (macOS :437-439, :784-787 would draw them).
-    /// Hidden or not, an absent client is not "hidden with data".</summary>
+    /// <summary>Single-client tab with no snapshot (any fetch outcome): not
+    /// switched off, the card keeps main's loading / could-not-check states
+    /// (macOS would draw placeholder rows, :437-439, :784-787); switched off,
+    /// it is hidden at once, as main #181 and macOS :502-510.</summary>
     [Theory]
     [InlineData("claude")]
     [InlineData("codex")]
@@ -133,7 +133,7 @@ public sealed class LimitsCardFilterTests
     {
         Assert.False(LimitsCardFilter.HidesClientCard([Card("gemini")], [client], None));
         Assert.False(LimitsCardFilter.HidesClientCard([], [client], None));
-        Assert.False(LimitsCardFilter.HidesClientCard([], [client], new HashSet<string> { client }));
+        Assert.True(LimitsCardFilter.HidesClientCard([], [client], new HashSet<string> { client }));
     }
 
     [Fact]
