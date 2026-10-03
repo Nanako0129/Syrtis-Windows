@@ -20,6 +20,90 @@ public sealed record LimitsBadge(string Text, LimitsTone Tone);
 /// row shows, plus at most one short phrase.</summary>
 public sealed record LimitsTrendLabel(QuotaTrendDirection Direction, string? Text, LimitsTone Tone);
 
+/// <summary>One card on the Agent-limits card: a quota snapshot, or a
+/// placeholder for a client known to carry limits that has none yet
+/// (<see cref="Snapshot"/> null; always a primary).</summary>
+public sealed record LimitsRow(string ClientId, AgentUsageSnapshot? Snapshot)
+{
+    public bool IsPrimary => Snapshot?.Account.AccountKey is null;
+
+    public static LimitsRow Of(AgentUsageSnapshot snapshot) => new(snapshot.ClientId, snapshot);
+}
+
+/// <summary>Placeholder rows for clients known to carry quotas before their
+/// first snapshot arrives (macOS <c>AgentLimitsCard.placeholderRows</c>
+/// :228-234, <c>known</c> :437-439, the rows themselves :784-787).</summary>
+public static class LimitsPlaceholders
+{
+    /// <summary>The window labels each client's placeholder draws, in the
+    /// order macOS draws them (LIMIT_ROWS in the web card).</summary>
+    public static readonly IReadOnlyDictionary<string, IReadOnlyList<string>> Labels =
+        new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+        {
+            ["codex"] = ["Session", "Weekly"],
+            ["claude"] = ["Session", "Weekly"],
+            ["gemini"] = ["Pro", "Flash"],
+            ["grok"] = ["Weekly"],
+            ["grok-bot"] = ["Weekly"],
+        };
+
+    /// <summary>The ids that get a placeholder row, for
+    /// <see cref="ClientRegistry.KnownLimitsClients"/>.</summary>
+    public static readonly IReadOnlySet<string> Clients = Labels.Keys.ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>macOS <c>known(_:)</c>: a client can show a row when it has
+    /// a placeholder or its primary account has a snapshot.</summary>
+    public static bool Known(string clientId, IReadOnlyList<AgentUsageSnapshot> agents) =>
+        Labels.ContainsKey(clientId)
+        || agents.Any(a => a.ClientId == clientId && a.Account.AccountKey is null);
+
+    /// <summary>The rows the card draws: the requested clients that are
+    /// known, then every other client with a snapshot (macOS
+    /// <c>baseClients</c>), each as its snapshot rows or, with no primary
+    /// snapshot at all, one placeholder. <paramref name="visible"/> is the
+    /// already-filtered snapshot list (<see cref="LimitsCardFilter.Visible"/>);
+    /// a placeholder obeys the same hide rules a primary does — the limits
+    /// toggle everywhere, tab visibility on the multi-client card only — so
+    /// a switched-off client does not come back as a placeholder.</summary>
+    /// <param name="requested">The clients the surface was asked for: the
+    /// tab's clients on the multi-client card, the one owner on a client
+    /// tab.</param>
+    /// <param name="all">The whole payload, hidden cards included: a client
+    /// whose snapshot exists but is hidden must not get a placeholder
+    /// instead.</param>
+    public static IReadOnlyList<LimitsRow> Rows(
+        IReadOnlyList<AgentUsageSnapshot> visible,
+        IReadOnlyList<AgentUsageSnapshot> all,
+        IReadOnlyList<string> requested,
+        bool multiClient,
+        IReadOnlySet<string> tabHidden,
+        IReadOnlySet<string> limitsHidden)
+    {
+        // A primary with a snapshot, hidden or not, is never replaced by a
+        // placeholder; an extra account's snapshot does not stand in for the
+        // primary, which still gets its placeholder (macOS
+        // expandedWithExtraAccounts).
+        var primaryIds = all.Where(static a => a.Account.AccountKey is null)
+            .Select(static a => a.ClientId).ToHashSet(StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var ids = requested.Where(id => Known(id, all))
+            .Concat(visible.Select(static a => a.ClientId))
+            .Where(seen.Add);
+        var rows = new List<LimitsRow>();
+        foreach (var id in ids)
+        {
+            if (!primaryIds.Contains(id) && !limitsHidden.Contains(id) && !(multiClient && tabHidden.Contains(id)))
+            {
+                rows.Add(new LimitsRow(id, null));
+            }
+
+            rows.AddRange(visible.Where(a => a.ClientId == id).Select(LimitsRow.Of));
+        }
+
+        return rows;
+    }
+}
+
 /// <summary>The line under a limits-card header.</summary>
 public sealed record LimitsDetail(string Text, bool IsError);
 
@@ -51,28 +135,26 @@ public sealed record LimitsSetupPart(string Text, bool IsCommand);
 /// so dragging a card also moves its tab and the other way round.</summary>
 public static class LimitsCardOrder
 {
-    /// <summary>Primary cards sorted by the saved order (unsaved ids keep
-    /// their payload order at the end); each primary's extra accounts follow
+    /// <summary>Primary rows sorted by the saved order (unsaved ids keep
+    /// their incoming order at the end); each primary's extra accounts follow
     /// it; an extra whose primary is absent (hidden) keeps its relative place
-    /// at the end. Extra accounts are never part of the saved order.</summary>
-    public static IReadOnlyList<AgentUsageSnapshot> Apply(
-        IReadOnlyList<AgentUsageSnapshot> agents, string orderRaw)
+    /// at the end. Extra accounts are never part of the saved order. A
+    /// placeholder row is a primary.</summary>
+    public static IReadOnlyList<LimitsRow> Apply(IReadOnlyList<LimitsRow> rows, string orderRaw)
     {
-        // A list for the payload order (Dictionary enumeration order is not
+        // A list for the incoming order (Dictionary enumeration order is not
         // a contract), a dictionary for lookup. One primary per client.
-        var primaryList = agents.Where(static a => a.Account.AccountKey is null)
-            .DistinctBy(static a => a.ClientId)
-            .ToList();
-        var primaries = primaryList.ToDictionary(static a => a.ClientId);
-        var ordered = ClientRegistry.OrderedClients([.. primaryList.Select(static a => a.ClientId)], orderRaw);
-        var output = new List<AgentUsageSnapshot>(agents.Count);
+        var primaryList = rows.Where(static r => r.IsPrimary).DistinctBy(static r => r.ClientId).ToList();
+        var primaries = primaryList.ToDictionary(static r => r.ClientId);
+        var ordered = ClientRegistry.OrderedClients([.. primaryList.Select(static r => r.ClientId)], orderRaw);
+        var output = new List<LimitsRow>(rows.Count);
         foreach (var id in ordered)
         {
             output.Add(primaries[id]);
-            output.AddRange(agents.Where(a => a.ClientId == id && a.Account.AccountKey is not null));
+            output.AddRange(rows.Where(r => r.ClientId == id && !r.IsPrimary));
         }
 
-        output.AddRange(agents.Where(a => a.Account.AccountKey is not null && !primaries.ContainsKey(a.ClientId)));
+        output.AddRange(rows.Where(r => !r.IsPrimary && !primaries.ContainsKey(r.ClientId)));
         return output;
     }
 

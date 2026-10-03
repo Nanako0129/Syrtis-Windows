@@ -1499,7 +1499,7 @@ public sealed class SettingsWindow : Window
             .Where(quotaSeen.Add)
             .ToList();
         var known = ClientRegistry.OrderedClients(
-            ClientRegistry.KnownLimitsClients(present, quotaIds, new HashSet<string>()), store);
+            ClientRegistry.KnownLimitsClients(present, quotaIds, LimitsPlaceholders.Clients), store);
         if (known.Count == 0)
         {
             return panel;
