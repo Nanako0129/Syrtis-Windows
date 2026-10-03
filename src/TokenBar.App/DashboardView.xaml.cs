@@ -1688,7 +1688,13 @@ public sealed partial class DashboardView : UserControl
             header.Children.Add(title);
             var badge = AgentLimitsText.StatusBadge(agent, liveClients.Contains(agent.ClientId));
             section.Children.Add(Ui.Row(header, ToneText(badge.Text, 10, badge.Tone)));
-            var host = drag?.Host(agent, section) ?? (FrameworkElement)section;
+            // Added before the section is filled; null when the card joined
+            // its primary's drag group.
+            if ((drag is null ? section : drag.Host(agent, section)) is { } host)
+            {
+                panel.Children.Add(host);
+            }
+
             if (agent.IsSetupPlaceholder)
             {
                 // ponytail: placeholder copy stays the raw error until G3b's setup prompt.
@@ -1696,7 +1702,7 @@ public sealed partial class DashboardView : UserControl
                 {
                     section.Children.Add(Ui.Dim(agent.Error, 11));
                 }
-                panel.Children.Add(host);
+
                 continue;
             }
 
@@ -1711,7 +1717,6 @@ public sealed partial class DashboardView : UserControl
 
             if (agent.Error is not null)
             {
-                panel.Children.Add(host);
                 continue;
             }
 
@@ -1742,8 +1747,6 @@ public sealed partial class DashboardView : UserControl
                     window, row, classic, metric,
                     layout == LimitsLayout.Chart ? samples : null, trend));
             }
-
-            panel.Children.Add(host);
         }
 
         return panel;

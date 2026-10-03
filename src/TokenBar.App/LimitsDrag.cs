@@ -40,34 +40,50 @@ internal sealed class LimitsDrag
     /// WinUI is not relied on to report the lost capture.</summary>
     public static void CancelActive() => _active?.End(commit: false);
 
-    private readonly Panel _panel;
+    private readonly StackPanel _panel;
+    private readonly double _spacing;
     private readonly List<string> _visible;
-    private readonly Dictionary<string, (Grid Host, Rectangle Top, Rectangle Bottom)> _cards = [];
+    private readonly Dictionary<string, (Grid Host, StackPanel Group, Rectangle Top, Rectangle Bottom)> _cards = [];
     private string? _dragId;
     private string? _overId;
 
-    public LimitsDrag(Panel panel, IReadOnlyList<AgentUsageSnapshot> orderedAgents)
+    public LimitsDrag(StackPanel panel, IReadOnlyList<AgentUsageSnapshot> orderedAgents)
     {
         _panel = panel;
+        // A group's extra accounts sit as far apart as the cards themselves.
+        _spacing = panel.Spacing;
         _visible = [.. orderedAgents.Where(static a => a.Account.AccountKey is null).Select(static a => a.ClientId)];
     }
 
-    /// <summary>Wraps a primary card so it can show a drop line; an extra
-    /// account's card is returned as is.</summary>
-    public FrameworkElement Host(AgentUsageSnapshot agent, FrameworkElement section)
+    /// <summary>The element to add to the panel for this card, or null when
+    /// it has gone into an earlier one. A primary card starts a group that
+    /// its extra accounts join (LimitsCardOrder.Apply puts them right after
+    /// it), so the group moves, highlights and takes drops as one: a card
+    /// dropped "below" Claude lands after Claude's extra accounts, and the
+    /// line is drawn there. An extra whose primary is absent stands
+    /// alone.</summary>
+    public FrameworkElement? Host(AgentUsageSnapshot agent, FrameworkElement section)
     {
         if (agent.Account.AccountKey is not null)
         {
+            if (_cards.TryGetValue(agent.ClientId, out var owner))
+            {
+                owner.Group.Children.Add(section);
+                return null;
+            }
+
             return section;
         }
 
+        var group = new StackPanel { Spacing = _spacing };
+        group.Children.Add(section);
         var host = new Grid();
-        host.Children.Add(section);
+        host.Children.Add(group);
         var top = DropLine(VerticalAlignment.Top, new Thickness(0, -DropLineOffset, 0, 0));
         var bottom = DropLine(VerticalAlignment.Bottom, new Thickness(0, 0, 0, -DropLineOffset));
         host.Children.Add(top);
         host.Children.Add(bottom);
-        _cards[agent.ClientId] = (host, top, bottom);
+        _cards[agent.ClientId] = (host, group, top, bottom);
         return host;
     }
 
@@ -117,18 +133,31 @@ internal sealed class LimitsDrag
         IsHitTestVisible = false,
     };
 
+    /// <summary>The group the pointer is over, counting the gap under a
+    /// group (where its drop line is drawn) and anything above the first or
+    /// below the last as the nearest group, so there is no dead zone in
+    /// which the line vanishes and a release silently does nothing.</summary>
     private string? CardAt(double y)
     {
+        string? hit = null;
+        var hitTop = double.NegativeInfinity;
+        string? first = null;
+        var firstTop = double.PositiveInfinity;
         foreach (var (id, card) in _cards)
         {
             var top = card.Host.TransformToVisual(_panel).TransformPoint(default).Y;
-            if (y >= top && y < top + card.Host.ActualHeight)
+            if (top <= y && top > hitTop)
             {
-                return id;
+                (hit, hitTop) = (id, top);
+            }
+
+            if (top < firstTop)
+            {
+                (first, firstTop) = (id, top);
             }
         }
 
-        return null;
+        return hit ?? first;
     }
 
     private void Over(string? target)
