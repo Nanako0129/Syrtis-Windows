@@ -103,8 +103,10 @@ pub(crate) type ResolveCredential =
 /// (`agent_usage::KiroDeps`), whose only non-test value is `USAGE_URL` and
 /// `agent_account_scope::resolve_credential`; a test points them at a loopback
 /// mock and a temporary account-scope root. `fetch_kiro_with` still takes
-/// one `now` before the load for the snapshot's `updated_at` (as macOS's
-/// `fetch_kiro` does); only the reset comparison reads the clock afterwards.
+/// one `now` before the load (as macOS's `fetch_kiro` does) and uses it for
+/// the credential expiry check and the snapshot's `updated_at`; the reset
+/// comparison here and the outcome/enrich step in `fetch_kiro_with` each read
+/// the clock again after the response.
 pub(crate) async fn fetch(
     credential: KiroCredential,
     usage_url: &str,
