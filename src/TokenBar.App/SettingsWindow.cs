@@ -399,9 +399,16 @@ public sealed class SettingsWindow : Window
             animate.Toggled += (_, _) =>
                 store.SetBool("tokenbar.tray.animate", animate.IsOn);
             icon.Children.Add(ToggleRow("Animate with token rate".Localized(), animate));
-            icon.Children.Add(Hint(
-                ("Idle purrs at 2 fps; a heavy session sprints. Shown only in "
-                    + "the icon-only tray mode.").Localized()));
+            // The cat and parrot speed up with the rate; the sand plays at a
+            // fixed 24 fps and shows usage by how much falls, so this hint
+            // would describe the wrong animation for it (macOS shows no such
+            // hint for the sand).
+            if (styleRaw != SandShoal.Style)
+            {
+                icon.Children.Add(Hint(
+                    ("Idle purrs at 2 fps; a heavy session sprints. Shown only in "
+                        + "the icon-only tray mode.").Localized()));
+            }
             // macOS SettingsPanel.swift:309-316: the pace applies only while
             // the animation follows the rate, so it is offered only then.
             if (animate.IsOn)

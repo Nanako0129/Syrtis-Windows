@@ -456,15 +456,26 @@ $assetCounts = [ordered]@{
     "Assets/anim-parrot" = 10
     "Assets/anim-parrot-light" = 10
 }
+# Sand shoal frame sets: four levels, dark and light, 144 frames each, named
+# frame-000..143. A missing set would not fail the app: the animator caches an
+# empty list and the tray keeps the previous style's frame while Settings says
+# "Sand shoal", so the publish check is where it has to be caught.
+foreach ($level in 0..3) {
+    foreach ($suffix in @("", "-light")) {
+        $assetCounts["Assets/anim-sand$level$suffix"] = 144
+    }
+}
 foreach ($asset in $assetCounts.GetEnumerator()) {
     $assetDirectory = Join-Path $publishRoot $asset.Key
     if (-not (Test-Path -LiteralPath $assetDirectory -PathType Container)) {
         throw "Required asset directory is missing: $($asset.Key)"
     }
+    $digits = if ($asset.Key -like "Assets/anim-sand*") { "D3" } else { "D2" }
     for ($index = 0; $index -lt $asset.Value; $index++) {
-        $assetPath = Join-Path $assetDirectory ("frame-{0:D2}.png" -f $index)
+        $name = "frame-{0:$digits}.png" -f $index
+        $assetPath = Join-Path $assetDirectory $name
         if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) {
-            throw "Required asset file is missing: $($asset.Key)/frame-$('{0:D2}' -f $index).png"
+            throw "Required asset file is missing: $($asset.Key)/$name"
         }
     }
 }
