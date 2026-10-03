@@ -907,10 +907,7 @@ public sealed partial class DashboardView
         };
         head.Children.Add(Ui.Text(open ? "▾" : "▸", 8, 0.45));
         head.Children.Add(Ui.Text(row.Stamp, 9, 0.6));
-        if (!noLocalUsage)
-        {
-            head.Children.Add(HistoryBars(row, historyRow, colors));
-        }
+        head.Children.Add(HistoryBars(row, historyRow, colors, noLocalUsage));
 
         var percent = Ui.Text(WindowHistoryText.Percent(row), 9);
         percent.Width = 30;
@@ -1115,7 +1112,8 @@ public sealed partial class DashboardView
     /// that is not there. Adjacent and separately scaled, the mismatch between
     /// the two lengths is legible instead of hidden, and that mismatch is what
     /// this card exists to expose.</summary>
-    private FrameworkElement HistoryBars(WindowHistoryRow row, QuotaHistoryRow historyRow, ModelColorMap colors)
+    private FrameworkElement HistoryBars(
+        WindowHistoryRow row, QuotaHistoryRow historyRow, ModelColorMap colors, bool noLocalUsage)
     {
         var stack = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
         stack.Children.Add(HistoryBar(
@@ -1126,7 +1124,11 @@ public sealed partial class DashboardView
         // the app's shared palette. An empty strip is a real answer: this
         // window consumed allowance and nothing in it was declared as this
         // subscription's.
-        stack.Children.Add(HistoryUsageBar(row, historyRow, colors));
+        // No per-account scan: an empty track keeps the row's layout; the
+        // quota bar above is this account's own and stays.
+        stack.Children.Add(noLocalUsage
+            ? HistoryBar(0, Colors.Gray, 0)
+            : HistoryUsageBar(row, historyRow, colors));
         return stack;
     }
 
