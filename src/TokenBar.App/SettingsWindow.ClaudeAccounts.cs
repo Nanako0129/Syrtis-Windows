@@ -1,6 +1,8 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using TokenBar.Core;
+// TokenBar.Core.Grid collides with the XAML Grid (as in SettingsWindow.cs).
+using Grid = Microsoft.UI.Xaml.Controls.Grid;
 
 namespace TokenBar.App;
 
