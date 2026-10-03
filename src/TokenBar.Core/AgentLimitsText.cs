@@ -200,19 +200,15 @@ public static class AgentLimitsText
             // One entry with {0} where the command goes: English says "and
             // reopen Syrtis" after it, Chinese folds that into the sentence
             // before it, and a pair of keys could not leave either side empty.
+            // Text, command, text: a translation that lost its {0} still
+            // shows the command, after the whole sentence.
             var removal = "The claude CLI reads this variable too and prefers it over /login. To stop using it, run:{0}and reopen Syrtis."
-                .Localized().Split("{0}");
-            foreach (var (text, i) in removal.Select((text, i) => (text.Trim(), i)))
+                .Localized().Split("{0}", 2);
+            parts.Add(new(removal[0].Trim(), IsCommand: false));
+            parts.Add(new(ClaudeRemoveCommand, IsCommand: true));
+            if (removal.Length > 1 && removal[1].Trim() is { Length: > 0 } after)
             {
-                if (i > 0)
-                {
-                    parts.Add(new(ClaudeRemoveCommand, IsCommand: true));
-                }
-
-                if (text.Length > 0)
-                {
-                    parts.Add(new(text, IsCommand: false));
-                }
+                parts.Add(new(after, IsCommand: false));
             }
 
             return new(parts);
