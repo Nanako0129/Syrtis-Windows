@@ -237,7 +237,24 @@ public sealed class DashboardModel
         {
             Current = _lastSnapshot;
         }
+
+        if (ClaudeExtraRoots.Shared is { } roots)
+        {
+            roots.Pushed += OnClaudeRootsPushed;
+        }
     }
+
+    /// <summary>The native setters already dropped every scan cache and the
+    /// removed accounts' state; ask again so an added account's card and usage
+    /// appear, and a removed one's disappear, without waiting for the next
+    /// 60 s tick.</summary>
+    private void OnClaudeRootsPushed(ClaudeRootsPush _) =>
+        _dispatcher.TryEnqueue(() =>
+        {
+            RefreshSlow();
+            RefreshQuota();
+            RequestLazyRefresh();
+        });
 
     public Snapshot? Current { get; private set; }
 
@@ -364,6 +381,14 @@ public sealed class DashboardModel
         /// the export is expensive enough (macOS's own probe: 67s over 15
         /// days) that it must never be called with an unbounded range.</summary>
         public Interop.WindowUsage? WindowUsage { get; init; }
+
+        /// <summary>Each extra Claude account's own window usage
+        /// (<c>tb_window_usage(accountKey)</c>), by account key, from the same
+        /// bounded fetch as <see cref="WindowUsage"/>. Only successful scans
+        /// are present: an account missing here stays unattributed (spec rule
+        /// 6). A failed rescan keeps the account's prior rows.</summary>
+        public IReadOnlyDictionary<string, Interop.WindowUsage> AccountWindowUsage { get; init; } =
+            new Dictionary<string, Interop.WindowUsage>();
 
         /// <summary>Whether the window-usage READ has finished, whatever it
         /// returned — the same fact-about-the-request as
@@ -511,6 +536,7 @@ public sealed class DashboardModel
         // 5d-1's export scans the whole local corpus when its cache is cold,
         // which macOS's own probe measured at 67s over 15 days.
         Interop.WindowUsage? usage = null;
+        IReadOnlyDictionary<string, Interop.WindowUsage>? accountUsage = null;
         if (windowUsage)
         {
             var forBound = history ?? Current?.QuotaHistory ?? [];
@@ -524,11 +550,10 @@ public sealed class DashboardModel
                 // like the quota-history read above — the same reason the
                 // hourly/agents fetch above it boosts.
                 using var boost = ProcessPower.Boost();
-                usage = TryFetch(
-                    () => TbCore.WindowUsage(
-                        QuotaEquivalenceFold.BoundFromMs(forBound, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
-                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
-                    "windowUsage");
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var fromMs = QuotaEquivalenceFold.BoundFromMs(forBound, now);
+                usage = TryFetch(() => TbCore.WindowUsage(fromMs, now), "windowUsage");
+                accountUsage = FetchAccountWindows(fromMs, now, Current?.AccountWindowUsage);
             }
         }
 
@@ -568,9 +593,39 @@ public sealed class DashboardModel
                 // Same failed-read and same completion rules as QuotaHistory,
                 // immediately above, and for the same reason.
                 WindowUsage = usage ?? s.WindowUsage,
+                AccountWindowUsage = accountUsage ?? s.AccountWindowUsage,
                 WindowUsageAttempted = windowUsage || s.WindowUsageAttempted,
             };
         }, graph: null, stillValid: () => SelectionStillValid(year, generation));
+    }
+
+    /// <summary>One window per extra Claude account on the latest quota
+    /// cards, keyed only by what the registry reported
+    /// (<see cref="ClaudeExtraRoots.AttributableAccountKeys"/>). A failed scan
+    /// keeps that account's prior rows; an account no longer on the cards is
+    /// dropped.</summary>
+    private IReadOnlyDictionary<string, Interop.WindowUsage> FetchAccountWindows(
+        long fromMs, long untilMs, IReadOnlyDictionary<string, Interop.WindowUsage>? prior)
+    {
+        var result = new Dictionary<string, Interop.WindowUsage>(StringComparer.Ordinal);
+        foreach (var key in ClaudeExtraRoots.AttributableAccountKeys(_latestQuota))
+        {
+            try
+            {
+                result[key] = TbCore.WindowUsage(key, fromMs, untilMs);
+            }
+            catch (Exception ex)
+            {
+                // Type only: the key is a directory path (review R6).
+                DevLog.Write($"accountWindowUsage refresh failed: {ex.GetType().Name}");
+                if (prior is not null && prior.TryGetValue(key, out var kept))
+                {
+                    result[key] = kept;
+                }
+            }
+        }
+
+        return result;
     }
 
     private bool SelectionStillValid(string? year, long generation)
@@ -662,6 +717,10 @@ public sealed class DashboardModel
         _graphCoordinator.Started -= OnGraphStarted;
         _graphCoordinator.Published -= OnGraphPublished;
         _graphCoordinator.Completed -= OnGraphCompleted;
+        if (ClaudeExtraRoots.Shared is { } roots)
+        {
+            roots.Pushed -= OnClaudeRootsPushed;
+        }
     }
 
     private void RefreshSlow()
@@ -968,8 +1027,11 @@ public sealed class DashboardModel
                 // the quota, because LazyLaneFold.Outcome(QuotaAttempted,
                 // Quota) reads exactly that pair as a failed fetch, and a
                 // fetch that succeeded would render as failed for a frame.
+                var accountsChanged = false;
                 if (quota is not null)
                 {
+                    accountsChanged = !ClaudeExtraRoots.AttributableAccountKeys(quota)
+                        .SequenceEqual(ClaudeExtraRoots.AttributableAccountKeys(_latestQuota));
                     _latestQuota = quota;
                 }
 
@@ -977,6 +1039,13 @@ public sealed class DashboardModel
                 if (quota is not null)
                 {
                     Publish(s => s with { Quota = quota, QuotaAttempted = true }, graph: null);
+                    // An extra Claude account appeared or went: its window
+                    // scan keys off these cards, so fetch it now rather than
+                    // after the next graph publication.
+                    if (accountsChanged)
+                    {
+                        RequestLazyRefresh();
+                    }
                 }
                 else
                 {

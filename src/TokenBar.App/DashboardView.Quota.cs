@@ -221,7 +221,8 @@ public sealed partial class DashboardView
                     WindowCardText.AccountKeyPrefix + ClientRegistry.QuotaOwner(_activeClientTab)),
                 // Year-independent: the card's scan covers quota history,
                 // not the selected year (LocalRecordClients).
-                LocalRecordClients.Union(AppSettings.Store, snapshot.Graph.Summary.Clients)));
+                LocalRecordClients.Union(AppSettings.Store, snapshot.Graph.Summary.Clients)),
+            snapshot.AccountWindowUsage);
 
         // A client tab asks about one subscription, so it gets that
         // subscription's own three cards rather than the all-clients four.

@@ -201,7 +201,8 @@ public static class QuotaLensProjection
         WindowEquivalence.FetchOutcome quotaHistoryOutcome,
         UsageAttribution.Table confirmed,
         string? year,
-        Selection selection)
+        Selection selection,
+        IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage = null)
     {
         var overview = BuildOverview(history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed);
         var (trend, pastYearSelected) = BuildTrend(graph, confirmed, year);
@@ -210,7 +211,7 @@ public static class QuotaLensProjection
             : BuildClient(
                 selection.ActiveClientTab, selection.WindowCardTab,
                 history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed,
-                selection);
+                selection, accountWindowUsage);
         return new Model(overview, trend, pastYearSelected, client);
     }
 
@@ -309,7 +310,8 @@ public static class QuotaLensProjection
         WindowEquivalence.FetchOutcome windowUsageOutcome,
         WindowEquivalence.FetchOutcome quotaHistoryOutcome,
         UsageAttribution.Table confirmed,
-        Selection selection)
+        Selection selection,
+        IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage)
     {
         // Every subscription-facing lookup below is keyed by the quota OWNER,
         // not the raw client id — antigravity-cli spends the antigravity
@@ -318,12 +320,30 @@ public static class QuotaLensProjection
         // One card per client: the primary when it has windows, else the
         // first other account that does (Desktop-only users).
         var account = WindowCardText.WindowCardAccount(quota, owner, selection.WindowCardAccount);
-        var unattributed = account is not null || TabHasNoLocalRecords(clientId, selection.LocalUsageClients, confirmed.Records);
+        // A non-primary account reads local usage only from its own scan:
+        // tb_window_usage(accountKey) for a Claude config directory, fetched
+        // with the key the native registry itself reported on that card
+        // (ClaudeExtraRoots.AttributableAccountKeys). Anything else — Claude
+        // Desktop, another provider's account, a scan that failed or has not
+        // run — stays unattributed and never reads the primary's messages
+        // (spec rule 6).
+        Interop.WindowUsage? accountUsage = null;
+        if (account is not null && owner == ClaudeExtraRoots.ClientId)
+        {
+            accountWindowUsage?.TryGetValue(account, out accountUsage);
+        }
+
+        var unattributed = (account is not null && accountUsage is null)
+            || TabHasNoLocalRecords(clientId, selection.LocalUsageClients, confirmed.Records);
+        if (accountUsage is not null)
+        {
+            windowUsage = accountUsage;
+            windowUsageOutcome = WindowEquivalence.FetchOutcome.Succeeded;
+        }
+
         var tabs = WindowCardText.Tabs(history, quota, owner, account);
         var selected = tabs.FirstOrDefault(tab => WindowId(tab.Id) == windowCardTab)
             ?? DefaultTab(tabs);
-        // Windows has no per-account scan: a non-primary account reads no
-        // local usage at all (never the primary's).
         IReadOnlyList<WindowMessage> messages = unattributed ? [] : windowUsage?.Messages ?? [];
         // The selected window's model scope, looked up once (ModelScope.Of)
         // and handed to every surface of this card: the bars and live line
