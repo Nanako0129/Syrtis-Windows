@@ -280,6 +280,46 @@ fn a_registered_root_never_reaches_the_primary_window() {
     );
 }
 
+/// W4c B-1b: a config directory with NO registered scan root still never
+/// reaches the primary window. The engine finds `D/projects` on its own here,
+/// through a `.cc-mirror` variant whose `configDir` is D, so only the
+/// config-dir half of the primary's exclusion set can keep it out. The control
+/// (before D is registered) proves the mirror route really reaches D; totals
+/// keep it either way. Config dirs go in through the setter's commit path
+/// (`apply_config_dirs_for_test`; the drive-path rule refuses a POSIX
+/// fixture), so this runs on the macOS host with exact numbers and on Windows.
+#[test]
+fn a_config_dir_alone_never_reaches_the_primary_window() {
+    let Some(root) = child_root() else {
+        return run_in_child("a_config_dir_alone_never_reaches_the_primary_window", "config-dir-only");
+    };
+    const PRIMARY: i64 = 1_000;
+    const EXTRA: i64 = 7_000;
+    write_session(&root.join(".claude"), "primary", PRIMARY);
+    let dir = root.join("work-d");
+    write_session(&dir, "d", EXTRA);
+    let variant = root.join(".cc-mirror").join("v1");
+    std::fs::create_dir_all(&variant).unwrap();
+    std::fs::write(
+        variant.join("variant.json"),
+        serde_json::json!({ "configDir": dir }).to_string(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        claude_output(&call_window(None, WINDOW_FROM, WINDOW_UNTIL)),
+        PRIMARY + EXTRA,
+        "fixture is inert: the mirror route did not reach D"
+    );
+    crate::apply_config_dirs_for_test(vec![dir.display().to_string()]);
+    assert_eq!(
+        claude_output(&call_window(None, WINDOW_FROM, WINDOW_UNTIL)),
+        PRIMARY,
+        "a configured directory reached the primary window through the mirror route"
+    );
+    assert_eq!(claude_graph_output(&call_graph()), PRIMARY + EXTRA, "totals keep every account");
+}
+
 // ---- 4′: the gate, everywhere (empty setters still move the generation) --
 
 /// 4′(a): a window scan that took its context before a root change publishes

@@ -177,24 +177,24 @@ fn scoped_context(
     account: &Option<String>,
 ) -> Result<crate::LocalSourceContext, String> {
     let registry = crate::extra_scan_paths::snapshot();
-    // The primary window scans exactly what it scanned before W4b: the
-    // process context when no extra root is registered, otherwise a context
-    // captured with the same inputs `main` uses for it (`user_home_dir()`,
-    // env roots on, `ScannerSettings::default()`), which simply never contains
-    // the registered roots. Excluding them instead does not work: the engine
-    // applies `excluded_scan_paths` only on its context-free scan path, not in
-    // `scan_all_clients_resolved_inner`, which every scan here goes through.
-    // Roots the engine reaches by its own routes (a `.cc-mirror` variant
-    // naming an extra account's directory, `TOKSCALE_EXTRA_DIRS`) are still
-    // counted for the primary, exactly as on `main`; closing them needs that
-    // engine fix (Plan slice W4c).
+    // The primary window is the process context with every extra account
+    // excluded (macOS `account_options` / `primary_exclusions`, #258): the
+    // configured directories and the registered Claude roots. The engine
+    // drops an excluded prefix whichever route reached it, the registered
+    // roots, a `.cc-mirror` variant naming one of those directories, or
+    // `TOKSCALE_EXTRA_DIRS` (tokscale-core #65, which made the source-context
+    // scan honor `excluded_scan_paths`).
     //
-    // Whether the process context can serve the primary as is is read from
-    // the context itself, not from the registry: a request holding a context
-    // captured with roots, racing a setter that just cleared them, would
-    // otherwise see an empty registry and scan the old context with the
+    // The roots half is read from the held context, not from the registry: a
+    // request holding a context captured with roots, racing a setter that just
+    // cleared them, would otherwise exclude nothing and scan the old context's
     // removed roots under primary scope (CodeRabbit security review, #167).
-    if account.is_none() && context.resolved().scanner_settings().extra_scan_paths.is_empty() {
+    // The config dirs are not part of any context, so they come from their
+    // registry; a config-dir setter racing this request moves the generation,
+    // and the publish of a window computed under the old one is dropped.
+    let held = context.resolved().scanner_settings();
+    let (config_dirs, _) = crate::claude_config_dirs::snapshot();
+    if account.is_none() && held.extra_scan_paths.is_empty() && config_dirs.is_empty() {
         return Ok(context.clone());
     }
     let memo_key = (context.generation(), account.as_deref().map(account_identity));
@@ -206,11 +206,23 @@ fn scoped_context(
         return Ok(found.clone());
     }
     let resolved = match account {
-        None => tokscale_core::ResolvedLocalSourceContext::capture(
-            crate::user_home_dir(),
-            true,
-            tokscale_core::ScannerSettings::default(),
-        ),
+        None => {
+            let mut excluded: Vec<std::path::PathBuf> =
+                config_dirs.iter().map(std::path::PathBuf::from).collect();
+            excluded.extend(held.extra_scan_paths.get(CLAUDE).into_iter().flatten().cloned());
+            tokscale_core::ResolvedLocalSourceContext::capture(
+                crate::user_home_dir(),
+                true,
+                tokscale_core::ScannerSettings {
+                    extra_scan_paths: held.extra_scan_paths.clone(),
+                    excluded_scan_paths: std::collections::BTreeMap::from([(
+                        CLAUDE.to_string(),
+                        excluded,
+                    )]),
+                    ..Default::default()
+                },
+            )
+        }
         Some(dir) => {
             let own = registered_roots_under(dir, &registry);
             if own.is_empty() {
