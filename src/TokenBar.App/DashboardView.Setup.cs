@@ -17,8 +17,6 @@ public sealed partial class DashboardView
 {
     private bool _setupLoginFailed;
 
-    private static readonly string[] SetupIconStyles = ["cat", "parrot", "bars", "ring", "popsicle"];
-
     private List<UIElement> BuildSetupCards(DashboardModel.Snapshot snapshot)
     {
         var cards = new List<UIElement>();
@@ -153,9 +151,7 @@ public sealed partial class DashboardView
         var body = new StackPanel { Spacing = 8 };
         body.Children.Add(SetupBody(OnboardingSetup.Copy.IconBody));
         body.Children.Add(SetupChoices(
-            [("cat", "Cat".Localized()), ("parrot", "Parrot".Localized()),
-             ("bars", "Signal bars".Localized()), ("ring", "Ring gauge".Localized()),
-             ("popsicle", "Melting popsicle".Localized())],
+            [.. TrayIconStyles.Options],
             store.GetString("tokenbar.tray.animationStyle", "cat") ?? "cat",
             raw => store.SetString("tokenbar.tray.animationStyle", raw)));
         body.Children.Add(SetupButtonRow(SetupButton(
