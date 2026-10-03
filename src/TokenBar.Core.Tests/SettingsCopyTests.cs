@@ -31,6 +31,20 @@ public class SettingsCopyTests
         }
     }
 
+    // The gauge hint quotes the "Color on warning only" option by name, so
+    // each translation must quote that option's own translation.
+    [Theory]
+    [InlineData("strings-zh-Hant.json")]
+    [InlineData("strings-zh-Hans.json")]
+    public void GaugeHintQuotesTheTranslatedOptionLabel(string table)
+    {
+        var entries = JsonSerializer.Deserialize<Dictionary<string, string>>(
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, table)))!;
+
+        Assert.Contains(
+            entries["Color on warning only"], entries[SettingsCopy.GaugeColoringHint]);
+    }
+
     [Theory]
     [InlineData("cat", "Spinning cat")]
     [InlineData("parrot", "Party parrot")]

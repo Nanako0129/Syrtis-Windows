@@ -50,7 +50,7 @@
   "Classify each observed client/provider source against the subscription it should count toward. Nothing here is inferred as a billing event.": "將每個觀察到的用戶端／供應商來源分類到它應計入的訂閱。這裡沒有任何內容是推測出的帳務事件。",
   "Classify your usage in Settings to see what this window is worth": "到設定裡分類用量，才能知道這個窗值多少",
   "Client tabs": "用戶端分頁",
-  "Color on warning only": "僅在警告時上色",
+  "Color on warning only": "僅警示時上色",
   "Consumed {0}% of the allowance": "用掉了額度的 {0}%",
   "Cost reported by the client, about {0}x the local price estimate": "費用由用戶端自行回報，約為本機價格估算的 {0} 倍",
   "Could not check agent limits. It will be retried.": "無法查詢 Agent 額度，稍後會重試。",
