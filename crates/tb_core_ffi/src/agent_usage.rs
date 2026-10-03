@@ -15906,7 +15906,6 @@ mod grokbot_tests {
     mod windows_dpapi {
         use super::*;
         use crate::win_safe_storage::test_support::{local_state_for, v10_value};
-        use base64::Engine as _;
 
         const KEY: [u8; 32] = [0x2b; 32];
         const NONCE: [u8; 12] = [0x07; 12];
