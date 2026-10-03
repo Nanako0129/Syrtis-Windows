@@ -990,15 +990,18 @@ public sealed partial class DashboardView : UserControl
             _tabDragOver = over != null && over != id ? over : null;
             ShowTabDropLine();
         }), handledEventsToo: true);
-        // Button's own release handler releases the capture before handlers
-        // added here run, so PointerCaptureLost may arrive first. Both end
-        // the gesture through FinishTabDrag; whichever comes first does the
-        // work. A capture lost while the button is still held is a cancel
-        // (the window lost focus mid-drag), not a drop.
+        // Only the release drops. Button's own release handler may release
+        // the capture before the handler added here runs, so a capture loss
+        // does not end the gesture at once: it queues a cancel for after the
+        // current dispatch. A release in the same dispatch drops first, and the
+        // queued cancel then finds nothing to do. If no release follows (the
+        // window lost focus mid-drag), the cancel cleans up and writes nothing.
+        // This reads no button state inside the capture-loss event, whose
+        // value at that moment is not documented.
         button.AddHandler(PointerReleasedEvent, new Microsoft.UI.Xaml.Input.PointerEventHandler(
             (_, _) => FinishTabDrag(id, drop: true)), handledEventsToo: true);
-        button.PointerCaptureLost += (_, e) => FinishTabDrag(
-            id, drop: !e.GetCurrentPoint(button).Properties.IsLeftButtonPressed);
+        button.PointerCaptureLost += (_, _) =>
+            DispatcherQueue.TryEnqueue(() => FinishTabDrag(id, drop: false));
     }
 
     private void FinishTabDrag(string id, bool drop)
