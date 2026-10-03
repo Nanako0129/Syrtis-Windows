@@ -190,36 +190,60 @@ public static class Ui
     }
 
     /// <summary>Live-session rows (macOS UsageTraceCard): one collapsed row per
-    /// app, or one row per agent-and-model bucket when detailed. Returns null
-    /// when nothing is running so the caller can drop the whole card instead of
-    /// showing an empty one. Selection happens before collapse and Take(5), or a
-    /// high-rate hidden client can evict every selected row.</summary>
-    public static FrameworkElement? TraceRows(
+    /// app, or one row per agent-and-model bucket when detailed, each with a
+    /// rate bar. With nothing running it says so instead of disappearing, as
+    /// macOS keeps the card and reads "No activity in this window".</summary>
+    public static FrameworkElement TraceRows(
         IReadOnlyList<TraceBucket> trace, IReadOnlySet<string> selected, bool detailed)
     {
-        var picked = TraceCollapse.FilterByClients(trace, selected);
-        var rows = detailed
-            ? picked.Select(b => (b.Client, b.Model, b.TokensPerMin)).Take(5).ToList()
-            : TraceCollapse.CollapseByClient(picked)
-                .Select(r => (r.Client, r.Model, r.TokensPerMin)).Take(5).ToList();
+        var rows = TraceCollapse.CardRows(trace, selected, detailed);
         if (rows.Count == 0)
         {
-            return null;
+            var empty = Dim("No activity in this window".Localized());
+            empty.HorizontalAlignment = HorizontalAlignment.Center;
+            empty.Margin = new Thickness(0, 8, 0, 8);
+            return empty;
         }
 
+        var maxRate = rows.Max(r => r.TokensPerMin);
         var panel = new StackPanel { Spacing = 6 };
         foreach (var row in rows)
         {
-            var name = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-            name.Children.Add(Disc(ClientRegistry.Style(row.Client).Color));
-            name.Children.Add(Text($"{ClientRegistry.ShortName(row.Client)} · {row.Model}", 11));
-            panel.Children.Add(Row(
-                name, Text("{0}/min".Localized(
-                    Format.CompactTokens((long)row.TokensPerMin)), 11, 0.75)));
+            // Client, agent, then the model in the star column so a long
+            // model id trims instead of pushing the rate off the row.
+            var head = new Microsoft.UI.Xaml.Controls.Grid { ColumnSpacing = 6 };
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var cells = new UIElement[]
+            {
+                Text(ClientRegistry.ShortName(row.Client), 10, bold: true),
+                Text(row.Agent, 10, 0.75),
+                Text(row.Model, 10, 0.55),
+                Text($"{Format.CompactTokens((long)Math.Round(row.TokensPerMin))}/m", 10, 0.75),
+            };
+            ((TextBlock)cells[2]).TextTrimming = TextTrimming.CharacterEllipsis;
+            for (var c = 0; c < cells.Length; c++)
+            {
+                Microsoft.UI.Xaml.Controls.Grid.SetColumn((FrameworkElement)cells[c], c);
+                head.Children.Add(cells[c]);
+            }
+
+            var line = new StackPanel { Spacing = 2 };
+            line.Children.Add(head);
+            line.Children.Add(ShareBar(
+                TraceCollapse.BarPercent(row.TokensPerMin, maxRate) / 100,
+                TraceBarColor));
+            panel.Children.Add(line);
         }
 
         return panel;
     }
+
+    /// <summary>The live-session bar: one accent for every row, as macOS
+    /// fills it with the accent color rather than the client's.</summary>
+    private const string TraceBarColor = "#3b82f6";
 
     public static SolidColorBrush BrushFromHex(string hex)
     {
