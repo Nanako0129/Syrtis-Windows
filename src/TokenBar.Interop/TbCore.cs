@@ -178,6 +178,36 @@ public static class TbCore
         Unwrap<RootsResult>(NativeMethods.tb_set_extra_scan_paths(
             JsonSerializer.Serialize(new Dictionary<string, IReadOnlyList<string>> { ["claude"] = roots }, JsonOpts)));
 
+    /// <summary>Full-replace the captured Antigravity accounts with
+    /// <paramref name="json"/>, <c>[{"key","label"}]</c> exactly as Settings
+    /// stores it. Holds no secret; a refused entry comes back by index with a
+    /// fixed reason.</summary>
+    public static RootsResult SetAntigravityAccounts(string json) =>
+        Unwrap<RootsResult>(NativeMethods.tb_set_antigravity_accounts(json));
+
+    /// <summary>Copy agy's current Google login into Syrtis's own Credential
+    /// Manager entry (one refresh at Google first). Blocking, network. Throws
+    /// <see cref="TbCoreException"/> carrying a fixed code (ctb.h). Does not
+    /// register the account.</summary>
+    public static AntigravityAccount AntigravityCapture() =>
+        Unwrap<AntigravityAccount>(NativeMethods.tb_antigravity_capture());
+
+    /// <summary>agy's login marker (its credential's LastWritten as a decimal
+    /// FILETIME, or <c>absent</c>); attributes only, no secret.</summary>
+    public static string AntigravityLoginMarker() =>
+        Unwrap<AntigravityMarker>(NativeMethods.tb_antigravity_login_marker()).Marker;
+
+    /// <summary>One automatic capture; <paramref name="removedKeys"/> are
+    /// skipped before any request. Blocking, network.</summary>
+    public static AntigravityAutoCaptureResult AntigravityAutoCapture(IReadOnlyList<string> removedKeys) =>
+        Unwrap<AntigravityAutoCaptureResult>(NativeMethods.tb_antigravity_auto_capture(
+            JsonSerializer.Serialize(removedKeys, JsonOpts)));
+
+    /// <summary>Delete one captured account's Credential Manager entry and
+    /// cached access token. Never revokes at Google.</summary>
+    public static void AntigravityRemove(string key) =>
+        Unwrap<AntigravityRemoved>(NativeMethods.tb_antigravity_remove(key));
+
     /// <summary>
     /// Decodes the standard FFI envelope, returning the payload or throwing
     /// the embedded error. Pure logic, split out (like TBCore.decodeEnvelope)

@@ -92,6 +92,7 @@
     <!-- Extra Claude accounts' Settings copy and reason mapping, for the same
          reason: SettingsWindow.cs compiles under no test project. -->
     <Compile Include="..\TokenBar.App\ClaudeAccountsCopy.cs" Link="ClaudeAccountsCopy.cs" />
+    <Compile Include="..\TokenBar.App\AntigravityAccountsCopy.cs" Link="AntigravityAccountsCopy.cs" />
     <!-- Syrtis.Installer's boundary logic, pulled in for the same reason as
          the App sources above: none of these five files references
          System.Windows.Forms, so they compile as-is under net10. Deliberately

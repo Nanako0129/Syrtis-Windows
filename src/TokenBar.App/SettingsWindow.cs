@@ -972,6 +972,8 @@ public sealed partial class SettingsWindow : Window
 
         panel.Children.Add(Section(ClaudeAccountsCopy.Section.Localized(), BuildClaudeAccounts(store)));
 
+        panel.Children.Add(Section(AntigravityAccountsCopy.Section.Localized(), BuildAntigravityAccounts(store)));
+
         // ── Discord (macOS SettingsPanel :944-1007) ─────────────────────
         _discordSection = Section(DiscordCopy.Section.Localized(), BuildDiscord(store));
         panel.Children.Add(_discordSection);

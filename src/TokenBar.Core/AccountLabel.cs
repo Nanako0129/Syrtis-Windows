@@ -37,6 +37,16 @@ public static class AccountLabel
             return "Claude Desktop";
         }
 
+        if (account.ClientId == AntigravityClientId)
+        {
+            // Never the key: it is derived from the Google account id. A key
+            // the registry no longer holds (removed while an older payload is
+            // still on screen) gets the generic label (macOS accountLabel).
+            return AntigravityLabel(account.AccountKey) is { } label
+                ? $"{ClientRegistry.ShortName(account.ClientId)} · {label}"
+                : "Antigravity account".Localized();
+        }
+
         var others = (payload?.Agents ?? [])
             .Select(a => a.Account)
             .Where(a => a.ClientId == account.ClientId && a.AccountKey is not null
@@ -58,9 +68,19 @@ public static class AccountLabel
         Of(agent.Account, payload, full);
 
     /// <summary>The full path for a config-dir account's tooltip; null for
-    /// the primary and for Desktop (nothing more to say).</summary>
+    /// the primary, for Desktop and for a captured Antigravity account
+    /// (nothing more to say, and its key must not be shown).</summary>
     public static string? Detail(AccountIdentity account) =>
-        account.AccountKey is { } key && key != ClaudeDesktopKey ? key : null;
+        account.AccountKey is { } key && key != ClaudeDesktopKey && account.ClientId != AntigravityClientId
+            ? key
+            : null;
+
+    public const string AntigravityClientId = "antigravity";
+
+    /// <summary>A captured Antigravity account's label (its email) by key,
+    /// from the app's account list; null when the key is not listed. Set once
+    /// at launch (<c>AntigravityAccounts.Label</c>).</summary>
+    public static Func<string, string?> AntigravityLabel { get; set; } = _ => null;
 
     // Either separator: the key is a Windows path, but this must not depend
     // on the OS the tests run on. A key that is all separators keeps itself.
