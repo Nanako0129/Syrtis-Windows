@@ -107,7 +107,7 @@ public sealed partial class DashboardView : UserControl
             _model?.RefreshForce();
             UpdateRefreshControl();
         };
-        HoverTip.Attach(RefreshButton, () => "Refresh usage data".Localized());
+        HoverTip.Attach(RefreshButton, () => RefreshTip.Text(_model?.Current?.RestoredAt, DateTimeOffset.Now));
 
         SettingsButton.Click += (_, _) => TrayService.OpenSettings?.Invoke();
         HoverTip.Attach(SettingsButton, () => "Settings".Localized());
@@ -636,9 +636,9 @@ public sealed partial class DashboardView : UserControl
         RateValue.Text = Format.CompactTokens((long)rate);
         CostLine.Text = CostSurfaceProjection.HeaderCostLine(
             today?.Cost ?? 0, stats, snapshot.CostAuthoritative);
-        FooterText.Text = "updated {0}".Localized(
-            snapshot.FetchedAt.ToString(
-                "HH:mm:ss", System.Globalization.CultureInfo.CurrentCulture));
+        // A restored snapshot reads as its age: FetchedAt is re-stamped by
+        // every quota / trace / model publish long before the live graph lands.
+        FooterText.Text = RefreshTip.Footer(snapshot.RestoredAt, snapshot.FetchedAt, DateTimeOffset.Now);
     }
 
     private string _yearPickerSignature = "";
