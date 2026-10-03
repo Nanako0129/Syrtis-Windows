@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using TokenBar.Core;
 using Windows.UI;
 
 namespace TokenBar.App;
@@ -10,8 +11,9 @@ namespace TokenBar.App;
 /// <summary>
 /// Instant, styled hover tooltip — the native ToolTip's fixed ~1s delay and
 /// plain chrome are nowhere near the macOS onContinuousHover cards, and WinUI
-/// exposes no delay knob. A Popup follows the pointer with a small offset and
-/// flips to stay inside the root bounds. Content is arbitrary UI (the macOS
+/// exposes no delay knob. A Popup follows the pointer, placed by
+/// <see cref="TooltipPlacement"/> inside the window's registered scroll
+/// viewport (macOS PopoverTooltipPlacement). Content is arbitrary UI (the macOS
 /// tooltips carry colored discs and metric rows, not just text).
 ///
 /// One host (Popup + Border) is kept PER XamlRoot. A single shared Popup cannot
@@ -56,7 +58,7 @@ public static class HoverTip
 
         var host = EnsureHost(root);
         host.Card.Child = content;
-        Position(host, root, rootPosition);
+        Position(host, target, root, rootPosition);
         host.Popup.IsOpen = true;
     }
 
@@ -68,7 +70,7 @@ public static class HoverTip
             && _hosts.TryGetValue(root, out var host)
             && host.Popup.IsOpen)
         {
-            Position(host, root, rootPosition);
+            Position(host, target, root, rootPosition);
             return true;
         }
 
@@ -136,29 +138,50 @@ public static class HoverTip
             && _hosts.TryGetValue(root, out var host)
             && host.Popup.IsOpen)
         {
-            Position(host, root, e.GetCurrentPoint(root.Content).Position);
+            Position(host, target, root, e.GetCurrentPoint(root.Content).Position);
         }
     }
 
+    /// <summary>Per window, the visible scroll area in root coordinates, so a
+    /// tooltip stays inside it and off the footer. The flyout registers its
+    /// cards scroller; a window that registers nothing places tooltips inside
+    /// its whole client area.</summary>
+    private static readonly Dictionary<XamlRoot, Func<Box?>> _viewports = [];
+
+    public static void RegisterViewport(XamlRoot root, Func<Box?> viewport) =>
+        _viewports[root] = viewport;
+
+    /// <summary><paramref name="element"/>'s bounds in its root's coordinates,
+    /// or null when it is not in the tree.</summary>
+    public static Box? BoundsInRoot(FrameworkElement element)
+    {
+        if (element.XamlRoot?.Content is not UIElement rootContent)
+        {
+            return null;
+        }
+
+        var origin = element.TransformToVisual(rootContent).TransformPoint(default);
+        return new Box(origin.X, origin.Y, element.ActualWidth, element.ActualHeight);
+    }
+
     private static void Position(
-        Host host, XamlRoot root, Windows.Foundation.Point rootPosition)
+        Host host, FrameworkElement target, XamlRoot root, Windows.Foundation.Point rootPosition)
     {
         host.Card.Measure(new Windows.Foundation.Size(300, double.PositiveInfinity));
         var size = host.Card.DesiredSize;
-        var x = rootPosition.X + 14;
-        var y = rootPosition.Y + 18;
-        if (x + size.Width > root.Size.Width - 4)
+        var window = new Box(0, 0, root.Size.Width, root.Size.Height);
+        var origin = TooltipPlacement.Origin(
+            rootPosition.X, rootPosition.Y, size.Width, size.Height,
+            BoundsInRoot(target) ?? window,
+            _viewports.TryGetValue(root, out var viewport) ? viewport() : null,
+            window);
+        if (origin is not { } at)
         {
-            x = rootPosition.X - size.Width - 10; // flip left near the right edge
+            return;
         }
 
-        if (y + size.Height > root.Size.Height - 4)
-        {
-            y = rootPosition.Y - size.Height - 10;
-        }
-
-        host.Popup.HorizontalOffset = Math.Max(4, x);
-        host.Popup.VerticalOffset = Math.Max(4, y);
+        host.Popup.HorizontalOffset = at.X;
+        host.Popup.VerticalOffset = at.Y;
     }
 
     /// <summary>True when <paramref name="popup"/> is one of HoverTip's tooltip
