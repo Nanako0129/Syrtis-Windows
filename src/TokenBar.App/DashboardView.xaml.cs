@@ -2394,7 +2394,7 @@ public sealed partial class DashboardView : UserControl
         {
             var block = new StackPanel { Spacing = 3 };
             block.Children.Add(Ui.Row(
-                Ui.Text(entry.Agent, 11, bold: true),
+                Ui.Text(CostSurfaceProjection.AgentLabel(entry.Agent), 11, bold: true),
                 Ui.Text(
                     "{0} msgs".Localized(entry.Messages)
                         + $" · {Format.CompactTokens(entry.Total)} · "

@@ -226,6 +226,31 @@ public class AccountIdentityTests
             "Claude Desktop · Session", summaries.Single(s => s.Id.AccountScope == "S").WindowLabel);
     }
 
+    /// <summary>In zh-Hant a non-primary account's history row reads its
+    /// window in Chinese too: the account prefix is composed before
+    /// QuotaLabels localizes the label, so the window part must already be
+    /// translated (188 check: "Claude Desktop · Session" stayed English).</summary>
+    [Fact]
+    public void ANonPrimaryAccountsWindowLabelIsLocalized()
+    {
+        var quota = Payload(
+            Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")),
+            Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
+        Localization.Load("zh-Hant", AppContext.BaseDirectory);
+        try
+        {
+            var (summaries, _, _) = QuotaLensData.Build([Series("P", active: false), Series("S", active: false)], quota);
+            var desktop = summaries.Single(s => s.Id.AccountScope == "S");
+            Assert.Equal("Claude Desktop · 工作階段", desktop.WindowLabel);
+            Assert.EndsWith("Claude Desktop · 工作階段", QuotaLabels.RowLabel(desktop));
+            Assert.EndsWith("工作階段", QuotaLabels.RowLabel(summaries.Single(s => s.Id.AccountScope == "P")));
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
+    }
+
     [Fact]
     public void ASeriesWithNoLiveSnapshotOfItsScopeKeepsTheFallbackLabel()
     {

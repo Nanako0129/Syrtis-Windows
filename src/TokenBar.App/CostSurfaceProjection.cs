@@ -16,6 +16,16 @@ public static class CostSurfaceProjection
 
     public static bool CanUseCost(bool authoritative) => authoritative;
 
+    /// <summary>The Agents lens row name. The engine folds every message no
+    /// sub-agent claimed into one bucket named exactly "Main"
+    /// (tokscale-core lib.rs:3329-3344), a UI word rather than a name, so it is
+    /// localized; every other entry is the user's own agent name and is shown
+    /// as received.</summary>
+    public static string AgentLabel(string agent) =>
+        agent == MainAgentBucket ? "Main".Localized() : agent;
+
+    private const string MainAgentBucket = "Main";
+
     public static bool IsChartCostChecking(
         bool authoritative, ChartMetric requested) =>
         !authoritative && requested == ChartMetric.Cost;
