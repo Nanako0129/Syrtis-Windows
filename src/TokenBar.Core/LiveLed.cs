@@ -21,4 +21,10 @@ public static class LiveLed
     }
 
     public static bool Active(double tokensPerMin) => tokensPerMin > 0;
+
+    /// <summary>Whether the flicker timer should tick: only while tokens flow
+    /// and the flyout is on screen. Hiding the flyout does not unload it, so
+    /// the timer has to stop on hide, or a tray app that is hidden most of
+    /// the time would tick ~11 times a second for nobody.</summary>
+    public static bool Runs(double tokensPerMin, bool visible) => Active(tokensPerMin) && visible;
 }

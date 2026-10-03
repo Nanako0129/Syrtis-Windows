@@ -34,4 +34,11 @@ public class LiveLedTests
         Assert.True(LiveLed.Active(0.5));
         Assert.Equal(90, LiveLed.SlotMs);
     }
+
+    [Theory]
+    [InlineData(1000, true, true)]
+    [InlineData(1000, false, false)]
+    [InlineData(0, true, false)]
+    public void TicksOnlyWhileFlowingAndOnScreen(double rate, bool visible, bool runs) =>
+        Assert.Equal(runs, LiveLed.Runs(rate, visible));
 }

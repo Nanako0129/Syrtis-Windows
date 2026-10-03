@@ -61,7 +61,6 @@ public sealed partial class DashboardView : UserControl
         InitializeComponent();
         ProductTitle.Text = ProductIdentity.Name;
         SetLiveRate(0);
-        Unloaded += (_, _) => _ledTimer?.Stop();
         // WinUI otherwise synthesizes a tooltip containing "Esc" for the
         // dashboard-wide Escape accelerator whenever the pointer rests over
         // the graph. The accelerator remains active; only its automatic
@@ -252,11 +251,13 @@ public sealed partial class DashboardView : UserControl
     {
         _flyoutVisible = true;
         SyncGraph3DActivity();
+        SetLiveRate(_ledRate); // the render just before ran while still hidden
     }
 
     public void OnFlyoutHidden()
     {
         _flyoutVisible = false;
+        _ledTimer?.Stop(); // Hide() does not unload, so Unloaded never fires
         _graph3d?.Release();
         UpdateHints(false); // a Ctrl release while hidden is never seen
     }
@@ -649,8 +650,8 @@ public sealed partial class DashboardView : UserControl
     private double _ledRate;
 
     /// <summary>Drives the rate LED (macOS activityLED): dim grey and still
-    /// while idle, a 90 ms flicker while tokens flow. The timer runs only
-    /// while the rate is non-zero, so an idle dashboard costs nothing.</summary>
+    /// while idle, a 90 ms flicker while tokens flow. The timer ticks only
+    /// while tokens flow and the flyout is shown (<see cref="LiveLed.Runs"/>).</summary>
     private void SetLiveRate(double tokensPerMin)
     {
         _ledRate = tokensPerMin;
@@ -663,6 +664,13 @@ public sealed partial class DashboardView : UserControl
         }
 
         RateLed.Fill = Ui.BrushFromHex(LedLitColor);
+        RateLed.Opacity = 1; // lit from the first frame, not the idle 0.4
+        if (!LiveLed.Runs(tokensPerMin, _flyoutVisible))
+        {
+            _ledTimer?.Stop();
+            return;
+        }
+
         if (_ledTimer is null)
         {
             _ledTimer = DispatcherQueue.CreateTimer();
