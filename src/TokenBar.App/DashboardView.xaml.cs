@@ -59,6 +59,15 @@ public sealed partial class DashboardView : UserControl
     public DashboardView()
     {
         InitializeComponent();
+        // Hover tooltips stay inside the cards' scroll area, so none sits
+        // under the header or the footer (macOS popoverScrollViewport).
+        Loaded += (_, _) =>
+        {
+            if (XamlRoot is { } root)
+            {
+                HoverTip.RegisterViewport(root, () => HoverTip.BoundsInRoot(CardsScroll));
+            }
+        };
         ProductTitle.Text = ProductIdentity.Name;
         // WinUI otherwise synthesizes a tooltip containing "Esc" for the
         // dashboard-wide Escape accelerator whenever the pointer rests over
