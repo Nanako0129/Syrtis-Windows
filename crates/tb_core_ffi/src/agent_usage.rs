@@ -5,6 +5,7 @@ use crate::agent_account_scope::{
 use crate::agent_antigravity;
 use crate::agent_copilot;
 use crate::agent_grok;
+use crate::agent_kiro;
 use crate::agent_quota_duration::{DurationEvidence, DurationSource, DurationUnavailableReason};
 use crate::agent_quota_history::{
     BatchObservationResult, HistoricalPace, HistoryError, HistoryOutcome, QuotaObservation,
@@ -1373,7 +1374,10 @@ fn usable_success(snapshot: &AgentUsageSnapshot) -> bool {
             .windows
             .iter()
             .any(|window| window.card_id == "billing.weekly.v1"),
-        "claude" | "copilot" | "antigravity" => !snapshot.windows.is_empty(),
+        // "kiro" carries the Kiro subscription quota; its success is a
+        // non-empty window set, so a later transient keeps the last-good card
+        // instead of a bare error (macOS `usable_success`).
+        "claude" | "copilot" | "antigravity" | "kiro" => !snapshot.windows.is_empty(),
         _ => false,
     }
 }
@@ -1519,14 +1523,44 @@ fn apply_provider_outcome(
     )
 }
 
+type BoxedFetch<T> = Pin<Box<dyn Future<Output = T>>>;
+
+/// One fetcher per quota provider joined by `run_with`, plus the opencode
+/// subscription probe. Production is `PRODUCTION_FETCHERS`; a test passes
+/// stubs so the join itself can be asserted without reading any real profile.
+struct Fetchers {
+    codex: fn() -> BoxedFetch<AgentUsageSnapshot>,
+    claude_accounts: fn() -> BoxedFetch<Vec<AgentUsageSnapshot>>,
+    antigravity: fn() -> BoxedFetch<AgentUsageSnapshot>,
+    copilot: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
+    grok: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
+    kiro: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
+    subscriptions: fn() -> Vec<String>,
+}
+
+const PRODUCTION_FETCHERS: Fetchers = Fetchers {
+    codex: || Box::pin(fetch_codex()),
+    claude_accounts: || Box::pin(fetch_claude_accounts()),
+    antigravity: || Box::pin(fetch_antigravity()),
+    copilot: || Box::pin(fetch_copilot()),
+    grok: || Box::pin(fetch_grok()),
+    kiro: || Box::pin(fetch_kiro()),
+    subscriptions: crate::opencode_integrations::detect_subscriptions,
+};
+
 pub async fn run(publication_generation: u64) -> AgentUsagePayload {
+    run_with(&PRODUCTION_FETCHERS, publication_generation).await
+}
+
+async fn run_with(fetchers: &Fetchers, publication_generation: u64) -> AgentUsagePayload {
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    let (codex, claude, antigravity, copilot, grok) = tokio::join!(
-        fetch_codex(),
-        fetch_claude_accounts(),
-        fetch_antigravity(),
-        fetch_copilot(),
-        fetch_grok()
+    let (codex, claude, antigravity, copilot, grok, kiro) = tokio::join!(
+        (fetchers.codex)(),
+        (fetchers.claude_accounts)(),
+        (fetchers.antigravity)(),
+        (fetchers.copilot)(),
+        (fetchers.grok)(),
+        (fetchers.kiro)()
     );
     let mut agents = vec![codex];
     agents.extend(claude);
@@ -1539,12 +1573,132 @@ pub async fn run(publication_generation: u64) -> AgentUsagePayload {
     if let Some(grok) = grok {
         agents.push(grok);
     }
+    // Kiro only appears when its IDE token file is present.
+    if let Some(kiro) = kiro {
+        agents.push(kiro);
+    }
     AgentUsagePayload {
         generated_at,
         publication_generation,
         agents,
-        opencode_subscriptions: crate::opencode_integrations::detect_subscriptions(),
+        opencode_subscriptions: (fetchers.subscriptions)(),
     }
+}
+
+/// Everything `fetch_kiro_with` reaches outside itself: where the credential
+/// comes from, which account-scope store binds it, where the request goes, which
+/// last-good cache it lands in, and which history writer enriches it.
+///
+/// Sealed in its own module so the rest of this file cannot build one: the
+/// only constructor outside `#[cfg(test)]` is `KiroDeps::system()`, which takes
+/// no arguments. There is no override and no environment variable of its own;
+/// the token file is found through `user_home_dir()` like every other provider
+/// (which honours `HOME` when set).
+mod kiro_deps {
+    use super::*;
+    use crate::kiro_integrations::KiroCredentialLoad;
+
+    pub(super) type KiroLoad = Pin<Box<dyn Future<Output = KiroCredentialLoad>>>;
+    pub(super) use crate::agent_kiro::ResolveCredential;
+    pub(super) type Enrich = dyn Fn(&mut AgentUsageSnapshot, i64);
+    pub(super) type ResolveHistoryScope = dyn Fn(
+        &str,
+        Option<(AuthoritativeIdKind, &str)>,
+    ) -> Result<HistoryScope, AccountScopeError>;
+
+    pub(super) struct KiroDeps<'a> {
+        pub(super) load_credential: &'a dyn Fn(DateTime<Utc>) -> KiroLoad,
+        pub(super) resolve_credential: &'a ResolveCredential,
+        pub(super) resolve_history_scope: &'a ResolveHistoryScope,
+        pub(super) usage_url: &'a str,
+        pub(super) last_good: &'a Mutex<ProviderLastGoodCache>,
+        pub(super) enrich: &'a Enrich,
+        _sealed: (),
+    }
+
+    fn load_system_credential(now: DateTime<Utc>) -> KiroLoad {
+        Box::pin(crate::kiro_integrations::kiro_credential(now))
+    }
+
+    impl KiroDeps<'static> {
+        pub(super) fn system() -> Self {
+            Self {
+                load_credential: &load_system_credential,
+                resolve_credential: &agent_account_scope::resolve_credential,
+                resolve_history_scope: &agent_account_scope::resolve_history_scope,
+                usage_url: crate::agent_kiro::USAGE_URL,
+                last_good: &PROVIDER_LAST_GOOD,
+                enrich: &enrich_snapshot,
+                _sealed: (),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    impl<'a> KiroDeps<'a> {
+        pub(super) fn for_test(
+            load_credential: &'a dyn Fn(DateTime<Utc>) -> KiroLoad,
+            resolve_credential: &'a ResolveCredential,
+            resolve_history_scope: &'a ResolveHistoryScope,
+            usage_url: &'a str,
+            last_good: &'a Mutex<ProviderLastGoodCache>,
+            enrich: &'a Enrich,
+        ) -> Self {
+            Self {
+                load_credential,
+                resolve_credential,
+                resolve_history_scope,
+                usage_url,
+                last_good,
+                enrich,
+                _sealed: (),
+            }
+        }
+    }
+}
+use kiro_deps::KiroDeps;
+
+async fn fetch_kiro() -> Option<AgentUsageSnapshot> {
+    fetch_kiro_with(&KiroDeps::system()).await
+}
+
+async fn fetch_kiro_with(deps: &KiroDeps<'_>) -> Option<AgentUsageSnapshot> {
+    use crate::kiro_integrations::KiroCredentialLoad;
+    let now = Utc::now();
+    let outcome = match (deps.load_credential)(now).await {
+        KiroCredentialLoad::Absent => ProviderFetchOutcome::Absent,
+        KiroCredentialLoad::Terminal(display) => {
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(display))
+        }
+        KiroCredentialLoad::Present(credential) => {
+            match agent_kiro::fetch(credential, deps.usage_url, deps.resolve_credential).await {
+                Ok(data) => ProviderFetchOutcome::Success {
+                    cache_binding: Some(data.cache_binding),
+                    snapshot: AgentUsageSnapshot {
+                        account_key: None,
+                        merge_scope: None,
+                        client_id: "kiro".to_string(),
+                        source: "oauth".to_string(),
+                        updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+                        identity: data.identity,
+                        account_scope: data.account_scope,
+                        // Kiro has no authoritative owner ID in what Syrtis fetches.
+                        history_scope: (deps.resolve_history_scope)("kiro", None),
+                        windows: data.windows,
+                        credits: None,
+                        error: None,
+                        transport_diagnostic: None,
+                    },
+                },
+                Err(failure) => ProviderFetchOutcome::Failure(failure),
+            }
+        }
+    };
+    // Same as `apply_provider_outcome`: the clock is read after the outcome.
+    let now = Utc::now();
+    apply_provider_outcome_with(deps.last_good, "kiro", "oauth", now, outcome, |snapshot| {
+        (deps.enrich)(snapshot, now.timestamp())
+    })
 }
 
 async fn fetch_grok() -> Option<AgentUsageSnapshot> {
@@ -9594,6 +9748,61 @@ mod tests {
     }
 
     #[test]
+    fn kiro_success_is_cached_and_survives_a_same_binding_transient() {
+        // Ported from macOS. A Kiro success has a non-empty window, so
+        // `usable_success("kiro")` admits it to the last-good cache; a later
+        // same-binding transient failure then replays that card instead of
+        // returning a bare error. Drop "kiro" from `usable_success` and the
+        // fallback below carries no window.
+        let scope = TestRefreshScope::new("kiro", "kiro-last-good");
+        let account_scope = scope
+            .resolve_current("fixture", "account-a", b"marker-a")
+            .unwrap();
+        let binding = ProviderCacheBinding::primary(account_scope.clone());
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        let fresh_at = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let failure_at = fresh_at + chrono::Duration::minutes(1);
+
+        apply_provider_outcome_with(
+            &cache,
+            "kiro",
+            "oauth",
+            fresh_at,
+            ProviderFetchOutcome::Success {
+                snapshot: cache_test_snapshot("kiro", Ok(account_scope), fresh_at),
+                cache_binding: Some(binding.clone()),
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        let fallback = apply_provider_outcome_with(
+            &cache,
+            "kiro",
+            "oauth",
+            failure_at,
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
+                "Kiro usage request failed. Retrying automatically.",
+                Some(binding.clone()),
+                timeout_diagnostic(),
+            )),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            fallback.windows.len(),
+            1,
+            "a kiro transient must replay the cached window"
+        );
+        assert!(fallback.error.is_some());
+        assert!(matches!(
+            fallback.account_scope,
+            Err(AccountScopeError::NoTrustedEvidence)
+        ));
+        scope.cleanup();
+    }
+
+    #[test]
     fn copilot_malformed_optional_reset_remains_success_and_keeps_last_good() {
         let scope = TestRefreshScope::new("copilot", "lossy-optional-reset");
         let account_scope = scope
@@ -14408,5 +14617,336 @@ mod tests {
             }
         }
         assert_eq!(fixture["payload"], serialized);
+    }
+}
+
+/// W5a: the Kiro card through its production entry (`fetch_kiro_with`) and the
+/// provider join (`run_with`). Every dependency is test-owned: the credential
+/// is a fixture file, account-scope rows go to a `TestRefreshScope` temp root,
+/// history goes to a recorder that opens no store, and the request goes to a
+/// loopback mock. Nothing here reads the real profile or the network.
+#[cfg(test)]
+mod kiro_tests {
+    use super::kiro_deps::{Enrich, KiroLoad, ResolveCredential, ResolveHistoryScope};
+    use super::*;
+    use crate::agent_account_scope::test_support::TestRefreshScope;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    const SENTINEL_TOKEN: &str = "kiro-sentinel-access-7f3a91";
+    const SENTINEL_REFRESH: &str = "kiro-sentinel-refresh-c04e5d";
+    const FIXTURE_ARN: &str = "arn:aws:codewhisperer:us-east-1:000000000000:profile/FIXTURE";
+    const USAGE_OK: &str = r#"{
+        "subscriptionInfo": {"subscriptionTitle": "KIRO PRO"},
+        "nextDateReset": 4000000000,
+        "usageBreakdownList": [{"currentUsageWithPrecision": 25.0, "usageLimitWithPrecision": 100.0}]
+    }"#;
+
+    /// Test-owned values behind one `KiroDeps`.
+    struct Harness {
+        dir: PathBuf,
+        scope: Arc<TestRefreshScope>,
+        cache: Mutex<ProviderLastGoodCache>,
+        enrich_calls: Arc<AtomicUsize>,
+        recorded_observations: Arc<AtomicUsize>,
+        load: Box<dyn Fn(DateTime<Utc>) -> KiroLoad>,
+        resolve_credential: Box<ResolveCredential>,
+        resolve_history: Box<ResolveHistoryScope>,
+        enrich: Box<Enrich>,
+        url: String,
+    }
+
+    impl Harness {
+        /// `token_file`: the fixture's contents, or `None` for no file at all.
+        fn new(tag: &str, token_file: Option<String>, url: String) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "tb-kiro-fetch-{tag}-{}-{}",
+                std::process::id(),
+                Utc::now().timestamp_nanos_opt().unwrap()
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            // Written at a literal path, read back through the production
+            // `ide_token_path_from(home)`.
+            if let Some(contents) = token_file {
+                let cache = dir.join(".aws").join("sso").join("cache");
+                fs::create_dir_all(&cache).unwrap();
+                fs::write(cache.join("kiro-auth-token.json"), contents).unwrap();
+            }
+            let home = dir.clone();
+            let scope = Arc::new(TestRefreshScope::new("kiro", tag));
+            let enrich_calls = Arc::new(AtomicUsize::new(0));
+            let recorded_observations = Arc::new(AtomicUsize::new(0));
+            let credential_scope = Arc::clone(&scope);
+            let history_scope = Arc::clone(&scope);
+            let calls = Arc::clone(&enrich_calls);
+            let observed = Arc::clone(&recorded_observations);
+            Self {
+                dir,
+                cache: Mutex::new(ProviderLastGoodCache::default()),
+                enrich_calls,
+                recorded_observations,
+                load: Box::new(move |now| {
+                    let load = crate::kiro_integrations::kiro_credential_from_ide_home(&home, now);
+                    Box::pin(async move { load })
+                }),
+                resolve_credential: Box::new(move |provider, source, location, marker| {
+                    assert_eq!(provider, "kiro");
+                    credential_scope.resolve_current(source, location, marker)
+                }),
+                resolve_history: Box::new(move |provider, authoritative| {
+                    history_scope.resolve_history(provider, authoritative)
+                }),
+                enrich: Box::new(move |snapshot, now| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    enrich_snapshot_with(snapshot, now, |_, observations, _| {
+                        observed.fetch_add(observations.len(), Ordering::SeqCst);
+                        Ok(vec![])
+                    });
+                }),
+                scope,
+                url,
+            }
+        }
+
+        fn deps(&self) -> KiroDeps<'_> {
+            KiroDeps::for_test(
+                &*self.load,
+                &*self.resolve_credential,
+                &*self.resolve_history,
+                &self.url,
+                &self.cache,
+                &*self.enrich,
+            )
+        }
+
+        fn enrich_calls(&self) -> usize {
+            self.enrich_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+            self.scope.cleanup();
+        }
+    }
+
+    fn fixture_token_file() -> String {
+        serde_json::json!({
+            "accessToken": SENTINEL_TOKEN,
+            "refreshToken": SENTINEL_REFRESH,
+            "profileArn": FIXTURE_ARN,
+            "expiresAt": "2099-01-01T00:00:00Z",
+            "authMethod": "social",
+            "provider": "Fixture"
+        })
+        .to_string()
+    }
+
+    /// Loopback stand-in for `/getUsageLimits`: answers one connection per
+    /// entry of `responses`, in order, and returns every request head it saw —
+    /// including any connection beyond the scripted ones.
+    async fn usage_mock(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/getUsageLimits", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            async fn read_head(stream: &mut tokio::net::TcpStream) -> String {
+                let mut head = Vec::new();
+                let mut buf = [0_u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let read = stream.read(&mut buf).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&buf[..read]);
+                }
+                String::from_utf8(head).unwrap()
+            }
+            let mut heads = Vec::new();
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                heads.push(read_head(&mut stream).await);
+                let response = format!(
+                    "HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            if let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await
+            {
+                heads.push(read_head(&mut stream).await);
+            }
+            heads
+        });
+        (url, server)
+    }
+
+    fn expected_query() -> String {
+        let mut url = reqwest::Url::parse("http://fixture/getUsageLimits").unwrap();
+        url.query_pairs_mut().append_pair("profileArn", FIXTURE_ARN);
+        url.query().unwrap().to_string()
+    }
+
+    /// A: fixture token file -> one `kiro` card; the mock saw exactly one GET
+    /// carrying the fixture's token and ARN and nothing else of the fixture.
+    /// F: account-scope rows land in the temp root; enrich ran exactly once.
+    #[tokio::test]
+    async fn fetch_kiro_with_fixture_sends_only_token_and_arn_to_the_usage_url() {
+        let (url, server) = usage_mock(vec![(200, USAGE_OK)]).await;
+        let harness = Harness::new("fixture", Some(fixture_token_file()), url);
+
+        let snapshot = fetch_kiro_with(&harness.deps())
+            .await
+            .expect("a signed-in Kiro yields a card");
+        assert_eq!(snapshot.client_id, "kiro");
+        assert_eq!(snapshot.source, "oauth");
+        assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+        assert_eq!(snapshot.windows.len(), 1);
+        assert!(snapshot.account_scope.is_ok());
+        assert_eq!(
+            snapshot.history_scope.as_ref().ok(),
+            harness.scope.resolve_history("kiro", None).as_ref().ok()
+        );
+        assert_eq!(
+            snapshot.identity.as_ref().and_then(|i| i.plan.as_deref()),
+            Some("KIRO PRO")
+        );
+
+        let heads = server.await.unwrap();
+        assert_eq!(heads.len(), 1, "exactly one request: {heads:?}");
+        let head = &heads[0];
+        let request_line = head.lines().next().unwrap();
+        assert_eq!(
+            request_line,
+            format!("GET /getUsageLimits?{} HTTP/1.1", expected_query())
+        );
+        let authorization: Vec<&str> = head
+            .lines()
+            .filter(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+            .collect();
+        assert_eq!(
+            authorization,
+            vec![format!("authorization: Bearer {SENTINEL_TOKEN}").as_str()]
+        );
+        for other in [SENTINEL_REFRESH, "2099-01-01", "social", "Fixture"] {
+            assert!(!head.contains(other), "{other} leaked into {head}");
+        }
+
+        // F: the binding was written under the temp root, as HMACs only.
+        let metadata = harness.scope.metadata_bytes();
+        assert!(!metadata.is_empty());
+        let metadata = String::from_utf8_lossy(&metadata);
+        assert!(!metadata.contains(SENTINEL_TOKEN));
+        assert_eq!(harness.enrich_calls(), 1);
+        assert_eq!(harness.recorded_observations.load(Ordering::SeqCst), 1);
+    }
+
+    /// B + F: no token file is Absent (no card, no request, no enrich).
+    #[tokio::test]
+    async fn fetch_kiro_with_no_token_file_is_absent() {
+        let (url, server) = usage_mock(vec![]).await;
+        let harness = Harness::new("absent", None, url);
+        assert!(fetch_kiro_with(&harness.deps()).await.is_none());
+        assert_eq!(harness.enrich_calls(), 0);
+        assert!(server.await.unwrap().is_empty(), "Absent sends nothing");
+    }
+
+    /// C (R5-1): success, then a 503 for the same token -> the cached window
+    /// is replayed with the error, instead of a bare error card. Fails if
+    /// `usable_success` does not admit "kiro".
+    #[tokio::test]
+    async fn kiro_transient_after_success_replays_the_cached_window() {
+        let (url, server) = usage_mock(vec![(200, USAGE_OK), (503, "")]).await;
+        let harness = Harness::new("transient", Some(fixture_token_file()), url);
+
+        let fresh = fetch_kiro_with(&harness.deps()).await.unwrap();
+        assert_eq!(fresh.windows.len(), 1);
+        assert!(fresh.error.is_none());
+
+        let fallback = fetch_kiro_with(&harness.deps()).await.unwrap();
+        assert_eq!(
+            fallback.windows.len(),
+            1,
+            "a kiro transient must replay the cached window"
+        );
+        assert_eq!(
+            fallback.error.as_deref(),
+            Some("Kiro usage request failed. Retrying automatically.")
+        );
+        assert!(fallback.transport_diagnostic.is_some());
+        assert_eq!(server.await.unwrap().len(), 2);
+        // F: the transient replays the cache without enriching again.
+        assert_eq!(harness.enrich_calls(), 1);
+    }
+
+    /// D: the access token never reaches the published snapshot, on success or
+    /// on either kind of failure.
+    #[tokio::test]
+    async fn kiro_token_never_appears_in_snapshot_or_error_text() {
+        let (url, server) = usage_mock(vec![(200, USAGE_OK), (401, ""), (503, "")]).await;
+        let harness = Harness::new("sentinel", Some(fixture_token_file()), url);
+        let mut displays = Vec::new();
+        for _ in 0..3 {
+            let snapshot = fetch_kiro_with(&harness.deps()).await.unwrap();
+            let json = serde_json::to_string(&snapshot).unwrap();
+            for secret in [SENTINEL_TOKEN, SENTINEL_REFRESH] {
+                assert!(!json.contains(secret), "{secret} in {json}");
+            }
+            displays.push(snapshot.error.clone());
+        }
+        assert_eq!(
+            displays,
+            vec![
+                None,
+                Some("Kiro credentials expired or lack access.".to_string()),
+                // The 401 cleared the cache, so this transient has no fallback.
+                Some("Kiro usage request failed. Retrying automatically.".to_string()),
+            ]
+        );
+        assert_eq!(server.await.unwrap().len(), 3);
+        assert_eq!(harness.enrich_calls(), 1);
+    }
+
+    fn stub(client_id: &str) -> AgentUsageSnapshot {
+        empty_error_snapshot(client_id, "stub", Utc::now(), "stub".to_string(), None)
+    }
+
+    /// E: the join publishes every provider's card, in order, kiro after grok,
+    /// and the subscriptions come from the fetcher set rather than the profile.
+    #[tokio::test]
+    async fn run_joins_every_quota_provider() {
+        let stubs = Fetchers {
+            codex: || Box::pin(async { stub("codex") }),
+            claude_accounts: || Box::pin(async { vec![stub("claude"), stub("claude")] }),
+            antigravity: || Box::pin(async { stub("antigravity") }),
+            copilot: || Box::pin(async { Some(stub("copilot")) }),
+            grok: || Box::pin(async { Some(stub("grok")) }),
+            kiro: || Box::pin(async { Some(stub("kiro")) }),
+            subscriptions: || vec!["StubSubscription".to_string()],
+        };
+        let payload = run_with(&stubs, 7).await;
+        let ids: Vec<&str> = payload
+            .agents
+            .iter()
+            .map(|agent| agent.client_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "codex",
+                "claude",
+                "claude",
+                "antigravity",
+                "copilot",
+                "grok",
+                "kiro"
+            ]
+        );
+        assert_eq!(payload.opencode_subscriptions, ["StubSubscription"]);
+        assert_eq!(payload.publication_generation, 7);
     }
 }
