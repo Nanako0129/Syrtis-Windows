@@ -32,6 +32,7 @@ public sealed partial class DashboardView : UserControl
     private string? _expandedMonth; // Monthly drill-down state
     private bool _hourlyProfileMode;
     private int _hourlyWindow = 48; // Timeline rows shown; +48 per "Show more"
+    private bool _modelsExpanded; // Overview Models card; not persisted (macOS @State)
     // Chart toggles, persisted with the macOS rawValue strings.
     private StackBy _chartStackBy =
         AppSettings.Store.GetString("tokenbar.chart.stackBy") == "agent"
@@ -1012,7 +1013,8 @@ public sealed partial class DashboardView : UserControl
                     && BuildTrace(snapshot) is { } trace
                     ? Ui.Card("Live session".Localized(), trace)
                     : null,
-                OverviewCard.Models => Ui.Card("Models".Localized(), BuildModelRows(snapshot, maxRows: 8)),
+                OverviewCard.Models => Ui.Card(
+                    OverviewScope.ModelsTitle(singleClient), BuildModelRows(snapshot, collapsible: true)),
                 OverviewCard.Streaks => Ui.Card("Streaks".Localized(), BuildStreaks(snapshot)),
                 _ => throw new InvalidOperationException($"Unhandled overview card: {card}"),
             };
@@ -1751,7 +1753,7 @@ public sealed partial class DashboardView : UserControl
         }
 
         content.Children.Add(legend);
-        content.Children.Add(BuildModelRows(snapshot, maxRows: null));
+        content.Children.Add(BuildModelRows(snapshot, collapsible: false));
         stack.Children.Add(Ui.Card("Models".Localized(), content, string.Join(" · ", subtitleParts)));
         return stack;
     }
@@ -1767,14 +1769,19 @@ public sealed partial class DashboardView : UserControl
             .Where(e => _selectedSet.Contains(ClientRegistry.CanonicalClient(e.Client)))
             .ToList();
 
-    private FrameworkElement BuildModelRows(DashboardModel.Snapshot snapshot, int? maxRows)
+    /// <summary>The model rows. <paramref name="collapsible"/> (the Overview
+    /// card) caps them at <see cref="OverviewScope.ModelRowCap"/> behind a
+    /// "Show N more" / "Show less" toggle; the Models lens lists every row.</summary>
+    private FrameworkElement BuildModelRows(DashboardModel.Snapshot snapshot, bool collapsible)
     {
         var panel = new StackPanel { Spacing = 8 };
         var entries = CostSurfaceProjection.OrderModels(
             SelectedModelEntries(snapshot), snapshot.CostAuthoritative).ToList();
-        if (maxRows is { } cap)
+        var toggle = (string?)null;
+        if (collapsible)
         {
-            entries = entries.Take(cap).ToList();
+            (var shown, toggle) = OverviewScope.ModelRows(entries.Count, _modelsExpanded);
+            entries = entries.Take(shown).ToList();
         }
 
         if (entries.Count == 0)
@@ -1842,6 +1849,14 @@ public sealed partial class DashboardView : UserControl
                 block,
                 () => ModelTip(captured, colors, snapshot.CostAuthoritative));
             panel.Children.Add(block);
+        }
+
+        if (toggle is not null)
+        {
+            var more = LensPill(toggle, false);
+            more.HorizontalAlignment = HorizontalAlignment.Center;
+            more.Click += (_, _) => { _modelsExpanded = !_modelsExpanded; RenderContent(false); };
+            panel.Children.Add(more);
         }
 
         return panel;
