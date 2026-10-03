@@ -6,6 +6,7 @@ use crate::agent_antigravity;
 use crate::agent_copilot;
 use crate::agent_grok;
 use crate::agent_kiro;
+use crate::agent_opencode_go;
 use crate::agent_quota_duration::{DurationEvidence, DurationSource, DurationUnavailableReason};
 use crate::agent_quota_history::{
     BatchObservationResult, HistoricalPace, HistoryError, HistoryOutcome, QuotaObservation,
@@ -1374,10 +1375,10 @@ fn usable_success(snapshot: &AgentUsageSnapshot) -> bool {
             .windows
             .iter()
             .any(|window| window.card_id == "billing.weekly.v1"),
-        // "kiro" carries the Kiro subscription quota; its success is a
-        // non-empty window set, so a later transient keeps the last-good card
-        // instead of a bare error (macOS `usable_success`).
-        "claude" | "copilot" | "antigravity" | "kiro" => !snapshot.windows.is_empty(),
+        // "kiro" carries the Kiro subscription quota and "opencode" the OpenCode
+        // Go quota; each success is a non-empty window set, so a later transient
+        // keeps the last-good card instead of a bare error (macOS `usable_success`).
+        "claude" | "copilot" | "antigravity" | "kiro" | "opencode" => !snapshot.windows.is_empty(),
         _ => false,
     }
 }
@@ -1535,6 +1536,7 @@ struct Fetchers {
     copilot: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
     grok: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
     kiro: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
+    opencode_go: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
     subscriptions: fn() -> Vec<String>,
 }
 
@@ -1545,6 +1547,7 @@ const PRODUCTION_FETCHERS: Fetchers = Fetchers {
     copilot: || Box::pin(fetch_copilot()),
     grok: || Box::pin(fetch_grok()),
     kiro: || Box::pin(fetch_kiro()),
+    opencode_go: || Box::pin(fetch_opencode_go()),
     subscriptions: crate::opencode_integrations::detect_subscriptions,
 };
 
@@ -1554,13 +1557,14 @@ pub async fn run(publication_generation: u64) -> AgentUsagePayload {
 
 async fn run_with(fetchers: &Fetchers, publication_generation: u64) -> AgentUsagePayload {
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    let (codex, claude, antigravity, copilot, grok, kiro) = tokio::join!(
+    let (codex, claude, antigravity, copilot, grok, kiro, opencode_go) = tokio::join!(
         (fetchers.codex)(),
         (fetchers.claude_accounts)(),
         (fetchers.antigravity)(),
         (fetchers.copilot)(),
         (fetchers.grok)(),
-        (fetchers.kiro)()
+        (fetchers.kiro)(),
+        (fetchers.opencode_go)()
     );
     let mut agents = vec![codex];
     agents.extend(claude);
@@ -1576,6 +1580,10 @@ async fn run_with(fetchers: &Fetchers, publication_generation: u64) -> AgentUsag
     // Kiro only appears when its IDE token file is present.
     if let Some(kiro) = kiro {
         agents.push(kiro);
+    }
+    // OpenCode Go only appears when opencode's auth.json holds an `opencode-go` key.
+    if let Some(opencode_go) = opencode_go {
+        agents.push(opencode_go);
     }
     AgentUsagePayload {
         generated_at,
@@ -1699,6 +1707,118 @@ async fn fetch_kiro_with(deps: &KiroDeps<'_>) -> Option<AgentUsageSnapshot> {
     apply_provider_outcome_with(deps.last_good, "kiro", "oauth", now, outcome, |snapshot| {
         (deps.enrich)(snapshot, now.timestamp())
     })
+}
+
+/// Everything `fetch_opencode_go_with` reaches outside itself, sealed the same
+/// way as `KiroDeps`: outside `#[cfg(test)]` the only constructor is
+/// `OpenCodeGoDeps::system()`. The key is read from opencode's `auth.json`
+/// through the same `auth_path()` the Copilot card uses; no override and no
+/// environment variable of its own.
+mod opencode_go_deps {
+    use super::kiro_deps::{Enrich, ResolveCredential, ResolveHistoryScope};
+    use super::*;
+    use crate::opencode_integrations::OpenCodeGoCredentialLoad;
+
+    pub(super) struct OpenCodeGoDeps<'a> {
+        pub(super) load_credential: &'a dyn Fn() -> OpenCodeGoCredentialLoad,
+        pub(super) resolve_credential: &'a ResolveCredential,
+        pub(super) resolve_history_scope: &'a ResolveHistoryScope,
+        pub(super) usage_url: &'a str,
+        pub(super) last_good: &'a Mutex<ProviderLastGoodCache>,
+        pub(super) enrich: &'a Enrich,
+        _sealed: (),
+    }
+
+    impl OpenCodeGoDeps<'static> {
+        pub(super) fn system() -> Self {
+            Self {
+                load_credential: &crate::opencode_integrations::opencode_go_credential,
+                resolve_credential: &agent_account_scope::resolve_credential,
+                resolve_history_scope: &agent_account_scope::resolve_history_scope,
+                usage_url: crate::agent_opencode_go::USAGE_URL,
+                last_good: &PROVIDER_LAST_GOOD,
+                enrich: &enrich_snapshot,
+                _sealed: (),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    impl<'a> OpenCodeGoDeps<'a> {
+        pub(super) fn for_test(
+            load_credential: &'a dyn Fn() -> OpenCodeGoCredentialLoad,
+            resolve_credential: &'a ResolveCredential,
+            resolve_history_scope: &'a ResolveHistoryScope,
+            usage_url: &'a str,
+            last_good: &'a Mutex<ProviderLastGoodCache>,
+            enrich: &'a Enrich,
+        ) -> Self {
+            Self {
+                load_credential,
+                resolve_credential,
+                resolve_history_scope,
+                usage_url,
+                last_good,
+                enrich,
+                _sealed: (),
+            }
+        }
+    }
+}
+use opencode_go_deps::OpenCodeGoDeps;
+
+async fn fetch_opencode_go() -> Option<AgentUsageSnapshot> {
+    fetch_opencode_go_with(&OpenCodeGoDeps::system()).await
+}
+
+async fn fetch_opencode_go_with(deps: &OpenCodeGoDeps<'_>) -> Option<AgentUsageSnapshot> {
+    use crate::opencode_integrations::OpenCodeGoCredentialLoad;
+    let now = Utc::now();
+    let outcome = match (deps.load_credential)() {
+        OpenCodeGoCredentialLoad::Absent => ProviderFetchOutcome::Absent,
+        OpenCodeGoCredentialLoad::Terminal(display) => {
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(display))
+        }
+        OpenCodeGoCredentialLoad::Present(credential) => {
+            match agent_opencode_go::fetch(credential, deps.usage_url, deps.resolve_credential)
+                .await
+            {
+                Ok(data) => ProviderFetchOutcome::Success {
+                    cache_binding: Some(data.cache_binding),
+                    snapshot: AgentUsageSnapshot {
+                        account_key: None,
+                        merge_scope: None,
+                        // The Go subscription quota attaches to the existing
+                        // `opencode` client tab, mirroring how the Copilot quota
+                        // (also fetched via opencode auth) feeds the `copilot`
+                        // tab rather than a separate one.
+                        client_id: "opencode".to_string(),
+                        source: "api".to_string(),
+                        updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+                        identity: data.identity,
+                        account_scope: data.account_scope,
+                        // OpenCode Go has no authoritative owner ID in what Syrtis fetches.
+                        history_scope: (deps.resolve_history_scope)("opencode", None),
+                        windows: data.windows,
+                        credits: None,
+                        error: None,
+                        transport_diagnostic: None,
+                    },
+                },
+                Err(failure) => ProviderFetchOutcome::Failure(failure),
+            }
+        }
+    };
+    // Same as `apply_provider_outcome`: the clock is read after the outcome.
+    let now = Utc::now();
+    apply_provider_outcome_with(
+        deps.last_good,
+        "opencode",
+        "api",
+        now,
+        outcome,
+        |snapshot| (deps.enrich)(snapshot, now.timestamp()),
+    )
 }
 
 async fn fetch_grok() -> Option<AgentUsageSnapshot> {
@@ -9805,6 +9925,63 @@ mod tests {
     }
 
     #[test]
+    fn opencode_go_success_is_cached_and_survives_a_same_binding_transient() {
+        // Ported from macOS. Regression for the OpenCode Go provider:
+        // `usable_success` must admit client_id "opencode" so a successful Go
+        // fetch enters the last-good cache and a later transient failure keeps
+        // the last-good card. Dropping "opencode" from `usable_success` turns
+        // this red: the success is never cached, so the transient failure
+        // returns a bare error instead.
+        let scope = TestRefreshScope::new("opencode", "opencode-last-good");
+        let account_scope = scope
+            .resolve_current("fixture", "account-go", b"marker-go")
+            .unwrap();
+        let binding = ProviderCacheBinding::primary(account_scope.clone());
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        let fresh_at = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let failure_at = fresh_at + chrono::Duration::minutes(1);
+
+        let fresh = apply_provider_outcome_with(
+            &cache,
+            "opencode",
+            "api",
+            fresh_at,
+            ProviderFetchOutcome::Success {
+                snapshot: cache_test_snapshot("opencode", Ok(account_scope), fresh_at),
+                cache_binding: Some(binding.clone()),
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert!(fresh.error.is_none());
+        assert_eq!(fresh.windows.len(), 1);
+        // The success reached the cache under the opencode slot.
+        assert!(lock_last_good(&cache)
+            .entries
+            .contains_key(&account_slot("opencode", None)));
+
+        let fallback = apply_provider_outcome_with(
+            &cache,
+            "opencode",
+            "api",
+            failure_at,
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
+                "OpenCode Go usage request failed. Retrying automatically.",
+                Some(binding.clone()),
+                timeout_diagnostic(),
+            )),
+            |_| {},
+        )
+        .unwrap();
+        // The last-good window is preserved; the current error rides on top.
+        assert_eq!(fallback.updated_at, fresh.updated_at);
+        assert_eq!(fallback.windows.len(), 1);
+        assert_eq!(fallback.windows[0].label_for_test(), "Session");
+        assert!(fallback.error.is_some());
+        scope.cleanup();
+    }
+
+    #[test]
     fn copilot_malformed_optional_reset_remains_success_and_keeps_last_good() {
         let scope = TestRefreshScope::new("copilot", "lossy-optional-reset");
         let account_scope = scope
@@ -14928,6 +15105,7 @@ mod kiro_tests {
             copilot: || Box::pin(async { Some(stub("copilot")) }),
             grok: || Box::pin(async { Some(stub("grok")) }),
             kiro: || Box::pin(async { Some(stub("kiro")) }),
+            opencode_go: || Box::pin(async { Some(stub("opencode")) }),
             subscriptions: || vec!["StubSubscription".to_string()],
         };
         let payload = run_with(&stubs, 7).await;
@@ -14945,10 +15123,308 @@ mod kiro_tests {
                 "antigravity",
                 "copilot",
                 "grok",
-                "kiro"
+                "kiro",
+                "opencode"
             ]
         );
         assert_eq!(payload.opencode_subscriptions, ["StubSubscription"]);
         assert_eq!(payload.publication_generation, 7);
+    }
+}
+
+/// W5b: the OpenCode Go card through its production entry
+/// (`fetch_opencode_go_with`). Same harness shape as `kiro_tests`: the key is a
+/// fixture `auth.json` read by the production loader, account-scope rows go to
+/// a `TestRefreshScope` temp root, history goes to a recorder that opens no
+/// store, and the request goes to a loopback mock. Nothing here reads the real
+/// profile or the network.
+#[cfg(test)]
+mod opencode_go_tests {
+    use super::kiro_deps::{Enrich, ResolveCredential, ResolveHistoryScope};
+    use super::*;
+    use crate::agent_account_scope::test_support::TestRefreshScope;
+    use crate::opencode_integrations::OpenCodeGoCredentialLoad;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    const SENTINEL_KEY: &str = "opencode-go-sentinel-key-5be2d8";
+    /// Another provider's entry in the same `auth.json`; it must never leave
+    /// the file through this card.
+    const COPILOT_SENTINEL: &str = "copilot-sentinel-refresh-91aa0c";
+    const USAGE_OK: &str = r#"{
+        "usage": {
+            "rolling": {"percent": 47.0, "resetsAt": "2099-01-01T05:00:00Z"},
+            "weekly":  {"percent": 63.0, "resetsAt": "2099-01-07T00:00:00Z"},
+            "monthly": {"percent": 28.0, "resetsAt": "2099-02-01T00:00:00Z"}
+        }
+    }"#;
+
+    /// Test-owned values behind one `OpenCodeGoDeps`.
+    struct Harness {
+        dir: PathBuf,
+        scope: Arc<TestRefreshScope>,
+        cache: Mutex<ProviderLastGoodCache>,
+        enrich_calls: Arc<AtomicUsize>,
+        recorded_observations: Arc<AtomicUsize>,
+        load: Box<dyn Fn() -> OpenCodeGoCredentialLoad>,
+        resolve_credential: Box<ResolveCredential>,
+        resolve_history: Box<ResolveHistoryScope>,
+        enrich: Box<Enrich>,
+        url: String,
+    }
+
+    impl Harness {
+        /// `auth_json`: the fixture's contents, or `None` for no file at all.
+        fn new(tag: &str, auth_json: Option<String>, url: String) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "tb-opencode-go-fetch-{tag}-{}-{}",
+                std::process::id(),
+                Utc::now().timestamp_nanos_opt().unwrap()
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            let auth = dir.join("auth.json");
+            if let Some(contents) = auth_json {
+                fs::write(&auth, contents).unwrap();
+            }
+            let scope = Arc::new(TestRefreshScope::new("opencode", tag));
+            let enrich_calls = Arc::new(AtomicUsize::new(0));
+            let recorded_observations = Arc::new(AtomicUsize::new(0));
+            let credential_scope = Arc::clone(&scope);
+            let history_scope = Arc::clone(&scope);
+            let calls = Arc::clone(&enrich_calls);
+            let observed = Arc::clone(&recorded_observations);
+            Self {
+                dir,
+                cache: Mutex::new(ProviderLastGoodCache::default()),
+                enrich_calls,
+                recorded_observations,
+                load: Box::new(move || {
+                    crate::opencode_integrations::opencode_go_credential_at(&auth)
+                }),
+                resolve_credential: Box::new(move |provider, source, location, marker| {
+                    assert_eq!(provider, "opencode");
+                    credential_scope.resolve_current(source, location, marker)
+                }),
+                resolve_history: Box::new(move |provider, authoritative| {
+                    history_scope.resolve_history(provider, authoritative)
+                }),
+                enrich: Box::new(move |snapshot, now| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    enrich_snapshot_with(snapshot, now, |_, observations, _| {
+                        observed.fetch_add(observations.len(), Ordering::SeqCst);
+                        Ok(vec![])
+                    });
+                }),
+                scope,
+                url,
+            }
+        }
+
+        fn deps(&self) -> OpenCodeGoDeps<'_> {
+            OpenCodeGoDeps::for_test(
+                &*self.load,
+                &*self.resolve_credential,
+                &*self.resolve_history,
+                &self.url,
+                &self.cache,
+                &*self.enrich,
+            )
+        }
+
+        fn enrich_calls(&self) -> usize {
+            self.enrich_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+            self.scope.cleanup();
+        }
+    }
+
+    fn fixture_auth_json() -> String {
+        serde_json::json!({
+            "opencode-go": { "type": "api", "key": SENTINEL_KEY },
+            "github-copilot": {
+                "type": "oauth",
+                "refresh": COPILOT_SENTINEL,
+                "access": COPILOT_SENTINEL,
+                "expires": 0
+            }
+        })
+        .to_string()
+    }
+
+    /// Loopback stand-in for `/zen/go/v1/usage`: answers one connection per
+    /// entry of `responses`, in order, and returns every request head it saw —
+    /// including any connection beyond the scripted ones.
+    async fn usage_mock(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/zen/go/v1/usage", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            async fn read_head(stream: &mut tokio::net::TcpStream) -> String {
+                let mut head = Vec::new();
+                let mut buf = [0_u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let read = stream.read(&mut buf).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&buf[..read]);
+                }
+                String::from_utf8(head).unwrap()
+            }
+            let mut heads = Vec::new();
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                heads.push(read_head(&mut stream).await);
+                let response = format!(
+                    "HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            if let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await
+            {
+                heads.push(read_head(&mut stream).await);
+            }
+            heads
+        });
+        (url, server)
+    }
+
+    /// A: fixture `auth.json` -> one `opencode` card; the mock saw exactly one
+    /// GET carrying the fixture's Go key and nothing else of the file (the
+    /// Copilot entry beside it included).
+    /// F: account-scope rows land in the temp root; enrich ran exactly once.
+    #[tokio::test]
+    async fn fetch_opencode_go_with_fixture_sends_only_the_key_to_the_usage_url() {
+        let (url, server) = usage_mock(vec![(200, USAGE_OK)]).await;
+        let harness = Harness::new("fixture", Some(fixture_auth_json()), url);
+
+        let snapshot = fetch_opencode_go_with(&harness.deps())
+            .await
+            .expect("a signed-in OpenCode Go yields a card");
+        assert_eq!(snapshot.client_id, "opencode");
+        assert_eq!(snapshot.source, "api");
+        assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+        let labels: Vec<_> = snapshot
+            .windows
+            .iter()
+            .map(|w| w.label_for_test())
+            .collect();
+        assert_eq!(labels, ["Rolling", "Weekly", "Monthly"]);
+        assert!(snapshot.account_scope.is_ok());
+        assert_eq!(
+            snapshot.history_scope.as_ref().ok(),
+            harness
+                .scope
+                .resolve_history("opencode", None)
+                .as_ref()
+                .ok()
+        );
+        assert_eq!(
+            snapshot.identity.as_ref().and_then(|i| i.plan.as_deref()),
+            Some("Go")
+        );
+
+        let heads = server.await.unwrap();
+        assert_eq!(heads.len(), 1, "exactly one request: {heads:?}");
+        let head = &heads[0];
+        assert_eq!(
+            head.lines().next().unwrap(),
+            "GET /zen/go/v1/usage HTTP/1.1"
+        );
+        let authorization: Vec<&str> = head
+            .lines()
+            .filter(|line| line.to_ascii_lowercase().starts_with("authorization:"))
+            .collect();
+        assert_eq!(
+            authorization,
+            vec![format!("authorization: Bearer {SENTINEL_KEY}").as_str()]
+        );
+        for other in [COPILOT_SENTINEL, "github-copilot", "oauth"] {
+            assert!(!head.contains(other), "{other} leaked into {head}");
+        }
+
+        // F: the binding was written under the temp root, as HMACs only.
+        let metadata = harness.scope.metadata_bytes();
+        assert!(!metadata.is_empty());
+        let metadata = String::from_utf8_lossy(&metadata);
+        assert!(!metadata.contains(SENTINEL_KEY));
+        assert!(!metadata.contains(COPILOT_SENTINEL));
+        assert_eq!(harness.enrich_calls(), 1);
+        assert_eq!(harness.recorded_observations.load(Ordering::SeqCst), 3);
+    }
+
+    /// B + F: no `auth.json` is Absent (no card, no request, no enrich).
+    #[tokio::test]
+    async fn fetch_opencode_go_with_no_auth_file_is_absent() {
+        let (url, server) = usage_mock(vec![]).await;
+        let harness = Harness::new("absent", None, url);
+        assert!(fetch_opencode_go_with(&harness.deps()).await.is_none());
+        assert_eq!(harness.enrich_calls(), 0);
+        assert!(server.await.unwrap().is_empty(), "Absent sends nothing");
+    }
+
+    /// C (R5-1): success, then a 503 for the same key -> the cached windows are
+    /// replayed with the error, instead of a bare error card. Fails if
+    /// `usable_success` does not admit "opencode".
+    #[tokio::test]
+    async fn opencode_go_transient_after_success_replays_the_cached_windows() {
+        let (url, server) = usage_mock(vec![(200, USAGE_OK), (503, "")]).await;
+        let harness = Harness::new("transient", Some(fixture_auth_json()), url);
+
+        let fresh = fetch_opencode_go_with(&harness.deps()).await.unwrap();
+        assert_eq!(fresh.windows.len(), 3);
+        assert!(fresh.error.is_none());
+
+        let fallback = fetch_opencode_go_with(&harness.deps()).await.unwrap();
+        assert_eq!(
+            fallback.windows.len(),
+            3,
+            "an opencode transient must replay the cached windows"
+        );
+        assert_eq!(
+            fallback.error.as_deref(),
+            Some("OpenCode Go usage request failed. Retrying automatically.")
+        );
+        assert!(fallback.transport_diagnostic.is_some());
+        assert_eq!(server.await.unwrap().len(), 2);
+        // F: the transient replays the cache without enriching again.
+        assert_eq!(harness.enrich_calls(), 1);
+    }
+
+    /// D: neither the Go key nor the other provider's entry in the same file
+    /// reaches the published snapshot, on success or on either kind of failure.
+    #[tokio::test]
+    async fn opencode_go_key_never_appears_in_snapshot_or_error_text() {
+        let (url, server) = usage_mock(vec![(200, USAGE_OK), (401, ""), (503, "")]).await;
+        let harness = Harness::new("sentinel", Some(fixture_auth_json()), url);
+        let mut displays = Vec::new();
+        for _ in 0..3 {
+            let snapshot = fetch_opencode_go_with(&harness.deps()).await.unwrap();
+            let json = serde_json::to_string(&snapshot).unwrap();
+            for secret in [SENTINEL_KEY, COPILOT_SENTINEL] {
+                assert!(!json.contains(secret), "{secret} in {json}");
+            }
+            displays.push(snapshot.error.clone());
+        }
+        assert_eq!(
+            displays,
+            vec![
+                None,
+                Some("OpenCode Go API key expired or lacks access.".to_string()),
+                // The 401 cleared the cache, so this transient has no fallback.
+                Some("OpenCode Go usage request failed. Retrying automatically.".to_string()),
+            ]
+        );
+        assert_eq!(server.await.unwrap().len(), 3);
+        assert_eq!(harness.enrich_calls(), 1);
     }
 }
