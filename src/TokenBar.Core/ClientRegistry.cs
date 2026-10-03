@@ -77,7 +77,7 @@ public static class ClientRegistry
         ["muse"] = ("Muse Code", "#0064e0"),
         ["reasonix"] = ("Reasonix", "#808000"),
         ["kimchi"] = ("Kimchi", "#7f1d1d"),
-        ["senpi"] = ("Senpi (OmO Native)", "#2f6f63"),
+        ["senpi"] = ("Senpi", "#2f6f63"),
         ["omp"] = ("Oh My Pi", "#d946ef"),
     };
 

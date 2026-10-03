@@ -380,10 +380,7 @@ public sealed class SettingsWindow : Window
             textColor.Children.Add(customColorRow);
         }
 
-        textColor.Children.Add(Hint(
-            ("Custom colors follow each item's remaining quota: normal above 25%, low above "
-                + "10% through 25%, and very low at 10% or below. Other text and unavailable "
-                + "quota use the normal color. Automatic keeps the original colors.").Localized()));
+        textColor.Children.Add(Hint(SettingsCopy.TextColorHint.Localized()));
         panel.Children.Add(Section("Font color".Localized(), textColor));
 
         // ── Tray icon ──────────────────────────────────────────────────
@@ -451,9 +448,7 @@ public sealed class SettingsWindow : Window
                 ],
                 store.GetString("tokenbar.icon.coloring", "warning") ?? "warning",
                 raw => store.SetString("tokenbar.icon.coloring", raw)));
-            icon.Children.Add(Hint(
-                "Battery-icon behavior: the gauge picks up color under 25% left."
-                .Localized()));
+            icon.Children.Add(Hint(SettingsCopy.GaugeColoringHint.Localized()));
         }
 
         panel.Children.Add(Section("Tray icon".Localized(), icon));
@@ -578,8 +573,8 @@ public sealed class SettingsWindow : Window
         detailed.Toggled += (_, _) =>
             store.SetBool("tokenbar.trace.detailed", detailed.IsOn);
         var trace = new StackPanel { Spacing = 8 };
-        trace.Children.Add(ToggleRow("Detailed rows".Localized(), detailed));
-        trace.Children.Add(Hint("One row per agent and model instead of per app.".Localized()));
+        trace.Children.Add(ToggleRow(SettingsCopy.LiveTraceToggle.Localized(), detailed));
+        trace.Children.Add(Hint(SettingsCopy.LiveTraceHint.Localized()));
         panel.Children.Add(Section("Live trace".Localized(), trace));
 
         // ── Flyout size ────────────────────────────────────────────────
@@ -965,9 +960,7 @@ public sealed class SettingsWindow : Window
             ],
             Math.Max(1, store.GetInt("tokenbar.refresh.intervalMin", 30)).ToString(),
             raw => store.SetInt("tokenbar.refresh.intervalMin", int.Parse(raw))));
-        refresh.Children.Add(Hint(
-            ("How often the tray forces a full log re-read; cached reads stay "
-                + "continuous either way.").Localized()));
+        refresh.Children.Add(Hint(SettingsCopy.RefreshHint.Localized()));
         panel.Children.Add(Section("Data refresh".Localized(), refresh));
 
         // ── Discord (macOS SettingsPanel :944-1007) ─────────────────────
@@ -1209,10 +1202,7 @@ public sealed class SettingsWindow : Window
                     .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
                     ?.InformationalVersion ?? "dev",
                 12)));
-        about.Children.Add(Hint(
-            ("Shared parsing engine from tokscale-core, originally derived "
-                + "from tokscale by junhoyeo; menu-bar concept from "
-                + "handlecusion's tokcat.").Localized()));
+        about.Children.Add(Hint(SettingsCopy.About.Localized()));
         panel.Children.Add(Section("About".Localized(), about));
 
         // ── Check for updates ──────────────────────────────────────────
