@@ -48,6 +48,8 @@ public class ClaudeExtraRootsTests
     [InlineData(@"d:/WORK/.claude", "duplicate")]
     [InlineData(@"C:\Users\Me\.claude\work", "defaultConfigDir")]
     [InlineData(@"C:\Users", "defaultConfigDir")]
+    [InlineData(@"E:\", "rootDirectory")]
+    [InlineData(@"c:/", "rootDirectory")]
     [InlineData(@"\\server\share\.claude", "unsupportedPath")]
     [InlineData(@"//wsl.localhost/Ubuntu/home/me/.claude", "unsupportedPath")]
     [InlineData(@"C:\Users\Me\.claude-work", null)]
