@@ -14,8 +14,10 @@ public static class LocalRecordClients
     /// keys (<see cref="ClientRegistry.ParseIdSet"/>).</summary>
     public const string Key = "tokenbar.localRecordClients";
 
-    /// <summary>Merge one accepted graph's clients into the persisted set;
-    /// writes only when something new appears.</summary>
+    /// <summary>Merge one accepted graph's clients into the persisted set.
+    /// A graph with nothing new writes the same string, which
+    /// <see cref="SettingsStore"/> drops without saving or raising
+    /// Changed.</summary>
     public static void Record(SettingsStore store, IEnumerable<string> clients)
     {
         var known = ClientRegistry.ParseIdSet(store.GetString(Key) ?? "");
@@ -28,10 +30,7 @@ public static class LocalRecordClients
             }
         }
 
-        if (union.Count != known.Count)
-        {
-            store.SetString(Key, string.Join(',', union));
-        }
+        store.SetString(Key, string.Join(',', union));
     }
 
     /// <summary>The year-independent "has local records" set the window card

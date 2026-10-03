@@ -47,10 +47,16 @@ public static class Ui
             TextTrimming = TextTrimming.CharacterEllipsis,
             TextWrapping = TextWrapping.NoWrap,
         };
+        // The hover card is one shared popup per XamlRoot, so this title only
+        // moves or closes it while it is the one that opened it; otherwise an
+        // untrimmed title (or a rebuilt card's Unloaded) would move or close
+        // another element's tip.
+        var showing = false;
         titleText.PointerEntered += (_, e) =>
         {
             if (titleText.IsTextTrimmed && titleText.XamlRoot is { } root)
             {
+                showing = true;
                 HoverTip.ShowAt(titleText, new TextBlock
                 {
                     Text = title,
@@ -62,13 +68,21 @@ public static class Ui
         };
         titleText.PointerMoved += (_, e) =>
         {
-            if (titleText.XamlRoot is { } root)
+            if (showing && titleText.XamlRoot is { } root)
             {
                 HoverTip.MoveAt(titleText, e.GetCurrentPoint(root.Content).Position);
             }
         };
-        titleText.PointerExited += (_, _) => HoverTip.HideFor(titleText);
-        titleText.Unloaded += (_, _) => HoverTip.HideFor(titleText);
+        void Hide()
+        {
+            if (showing)
+            {
+                showing = false;
+                HoverTip.HideFor(titleText);
+            }
+        }
+        titleText.PointerExited += (_, _) => Hide();
+        titleText.Unloaded += (_, _) => Hide();
         head.Children.Add(titleText);
         if (subtitle is not null || trailing is not null)
         {

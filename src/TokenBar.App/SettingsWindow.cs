@@ -219,7 +219,7 @@ public sealed class SettingsWindow : Window
         {
             if (!key.StartsWith("tokenbar.", StringComparison.Ordinal)
                 || key is "tokenbar.quota.lastRemaining" or "tokenbar.quota.lastResolvedAt"
-                    or "tokenbar.popover.height")
+                    or "tokenbar.popover.height" or LocalRecordClients.Key)
             {
                 return;
             }

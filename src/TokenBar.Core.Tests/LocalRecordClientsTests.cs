@@ -38,4 +38,21 @@ public class LocalRecordClientsTests
         LocalRecordClients.Record(store, []);
         Assert.Equal("claude,codex", new SettingsStore(path).GetString(LocalRecordClients.Key));
     }
+    /// <summary>A graph with nothing new raises no Changed (the store drops an
+    /// equal value), so background graph polls cannot keep signalling the
+    /// Settings window.</summary>
+    [Fact]
+    public void RecordWritesOnlyWhenSomethingNewAppears()
+    {
+        var store = Fresh();
+        var changes = 0;
+        store.Changed += key => { if (key == LocalRecordClients.Key) { changes++; } };
+        LocalRecordClients.Record(store, ["codex", "claude"]);
+        Assert.Equal(1, changes);
+        LocalRecordClients.Record(store, ["claude"]);
+        LocalRecordClients.Record(store, ["codex", "claude"]);
+        Assert.Equal(1, changes);
+        LocalRecordClients.Record(store, ["opencode"]);
+        Assert.Equal(2, changes);
+    }
 }

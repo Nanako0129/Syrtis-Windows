@@ -54,9 +54,12 @@ public static class QuotaLensProjection
     /// window moves: a stored preference belonging to another client leaves
     /// this one's window alone, and a window vanishing from the payload moves
     /// it with no click at all.</param>
-    /// <param name="LocalUsageClients">Client ids with local usage records
-    /// (the loaded graph's <c>Summary.Clients</c> — the same list that decides
-    /// which tabs are quota-only), or null while that is unknown. See
+    /// <param name="LocalUsageClients">Client ids with local usage records in
+    /// any year: the view passes <see cref="LocalRecordClients.Union"/>
+    /// (the persisted all-years set plus the loaded graph's
+    /// <c>Summary.Clients</c>), which can be wider than the year-scoped list
+    /// that decides which tabs are quota-only. Null means unknown and keeps
+    /// the pre-rule behaviour (tests and callers without a graph). See
     /// <see cref="TabHasNoLocalRecords"/>.</param>
     /// <param name="HistoryShownCount">How many history rows the reader has
     /// grown the card to. Not a display-only toggle despite looking like one:
