@@ -137,7 +137,10 @@ public static class ClaudeExtraRoots
     /// stays unattributed). Claude Desktop has no local scan.</summary>
     public static IReadOnlyList<string> AttributableAccountKeys(AgentUsagePayload? quota) =>
         [.. (quota?.Agents ?? [])
+#if MUT_SCAN
+#else
             .Where(card => card.ClientId == ClientId)
+#endif
             .Select(card => card.Account.AccountKey)
             .OfType<string>()
             .Where(key => key != AccountLabel.ClaudeDesktopKey)

@@ -194,10 +194,20 @@ public static class AntigravityFetch
         AntigravityAccountsInstaller? installer,
         AntigravityAutoCapture? capture)
     {
+#if MUT_LAUNCH
+#else
         installer?.Install();
+#endif
+#if MUT_GATE
+        if (capture is not null)
+#else
         if (capture is { IsEnabled: true })
+#endif
         {
+#if MUT_PREFETCH
+#else
             _ = capture.PrepareForFetch().GetAwaiter().GetResult();
+#endif
         }
 
         var payload = fetch();
@@ -206,8 +216,12 @@ public static class AntigravityFetch
             return payload;
         }
 
+#if MUT_NO_DEDUP
+        return payload;
+#else
         var (key, marker) = capture.Current;
         return AntigravityDedup.Apply(payload, key, marker);
+#endif
     }
 }
 
@@ -248,7 +262,11 @@ public static class AntigravityDedup
         }
 
         var primary = agents[primaryIndex];
+#if MUT_MARKER_EQ
+        if (primary.Source != "agy" || primary.Error is not null)
+#else
         if (primary.Source != "agy" || primary.AgyLoginMarker != currentMarker || primary.Error is not null)
+#endif
         {
             return payload;
         }
@@ -278,7 +296,11 @@ public static class AntigravityDedup
     /// pace.</summary>
     public static AgentUsageSnapshot AdoptingHistory(AgentUsageSnapshot primary, AgentUsageSnapshot captured)
     {
+#if MUT_ADOPT_ERR
+        if (captured.AccountKey is not { } key || captured.Windows.Count == 0)
+#else
         if (captured.Error is not null || captured.AccountKey is not { } key || captured.Windows.Count == 0)
+#endif
         {
             return primary;
         }

@@ -42,7 +42,11 @@ public static class AccountLabel
             // Never the key: it is derived from the Google account id. A key
             // the registry no longer holds (removed while an older payload is
             // still on screen) gets the generic label (macOS accountLabel).
+#if MUT_LABEL_KEY
+            return account.AccountKey is { } label
+#else
             return AntigravityLabel(account.AccountKey) is { } label
+#endif
                 ? $"{ClientRegistry.ShortName(account.ClientId)} · {label}"
                 : "Antigravity account".Localized();
         }

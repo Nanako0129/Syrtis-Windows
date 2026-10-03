@@ -804,7 +804,11 @@ public sealed record AgentUsageSnapshot(
     /// card by history scope, not by account key, so the read is routed by
     /// the adopted account's scope.</summary>
     [JsonIgnore]
+#if MUT_READSCOPE
+    public AccountScopeStatus? HistoryReadScope => HistoryScope;
+#else
     public AccountScopeStatus? HistoryReadScope => HistoryAccountKey is null ? HistoryScope : HistoryAccountScope;
+#endif
 
     /// <summary>The identity of this card — a pair, never an encoded string
     /// (mirrors the core's <c>account_key_component</c>: null and "" are the

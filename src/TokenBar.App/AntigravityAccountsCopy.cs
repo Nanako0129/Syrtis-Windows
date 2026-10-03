@@ -74,7 +74,11 @@ internal static class AntigravityAccountsCopy
         "invalid_credential_format" => "The login had an unexpected format. Nothing was saved.",
         "keychain_write_failed" => "Couldn't save to Windows Credential Manager.",
         "keychain_delete_failed" => "Couldn't delete the copy from Windows Credential Manager.",
+#if MUT_ERRMAP
+        _ => code ?? Generic,
+#else
         _ => Generic,
+#endif
     };
 
     /// <summary>Every error code ctb.h lists for <c>tb_antigravity_capture</c>

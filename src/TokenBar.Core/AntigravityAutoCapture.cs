@@ -309,10 +309,13 @@ public sealed class AntigravityAutoCapture
     /// was turned on.</summary>
     public async Task<bool> TurnOn(Func<Task<bool>> confirm)
     {
+#if MUT_CONFIRM
+#else
         if (!await confirm())
         {
             return false;
         }
+#endif
 
         await SetEnabled(true);
         return true;
@@ -366,7 +369,11 @@ public sealed class AntigravityAutoCapture
             var after = await TryMarker().ConfigureAwait(false);
             lock (_gate)
             {
+#if MUT_BIND
+                changed = true
+#else
                 changed = before is not null && before == after
+#endif
                     ? SetCurrentLocked(captured.Key, after)
                     : ClearCurrentLocked();
                 if (_paused)
@@ -428,15 +435,24 @@ public sealed class AntigravityAutoCapture
             AntigravityAccounts.Mutate(_store, _io.Install, accounts => [.. accounts.Where(a => a.Key != key)]);
             lock (_gate)
             {
+#if MUT_REMOVE_CLEAR
+#else
                 if (_currentKey == key)
                 {
                     changed = ClearCurrentLocked();
                 }
+#endif
             }
 
+#if MUT_REMOVE_APPEND
+            if (true)
+            {
+                var removed = AntigravityAccounts.RemovedKeys(_store);
+#else
             if (IsEnabled)
             {
                 var removed = AntigravityAccounts.RemovedKeys(_store);
+#endif
                 if (!removed.Contains(key))
                 {
                     AntigravityAccounts.SaveRemovedKeys(_store, [.. removed, key]);
