@@ -312,4 +312,34 @@ public class ClaudeExtraRootsTests
         Assert.Empty(client.Messages);
     }
 
+    // ---- Settings copy -----------------------------------------------------
+
+    [Fact]
+    public void EveryReasonCodeHasItsOwnSentence()
+    {
+        var generic = ClaudeAccountsCopy.Reason("not-a-code");
+        foreach (var code in ClaudeAccountsCopy.ReasonCodes.Where(code => code != "empty"))
+        {
+            Assert.NotEqual(generic, ClaudeAccountsCopy.Reason(code));
+        }
+    }
+
+    [Theory]
+    [InlineData("zh-Hant")]
+    [InlineData("zh-Hans")]
+    public void EverySettingsStringIsTranslated(string language)
+    {
+        Localization.Load(language, AppContext.BaseDirectory);
+        try
+        {
+            foreach (var english in ClaudeAccountsCopy.All())
+            {
+                Assert.NotEqual(english, english.Localized());
+            }
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
+    }
 }
