@@ -229,14 +229,28 @@ public class ClaudeExtraRootsTests
         Assert.DoesNotContain("SENTINEL", line, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>Only a launch push that ran is marked as one: after a failed
+    /// launch push, the user's next save is a normal push the dashboard must
+    /// refresh for.</summary>
     [Fact]
-    public void PushesAreNumberedSoTheLaunchPushIsTheFirst()
+    public void OnlyTheLaunchRequestIsMarkedLaunch()
     {
-        var pusher = new ClaudeRootsPusher(() => [], dirs => Ok(0), roots => Ok(0), _ => { });
+        var fail = true;
+        var pushes = new List<ClaudeRootsPush>();
+        var pusher = new ClaudeRootsPusher(
+            () => [],
+            dirs => fail ? throw new InvalidOperationException() : Ok(0),
+            roots => Ok(0),
+            _ => { });
+        pusher.Pushed += pushes.Add;
+
+        Assert.Throws<AggregateException>(() => pusher.Request(launch: true).Wait(TimeSpan.FromSeconds(10)));
+        fail = false;
         Assert.True(pusher.Request().Wait(TimeSpan.FromSeconds(10)));
-        Assert.Equal(1, pusher.Last!.Sequence);
-        Assert.True(pusher.Request().Wait(TimeSpan.FromSeconds(10)));
-        Assert.Equal(2, pusher.Last!.Sequence);
+
+        Assert.False(Assert.Single(pushes).Launch);
+        Assert.True(pusher.Request(launch: true).Wait(TimeSpan.FromSeconds(10)));
+        Assert.True(pushes[^1].Launch);
     }
 
     [Fact]
