@@ -289,16 +289,19 @@ fn a_window_scan_from_before_a_root_change_is_not_published() {
     let Some(_) = child_root() else {
         return run_in_child("a_window_scan_from_before_a_root_change_is_not_published", "gate-window");
     };
-    // Fill the cell first so the blocked caller takes a real context.
-    crate::LocalSourceContext::process().unwrap();
+    // The caller's context is taken here, before the setter, so it predates
+    // the root change however the threads are scheduled; the held COMPUTE
+    // lock keeps its publish after the bump.
+    let old = crate::LocalSourceContext::process().unwrap();
     let held = crate::window_usage::lock_compute_for_test();
-    let caller = std::thread::spawn(|| call_window(None, WINDOW_FROM, WINDOW_UNTIL));
-    std::thread::sleep(Duration::from_millis(300));
+    let caller = std::thread::spawn(move || {
+        crate::window_usage::cached(&old, &None, WINDOW_FROM, WINDOW_UNTIL)
+    });
     let generation_before = generation();
     assert_eq!(call_set_scan("{}")["ok"], true);
     assert_ne!(generation(), generation_before);
     drop(held);
-    assert_eq!(caller.join().unwrap()["ok"], true, "the caller is still answered");
+    assert!(caller.join().unwrap().is_ok(), "the caller is still answered");
     assert!(
         !crate::window_usage::has_entry_for_test(&None, WINDOW_FROM),
         "a scan from the old generation must not be cached"
@@ -344,13 +347,15 @@ fn the_config_dir_setter_orders_its_bump_after_the_commit() {
     let Some(_) = child_root() else {
         return run_in_child("the_config_dir_setter_orders_its_bump_after_the_commit", "gate-dirs");
     };
-    crate::LocalSourceContext::process().unwrap();
+    // Context taken before the setter on this thread (see 4′(a)).
+    let old = crate::LocalSourceContext::process().unwrap();
     let held = crate::window_usage::lock_compute_for_test();
-    let caller = std::thread::spawn(|| call_window(None, WINDOW_FROM, WINDOW_UNTIL));
-    std::thread::sleep(Duration::from_millis(300));
+    let caller = std::thread::spawn(move || {
+        crate::window_usage::cached(&old, &None, WINDOW_FROM, WINDOW_UNTIL)
+    });
     assert_eq!(call_set_dirs(r#"["C:\\tokenbar-acceptance\\work"]"#)["ok"], true);
     drop(held);
-    assert_eq!(caller.join().unwrap()["ok"], true);
+    assert!(caller.join().unwrap().is_ok());
     assert!(!crate::window_usage::has_entry_for_test(&None, WINDOW_FROM));
     assert_eq!(
         crate::claude_config_dirs::snapshot().0,
