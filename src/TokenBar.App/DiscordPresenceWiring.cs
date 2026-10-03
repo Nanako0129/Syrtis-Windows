@@ -357,37 +357,12 @@ internal sealed class DiscordPresenceController
     }
 }
 
-/// <summary>The one-time card that makes the default-off feature findable.
-/// It enables nothing and offers no path to on: the only route is the
-/// Settings toggle, where the full disclosure is (DiscordIntro.swift
-/// :5-19).</summary>
-internal static class DiscordIntro
-{
-    /// <summary>Set when the card is PRESENTED, not when it is acted on, and
-    /// deliberately not versioned (DiscordIntro.swift :21-31).</summary>
-    internal const string ShownKey = "tokenbar.discord.introShown";
-
-    /// <summary>Whether to present — and it CONSUMES the flag either way, so
-    /// someone who already had the feature on is never introduced to it later
-    /// after switching it off (DiscordIntro.swift :39-51).</summary>
-    internal static bool Consume(SettingsStore store)
-    {
-        if (store.GetBool(ShownKey, false))
-        {
-            return false;
-        }
-
-        store.SetBool(ShownKey, true);
-        return !DiscordPresence.Enabled(store);
-    }
-}
-
-/// <summary>Every string the Discord section and the intro show, as English
+/// <summary>Every string the Discord section shows, as English
 /// keys into strings-zh-Hant.json. The consent copy is macOS SettingsPanel
-/// :944-1006 and DiscordIntro.swift :104-108, and its zh-Hant is macOS
-/// Localizable.strings :267-281, verbatim except that the product-name
-/// occurrences read "Syrtis" (user decision 2026-09-26). The Discord activity
-/// title stays "TokenBar". DiscordWiringTests.ConsentCopyIsMacOsWithTheProductRenamed
+/// :944-1006, and its zh-Hant is macOS Localizable.strings, verbatim except
+/// that the product-name occurrences read "Syrtis" (user decision
+/// 2026-09-26). The launch-time intro's strings went with the intro (macOS
+/// 2e25c7ff). DiscordWiringTests.ConsentCopyIsMacOsWithTheProductRenamed
 /// pins both languages against the macOS text and the exact list of
 /// renamed occurrences.</summary>
 internal static class DiscordCopy
@@ -416,25 +391,4 @@ internal static class DiscordCopy
 
     internal const string WholeDollarsHint =
         "A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend.";
-
-    internal const string IntroBody =
-        "Your Discord profile can show what you have been building today. Pick exactly what appears — or nothing at all — in Settings.";
-
-    internal const string OpenSettings = "Open Settings";
-
-    internal const string NotNow = "Not now";
-
-    /// <summary>The intro's mock activity: representative values labelled as
-    /// a preview, never the user's figures (DiscordIntro.swift :76-95). The
-    /// title is the Discord portal application's name, which is what Discord
-    /// shows, so it is not translated.</summary>
-    // The Discord portal application's name, which is what Discord shows as
-    // the activity title. Renamed from TokenBar to Syrtis on the portal on
-    // 2026-09-26 (GET /api/v10/applications/1534085299163107348/rpc returned
-    // name "Syrtis" that day); keep the two in step.
-    internal const string PreviewTitle = "Syrtis";
-
-    internal const string PreviewDetails = "1.2M tokens today";
-
-    internal const string PreviewState = "Claude Code · $10-50";
 }

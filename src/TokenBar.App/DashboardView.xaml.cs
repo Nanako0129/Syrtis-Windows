@@ -977,6 +977,16 @@ public sealed partial class DashboardView : UserControl
         var singleClient = OverviewScope.SingleClient(_activeClientTab);
         var limitsClientId = OverviewScope.LimitsClientId(singleClient);
 
+        // First-run setup cards, at the top of the global Overview lens only
+        // (macOS PopoverView.swift:712-720).
+        if (OnboardingSetup.ShowsOn(_view, _activeClientTab))
+        {
+            foreach (var setupCard in BuildSetupCards(snapshot))
+            {
+                stack.Children.Add(setupCard);
+            }
+        }
+
         // Order comes from OverviewCards.RenderOrder, not from the sequence of
         // these calls, so a test can see it. macOS got this same sequence wrong
         // once and its pinned order is what caught it; this arrived at the same

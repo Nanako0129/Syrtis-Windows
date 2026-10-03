@@ -475,23 +475,6 @@ public sealed class DiscordWiringTests : IDisposable
         }
     }
 
-    // ---- intro --------------------------------------------------------------
-
-    [Fact]
-    public void IntroShowsOnceAndNeverToSomeoneAlreadyUsingIt()
-    {
-        var fresh = NewStore();
-        Assert.True(DiscordIntro.Consume(fresh));
-        Assert.False(DiscordIntro.Consume(fresh));
-        Assert.False(DiscordPresence.Enabled(fresh)); // presenting enables nothing
-
-        var existing = NewStore();
-        existing.SetBool(DiscordPresence.EnabledKey, true);
-        Assert.False(DiscordIntro.Consume(existing));
-        existing.SetBool(DiscordPresence.EnabledKey, false);
-        Assert.False(DiscordIntro.Consume(existing)); // consumed, not deferred
-    }
-
     // ---- consent copy -------------------------------------------------------
 
     // The macOS copy VERBATIM — SettingsPanel.swift :944-1006 and
@@ -505,11 +488,6 @@ public sealed class DiscordWiringTests : IDisposable
     private static readonly (string English, string Zh)[] MacOsCopy =
     [
         ("Show today's usage on Discord", "在 Discord 顯示今日用量"),
-        ("Open Settings", "開啟設定"),
-        ("Not now", "暫時不要"),
-        ("1.2M tokens today", "今日 1.2M token"),
-        ("Your Discord profile can show what you have been building today. Pick exactly what appears — or nothing at all — in Settings.",
-            "你的 Discord 個人檔案可以顯示你今天在做什麼。要顯示哪些內容——或什麼都不顯示——都在設定裡挑。"),
         ("Off by default. Publishes what you pick below — today's tokens, a client name, a cost range or rounded figure — for whichever client you choose, and a link to TokenBar's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included, and a change here reaches your profile within about 15 seconds.",
             "預設關閉。會把你在下方勾選的內容——今日 token 數、用戶端名稱、花費級距或取整金額——依你指定的用戶端，連同一個 TokenBar 原始碼連結，發布到你的 Discord 個人檔案。工作時會持續更新，因此活動時段也會曝光。任何看得到你檔案的人都能讀取並保存每一次更新；關閉只會停止後續更新，無法收回已經送出的內容。已隱藏的用戶端不會送出；在這裡做的變更約 15 秒內反映到你的個人檔案。"),
         ("Include today's tokens", "包含今日 token 數"),
@@ -548,8 +526,7 @@ public sealed class DiscordWiringTests : IDisposable
 
         string[] windowsEnglish =
         [
-            DiscordCopy.Toggle, DiscordCopy.OpenSettings, DiscordCopy.NotNow, DiscordCopy.PreviewDetails,
-            DiscordCopy.IntroBody, DiscordCopy.Consent, DiscordCopy.IncludeTokens, DiscordCopy.IncludeClient,
+            DiscordCopy.Toggle, DiscordCopy.Consent, DiscordCopy.IncludeTokens, DiscordCopy.IncludeClient,
             DiscordCopy.IncludeCost, DiscordCopy.UntickHint, DiscordCopy.WholeDollars,
             DiscordCopy.WholeDollarsHint, DiscordCopy.MostUsed, DiscordCopy.NamingHint,
         ];
@@ -559,10 +536,6 @@ public sealed class DiscordWiringTests : IDisposable
             Assert.Equal(Renamed(MacOsCopy[i].English), windowsEnglish[i]);
             Assert.DoesNotContain("TokenBar", windowsEnglish[i]);
         }
-
-        // The Discord activity title is the portal app's name (renamed to
-        // Syrtis on the portal, 2026-09-26).
-        Assert.Equal("Syrtis", DiscordCopy.PreviewTitle);
 
         Localization.Load("zh-Hant", AppContext.BaseDirectory);
         try

@@ -80,16 +80,25 @@ public sealed class SettingsWindow : Window
     private readonly Dictionary<string, StackPanel> _pages = new(StringComparer.Ordinal);
     private string _selectedTag = "menubar";
 
+    /// <param name="showDashboard">Open on the Dashboard page, where the tab
+    /// row's visibility lives — the setup card's "Choose tabs…" (macOS
+    /// <c>show(scrollingTo: .dashboard)</c>). Navigation only.</param>
     /// <param name="showDiscord">Open on the General page scrolled to the
-    /// Discord section — the Discord intro's "Open Settings" (macOS
+    /// Discord section — the setup card's "Set up in Settings…" (macOS
     /// <c>show(scrollingTo: .discord)</c>). Navigation only; it writes
     /// nothing.</param>
     public static void Present(
         Func<AgentUsagePayload?> quota, Func<UsagePayload?> graph,
         Func<IReadOnlyList<TraceBucket>> trace, bool showDiscord = false,
-        bool showAttribution = false)
+        bool showAttribution = false, bool showDashboard = false)
     {
         _shared ??= new SettingsWindow(quota, graph, trace);
+        if (showDashboard)
+        {
+            _shared._selectedTag = "dashboard";
+            _shared._nav.SelectedItem = _shared._dashboardItem;
+        }
+
         if (showAttribution)
         {
             _shared._selectedTag = "attribution";
@@ -381,11 +390,7 @@ public sealed class SettingsWindow : Window
         var icon = new StackPanel { Spacing = 8 };
         icon.Children.Add(RadioGroup(
             "tray.style",
-            [
-                ("cat", "Cat".Localized()), ("parrot", "Parrot".Localized()),
-                (SandShoal.Style, SandShoal.Label), ("bars", "Signal bars".Localized()),
-                ("ring", "Ring gauge".Localized()), ("popsicle", "Melting popsicle".Localized()),
-            ],
+            [.. TrayIconStyles.Options],
             styleRaw,
             raw => store.SetString("tokenbar.tray.animationStyle", raw)));
         if (SandShoal.IsAnimated(styleRaw))
