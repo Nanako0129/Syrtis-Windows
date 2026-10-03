@@ -23,9 +23,26 @@ public sealed record LimitsTrendLabel(QuotaTrendDirection Direction, string? Tex
 /// <summary>The line under a limits-card header.</summary>
 public sealed record LimitsDetail(string Text, bool IsError);
 
-/// <summary>What an unconfigured card asks the user to do, plus a command to
-/// copy when there is one.</summary>
-public sealed record LimitsSetupPrompt(string Text, string? Command);
+/// <summary>What an unconfigured card asks the user to do: prose and
+/// commands to copy, in reading order.</summary>
+public sealed record LimitsSetupPrompt(IReadOnlyList<LimitsSetupPart> Parts)
+{
+    public LimitsSetupPrompt(string text)
+        : this([new LimitsSetupPart(text, IsCommand: false)])
+    {
+    }
+
+    /// <summary>Equal when the parts are, in order (a record compares a list
+    /// by reference).</summary>
+    public bool Equals(LimitsSetupPrompt? other) =>
+        other is not null && Parts.SequenceEqual(other.Parts);
+
+    public override int GetHashCode() => Parts.Count;
+}
+
+/// <summary>One piece of a setup prompt: prose, or a command shown in a
+/// copyable box.</summary>
+public sealed record LimitsSetupPart(string Text, bool IsCommand);
 
 /// <summary>Card order on the multi-client Agent-limits card (macOS
 /// <c>AgentLimitsCard.visibleClients</c> :471-491 and the drag's
@@ -151,6 +168,14 @@ public static class AgentLimitsText
     public const string ClaudeSetupCommand =
         "[Environment]::SetEnvironmentVariable('CLAUDE_CODE_OAUTH_TOKEN', (Read-Host 'Claude setup-token'), 'User')";
 
+    /// <summary>Removes the variable <see cref="ClaudeSetupCommand"/> sets. A
+    /// user variable reaches every process the user starts, and the claude
+    /// CLI, like Syrtis, prefers it over a stored /login, so the prompt says
+    /// how to undo it (user decision, 2026-10-04) — the macOS Keychain item
+    /// is read by Syrtis alone and needs no such note.</summary>
+    public const string ClaudeRemoveCommand =
+        "[Environment]::SetEnvironmentVariable('CLAUDE_CODE_OAUTH_TOKEN', $null, 'User')";
+
     /// <summary>What an unconfigured card shows (macOS
     /// <c>AgentUsageSnapshot.setupInstructions</c>): Claude's setup-token
     /// instructions for Claude only — they name Claude's own variable — and
@@ -166,13 +191,34 @@ public static class AgentLimitsText
 
         if (snapshot.ClientId == "claude")
         {
-            return new(
-                "Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from its environment. Save the token as a user environment variable with this PowerShell command, then quit Syrtis and reopen it from the Start menu. The token is stored unencrypted in your Windows user environment."
-                    .Localized(),
-                ClaudeSetupCommand);
+            List<LimitsSetupPart> parts =
+            [
+                new("Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from its environment. Save the token as a user environment variable with this PowerShell command, then quit Syrtis and reopen it from the Start menu. The token is stored unencrypted in your Windows user environment."
+                    .Localized(), IsCommand: false),
+                new(ClaudeSetupCommand, IsCommand: true),
+            ];
+            // One entry with {0} where the command goes: English says "and
+            // reopen Syrtis" after it, Chinese folds that into the sentence
+            // before it, and a pair of keys could not leave either side empty.
+            var removal = "The claude CLI reads this variable too and prefers it over /login. To stop using it, run:{0}and reopen Syrtis."
+                .Localized().Split("{0}");
+            foreach (var (text, i) in removal.Select((text, i) => (text.Trim(), i)))
+            {
+                if (i > 0)
+                {
+                    parts.Add(new(ClaudeRemoveCommand, IsCommand: true));
+                }
+
+                if (text.Length > 0)
+                {
+                    parts.Add(new(text, IsCommand: false));
+                }
+            }
+
+            return new(parts);
         }
 
-        return string.IsNullOrEmpty(snapshot.Error) ? null : new(snapshot.Error, null);
+        return string.IsNullOrEmpty(snapshot.Error) ? null : new LimitsSetupPrompt(snapshot.Error);
     }
 
     /// <summary>The line under a client header (macOS <c>detailText</c>

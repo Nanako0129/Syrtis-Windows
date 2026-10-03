@@ -2767,16 +2767,27 @@ public sealed partial class DashboardView : UserControl
     private static readonly FontFamily SetupCommandFont = new("Consolas, Cascadia Mono, monospace");
 
     /// <summary>An unconfigured card's instructions (macOS
-    /// <c>claudeSetupPrompt</c> / <c>providerMessage</c>): the text, and when
-    /// there is a command, a selectable monospace box with a copy
-    /// button.</summary>
+    /// <c>claudeSetupPrompt</c> / <c>providerMessage</c>): prose, and each
+    /// command in a selectable monospace box with a copy button, in the
+    /// order Core gives them.</summary>
     private static FrameworkElement SetupPrompt(LimitsSetupPrompt prompt)
     {
+        var stack = new StackPanel { Spacing = 6 };
+        foreach (var part in prompt.Parts)
+        {
+            stack.Children.Add(part.IsCommand ? SetupCommand(part.Text) : SetupProse(part.Text));
+        }
+
+        return stack;
+    }
+
+    /// <summary>`code` spans in monospace, as macOS Text renders the same
+    /// copy's Markdown; the backticks themselves are not shown. Provider
+    /// messages ("Run `codex` to log in") use the same markup.</summary>
+    private static TextBlock SetupProse(string prose)
+    {
         var text = Ui.Dim("", 10);
-        // `code` spans in monospace, as macOS Text renders the same copy's
-        // Markdown; the backticks themselves are not shown. Provider messages
-        // ("Run `codex` to log in") use the same markup.
-        var parts = prompt.Text.Split('`');
+        var parts = prose.Split('`');
         for (var i = 0; i < parts.Length; i++)
         {
             var run = new Microsoft.UI.Xaml.Documents.Run { Text = parts[i] };
@@ -2788,13 +2799,11 @@ public sealed partial class DashboardView : UserControl
             text.Inlines.Add(run);
         }
 
-        if (prompt.Command is not { } command)
-        {
-            return text;
-        }
+        return text;
+    }
 
-        var stack = new StackPanel { Spacing = 6 };
-        stack.Children.Add(text);
+    private static Grid SetupCommand(string command)
+    {
         var code = new Border
         {
             Padding = new Thickness(6),
@@ -2829,8 +2838,7 @@ public sealed partial class DashboardView : UserControl
         row.Children.Add(code);
         Grid.SetColumn(copy, 1);
         row.Children.Add(copy);
-        stack.Children.Add(row);
-        return stack;
+        return row;
     }
 
     /// <summary>A limits-card label in Core's <see cref="LimitsTone"/>. Red and
