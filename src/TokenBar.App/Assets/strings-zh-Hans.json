@@ -479,5 +479,6 @@
   "Recently: runs out": "近期：将会用完",
   "{0} used": "已用 {0}",
   "{0} less left": "预计少剩 {0}",
-  "{0} more left": "预计多剩 {0}"
+  "{0} more left": "预计多剩 {0}",
+  "Drag to reorder": "拖动以调整顺序"
 }

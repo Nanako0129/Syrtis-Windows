@@ -20,6 +20,55 @@ public sealed record LimitsBadge(string Text, LimitsTone Tone);
 /// row shows, plus at most one short phrase.</summary>
 public sealed record LimitsTrendLabel(QuotaTrendDirection Direction, string? Text, LimitsTone Tone);
 
+/// <summary>The line under a limits-card header.</summary>
+public sealed record LimitsDetail(string Text, bool IsError);
+
+/// <summary>Card order on the multi-client Agent-limits card (macOS
+/// <c>AgentLimitsCard.visibleClients</c> :471-491 and the drag's
+/// <c>onEnded</c> :693-706). The order lives in
+/// <see cref="ClientRegistry.TabOrderKey"/>, shared with the client tab row,
+/// so dragging a card also moves its tab and the other way round.</summary>
+public static class LimitsCardOrder
+{
+    /// <summary>Primary cards sorted by the saved order (unsaved ids keep
+    /// their payload order at the end); each primary's extra accounts follow
+    /// it; an extra whose primary is absent (hidden) keeps its relative place
+    /// at the end. Extra accounts are never part of the saved order.</summary>
+    public static IReadOnlyList<AgentUsageSnapshot> Apply(
+        IReadOnlyList<AgentUsageSnapshot> agents, string orderRaw)
+    {
+        var primaries = agents.Where(static a => a.Account.AccountKey is null)
+            .DistinctBy(static a => a.ClientId)
+            .ToDictionary(static a => a.ClientId);
+        var ordered = ClientRegistry.OrderedClients([.. primaries.Keys], orderRaw);
+        var output = new List<AgentUsageSnapshot>(agents.Count);
+        foreach (var id in ordered)
+        {
+            output.Add(primaries[id]);
+            output.AddRange(agents.Where(a => a.ClientId == id && a.Account.AccountKey is not null));
+        }
+
+        output.AddRange(agents.Where(a => a.Account.AccountKey is not null && !primaries.ContainsKey(a.ClientId)));
+        return output;
+    }
+
+    /// <summary>The order to save after dropping <paramref name="from"/> on
+    /// <paramref name="to"/>. <paramref name="visible"/> is the on-screen
+    /// primary order; ids off screen (hidden tabs, clients with no quota) keep
+    /// their saved slots instead of falling out of the key.</summary>
+    public static string Dropped(string orderRaw, IReadOnlyList<string> visible, string from, string to) =>
+        string.Join(',', ClientRegistry.MergeReorder(ClientRegistry.ParseIdList(orderRaw), visible, from, to));
+
+    /// <summary>Whether the drop line sits under the target (dragging down)
+    /// rather than over it — the direction-aware insert
+    /// <see cref="ClientRegistry.Reorder"/> performs.</summary>
+    public static bool DropsBelow(IReadOnlyList<string> visible, string from, string to)
+    {
+        List<string> list = [.. visible];
+        return list.IndexOf(from) < list.IndexOf(to);
+    }
+}
+
 /// <summary>Display decisions of macOS <c>AgentLimitsCard</c> (945dbcc2) that
 /// the Windows card draws: the status badge (:963-992), the trend indicator
 /// (:1185-1250) and its tooltip (:599-617). DashboardView compiles under no
@@ -62,6 +111,22 @@ public static class AgentLimitsText
         return isLive
             ? new("Live".Localized(), LimitsTone.Green)
             : new("No quota".Localized(), LimitsTone.Secondary);
+    }
+
+    /// <summary>The line under a client header (macOS <c>detailText</c>
+    /// :994-999): the error when there is one, drawn red; otherwise
+    /// "email · plan" with whichever part is present. Email belongs on this
+    /// card only — <see cref="AccountLabel"/> and the tray never carry
+    /// it.</summary>
+    public static LimitsDetail? Detail(AgentUsageSnapshot snapshot)
+    {
+        if (snapshot.Error is { } error)
+        {
+            return new(error, IsError: true);
+        }
+
+        var parts = new[] { snapshot.Identity?.Email, snapshot.Identity?.Plan }.OfType<string>().ToList();
+        return parts.Count == 0 ? null : new(string.Join(" · ", parts), IsError: false);
     }
 
     /// <summary>Clients whose live tail shows activity right now.</summary>
