@@ -39,8 +39,21 @@ public sealed partial class DashboardView : UserControl
     private ChartMetric _chartMetric =
         AppSettings.Store.GetString("tokenbar.chart.metric") == "cost"
             ? ChartMetric.Cost : ChartMetric.Tokens;
-    private bool _chartView3D =
-        AppSettings.Store.GetString("tokenbar.chart.view", "2d") == "3d";
+    private ChartView _chartView =
+        ChartViews.Parse(AppSettings.Store.GetString(ChartViews.Key, "2d"));
+    // Ctrl-held number hints on the tab row (macOS cmdHeld/cmdHintTask).
+    private readonly CtrlHintGate _hintGate = new();
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _hintTimer;
+    // The heatmap's horizontal scroller while it is on screen, so the wheel
+    // router can scroll it like the tab rows; null otherwise.
+    private ScrollViewer? _heatmapScroll;
+
+    /// <summary>The heatmap is rebuilt on every snapshot (about every 10 s), so
+    /// its horizontal position is kept here and restored, and it is re-anchored
+    /// to the most recent column only when the year or cutoff day changes, as
+    /// macOS does (ContributionHeatmap.swift:413-415).</summary>
+    private string? _heatmapAnchor;
+    private double? _heatmapOffset;
 
     public DashboardView()
     {
@@ -112,15 +125,18 @@ public sealed partial class DashboardView : UserControl
                 _ = DispatcherQueue.TryEnqueue(ApplyLensVisibility);
             }
             else if (key.StartsWith("tokenbar.limits.", StringComparison.Ordinal)
-                || key == "tokenbar.trace.detailed")
+                || key == "tokenbar.trace.detailed"
+                || key == OverviewCards.HiddenKey
+                || key.StartsWith("tokenbar.usage.attribution.", StringComparison.Ordinal))
             {
                 _ = DispatcherQueue.TryEnqueue(() => RenderContent(animated: false));
             }
         };
 
         // In-flyout shortcuts, the macOS ⌘ set on Ctrl: Esc/Ctrl+W close,
-        // Ctrl+R refresh, Ctrl+, settings, Ctrl+Q quit, Ctrl+1..8 lenses,
-        // Ctrl+[ / Ctrl+] cycle.
+        // Ctrl+R refresh, Ctrl+, settings, Ctrl+Q quit, Ctrl+G chart view,
+        // Ctrl+1..9 select tab, Ctrl+[ / Ctrl+] previous/next tab. "Tab" is
+        // the client tab row (Overview first), as on macOS — not the lenses.
         // Esc yields to an open transient (the year menu): light-dismiss
         // should collapse the popup, not slide the whole flyout away.
         var escape = new Microsoft.UI.Xaml.Input.KeyboardAccelerator
@@ -155,12 +171,11 @@ public sealed partial class DashboardView : UserControl
             ToggleChartView);
         AddAccel(Windows.System.VirtualKey.Q, Windows.System.VirtualKeyModifiers.Control,
             () => TrayService.QuitApp?.Invoke());
-        var lenses = Enum.GetValues<AppView>();
-        for (var i = 0; i < lenses.Length && i < 9; i++)
+        for (var n = 1; n <= TabShortcuts.MaxNumbered; n++)
         {
-            var view = lenses[i];
-            AddAccel(Windows.System.VirtualKey.Number1 + i,
-                Windows.System.VirtualKeyModifiers.Control, () => SwitchTo(view));
+            var number = n;
+            AddAccel(Windows.System.VirtualKey.Number1 + (number - 1),
+                Windows.System.VirtualKeyModifiers.Control, () => SelectTabByNumber(number));
         }
 
         // WinRT's VirtualKey enum has no OEM members, so casting VK_OEM_4 /
@@ -174,8 +189,28 @@ public sealed partial class DashboardView : UserControl
             KeyDownEvent,
             new Microsoft.UI.Xaml.Input.KeyEventHandler(OnOemShortcut),
             handledEventsToo: true);
+        // Ctrl held alone for 400 ms shows the number hints; any release or
+        // extra modifier hides them (macOS handleFlagsChanged).
+        AddHandler(
+            KeyDownEvent,
+            new Microsoft.UI.Xaml.Input.KeyEventHandler((_, _) => UpdateHints(CtrlHeldAlone())),
+            handledEventsToo: true);
+        AddHandler(
+            KeyUpEvent,
+            new Microsoft.UI.Xaml.Input.KeyEventHandler((_, _) => UpdateHints(CtrlHeldAlone())),
+            handledEventsToo: true);
 
-        ActualThemeChanged += (_, _) => UpdateGraph3DData(_snapshot);
+        ActualThemeChanged += (_, _) =>
+        {
+            UpdateGraph3DData(_snapshot);
+            // The heatmap's empty-day fill is chosen for the theme when it is
+            // built; without a rebuild those cells stay the other theme's
+            // colour and nearly vanish until the next snapshot.
+            if (_chartView == ChartView.Heatmap && _snapshot is not null)
+            {
+                RenderContent(animated: false);
+            }
+        };
     }
 
     /// <summary>The flyout owns hiding (Esc/Ctrl+W land here).</summary>
@@ -220,12 +255,13 @@ public sealed partial class DashboardView : UserControl
     {
         _flyoutVisible = false;
         _graph3d?.Release();
+        UpdateHints(false); // a Ctrl release while hidden is never seen
     }
 
     private Graph3DPanel EnsureGraph3D() => _graph3d ??= new Graph3DPanel();
 
     private bool Graph3DShouldBeActive =>
-        _graph3dDevMode || (_chartView3D
+        _graph3dDevMode || (_chartView == ChartView.ThreeD
             && _view is AppView.Overview or AppView.Stats);
 
     private void SyncGraph3DActivity()
@@ -247,11 +283,8 @@ public sealed partial class DashboardView : UserControl
             return;
         }
 
-        var stats = _selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet);
-        var year = _model?.Year ?? Format.TodayKey()[..4];
-        var grid = TokenBar.Core.Grid.Build(year, stats.PerDayMap);
         _graph3d.SetData(
-            grid,
+            CurrentGrid(snapshot),
             ActualTheme == ElementTheme.Dark,
             snapshot.CostAuthoritative);
     }
@@ -267,27 +300,109 @@ public sealed partial class DashboardView : UserControl
         _graph3dContentHost = null;
     }
 
-    private void ToggleChartView() => SetChartView(!_chartView3D);
+    private string GridYear => _model?.Year ?? Format.TodayKey()[..4];
 
-    private void SetChartView(bool use3D)
+    /// <summary>The year grid for the selected clients. The 3D graph and the
+    /// flat heatmap both read it, so they cannot show different data.</summary>
+    private TokenBar.Core.GridLayout CurrentGrid(DashboardModel.Snapshot snapshot)
     {
-        if (_chartView3D == use3D)
+        var stats = _selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet);
+        return TokenBar.Core.Grid.Build(GridYear, stats.PerDayMap);
+    }
+
+    private void ToggleChartView() => SetChartView(_chartView.Next());
+
+    private void SetChartView(ChartView view)
+    {
+        if (_chartView == view)
         {
             return;
         }
 
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        _chartView3D = use3D;
-        AppSettings.Store.SetString("tokenbar.chart.view", use3D ? "3d" : "2d");
+        _chartView = view;
+        AppSettings.Store.SetString(ChartViews.Key, view.Raw());
         RenderContent(animated: false);
         SyncGraph3DActivity();
         var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-        DevLog.Write($"graph3d: toggle view={(use3D ? "3d" : "2d")} "
+        DevLog.Write($"graph3d: toggle view={view.Raw()} "
             + $"elapsed={elapsed:F1}ms");
     }
 
+    private void SelectTabByNumber(int number)
+    {
+        // Before the first snapshot the tab row is empty, so every target would
+        // resolve to Overview and overwrite the saved tab with nothing visible.
+        if (_snapshot is null)
+        {
+            return;
+        }
+
+        if (TabShortcuts.Target(TabShortcuts.Tabs(_displayClients), number) is { } id)
+        {
+            SelectClientTab(id);
+        }
+    }
+
+    private void StepTab(int step)
+    {
+        if (_snapshot is null)
+        {
+            return; // same reason as SelectTabByNumber
+        }
+
+        SelectClientTab(TabShortcuts.Step(
+            TabShortcuts.Tabs(_displayClients), _activeClientTab, step));
+    }
+
+    private static bool IsKeyDown(Windows.System.VirtualKey key) =>
+        Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(key)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+
+    private static bool CtrlHeldAlone() =>
+        IsKeyDown(Windows.System.VirtualKey.Control)
+        && !IsKeyDown(Windows.System.VirtualKey.Shift)
+        && !IsKeyDown(Windows.System.VirtualKey.Menu)
+        && !IsKeyDown(Windows.System.VirtualKey.LeftWindows)
+        && !IsKeyDown(Windows.System.VirtualKey.RightWindows);
+
+    private void UpdateHints(bool ctrlAlone)
+    {
+        // A hidden flyout never shows hints: Ctrl+W hides it synchronously and
+        // a KeyDown for the same press may still arrive with Ctrl held, which
+        // would start the timer behind a window whose KeyUp never comes back.
+        switch (_hintGate.Update(ctrlAlone && _flyoutVisible))
+        {
+            case HintStep.StartTimer:
+                if (_hintTimer is null)
+                {
+                    _hintTimer = DispatcherQueue.CreateTimer();
+                    _hintTimer.Interval = TimeSpan.FromMilliseconds(TabShortcuts.HintDelayMs);
+                    _hintTimer.IsRepeating = false;
+                    _hintTimer.Tick += (_, _) =>
+                    {
+                        if (!_flyoutVisible)
+                        {
+                            _hintGate.Update(ctrlAlone: false);
+                            return;
+                        }
+
+                        _hintGate.Fire();
+                        UpdateClientTabs();
+                    };
+                }
+
+                _hintTimer.Start();
+                break;
+            case HintStep.CancelAndHide:
+                _hintTimer?.Stop();
+                UpdateClientTabs(); // no-op unless the hints were showing
+                break;
+        }
+    }
+
     /// <summary>Ctrl shortcuts whose key has no VirtualKey member: [ and ]
-    /// cycle lenses, comma opens Settings. Kept as raw virtual-key codes
+    /// step the tab row, comma opens Settings. Kept as raw virtual-key codes
     /// rather than characters, so the binding follows the physical key the
     /// same way the accelerator-based shortcuts do.</summary>
     private void OnOemShortcut(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
@@ -307,10 +422,10 @@ public sealed partial class DashboardView : UserControl
         switch ((int)e.Key)
         {
             case VkOem4:
-                CycleLens(-1);
+                StepTab(-1);
                 break;
             case VkOem6:
-                CycleLens(1);
+                StepTab(1);
                 break;
             case VkOemComma:
                 TrayService.OpenSettings?.Invoke();
@@ -359,18 +474,6 @@ public sealed partial class DashboardView : UserControl
         SwitchTo(_view);
     }
 
-    private void CycleLens(int step)
-    {
-        var lenses = AppViews.Visible(AppSettings.Store);
-        var index = lenses.IndexOf(_view);
-        if (index < 0)
-        {
-            index = 0;
-        }
-
-        SwitchTo(lenses[(index + step + lenses.Count) % lenses.Count]);
-    }
-
     /// <summary>One control, two states (macOS refreshButton): the glyph
     /// while idle, a spinner while a forced re-read or the initial load runs.</summary>
     private void UpdateRefreshControl(bool loading = false)
@@ -398,9 +501,8 @@ public sealed partial class DashboardView : UserControl
 
     public void SwitchTo(AppView view)
     {
-        // One guard for every caller: the numeric accelerators each bind a
-        // fixed lens at construction, so a hidden lens would otherwise stay
-        // reachable by shortcut even though its tab is gone.
+        // One guard for every caller, so a hidden lens (a stale selection, a
+        // programmatic request) can never be shown with no tab to leave it by.
         view = AppViews.Effective(view, AppSettings.Store);
         if (_view == view)
         {
@@ -449,6 +551,7 @@ public sealed partial class DashboardView : UserControl
         ClientTabsPanel.Children.Clear();
 
         DetachGraph3DContentHost();
+        _heatmapScroll = null;
         ContentHost.Content = null;
         if (!_graph3dDevMode)
         {
@@ -608,24 +711,38 @@ public sealed partial class DashboardView : UserControl
         }
     }
 
-    /// <summary>A vertical wheel over either tab row scrolls that row
+    /// <summary>A vertical wheel over either tab row (or the heatmap) scrolls it
     /// horizontally (macOS HorizontalWheelScroll). Returns false when the row
     /// is already at the end it is being pushed toward, so the wheel falls
     /// through to the dashboard's vertical scroll instead of dying under the
     /// cursor.</summary>
+    private bool PointIsInside(FrameworkElement element, Windows.Foundation.Point point)
+    {
+        var origin = element.TransformToVisual(this)
+            .TransformPoint(new Windows.Foundation.Point(0, 0));
+        return point.X >= origin.X && point.X <= origin.X + element.ActualWidth
+            && point.Y >= origin.Y && point.Y <= origin.Y + element.ActualHeight;
+    }
+
     private bool TryScrollTabRowAt(Windows.Foundation.Point point, int delta)
     {
-        foreach (var row in new[] { ClientTabsScroll, TabsScroll })
+        foreach (var row in new[] { ClientTabsScroll, TabsScroll, _heatmapScroll })
         {
             if (row is null || row.Visibility != Visibility.Visible)
             {
                 continue;
             }
 
-            var origin = row.TransformToVisual(this)
-                .TransformPoint(new Windows.Foundation.Point(0, 0));
-            if (point.X < origin.X || point.X > origin.X + row.ActualWidth
-                || point.Y < origin.Y || point.Y > origin.Y + row.ActualHeight)
+            if (!PointIsInside(row, point))
+            {
+                continue;
+            }
+
+            // The heatmap lives inside CardsScroll and can be scrolled out of
+            // sight; its bounds still extend under the header, so a wheel there
+            // must reach the dashboard, not the hidden grid. The tab rows are
+            // never clipped.
+            if (row == _heatmapScroll && !PointIsInside(CardsScroll, point))
             {
                 continue;
             }
@@ -713,7 +830,13 @@ public sealed partial class DashboardView : UserControl
 
     private void UpdateClientTabs()
     {
-        var signature = $"{_activeClientTab}|{string.Join(',', _displayClients)}";
+        if (_snapshot is null)
+        {
+            return; // loading: the row is empty on purpose
+        }
+
+        var signature =
+            $"{_activeClientTab}|{_hintGate.Visible}|{string.Join(',', _displayClients)}";
         if (signature == _clientTabsSignature)
         {
             return;
@@ -721,14 +844,15 @@ public sealed partial class DashboardView : UserControl
 
         _clientTabsSignature = signature;
         ClientTabsPanel.Children.Clear();
-        AddClientTab(ClientRegistry.OverviewTab, "Overview".Localized());
-        foreach (var id in _displayClients)
+        // Overview is tab 1 and clients follow from 2, as DashboardTabs.swift.
+        AddClientTab(ClientRegistry.OverviewTab, "Overview".Localized(), 1);
+        for (var i = 0; i < _displayClients.Count; i++)
         {
-            AddClientTab(id, ClientRegistry.TabLabel(id));
+            AddClientTab(_displayClients[i], ClientRegistry.TabLabel(_displayClients[i]), i + 2);
         }
     }
 
-    private void AddClientTab(string id, string label)
+    private void AddClientTab(string id, string label, int number)
     {
         var active = id == _activeClientTab;
         // DashboardTabs.swift:91-96 — icon + label, icon omitted for the
@@ -744,6 +868,28 @@ public sealed partial class DashboardView : UserControl
             row.Children.Add(AgentIcon.Create(id, 14));
             row.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center });
             content = row;
+        }
+
+        if (_hintGate.Visible && number <= TabShortcuts.MaxNumbered)
+        {
+            // DashboardTabs.swift:100-108 — a small "⌘N" badge after the label.
+            var withHint = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5 };
+            withHint.Children.Add(content);
+            withHint.Children.Add(new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(40, 128, 128, 128)),
+                CornerRadius = new CornerRadius(3),
+                Padding = new Thickness(3, 1, 3, 1),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock
+                {
+                    Text = $"Ctrl+{number}",
+                    FontSize = 8,
+                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                    Opacity = 0.75,
+                },
+            });
+            content = withHint;
         }
 
         var button = new Button
@@ -779,6 +925,7 @@ public sealed partial class DashboardView : UserControl
         }
 
         DetachGraph3DContentHost();
+        _heatmapScroll = null;
         UIElement content = _view switch
         {
             AppView.Quota => BuildQuota(_snapshot),
@@ -830,12 +977,22 @@ public sealed partial class DashboardView : UserControl
         var singleClient = OverviewScope.SingleClient(_activeClientTab);
         var limitsClientId = OverviewScope.LimitsClientId(singleClient);
 
+        // First-run setup cards, at the top of the global Overview lens only
+        // (macOS PopoverView.swift:712-720).
+        if (OnboardingSetup.ShowsOn(_view, _activeClientTab))
+        {
+            foreach (var setupCard in BuildSetupCards(snapshot))
+            {
+                stack.Children.Add(setupCard);
+            }
+        }
+
         // Order comes from OverviewCards.RenderOrder, not from the sequence of
         // these calls, so a test can see it. macOS got this same sequence wrong
         // once and its pinned order is what caught it; this arrived at the same
         // mistake independently, with the quota summary built directly above
         // the limits card and the chart therefore ahead of it.
-        foreach (var card in OverviewCards.RenderOrder)
+        foreach (var card in OverviewCards.Visible(AppSettings.Store))
         {
             var element = card switch
             {
@@ -876,7 +1033,7 @@ public sealed partial class DashboardView : UserControl
         Ui.Card(
             "Token Usage".Localized(),
             BuildChart(snapshot),
-            (_chartView3D ? "Full year" : "30 days").Localized(),
+            (_chartView == ChartView.Bars ? "30 days" : "Full year").Localized(),
             BuildChartViewToggle());
 
     private FrameworkElement BuildChartViewToggle()
@@ -886,12 +1043,19 @@ public sealed partial class DashboardView : UserControl
             Orientation = Orientation.Horizontal,
             Spacing = 2,
         };
-        var twoD = LensPill("2D", !_chartView3D);
-        var threeD = LensPill("3D", _chartView3D);
-        twoD.Click += (_, _) => SetChartView(false);
-        threeD.Click += (_, _) => SetChartView(true);
-        row.Children.Add(twoD);
-        row.Children.Add(threeD);
+        // Picker order is the Ctrl+G cycle order (bars, heatmap, 3D).
+        foreach (var (view, label) in new[]
+        {
+            (ChartView.Bars, "Bars".Localized()),
+            (ChartView.Heatmap, "Heatmap".Localized()),
+            (ChartView.ThreeD, "3D"),
+        })
+        {
+            var pill = LensPill(label, _chartView == view);
+            pill.Click += (_, _) => SetChartView(view);
+            row.Children.Add(pill);
+        }
+
         return row;
     }
 
@@ -902,10 +1066,12 @@ public sealed partial class DashboardView : UserControl
             return Ui.Dim("No visible client usage.".Localized());
         }
 
-        if (_chartView3D)
+        if (_chartView == ChartView.ThreeD)
         {
             return BuildGraph3D(snapshot);
         }
+
+        var heatmap = _chartView == ChartView.Heatmap;
 
         var holder = new StackPanel();
 
@@ -936,9 +1102,14 @@ public sealed partial class DashboardView : UserControl
                 SetMetric(ChartMetric.Cost);
             }
         };
-        toggles.Children.Add(byModel);
-        toggles.Children.Add(byAgent);
-        toggles.Children.Add(new Border { Width = 8 });
+        if (!heatmap)
+        {
+            // Model/Agent stacking has nowhere to go in a one-colour cell.
+            toggles.Children.Add(byModel);
+            toggles.Children.Add(byAgent);
+            toggles.Children.Add(new Border { Width = 8 });
+        }
+
         toggles.Children.Add(byTokens);
         toggles.Children.Add(byCost);
 
@@ -967,6 +1138,12 @@ public sealed partial class DashboardView : UserControl
                 snapshot.CostAuthoritative, _chartMetric))
         {
             holder.Children.Add(Ui.Dim(CostSurfaceProjection.ChartChecking));
+            return holder;
+        }
+
+        if (heatmap)
+        {
+            holder.Children.Add(BuildHeatmap(snapshot, _chartMetric));
             return holder;
         }
 
@@ -1104,6 +1281,121 @@ public sealed partial class DashboardView : UserControl
 
         canvas.SizeChanged += (_, _) => Draw();
         return holder;
+    }
+
+    /// <summary>The flat, Sunday-first year heatmap (macOS ContributionHeatmap):
+    /// a cell per day of the same grid the 3D graph reads, a five-step blue ramp
+    /// by the chosen metric, month labels above, opening scrolled to the most
+    /// recent day. All decisions come from <see cref="HeatmapMath"/>.</summary>
+    private FrameworkElement BuildHeatmap(DashboardModel.Snapshot snapshot, ChartMetric metric)
+    {
+        var grid = CurrentGrid(snapshot);
+        var cutoff = HeatmapMath.Cutoff(GridYear, Format.TodayKey());
+        var labels = HeatmapMath.MonthLabels(grid, cutoff);
+        var max = HeatmapMath.MaxValue(grid, metric, cutoff);
+        var dark = ActualTheme == ElementTheme.Dark;
+        var canvas = new Canvas
+        {
+            Width = HeatmapMath.ContentWidth(HeatmapMath.VisibleCols(grid, cutoff), labels),
+            Height = HeatmapMath.ContentHeight,
+        };
+
+        foreach (var (col, month) in labels)
+        {
+            var label = Ui.Text(HeatmapMath.MonthAbbrev[month - 1].Localized(), 10, 0.6);
+            Canvas.SetLeft(label, HeatmapMath.GridLeading + col * HeatmapMath.Step);
+            Canvas.SetTop(label, 0);
+            canvas.Children.Add(label);
+        }
+
+        // One shared hover ring, sitting in the gap around the hovered cell
+        // (macOS hoverRingInset -1).
+        var ring = new Rectangle
+        {
+            Width = HeatmapMath.Cell + 2,
+            Height = HeatmapMath.Cell + 2,
+            RadiusX = 3,
+            RadiusY = 3,
+            Stroke = HoverOutlineBrush(),
+            StrokeThickness = 1,
+            Visibility = Visibility.Collapsed,
+            IsHitTestVisible = false,
+        };
+
+        foreach (var cell in grid.Cells)
+        {
+            if (!HeatmapMath.IsRenderable(cell, cutoff))
+            {
+                continue;
+            }
+
+            var (a, r, g, b) = HeatmapMath.Fill(
+                HeatmapMath.Level(HeatmapMath.Value(cell, metric), max), dark);
+            var (x, y) = HeatmapMath.CellOrigin(cell.Col, cell.Row);
+            var rect = new Rectangle
+            {
+                Width = HeatmapMath.Cell,
+                Height = HeatmapMath.Cell,
+                RadiusX = 2,
+                RadiusY = 2,
+                Fill = new SolidColorBrush(Color.FromArgb(a, r, g, b)),
+            };
+            Canvas.SetLeft(rect, x);
+            Canvas.SetTop(rect, y);
+            canvas.Children.Add(rect);
+
+            if (HeatmapMath.HasData(cell, metric))
+            {
+                var captured = cell;
+                AttachHoverOutline(rect, hovered =>
+                {
+                    Canvas.SetLeft(ring, x - 1);
+                    Canvas.SetTop(ring, y - 1);
+                    ring.Visibility = hovered ? Visibility.Visible : Visibility.Collapsed;
+                });
+                HoverTip.AttachRich(rect, () => HeatmapTip(captured, snapshot.CostAuthoritative));
+            }
+        }
+
+        canvas.Children.Add(ring);
+
+        var scroll = new ScrollViewer
+        {
+            Content = canvas,
+            HorizontalScrollMode = ScrollMode.Enabled,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            VerticalScrollMode = ScrollMode.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Margin = new Thickness(0, 6, 0, 0),
+        };
+        // Land on the most recent columns, not Jan 1 (ChangeView clamps), the
+        // first time and when the year or cutoff changes; otherwise keep the
+        // position the user scrolled to.
+        var anchor = HeatmapMath.Anchor(GridYear, cutoff);
+        var restore = HeatmapMath.RestoreOffset(_heatmapAnchor, anchor, _heatmapOffset);
+        _heatmapAnchor = anchor;
+        scroll.Loaded += (_, _) => DispatcherQueue.TryEnqueue(
+            Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () => scroll.ChangeView(restore ?? canvas.Width, null, null, disableAnimation: true));
+        scroll.ViewChanged += (_, e) =>
+        {
+            if (!e.IsIntermediate)
+            {
+                _heatmapOffset = scroll.HorizontalOffset;
+            }
+        };
+        _heatmapScroll = scroll;
+        return scroll;
+    }
+
+    private UIElement HeatmapTip(TokenBar.Core.GridCell cell, bool costAuthoritative)
+    {
+        var panel = new StackPanel { Spacing = 5, MinWidth = 170 };
+        panel.Children.Add(TipText(Format.MonthDay(cell.Date), 12, bold: true));
+        panel.Children.Add(TipRow(
+            TipText("{0} tokens".Localized(Format.ExactTokens(cell.Tokens)), 11, 0.9),
+            CostSurfaceProjection.DayTipCost(cell.Tokens, cell.Cost, costAuthoritative), 0.9));
+        return panel;
     }
 
     private FrameworkElement BuildGraph3D(DashboardModel.Snapshot snapshot)

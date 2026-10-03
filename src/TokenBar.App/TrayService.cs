@@ -73,6 +73,9 @@ public sealed class TrayService : IDisposable
         _feed = new TrayFeed(_dispatcher, graphCoordinator);
         _animator = new TrayAnimator(_dispatcher, () => _feed.TokensPerMin, ApplyCachedIcon);
         OpenSettings = ShowSettings;
+        OpenAttributionSettings = ShowAttributionSettings;
+        OpenDashboardSettings = ShowDashboardSettings;
+        OpenDiscordSettings = ShowDiscordSettings;
         // Discord presence (opt-in, default off). The only production client
         // factory: the constant local pipe, reached only after
         // DiscordPresence.MayConnect has said yes for these arguments.
@@ -163,6 +166,16 @@ public sealed class TrayService : IDisposable
     /// the view layer never sees the tray feed.</summary>
     public static Action? OpenSettings { get; private set; }
 
+    /// <summary>The attribution onboarding card's "Set up manually…": settings
+    /// opened on the Usage attribution page (macOS
+    /// <c>showFromPopover(scrollingTo: .usageAttribution)</c>).</summary>
+    public static Action? OpenAttributionSettings { get; private set; }
+
+    /// <summary>The setup cards' "Choose tabs…" and "Set up in Settings…".</summary>
+    internal static Action? OpenDashboardSettings { get; private set; }
+
+    internal static Action? OpenDiscordSettings { get; private set; }
+
     /// <summary>Settings' manual "Check now" reaches the update flow through
     /// here. Unlike the two neighbours this is set by App, which owns the
     /// flow — the tray only already owns the update surface (PublishUpdate),
@@ -172,8 +185,14 @@ public sealed class TrayService : IDisposable
     public void ShowSettings() => SettingsWindow.Present(
         () => _feed.Quota, () => _feed.Graph, () => _feed.Trace);
 
-    /// <summary>The Discord intro's "Open Settings": navigation to the
-    /// Discord section, never a write.</summary>
+    internal void ShowAttributionSettings() => SettingsWindow.Present(
+        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showAttribution: true);
+
+    internal void ShowDashboardSettings() => SettingsWindow.Present(
+        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showDashboard: true);
+
+    /// <summary>The Discord setup card's "Set up in Settings…": navigation to
+    /// the Discord section, never a write.</summary>
     internal void ShowDiscordSettings() => SettingsWindow.Present(
         () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showDiscord: true);
 
@@ -594,6 +613,9 @@ public sealed class TrayService : IDisposable
             + "|" + AppSettings.Store.GetString(MenuBarTextColor.CriticalColorKey);
         var signature =
             $"{mode}|{styleRaw}|{coloring}|{dark}|{title}|{remaining:F1}|{animate}|{stale}"
+            // A still sand icon is the level's dune, so it follows usage too
+            // (macOS updateAnimationSpeedIfPresented).
+            + (styleRaw == SandShoal.Style ? $"|sand{_animator.SandLevel()}" : "")
             + $"|{textColorMode}|{textColorHex}";
         if (signature == _iconSignature)
         {
@@ -604,7 +626,7 @@ public sealed class TrayService : IDisposable
 
         // Hidden mode with an animation style hands the icon to the
         // animator; every other state renders one static frame here.
-        if (mode == TrayMode.Hidden && styleRaw is "cat" or "parrot")
+        if (mode == TrayMode.Hidden && SandShoal.IsAnimated(styleRaw))
         {
             _animator.Start(styleRaw, dark,
                 animate: animate);
@@ -617,9 +639,11 @@ public sealed class TrayService : IDisposable
         using var bmp = mode != TrayMode.Hidden && title.Length > 0
             ? TrayIconRenderer.RenderTitle(
                 TrayModes.IconTitle(title),
-                TrayIconRenderer.ResolveInk(
-                    AppSettings.Store, automaticColor,
-                    mode == TrayMode.QuotaLeft ? remaining : null),
+                TrayGlyph.TitleIsStale(mode, remaining, stale)
+                    ? TrayIconRenderer.StaleInk(dark)
+                    : TrayIconRenderer.ResolveInk(
+                        AppSettings.Store, automaticColor,
+                        mode == TrayMode.QuotaLeft ? remaining : null),
                 dark)
             : TrayIconRenderer.RenderGauge(
                 TrayIconRenderer.ParseGaugeStyle(styleRaw) ?? QuotaIconStyle.Bars,

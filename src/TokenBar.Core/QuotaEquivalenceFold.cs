@@ -74,9 +74,13 @@ public static class QuotaEquivalenceFold
         IReadOnlyList<QuotaCycle> cycles,
         string providerId,
         IReadOnlyList<WindowMessage> messages,
-        IReadOnlyList<UsageAttribution.Record> confirmed)
+        IReadOnlyList<UsageAttribution.Record> confirmed,
+        string? modelScope)
     {
-        var (sorted, stamps) = ResolveAndSort(messages, confirmed);
+        // No default for the scope, as macOS QuotaHistoryFold.spans: a caller
+        // that forgets it would silently count every model for a scoped
+        // window, so leaving it out does not compile.
+        var (sorted, stamps) = ResolveAndSort(QuotaHistoryFold.InScope(messages, modelScope), confirmed);
         return CyclesCore(cycles, providerId, sorted, stamps);
     }
 
@@ -166,13 +170,25 @@ public static class QuotaEquivalenceFold
     /// re-resolving the whole export; a store with several windows repeated
     /// that work per window on top of the per-cycle cost <see cref="CyclesCore"/>
     /// already fixed.
+    /// </para>
+    /// <para>
+    /// <paramref name="scopeOf"/> answers a series' model scope (the caller
+    /// passes <see cref="ModelScope.Of"/> over its provider, account and
+    /// window key), so each window's span is narrowed to its own scope (macOS DashboardModel.swift:1836-1843). Only the span
+    /// numerator is narrowed; <see cref="DeclaredCore"/> is unchanged.
     /// </para></summary>
     public static IReadOnlyDictionary<QuotaWindowIdentity, WindowEquivalence.Row> Build(
         IReadOnlyList<QuotaHistorySeries> history,
         IReadOnlyList<WindowMessage> messages,
-        UsageAttribution.Table confirmed)
+        UsageAttribution.Table confirmed,
+        Func<QuotaHistorySeries, string?> scopeOf)
     {
         var (sorted, stamps) = ResolveAndSort(messages, confirmed.Records);
+        // A scoped series' span numerator reads the export narrowed by
+        // QuotaHistoryFold.InScope, the one statement of the scope rule,
+        // resolved and sorted once per distinct scope (a handful at most).
+        var scoped = new Dictionary<string, (IReadOnlyList<ResolvedMessage>, IReadOnlyList<long>)>(
+            StringComparer.Ordinal);
         var result = new Dictionary<QuotaWindowIdentity, WindowEquivalence.Row>();
         foreach (var series in history)
         {
@@ -182,7 +198,19 @@ public static class QuotaEquivalenceFold
             // cycles beyond it are not part of "the admitted set behind the
             // equivalence" either.
             var considered = QuotaHistoryFold.Considered(QuotaHistoryFold.Cycles(series.Samples));
-            var spanCycles = CyclesCore(considered, series.ProviderId, sorted, stamps);
+            var (spanSorted, spanStamps) = (sorted, stamps);
+            if (scopeOf(series) is { } scope)
+            {
+                if (!scoped.TryGetValue(scope, out var narrowed))
+                {
+                    narrowed = ResolveAndSort(QuotaHistoryFold.InScope(messages, scope), confirmed.Records);
+                    scoped[scope] = narrowed;
+                }
+
+                (spanSorted, spanStamps) = narrowed;
+            }
+
+            var spanCycles = CyclesCore(considered, series.ProviderId, spanSorted, spanStamps);
             // Per window, not per app: a user who classified their Codex
             // usage but never touched this window's own messages has still
             // declared nothing about THIS subscription's evidence, so a zero

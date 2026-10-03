@@ -57,7 +57,7 @@ public class QuotaEquivalenceFoldTests
             Message(1500, "cursor", "anthropic", 999, 99.0), // -> cursor, does not match
         };
 
-        var spans = QuotaEquivalenceFold.Cycles(cycles, "claude", messages, confirmed);
+        var spans = QuotaEquivalenceFold.Cycles(cycles, "claude", messages, confirmed, modelScope: null);
 
         var span = Assert.Single(spans);
         Assert.Equal(1000, span.SpanTokens);
@@ -85,7 +85,7 @@ public class QuotaEquivalenceFoldTests
             Message(2001, "claude-code", "anthropic", 1000, 5.0), // after last: excluded
         };
 
-        var spans = QuotaEquivalenceFold.Cycles(cycles, "claude", messages, confirmed);
+        var spans = QuotaEquivalenceFold.Cycles(cycles, "claude", messages, confirmed, modelScope: null);
 
         var span = Assert.Single(spans);
         Assert.Equal(2000, span.SpanTokens); // two included messages, 1000 each
@@ -108,7 +108,7 @@ public class QuotaEquivalenceFoldTests
             Message(1500, "unknown-client", "anthropic", 1000, 5.0), // unassigned
         };
 
-        var spans = QuotaEquivalenceFold.Cycles(cycles, "claude", messages, confirmed);
+        var spans = QuotaEquivalenceFold.Cycles(cycles, "claude", messages, confirmed, modelScope: null);
 
         var span = Assert.Single(spans);
         Assert.Equal(0, span.SpanTokens);
@@ -137,7 +137,7 @@ public class QuotaEquivalenceFoldTests
         var history = new[] { new QuotaHistorySeries("claude", "acct", "session.v1", samples) };
         var messages = new[] { Message(1000, "claude-code", "anthropic", 1000, 5.0) };
 
-        var result = QuotaEquivalenceFold.Build(history, messages, confirmed);
+        var result = QuotaEquivalenceFold.Build(history, messages, confirmed, _ => null);
 
         var id = new QuotaWindowIdentity("claude", "acct", "session.v1");
         Assert.True(result.ContainsKey(id));
@@ -193,7 +193,7 @@ public class QuotaEquivalenceFoldTests
             Message(150_000, "codex-cli", "openai", 1000, 5.0), // never classified
         };
 
-        var result = QuotaEquivalenceFold.Build(history, messages, confirmed);
+        var result = QuotaEquivalenceFold.Build(history, messages, confirmed, _ => null);
 
         var codexRow = result[new QuotaWindowIdentity("codex", "acct", "weekly.v1")];
         Assert.IsType<WindowEquivalence.Row.Undeclared>(codexRow);

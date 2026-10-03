@@ -23,6 +23,19 @@ internal static class TrayIconGallery
                     bmp.Save(Path.Combine(
                         dir, $"{style}-{level:F0}-{(dark ? "dark" : "light")}.png"));
                 }
+
+                // The two non-live glyphs: no reading (faded + slash, #419)
+                // and a stale reading (grey fill, #8).
+                var theme = dark ? "dark" : "light";
+                using (var none = TrayIconRenderer.RenderGauge(
+                    style, null, dark, IconColoring.WarningOnly))
+                {
+                    none.Save(Path.Combine(dir, $"{style}-noreading-{theme}.png"));
+                }
+
+                using var stale = TrayIconRenderer.RenderGauge(
+                    style, 20, dark, IconColoring.WarningOnly, stale: true);
+                stale.Save(Path.Combine(dir, $"{style}-20-stale-{theme}.png"));
             }
         }
 
@@ -37,6 +50,14 @@ internal static class TrayIconGallery
             using var bmp = TrayIconRenderer.RenderTitle(
                 TokenBar.Core.TrayModes.IconTitle(titles[i]), color, dark: true);
             bmp.Save(Path.Combine(dir, $"title-{i}.png"));
+        }
+
+        // A stale quota-left value takes the stale grey (#420).
+        foreach (var dark in new[] { true, false })
+        {
+            using var bmp = TrayIconRenderer.RenderTitle(
+                TokenBar.Core.TrayModes.IconTitle("8%"), TrayIconRenderer.StaleInk(dark), dark);
+            bmp.Save(Path.Combine(dir, $"title-8-stale-{(dark ? "dark" : "light")}.png"));
         }
 
         DevLog.Write($"tray icon gallery dumped to {dir} (titles: {string.Join(' ', titles)})");

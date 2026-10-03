@@ -1,3 +1,5 @@
+using TokenBar.Interop;
+
 namespace TokenBar.Core;
 
 /// <summary>
@@ -73,5 +75,52 @@ public static class ModelScope
 
         var present = new HashSet<string>(Tokens(modelId), StringComparer.Ordinal);
         return wanted.All(present.Contains);
+    }
+
+    /// <summary>The model scope of the window a client's card or history
+    /// series names, or null when the window is not scoped (or not in the
+    /// payload). The ONE place a consumer gets a scope from: the window card,
+    /// the history rows and the equivalence estimate each hold only a
+    /// <c>(client, account, window key)</c>, and re-deriving the scope from
+    /// that key at each site is three parsers for one fact, which is how they
+    /// drift. The scope itself is decided in Rust
+    /// (<c>append_claude_scoped_windows</c>) and only looked up here.
+    /// <para>
+    /// Port of macOS <c>WindowCardLoader.modelScope(payload:cardId:)</c>
+    /// (WindowCardLoader.swift:384-396). macOS is handed a card id; the
+    /// Windows callers hold a window key (a card tab's
+    /// <see cref="QuotaWindowIdentity.WindowKey"/>, a history series' key),
+    /// so a window matches on either its <see cref="UsageWindow.CardId"/> or
+    /// its <c>PaceStatus.WindowKey</c>. For a scoped window the two are the
+    /// same string (<c>weekly_scoped.{slug}.v1</c>, or the flat lane key it
+    /// succeeds; Rust sets both from one value).
+    /// </para>
+    /// <para>
+    /// The account matters: a flat-successor key (<c>sonnet.weekly.v1</c>)
+    /// is unscoped on an account still sent the flat field and scoped on one
+    /// sent only the <c>limits[]</c> entry, so the same key can carry
+    /// different scopes. When <paramref name="accountScope"/> names a
+    /// snapshot's <c>HistoryScope</c>, only that snapshot answers. Otherwise
+    /// (no live scope to join by) this falls back to macOS's rule, the
+    /// client's first snapshot, which on macOS is the only rule.
+    /// </para></summary>
+    public static string? Of(
+        AgentUsagePayload? payload, string? clientId, string? accountScope, string? windowKey)
+    {
+        if (payload is null || clientId is null || windowKey is null)
+        {
+            return null;
+        }
+
+        var agents = payload.Agents.Where(agent => agent.ClientId == clientId).ToList();
+        var owned = accountScope is null
+            ? []
+            : agents.Where(agent => agent.HistoryScope?.Scope == accountScope).ToList();
+        var candidates = owned.Count > 0 ? owned : agents.Take(1).ToList();
+        return candidates
+            .SelectMany(agent => agent.RawCardWindows)
+            .FirstOrDefault(window =>
+                window.CardId == windowKey || window.PaceStatus.WindowKey == windowKey)
+            ?.ModelScope;
     }
 }

@@ -491,6 +491,66 @@ public static class UsageAttributionSettings
         return records;
     }
 
+    /// <summary>What the onboarding card shows: one acceptance record per
+    /// unassigned source that has a suggestion, plus how many unassigned
+    /// sources have none. Built from the same rows/acceptance functions the
+    /// Settings page uses; it does not re-derive the policy (macOS
+    /// <c>OnboardingSummary</c>, UsageAttributionSettings.swift:502-540).</summary>
+    public sealed record OnboardingSummary(
+        IReadOnlyList<UsageAttribution.Record> Records, int UnsuggestedCount);
+
+    public static OnboardingSummary OnboardingSummaryFor(
+        IReadOnlyList<ModelReportEntry> entries,
+        IReadOnlyList<UsageAttribution.Record> confirmed,
+        IReadOnlyList<string> subscriptionClients,
+        RoutedSubscriptions? routedSubscriptions = null)
+    {
+        var suggestions = SuggestionRecords(entries, confirmed, subscriptionClients, routedSubscriptions);
+        var rows = Rows(entries, confirmed, suggestions);
+        var unassigned = rows.Count(row => row.State.Kind == UsageAttribution.StateKind.Unassigned);
+        var records = AcceptanceRecords(rows);
+        return new OnboardingSummary(records, unassigned - records.Count);
+    }
+
+    /// <summary>The accept-all WRITE path: confirm every proposed record, then
+    /// remove each from the suggestions table so it stops being offered.
+    /// Settings' "Accept all" and the onboarding card both call this, so the two
+    /// surfaces cannot confirm records by different rules (macOS
+    /// <c>accept</c>, UsageAttributionSettings.swift:542-565).
+    /// <para>Both raw encodings are computed BEFORE either write: a rejected
+    /// encode writes nothing and returns the failure, so the two tables are
+    /// never left disagreeing. An empty <paramref name="records"/> is a no-op
+    /// success.</para></summary>
+    public static WriteFailure? Accept(
+        SettingsStore store, IReadOnlyList<UsageAttribution.Record> records)
+    {
+        if (records.Count == 0)
+        {
+            return null;
+        }
+
+        var confirmedStored = UsageAttribution.StoredValue.From(store, UsageAttribution.ConfirmedKey);
+        var confirmedRaw = UsageAttribution.ConfirmedRaw(confirmedStored, records);
+        if (confirmedRaw is null)
+        {
+            return DiagnoseWriteFailure(UsageAttribution.ParseState(confirmedStored), records, null);
+        }
+
+        var removals = records
+            .Select(record => record with { State = UsageAttribution.State.Unassigned })
+            .ToList();
+        var suggestionsStored = UsageAttribution.StoredValue.From(store, UsageAttribution.SuggestionsKey);
+        var suggestionsRaw = UsageAttribution.SuggestionsRaw(suggestionsStored, removals);
+        if (suggestionsRaw is null)
+        {
+            return DiagnoseWriteFailure(UsageAttribution.ParseState(suggestionsStored), removals, null);
+        }
+
+        store.SetString(UsageAttribution.ConfirmedKey, confirmedRaw);
+        store.SetString(UsageAttribution.SuggestionsKey, suggestionsRaw);
+        return null;
+    }
+
     /// <summary>Why a write did not happen. <paramref name="result"/> is the raw
     /// value the codec produced; a non-null one means the write succeeded and
     /// there is no failure to report.</summary>

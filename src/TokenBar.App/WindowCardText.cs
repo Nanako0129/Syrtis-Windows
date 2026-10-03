@@ -522,6 +522,17 @@ public static class WindowCardText
             ? "Session window".Localized()
             : "{0} window".Localized(QuotaLabels.Window(tab.Label, tab.Id.WindowKey));
 
+    /// <summary>The note a model-scoped window shows when the scope join found
+    /// none of this subscription's usage in it, though some unscoped usage
+    /// is there (macOS WindowUsageCard.swift scopeNote). Empty bars under a
+    /// moving curve would read as "you did no work", a claim the card has no
+    /// evidence for; null when there is nothing to say.</summary>
+    public static string? ScopeNote(bool scopeMatchedNothing, WindowCardTab? tab) =>
+        scopeMatchedNothing && tab is not null
+            ? "No local usage matched {0}, though this subscription has other usage in this window"
+                .Localized(QuotaLabels.Window(tab.Label, tab.Id.WindowKey))
+            : null;
+
     /// <summary>The tab pill's text. Same naming as <see cref="Title"/>, without
     /// the "window" noun the heading adds.</summary>
     public static string TabLabel(WindowCardTab tab) =>

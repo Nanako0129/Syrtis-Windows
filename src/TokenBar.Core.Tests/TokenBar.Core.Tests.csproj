@@ -35,6 +35,12 @@
     <Compile Include="..\TokenBar.App\CostSurfaceProjection.cs" Link="CostSurfaceProjection.cs" />
     <Compile Include="..\TokenBar.App\AppViews.cs" Link="AppViews.cs" />
     <Compile Include="..\TokenBar.App\OverviewCard.cs" Link="OverviewCard.cs" />
+    <!-- Tab-row keyboard rules (Ctrl+1..9, Ctrl+[ ], the Ctrl-held hints), the
+         three-state chart view and the flat heatmap's layout math: DashboardView
+         compiles under no test project, so each decision lives in its own pure file. -->
+    <Compile Include="..\TokenBar.App\TabShortcuts.cs" Link="TabShortcuts.cs" />
+    <Compile Include="..\TokenBar.App\ChartView.cs" Link="ChartView.cs" />
+    <Compile Include="..\TokenBar.App\HeatmapMath.cs" Link="HeatmapMath.cs" />
     <Compile Include="..\TokenBar.App\AppLanguage.cs" Link="AppLanguage.cs" />
     <Compile Include="..\TokenBar.App\DrillDownSummary.cs" Link="DrillDownSummary.cs" />
     <Compile Include="..\TokenBar.App\QuotaSummaryText.cs" Link="QuotaSummaryText.cs" />
@@ -58,6 +64,12 @@
          the same reason as the file above: SettingsWindow.cs compiles under no
          test project. -->
     <Compile Include="..\TokenBar.App\AttributionReportGate.cs" Link="AttributionReportGate.cs" />
+    <Compile Include="..\TokenBar.App\AttributionOnboardingCard.cs" Link="AttributionOnboardingCard.cs" />
+    <!-- First-run setup cards (M9): every show rule, the answer/skip/remaining
+         bookkeeping and the Overview-only placement. DashboardView.Setup.cs
+         compiles under no test project, so none of it lives there. -->
+    <Compile Include="..\TokenBar.App\TrayIconStyles.cs" Link="TrayIconStyles.cs" />
+    <Compile Include="..\TokenBar.App\OnboardingSetup.cs" Link="OnboardingSetup.cs" />
     <!-- The 每日・依訂閱 card's four-state branch and its copy, for the same
          reason: DashboardView.Quota.cs is compiled by no test project, and the
          state choice is the defect this card can actually ship (a range with
