@@ -141,4 +141,28 @@ public class DrillDownSummaryTests
     [Fact]
     public void AnUnpricedMonthReadsAsUnpricedNotFree() =>
         Assert.Equal("12 msgs · 12.3K · —", DrillDownSummary.Text(Month(cost: 0), true));
+
+    // The lens card's trailing count, singular at one as macOS words it.
+    [Theory]
+    [InlineData(1, "1 active day", "1 active month")]
+    [InlineData(3, "3 active days", "3 active months")]
+    public void ActiveCountsAgreeInNumber(int count, string days, string months)
+    {
+        Assert.Equal(days, DrillDownSummary.ActiveDays(count));
+        Assert.Equal(months, DrillDownSummary.ActiveMonths(count));
+    }
+
+    // Chinese has no plural: one day and three days take the same wording,
+    // so the count must not change register between the two keys.
+    [Theory]
+    [InlineData("strings-zh-Hant.json")]
+    [InlineData("strings-zh-Hans.json")]
+    public void ActiveCountKeysReadTheSameInChinese(string table)
+    {
+        var entries = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, table)))!;
+
+        Assert.Equal(entries["{0} active day"], entries["{0} active days"]);
+        Assert.Equal(entries["{0} active month"], entries["{0} active months"]);
+    }
 }

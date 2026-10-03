@@ -341,6 +341,32 @@ public class AccountIdentityTests
     }
 
     [Fact]
+    public void PrimaryPillNamesItsEmailWhenThePayloadHasOne()
+    {
+        var withEmail = Payload(
+            Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1"))
+                with { Identity = new AgentIdentity(Email: " a@example.com ") },
+            Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1"))
+                with { Identity = new AgentIdentity(Email: "b@example.com") });
+        Assert.Equal(
+            ["a@example.com", "Claude Desktop"],
+            WindowCardText.AccountPills(withEmail, "claude").Select(p => p.Label));
+
+        // A blank email falls back to the client name.
+        var blank = Payload(
+            Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1"))
+                with { Identity = new AgentIdentity(Email: "  ") },
+            Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
+        Assert.Equal("Claude", WindowCardText.AccountPills(blank, "claude")[0].Label);
+
+        // Negative control: AccountLabel also feeds the tray menu and tooltip
+        // (TrayService), which must never show the email.
+        Assert.Equal("Claude", AccountLabel.Of(new AccountIdentity("claude", null), withEmail));
+        Assert.Equal("Claude Code", AccountLabel.Of(withEmail.Agents[0], withEmail, full: true));
+        Assert.Null(WindowCardText.HeaderAccountLabel(withEmail, "claude", null));
+    }
+
+    [Fact]
     public void StoredAccountWinsWhenPresentWithWindowsElseTheDefaultRuleApplies()
     {
         var both = TwoAccounts();

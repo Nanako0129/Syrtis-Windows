@@ -17,10 +17,15 @@ public readonly record struct GraphQuery(string? Year)
 
 public readonly record struct GraphRequestId(GraphQuery Query, long Generation);
 
+/// <param name="RestoredFrom">When the payload is a persisted snapshot, the
+/// time it was captured; null for a live computation. Lets the UI say the
+/// numbers on screen are from an earlier run until the live pass replaces
+/// them.</param>
 public sealed record GraphPublication(
     GraphRequestId RequestId,
     GraphPublicationStage Stage,
-    UsagePayload Payload);
+    UsagePayload Payload,
+    DateTimeOffset? RestoredFrom = null);
 
 public sealed record GraphRequestCompletion(
     GraphRequestId RequestId,
@@ -60,7 +65,13 @@ public sealed class GraphRequestCoordinator
     internal const Environment.SpecialFolder SnapshotProfileRoot =
         Environment.SpecialFolder.LocalApplicationData;
 
-    private static readonly TimeSpan SnapshotMaxAge = TimeSpan.FromMinutes(30);
+    /// <summary>Oldest persisted snapshot still shown at startup: 90 days, as
+    /// macOS (<c>SnapshotStore.maxAge</c>). A hit already requires the same
+    /// schema, source context id and year (<see cref="GraphSnapshotStore"/>),
+    /// the payload is validated, and the live pass replaces it as soon as it
+    /// publishes, so age only decides whether a cold start shows yesterday's
+    /// numbers (marked as such) or nothing.</summary>
+    internal static readonly TimeSpan SnapshotMaxAge = TimeSpan.FromDays(90);
 
     private sealed class QueryState(GraphQuery query)
     {
@@ -490,7 +501,7 @@ public sealed class GraphRequestCoordinator
             state,
             requestId,
             new GraphPublication(
-                requestId, GraphPublicationStage.LocalFirst, result.Payload),
+                requestId, GraphPublicationStage.LocalFirst, result.Payload, capturedAt),
             snapshot: true);
     }
 

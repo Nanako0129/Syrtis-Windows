@@ -105,12 +105,21 @@ public static class WindowCardText
 
     /// <summary>The account pills for a client: payload order, one per card
     /// with live windows, and only when there are at least two — otherwise
-    /// empty and the card is exactly the single-account card.</summary>
+    /// empty and the card is exactly the single-account card.
+    /// <para>The primary's pill names its <c>identity.email</c> when the
+    /// payload carries one (macOS <c>CardAccountContext.pillLabel</c>). Only
+    /// here: <see cref="AccountLabel.Of(AccountIdentity, AgentUsagePayload?, bool)"/>
+    /// also feeds the tray menu and tooltip, which must not show an
+    /// email.</para></summary>
     public static IReadOnlyList<AccountPill> AccountPills(AgentUsagePayload? quota, string clientId)
     {
         var pills = (quota?.Agents ?? [])
             .Where(a => a.ClientId == clientId && a.Windows.Count > 0)
-            .Select(a => new AccountPill(a.Account.AccountKey, AccountLabel.Of(a.Account, quota)))
+            .Select(a => new AccountPill(
+                a.Account.AccountKey,
+                a.Account.AccountKey is null && a.Identity?.Email?.Trim() is { Length: > 0 } email
+                    ? email
+                    : AccountLabel.Of(a.Account, quota)))
             .ToList();
         return pills.Count >= 2 ? pills : [];
     }
@@ -176,14 +185,15 @@ public static class WindowCardText
     /// Antigravity local IDE key history on an authoritative owner ID (the
     /// ChatGPT account ID; the signed-in email), so two accounts there keep
     /// two series and the previous account's series stays out of the new
-    /// one's tab. Claude, Copilot, Grok and Antigravity's remote OAuth route
-    /// have no owner ID in anything fetched, so their history scope is one
+    /// one's tab. Claude, Copilot, Grok, Kiro and Antigravity's remote OAuth
+    /// route have no owner ID in anything fetched, so their history scope is one
     /// constant per installation and provider: every account signed in on
     /// this installation records into, and is shown, the same series. That
     /// is macOS's trade, accepted for Windows on 2026-09-25 — the curve
     /// models the operator, not the billing account — and it is what stops a
     /// credential rotation from starting the history over. Before it, those
-    /// providers keyed history on the credential lineage and this filter
+    /// providers except Kiro (added after, never lineage-keyed) keyed history
+    /// on the credential lineage and this filter
     /// isolated accounts for them too; the series that rule left behind are
     /// merged into the history-scope series once, by the Rust store's
     /// one-time schema-3 fold (a window whose merge fails validation keeps
@@ -514,13 +524,12 @@ public static class WindowCardText
     }
 
     /// <summary>The card's own heading. The window half goes through
-    /// <see cref="QuotaLabels.Window"/> — the one place a window is named — so
-    /// this title, the tab pill above it and the strip card's row cannot
-    /// disagree about what the same window is called.</summary>
+    /// <see cref="ShortWindow"/>, shared with the tab pill above it, so the
+    /// two cannot disagree about what the same window is called.</summary>
     public static string Title(WindowCardTab? tab) =>
         tab is null
             ? "Session window".Localized()
-            : "{0} window".Localized(QuotaLabels.Window(tab.Label, tab.Id.WindowKey));
+            : "{0} window".Localized(ShortWindow(tab));
 
     /// <summary>The note a model-scoped window shows when the scope join found
     /// none of this subscription's usage in it, though some unscoped usage
@@ -535,8 +544,53 @@ public static class WindowCardText
 
     /// <summary>The tab pill's text. Same naming as <see cref="Title"/>, without
     /// the "window" noun the heading adds.</summary>
-    public static string TabLabel(WindowCardTab tab) =>
-        QuotaLabels.Window(tab.Label, tab.Id.WindowKey);
+    public static string TabLabel(WindowCardTab tab) => ShortWindow(tab);
+
+    /// <summary><see cref="QuotaLabels.Window"/>, with a live label shortened
+    /// by <see cref="ShortLabel"/>. A window with no live label is named from
+    /// its key, which is never the long grouped shape.</summary>
+    private static string ShortWindow(WindowCardTab tab) =>
+        string.IsNullOrWhiteSpace(tab.Label)
+            ? QuotaLabels.Window(tab.Label, tab.Id.WindowKey)
+            : ShortLabel(tab.Label);
+
+    private const string LimitRemaining = " Limit Remaining";
+
+    /// <summary>The card title and window pills are narrow; Antigravity's
+    /// grouped buckets arrive as "Gemini Models · Weekly Limit Remaining",
+    /// which overflowed the pill row. Port of macOS
+    /// <c>WindowUsageCard.shortLabel</c>: shortens only the
+    /// "&lt;group&gt; · &lt;bucket&gt; Limit Remaining" shape to
+    /// "Gemini · Weekly", "Claude/GPT · 5h" (bucket localized); any other
+    /// label is returned localized and unchanged. The Agent-limits card,
+    /// history, heatmap, Overview, tray and tooltips keep the full name.</summary>
+    public static string ShortLabel(string label)
+    {
+        var parts = label.Split(" · ");
+        if (parts.Length != 2 || !parts[1].EndsWith(LimitRemaining, StringComparison.Ordinal))
+        {
+            return label.Localized();
+        }
+
+        var group = parts[0];
+        foreach (var suffix in new[] { " Models", " models" })
+        {
+            if (group.EndsWith(suffix, StringComparison.Ordinal))
+            {
+                group = group[..^suffix.Length];
+            }
+        }
+
+        group = group.Replace(" and ", "/", StringComparison.Ordinal);
+        var bucket = parts[1][..^LimitRemaining.Length];
+        var window = bucket switch
+        {
+            "Weekly" => "Weekly".Localized(),
+            "Five Hour" => "5h".Localized(),
+            _ => bucket.Localized(),
+        };
+        return $"{group} · {window}";
+    }
 
     /// <summary>The line under the title. Every state names itself, so the
     /// subtitle can never say "waiting" while the body says it gave up.</summary>

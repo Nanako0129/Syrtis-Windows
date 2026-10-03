@@ -11,8 +11,8 @@ internal static class TrayIconStyles
 {
     internal static IReadOnlyList<(string Raw, string Label)> Options =>
     [
-        ("cat", "Cat".Localized()),
-        ("parrot", "Parrot".Localized()),
+        ("cat", "Spinning cat".Localized()),
+        ("parrot", "Party parrot".Localized()),
         (SandShoal.Style, SandShoal.Label),
         ("bars", "Signal bars".Localized()),
         ("ring", "Ring gauge".Localized()),

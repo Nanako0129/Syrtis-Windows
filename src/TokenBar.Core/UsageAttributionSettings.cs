@@ -190,6 +190,13 @@ public static class UsageAttributionSettings
         var configured = (payload?.Agents ?? [])
             .Where(snapshot =>
                 snapshot.Identity is not null || snapshot.Windows.Count > 0 || snapshot.Credits is not null)
+            // A declared router is never a direct attribution target: its usage is
+            // attributed through the subscriptions it routes into, not to itself
+            // (macOS `UsageAttributionSettings.subscriptionClients`).
+            // opencode now carries its own OpenCode Go quota snapshot, so without
+            // this it would be admitted here and a usage row could be "assigned"
+            // to opencode.
+            .Where(snapshot => snapshot.ClientId != "opencode")
             .Select(snapshot => snapshot.ClientId);
         var viaOpencode = (payload?.OpencodeSubscriptions ?? [])
             .Select(SubscriptionClientForLabel)
