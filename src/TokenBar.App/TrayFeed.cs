@@ -147,7 +147,7 @@ public sealed class TrayFeed : IDisposable
             try
             {
                 using var boost = ProcessPower.Boost(); // live-tail parse
-                var trace = TbCore.UsageTrace(600);
+                var trace = TbCore.UsageTrace(TraceCollapse.WindowSecs);
                 _ = _dispatcher.TryEnqueue(() =>
                 {
                     if (_disposed)
