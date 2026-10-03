@@ -109,11 +109,14 @@ public class GraphConsumerStateTests
         Assert.Equal(new LazyLaneActivation.Wanted(true, false, false, false), LazyLaneActivation.For(AppView.Hourly));
         Assert.Equal(new LazyLaneActivation.Wanted(false, true, false, false), LazyLaneActivation.For(AppView.Agents));
         Assert.Equal(new LazyLaneActivation.Wanted(false, false, true, true), LazyLaneActivation.For(AppView.Quota));
-        // Every other lens — Overview included — wants none of the four
-        // lazy lanes: this is what actually stops the leak, since the model
-        // reads this fresh on every SwitchTo rather than only ever setting
-        // flags true.
-        Assert.Equal(default, LazyLaneActivation.For(AppView.Overview));
+        // Overview wants the quota history alone: its Agent-limits card draws
+        // trend arrows from it (G3a, 188 check on 075d4d1 showed none there
+        // until Quota had been visited). The expensive window-usage scan stays
+        // Quota's own.
+        Assert.Equal(new LazyLaneActivation.Wanted(false, false, true, false), LazyLaneActivation.For(AppView.Overview));
+        // Every other lens wants none of the four lazy lanes: this is what
+        // actually stops the leak, since the model reads this fresh on every
+        // SwitchTo rather than only ever setting flags true.
         Assert.Equal(default, LazyLaneActivation.For(AppView.Models));
         Assert.Equal(default, LazyLaneActivation.For(AppView.Monthly));
         Assert.Equal(default, LazyLaneActivation.For(AppView.Daily));
