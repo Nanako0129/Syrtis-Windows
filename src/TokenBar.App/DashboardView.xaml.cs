@@ -911,13 +911,17 @@ public sealed partial class DashboardView : UserControl
         };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(
             button, $"ClientTab_{id}");
+        // Every tab press (Overview's too) starts a fresh gesture, so a drag
+        // never swallows a later, unrelated click.
+        button.AddHandler(PointerPressedEvent, new Microsoft.UI.Xaml.Input.PointerEventHandler(
+            (_, _) => _tabDragMoved = false), handledEventsToo: true);
         button.Click += (_, _) =>
         {
-            // The release that ends a drag also raises Click; it was a move,
-            // not a selection.
-            if (_tabDragEnded)
+            // A press that moved past the threshold was a drag, not a
+            // selection — whichever order Button raises Click and its capture
+            // release in.
+            if (_tabDragMoved)
             {
-                _tabDragEnded = false;
                 return;
             }
 
@@ -938,7 +942,7 @@ public sealed partial class DashboardView : UserControl
     private string? _tabDragOver;
     private Windows.Foundation.Point _tabDragStart;
     private bool _tabDragging;
-    private bool _tabDragEnded;
+    private bool _tabDragMoved; // this press passed the threshold; cleared on the next press
 
     /// <summary>The drop line drawn on the hovered tab's leading or trailing
     /// edge: 2 px of the accent, as macOS draws an accent Capsule 2 wide.</summary>
@@ -978,37 +982,40 @@ public sealed partial class DashboardView : UserControl
             }
 
             _tabDragging = true;
+            _tabDragMoved = true;
             var over = TabAt(at.X);
             _tabDragOver = over != null && over != id ? over : null;
             ShowTabDropLine();
         }), handledEventsToo: true);
-        button.AddHandler(PointerReleasedEvent, new Microsoft.UI.Xaml.Input.PointerEventHandler((_, _) =>
-        {
-            if (_tabDragId != id)
-            {
-                return;
-            }
+        // Button's own release handler releases the capture before handlers
+        // added here run, so PointerCaptureLost may arrive first. Both end
+        // the gesture through FinishTabDrag; whichever comes first does the
+        // work. A capture lost while the button is still held is a cancel
+        // (the window lost focus mid-drag), not a drop.
+        button.AddHandler(PointerReleasedEvent, new Microsoft.UI.Xaml.Input.PointerEventHandler(
+            (_, _) => FinishTabDrag(id, drop: true)), handledEventsToo: true);
+        button.PointerCaptureLost += (_, e) => FinishTabDrag(
+            id, drop: !e.GetCurrentPoint(button).Properties.IsLeftButtonPressed);
+    }
 
-            var (dragging, over) = (_tabDragging, _tabDragOver);
-            EndTabDrag();
-            _tabDragEnded = dragging;
-            if (dragging && over is not null)
-            {
-                var store = AppSettings.Store;
-                store.SetString(
-                    ClientRegistry.TabOrderKey,
-                    ClientRegistry.MoveTab(
-                        store.GetString(ClientRegistry.TabOrderKey) ?? "",
-                        _presentTabs, _displayClients, id, over));
-            }
-        }), handledEventsToo: true);
-        button.PointerCaptureLost += (_, _) =>
+    private void FinishTabDrag(string id, bool drop)
+    {
+        if (_tabDragId != id)
         {
-            if (_tabDragId == id)
-            {
-                EndTabDrag();
-            }
-        };
+            return;
+        }
+
+        var (dragging, over) = (_tabDragging, _tabDragOver);
+        EndTabDrag();
+        if (drop && dragging && over is not null)
+        {
+            var store = AppSettings.Store;
+            store.SetString(
+                ClientRegistry.TabOrderKey,
+                ClientRegistry.MoveTab(
+                    store.GetString(ClientRegistry.TabOrderKey) ?? "",
+                    _presentTabs, _displayClients, id, over));
+        }
     }
 
     private void EndTabDrag()
