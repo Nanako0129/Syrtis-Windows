@@ -789,6 +789,11 @@ public sealed class DashboardModel
         if (!attachment.InFlight)
         {
             Volatile.Write(ref _slowInFlight, 0);
+            // A request that finished while the dashboard was not polling
+            // (the tray started it) never reached OnGraphCompleted here; if
+            // its only publication is the restore, replaying it below must
+            // apply it as failed.
+            _settledRequestId = attachment.RequestId;
         }
 
         if (attachment.Latest is { } latest)
