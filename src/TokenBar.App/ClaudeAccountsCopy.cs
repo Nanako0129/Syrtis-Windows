@@ -41,7 +41,7 @@ internal static class ClaudeAccountsCopy
     internal static string Reason(string code) => code switch
     {
         "homeDirectory" => "That's your user folder. Pick the Claude config folder inside it.",
-        "defaultConfigDir" => "That's your main Claude account's folder, which is already shown.",
+        "defaultConfigDir" => "That folder overlaps your main Claude account's folder, which is already shown.",
         "duplicate" => "Already added.",
         "unsupportedPath" => "Only folders on a drive letter can be added, not network or WSL paths.",
         "rootDirectory" => "A drive's root can't be added.",

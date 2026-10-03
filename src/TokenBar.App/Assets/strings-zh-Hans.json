@@ -477,7 +477,7 @@
   "A folder on a network drive is read over the network on every refresh. Network paths (\\\\server\\share) and folders inside WSL can't be added yet.": "网络驱动器上的目录，每次刷新都会通过网络读取。网络路径（\\\\server\\share）和 WSL 中的目录暂时还不能添加。",
   "Remove only stops Syrtis reading the folder. The folder and its sign-in stay as they are, nothing is revoked at Anthropic, and the card's history is kept: adding the same folder again continues it.": "移除只会让 Syrtis 停止读取这个目录。目录和其中的登录信息都不会变动，也不会在 Anthropic 那边撤销任何授权；卡片的历史记录会保留，之后再添加同一个目录就会接着记录。",
   "That's your user folder. Pick the Claude config folder inside it.": "这是你的用户目录，请选择其中的 Claude 配置目录。",
-  "That's your main Claude account's folder, which is already shown.": "这是主 Claude 账户的目录，已经显示了。",
+  "That folder overlaps your main Claude account's folder, which is already shown.": "这个目录与主 Claude 账户的目录重叠，而主账户已经显示了。",
   "Already added.": "已经添加过了。",
   "Only folders on a drive letter can be added, not network or WSL paths.": "只能添加驱动器盘符下的目录，网络路径和 WSL 路径不行。",
   "A drive's root can't be added.": "不能添加驱动器的根目录。",

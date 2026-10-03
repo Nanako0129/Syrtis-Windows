@@ -46,11 +46,23 @@ public class ClaudeExtraRootsTests
     [InlineData(@"C:\Users\Me\.claude", "defaultConfigDir")]
     [InlineData(@"c:/USERS/me/.CLAUDE/", "defaultConfigDir")]
     [InlineData(@"d:/WORK/.claude", "duplicate")]
+    [InlineData(@"C:\Users\Me\.claude\work", "defaultConfigDir")]
+    [InlineData(@"C:\Users", "defaultConfigDir")]
+    [InlineData(@"\\server\share\.claude", "unsupportedPath")]
+    [InlineData(@"//wsl.localhost/Ubuntu/home/me/.claude", "unsupportedPath")]
     [InlineData(@"C:\Users\Me\.claude-work", null)]
-    [InlineData(@"C:\Users\Me\.claude\projects", null)]
+    [InlineData(@"C:\Users\Mee\.claude", null)]
     public void UiRulesFoldCaseAndSeparators(string path, string? expected)
     {
         Assert.Equal(expected, ClaudeExtraRoots.UiRejection(path, [@"D:\work\.claude"], @"C:\Users\Me"));
+    }
+
+    [Fact]
+    public void ANinthFolderIsRefusedBeforeSaving()
+    {
+        var eight = Enumerable.Range(0, ClaudeExtraRoots.MaxDirs).Select(i => $@"D:\a{i}").ToList();
+        Assert.Equal("limitExceeded", ClaudeExtraRoots.UiRejection(@"D:\b", eight, null));
+        Assert.Null(ClaudeExtraRoots.UiRejection(@"D:\b", eight[..^1], null));
     }
 
     [Fact]
@@ -122,9 +134,14 @@ public class ClaudeExtraRootsTests
     public void ScanRootsCoverOnlyDirectoriesTheConfigRegistryAcceptedAndMapBack()
     {
         IReadOnlyList<string>? scanned = null;
+        var configCalls = new List<IReadOnlyList<string>>();
         var pusher = new ClaudeRootsPusher(
             () => [@"D:\a", @"\\server\share", @"E:\b"],
-            dirs => Ok(2, new RootRejection(1, "unsupportedPath")),
+            dirs =>
+            {
+                configCalls.Add(dirs);
+                return dirs.Count == 3 ? Ok(2, new RootRejection(1, "unsupportedPath")) : Ok(dirs.Count);
+            },
             roots =>
             {
                 scanned = roots;
@@ -139,6 +156,35 @@ public class ClaudeExtraRootsTests
         Assert.Equal(
             new Dictionary<int, string> { [1] = "unsupportedPath", [2] = "notDirectory" },
             pusher.Last!.Rejected);
+        // E:\b's transcripts can't be scanned, so it gets no card either: the
+        // config registry ends on the directories both registries took.
+        Assert.Equal([@"D:\a"], configCalls[^1]);
+    }
+
+    /// <summary>A scan setter that fails leaves its registry as it was; the
+    /// config registry goes back to the last list both took.</summary>
+    [Fact]
+    public void AFailedScanSetterPutsTheConfigRegistryBack()
+    {
+        IReadOnlyList<string> saved = [@"D:\a"];
+        IReadOnlyList<string> config = [];
+        var failScan = false;
+        var pusher = new ClaudeRootsPusher(
+            () => saved,
+            dirs =>
+            {
+                config = dirs;
+                return Ok(dirs.Count);
+            },
+            roots => failScan ? throw new InvalidOperationException() : Ok(roots.Count),
+            _ => { });
+        Assert.True(pusher.Request().Wait(TimeSpan.FromSeconds(10)));
+
+        saved = [@"D:\a", @"D:\b"];
+        failScan = true;
+        Assert.Throws<AggregateException>(() => pusher.Request().Wait(TimeSpan.FromSeconds(10)));
+
+        Assert.Equal([@"D:\a"], config);
     }
 
     // ---- R6: logs carry exception types, never paths -----------------------
@@ -163,17 +209,34 @@ public class ClaudeExtraRootsTests
 
     // ---- the launch gate ---------------------------------------------------
 
+    /// <summary>A failed launch push is logged once, by type, and every
+    /// reader after it continues with the current context without logging
+    /// again.</summary>
     [Fact]
-    public void LaunchGateFallsBackOnAFailedPushAndLogsTheTypeOnly()
+    public void LaunchGateFallsBackOnAFailedPushAndLogsTheTypeOnce()
     {
         var log = new List<string>();
-        var failed = Task.FromException(new UnauthorizedAccessException($"denied: {Sentinel}"));
+        var launch = ClaudeExtraRoots.Observe(
+            Task.FromException(new UnauthorizedAccessException($"denied: {Sentinel}")), log.Add);
 
-        ClaudeExtraRoots.AwaitLaunch(failed, TimeSpan.FromSeconds(5), log.Add);
+        for (var reader = 0; reader < 3; reader++)
+        {
+            ClaudeExtraRoots.AwaitLaunch(launch, TimeSpan.FromSeconds(5), log.Add);
+        }
 
         var line = Assert.Single(log);
         Assert.Contains(nameof(UnauthorizedAccessException), line);
         Assert.DoesNotContain("SENTINEL", line, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void PushesAreNumberedSoTheLaunchPushIsTheFirst()
+    {
+        var pusher = new ClaudeRootsPusher(() => [], dirs => Ok(0), roots => Ok(0), _ => { });
+        Assert.True(pusher.Request().Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal(1, pusher.Last!.Sequence);
+        Assert.True(pusher.Request().Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal(2, pusher.Last!.Sequence);
     }
 
     [Fact]
@@ -225,6 +288,50 @@ public class ClaudeExtraRootsTests
 
             id = "sc1:before";
             Assert.Equal(GraphSnapshotReadStatus.Hit, snapshot.Read("2026").Status);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>A richer scan that started under one set of roots and finished
+    /// after they changed is not saved under the new id; one that ran wholly
+    /// under the current roots is.</summary>
+    [Fact]
+    public void AScanThatStraddledARootChangeIsNotSaved()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "tokenbar-tests", "profile-" + Guid.NewGuid().ToString("N"));
+        var id = "sc1:before";
+        UsagePayload? scanned = null;
+        try
+        {
+            var coordinator = GraphRequestCoordinator.CreateForApp(
+                getFolderPath: _ => root,
+                sourceContextId: () => id,
+                localFirst: _ => throw new InvalidOperationException(),
+                graph: _ =>
+                {
+                    scanned = RetainedGraphStartupTests.SnapshotPayload("2026-01-01");
+                    id = "sc1:after"; // the roots change while this scan runs
+                    return scanned;
+                });
+            var richer = typeof(GraphRequestCoordinator)
+                .GetField("_graph", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+                .GetValue(coordinator) as Func<string?, UsagePayload>;
+            var payload = richer!("2026");
+
+            Assert.Equal(
+                GraphSnapshotWriteStatus.Skipped,
+                coordinator.Snapshot!.Write("2026", DateTimeOffset.UtcNow, payload, null));
+
+            var again = richer("2026"); // starts and ends under sc1:after
+            Assert.Equal(
+                GraphSnapshotWriteStatus.Written,
+                coordinator.Snapshot.Write("2026", DateTimeOffset.UtcNow, again, null));
         }
         finally
         {
