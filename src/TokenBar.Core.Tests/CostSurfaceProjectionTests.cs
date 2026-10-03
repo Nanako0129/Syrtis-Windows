@@ -364,4 +364,23 @@ public class CostSurfaceProjectionTests
             Localization.Load("en", AppContext.BaseDirectory);
         }
     }
+    /// <summary>The engine's unattributed bucket "Main" reads in the UI
+    /// language; a user's own agent names (including one that only contains
+    /// "Main") are shown exactly as received.</summary>
+    [Fact]
+    public void TheMainAgentBucketIsLocalizedAndAgentNamesAreNot()
+    {
+        Localization.Load("zh-Hant", AppContext.BaseDirectory);
+        try
+        {
+            Assert.Equal("主要", CostSurfaceProjection.AgentLabel("Main"));
+            Assert.Equal("Plan Verifier", CostSurfaceProjection.AgentLabel("Plan Verifier"));
+            Assert.Equal("Main Executor", CostSurfaceProjection.AgentLabel("Main Executor"));
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
+        Assert.Equal("Main", CostSurfaceProjection.AgentLabel("Main"));
+    }
 }

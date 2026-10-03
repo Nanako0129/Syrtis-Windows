@@ -92,6 +92,26 @@ public class QuotaSummaryTextTests
     public void TightestHeadlineNamesClientAndWindow() =>
         Assert.Equal("Claude Code · Weekly", QuotaSummaryText.TightestHeadline(Summary()));
 
+    /// <summary>The engine names a window it cannot classify "Unknown"
+    /// (agent_usage.rs, Codex row fallback); in zh-Hant the headline reads it
+    /// in Chinese, as every other window label does (188 check:
+    /// "Codex · Unknown").</summary>
+    [Fact]
+    public void AnUnknownWindowLabelIsLocalized()
+    {
+        Localization.Load("zh-Hant", AppContext.BaseDirectory);
+        try
+        {
+            Assert.Equal(
+                "Codex · 未知",
+                QuotaSummaryText.TightestHeadline(Summary() with { TightestClient = "codex", TightestLabel = "Unknown" }));
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
+    }
+
     // Reset text is produced by UsagePace.ResetText, the same helper the
     // quota cards use — asserting the exact composed string here is what
     // pins that reuse rather than a re-derived countdown.

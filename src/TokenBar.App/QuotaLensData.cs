@@ -109,7 +109,12 @@ public static class QuotaLensData
                             (agent.ClientId, agent.HistoryScope!.Scope!, key),
                             account.AccountKey is null
                                 ? window.Label
-                                : $"{AccountLabel.Of(account, quota)} · {window.Label}");
+                                // The window part is localized here, where it
+                                // is still a table key: QuotaLabels.Window
+                                // localizes the whole label, and the composed
+                                // "<account> · <window>" has no entry, so a
+                                // non-primary row stayed in English.
+                                : $"{AccountLabel.Of(account, quota)} · {window.Label.Localized()}");
                     }
                     else
                     {
