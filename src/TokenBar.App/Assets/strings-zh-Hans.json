@@ -505,5 +505,10 @@
   "This folder can't be added.": "这个目录无法添加。",
   "That's your user folder. Pick the Claude config folder inside it.": "这是你的用户目录，请选择其中的 Claude 配置目录。",
   "That folder overlaps the projects or transcripts folder of a folder you already added.": "这个目录与已添加目录的 projects 或 transcripts 目录重叠。",
-  "Syrtis couldn't check this folder. Try again, or restart Syrtis.": "Syrtis 无法检查这个目录。请再试一次，或重新启动 Syrtis。"
+  "Syrtis couldn't check this folder. Try again, or restart Syrtis.": "Syrtis 无法检查这个目录。请再试一次，或重新启动 Syrtis。",
+  "No activity in this window": "此时间窗口内没有活动",
+  "last {0}m · {1}/m total": "最近 {0} 分钟 · 总计 {1}/分钟",
+  "No local usage records in this range.": "此期间没有本地用量记录。",
+  "The tokens and amounts below stay at 0 until usage is attributed to this subscription.": "用量归属到这个订阅之前，下面每一行的 token 与金额都会是 0。",
+  "Set up usage attribution…": "设置用量归属…"
 }

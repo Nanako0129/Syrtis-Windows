@@ -1111,7 +1111,7 @@ public sealed class DashboardModel
             try
             {
                 var rate = TbCore.TokensPerMin();
-                var trace = TbCore.UsageTrace(600);
+                var trace = TbCore.UsageTrace(TraceCollapse.WindowSecs);
                 Publish(s => s with { TokensPerMin = rate, Trace = trace }, graph: null);
             }
             catch (Exception ex)

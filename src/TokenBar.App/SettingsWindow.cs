@@ -1768,11 +1768,10 @@ public sealed partial class SettingsWindow : Window
         var selected = new HashSet<string>(
             ClientRegistry.DisplayClients(present, store), StringComparer.Ordinal);
         var detailed = store.GetBool("tokenbar.trace.detailed", false);
-        if (Ui.TraceRows(_trace(), selected, detailed) is { } rows)
-        {
-            _preview.Children.Add(Ui.Text("LIVE SESSION".Localized(), 10, 0.55, bold: true));
-            _preview.Children.Add(rows);
-        }
+        // Always shown, like the macOS preview's UsageTraceCard: an idle
+        // session reads "No activity in this window" rather than vanishing.
+        _preview.Children.Add(Ui.Text("LIVE SESSION".Localized(), 10, 0.55, bold: true));
+        _preview.Children.Add(Ui.TraceRows(_trace(), selected, detailed));
     }
 
     /// <summary>frame-00 of the cat/parrot set, letterboxed like the

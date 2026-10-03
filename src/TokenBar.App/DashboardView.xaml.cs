@@ -1049,7 +1049,15 @@ public sealed partial class DashboardView : UserControl
                 OverviewCard.QuotaSummary => OverviewScope.ShowsQuotaSummary(singleClient)
                     ? BuildQuotaSummary(snapshot)
                     : null,
-                OverviewCard.Chart => BuildUsageChartCard(snapshot),
+                // A client tab whose client has no local records gets a line
+                // saying so, not an empty chart (OverviewView.swift:101-107).
+                OverviewCard.Chart => OverviewScope.HasNoLocalUsage(
+                        singleClient, _selectedClients, (_selectedStats
+                            ?? new UsageStats(snapshot.Graph, _selectedSet)).PresentClients)
+                    ? Ui.Card(
+                        "Token Usage".Localized(),
+                        Ui.Dim("No local usage records in this range.".Localized()))
+                    : BuildUsageChartCard(snapshot),
                 OverviewCard.Limits => limitsClientId is { } hiddenCid
                     && LimitsCardFilter.HidesClientCard(
                         snapshot.Quota?.Agents ?? [],
@@ -1061,12 +1069,15 @@ public sealed partial class DashboardView : UserControl
                             ? "{0} limits".Localized(ClientRegistry.ShortName(cid))
                             : "Agent limits".Localized(),
                         BuildLimits(snapshot, limitsClientId)),
-                // Absent when there is no live session, or when this tab is
-                // scoped to one client — the trace answers "across everything
-                // right now", which a single-client tab did not ask.
+                // Absent when this tab is scoped to one client — the trace
+                // answers "across everything right now", which a single-client
+                // tab did not ask. With nothing running it stays and says so
+                // (macOS OverviewView.swift:111-114).
                 OverviewCard.Trace => OverviewScope.ShowsTrace(singleClient)
-                    && BuildTrace(snapshot) is { } trace
-                    ? Ui.Card("Live session".Localized(), trace)
+                    ? Ui.Card(
+                        "Live session".Localized(),
+                        BuildTrace(snapshot),
+                        TraceCollapse.Header(snapshot.Trace, _selectedSet))
                     : null,
                 OverviewCard.Models => Ui.Card(
                     OverviewScope.ModelsTitle(singleClient), BuildModelRows(snapshot, collapsible: true)),
@@ -1757,7 +1768,7 @@ public sealed partial class DashboardView : UserControl
         return panel;
     }
 
-    private FrameworkElement? BuildTrace(DashboardModel.Snapshot snapshot) =>
+    private FrameworkElement BuildTrace(DashboardModel.Snapshot snapshot) =>
         Ui.TraceRows(
             snapshot.Trace,
             _selectedSet,

@@ -62,6 +62,15 @@ internal static class OverviewScope
 
     internal static bool ShowsTrace(string? singleClient) => singleClient is null;
 
+    /// <summary>A client tab none of whose clients has local usage records in
+    /// range: its chart card says so instead of drawing an empty chart (macOS
+    /// OverviewView.swift:101-107, <c>singleClient != nil &amp;&amp; !hasLocalUsage</c>,
+    /// where hasLocalUsage asks whether any tab client is among the stats'
+    /// present clients).</summary>
+    internal static bool HasNoLocalUsage(
+        string? singleClient, IEnumerable<string> tabClients, IReadOnlyList<string> presentClients) =>
+        singleClient is not null && !tabClients.Any(presentClients.Contains);
+
     /// <summary>The clientId <c>BuildLimits</c> should restrict its rows to,
     /// or null to show every agent (Overview tab).
     /// <para>

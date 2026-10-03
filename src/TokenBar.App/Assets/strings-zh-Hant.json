@@ -505,5 +505,10 @@
   "This folder can't be added.": "這個資料夾無法加入。",
   "That's your user folder. Pick the Claude config folder inside it.": "這是你的使用者資料夾，請選它裡面的 Claude 設定資料夾。",
   "That folder overlaps the projects or transcripts folder of a folder you already added.": "這個資料夾和已加入資料夾的 projects 或 transcripts 資料夾重疊。",
-  "Syrtis couldn't check this folder. Try again, or restart Syrtis.": "Syrtis 無法檢查這個資料夾。請再試一次，或重新啟動 Syrtis。"
+  "Syrtis couldn't check this folder. Try again, or restart Syrtis.": "Syrtis 無法檢查這個資料夾。請再試一次，或重新啟動 Syrtis。",
+  "No activity in this window": "這個時間窗內沒有活動",
+  "last {0}m · {1}/m total": "最近 {0} 分鐘 · 合計 {1}/分",
+  "No local usage records in this range.": "此期間沒有本機用量紀錄。",
+  "The tokens and amounts below stay at 0 until usage is attributed to this subscription.": "用量歸屬到這個訂閱之前，下面每一列的 token 與金額都會是 0。",
+  "Set up usage attribution…": "設定用量歸屬…"
 }

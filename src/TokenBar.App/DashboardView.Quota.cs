@@ -92,6 +92,25 @@ public sealed partial class DashboardView
         AppSettings.Store.GetString(SubscriptionTrendText.MetricKey) == "tokens"
             ? ChartMetric.Tokens : ChartMetric.Cost;
 
+    /// <summary>macOS AttributionSetupLink: a small underlined link that opens
+    /// Settings → Usage attribution.</summary>
+    private static HyperlinkButton AttributionSetupLink()
+    {
+        var link = new HyperlinkButton
+        {
+            Content = new TextBlock
+            {
+                Text = AttributionOnboardingCard.Copy.SetUpLink.Localized(),
+                FontSize = 9,
+                TextDecorations = Windows.UI.Text.TextDecorations.Underline,
+            },
+            Padding = new Thickness(0),
+            Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+        };
+        link.Click += (_, _) => TrayService.OpenAttributionSettings?.Invoke();
+        return link;
+    }
+
     /// <summary>The attribution onboarding card sits above whichever Quota
     /// lens is showing, on every tab (macOS PopoverView.swift:765-770).</summary>
     private UIElement BuildQuota(DashboardModel.Snapshot snapshot)
@@ -986,6 +1005,16 @@ public sealed partial class DashboardView
         equivalenceLine.TextWrapping = TextWrapping.Wrap;
         equivalenceLine.Margin = new Thickness(0, 0, 0, 6);
         body.Children.Add(equivalenceLine);
+        if (AttributionOnboardingCard.ShowsHistoryZeroNote(
+            history.Equivalence, client.LocalUsageUnattributed))
+        {
+            var note = new StackPanel { Spacing = 2, Margin = new Thickness(0, 0, 0, 4) };
+            var text = Ui.Dim(AttributionOnboardingCard.Copy.HistoryZeroNote.Localized(), 9);
+            text.TextWrapping = TextWrapping.Wrap;
+            note.Children.Add(text);
+            note.Children.Add(AttributionSetupLink());
+            body.Children.Add(note);
+        }
 
         var colors = new ModelColorMap(snapshot.Models, snapshot.CostAuthoritative);
         foreach (var row in rows)
