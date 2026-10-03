@@ -60,6 +60,8 @@ public sealed partial class DashboardView : UserControl
     {
         InitializeComponent();
         ProductTitle.Text = ProductIdentity.Name;
+        SetLiveRate(0);
+        Unloaded += (_, _) => _ledTimer?.Stop();
         // WinUI otherwise synthesizes a tooltip containing "Esc" for the
         // dashboard-wide Escape accelerator whenever the pointer rests over
         // the graph. The accelerator remains active; only its automatic
@@ -539,6 +541,7 @@ public sealed partial class DashboardView : UserControl
         TodayValue.Text = "—";
         TotalValue.Text = "—";
         RateValue.Text = "—";
+        SetLiveRate(0);
         CostLine.Text = CostSurfaceProjection.Checking;
         FooterText.Text = "loading usage…".Localized();
         UpdateYearPicker();
@@ -634,12 +637,48 @@ public sealed partial class DashboardView : UserControl
         TodayValue.Text = Format.CompactTokens(today?.Tokens ?? 0);
         TotalValue.Text = Format.CompactTokens(stats.TotalTokens);
         RateValue.Text = Format.CompactTokens((long)rate);
+        SetLiveRate(rate);
         CostLine.Text = CostSurfaceProjection.HeaderCostLine(
             today?.Cost ?? 0, stats, snapshot.CostAuthoritative);
         FooterText.Text = "updated {0}".Localized(
             snapshot.FetchedAt.ToString(
                 "HH:mm:ss", System.Globalization.CultureInfo.CurrentCulture));
     }
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _ledTimer;
+    private double _ledRate;
+
+    /// <summary>Drives the rate LED (macOS activityLED): dim grey and still
+    /// while idle, a 90 ms flicker while tokens flow. The timer runs only
+    /// while the rate is non-zero, so an idle dashboard costs nothing.</summary>
+    private void SetLiveRate(double tokensPerMin)
+    {
+        _ledRate = tokensPerMin;
+        if (!LiveLed.Active(tokensPerMin))
+        {
+            _ledTimer?.Stop();
+            RateLed.Fill = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+            RateLed.Opacity = LedIdleOpacity;
+            return;
+        }
+
+        RateLed.Fill = Ui.BrushFromHex(LedLitColor);
+        if (_ledTimer is null)
+        {
+            _ledTimer = DispatcherQueue.CreateTimer();
+            _ledTimer.Interval = TimeSpan.FromMilliseconds(LiveLed.SlotMs);
+            _ledTimer.Tick += (_, _) => RateLed.Opacity = LiveLed.Lit(
+                (ulong)(Environment.TickCount64 / LiveLed.SlotMs), _ledRate) ? 1 : LedOffOpacity;
+        }
+
+        _ledTimer.Start();
+    }
+
+    /// <summary>macOS activityLED: green when lit, 0.25 opacity between
+    /// blinks, and an idle dot at 0.4 of the secondary color.</summary>
+    private const string LedLitColor = "#22c55e";
+    private const double LedOffOpacity = 0.25;
+    private const double LedIdleOpacity = 0.4;
 
     private string _yearPickerSignature = "";
 
