@@ -848,7 +848,9 @@ public sealed class DashboardModel
                 Graph = publication.Payload,
                 Models = pendingModel ?? baseline.Models,
                 CostAuthoritative = _graphState.CostAuthoritative,
-                FetchedAt = DateTimeOffset.Now,
+                // A restored graph was fetched when it was captured; the
+                // footer's "updated" time must not stamp it as fresh.
+                FetchedAt = publication.RestoredFrom?.ToLocalTime() ?? DateTimeOffset.Now,
                 RestoredAt = publication.RestoredFrom,
             };
             _lastSnapshot = Current;
