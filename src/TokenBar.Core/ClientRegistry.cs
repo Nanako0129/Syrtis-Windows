@@ -63,6 +63,7 @@ public static class ClientRegistry
         ["micode"] = ("MiMo Code", "#fb923c"),
         ["gjc"] = ("gjc", "#e11d48"),
         ["grok"] = ("Grok Build", "#1f2937"),
+        ["grok-bot"] = ("Grok Bot", "#000000"),
         // Clients added by the 2026-10-02 engine sync. Names and colors are
         // upstream tokscale's frontend values (packages/frontend/src/lib/
         // constants.ts at fe72e1f9: SOURCE_NAMES / SOURCE_COLORS), since
@@ -191,11 +192,11 @@ public static class ClientRegistry
     /// <summary>Tabs that group more than one client id under a single top
     /// tab: one member carries local session usage (antigravity-cli), the
     /// other only a cloud quota with no usage of its own (antigravity, the
-    /// IDE client). Ported from macOS ClientRegistry.swift's <c>tabGroups</c>
-    /// (:194-207); Windows has no grok-bot provider, so only the Antigravity
-    /// group exists here.</summary>
+    /// IDE client; grok-bot, the Grok Bot weekly quota). Ported from macOS
+    /// ClientRegistry.swift's <c>tabGroups</c> (:214-226 at 451b4329).</summary>
     private static readonly Dictionary<string, (string[] Members, string Label)> TabGroups = new()
     {
+        ["grok"] = (["grok", "grok-bot"], "Grok Build & Bot"),
         ["antigravity"] = (["antigravity", "antigravity-cli"], "Antigravity"),
     };
 
