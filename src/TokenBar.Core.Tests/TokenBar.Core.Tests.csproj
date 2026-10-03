@@ -37,6 +37,10 @@
     <!-- Settings copy shared word for word with macOS: SettingsWindow.cs
          compiles under no test project. -->
     <Compile Include="..\TokenBar.App\SettingsCopy.cs" Link="SettingsCopy.cs" />
+    <!-- The Hourly lens's and the Stats summary's decisions: DashboardView
+         compiles under no test project. -->
+    <Compile Include="..\TokenBar.App\HourlyLens.cs" Link="HourlyLens.cs" />
+    <Compile Include="..\TokenBar.App\StatsSummary.cs" Link="StatsSummary.cs" />
     <Compile Include="..\TokenBar.App\OverviewCard.cs" Link="OverviewCard.cs" />
     <!-- Tab-row keyboard rules (Ctrl+1..9, Ctrl+[ ], the Ctrl-held hints), the
          three-state chart view and the flat heatmap's layout math: DashboardView
