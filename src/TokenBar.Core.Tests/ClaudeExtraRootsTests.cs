@@ -146,19 +146,20 @@ public class ClaudeExtraRootsTests
             {
                 scanned = roots;
                 // Index 3 = E:\b\transcripts, the second accepted directory.
-                return Ok(3, new RootRejection(3, "notDirectory"));
+                return roots.Count == 4 ? Ok(3, new RootRejection(3, "notDirectory")) : Ok(roots.Count);
             },
             _ => { });
 
         Assert.True(pusher.Request().Wait(TimeSpan.FromSeconds(10)));
 
-        Assert.Equal([@"D:\a\projects", @"D:\a\transcripts", @"E:\b\projects", @"E:\b\transcripts"], scanned);
         Assert.Equal(
             new Dictionary<int, string> { [1] = "unsupportedPath", [2] = "notDirectory" },
             pusher.Last!.Rejected);
-        // E:\b's transcripts can't be scanned, so it gets no card either: the
-        // config registry ends on the directories both registries took.
+        // E:\b's transcripts can't be scanned, so it gets no card and its
+        // projects root is not scanned either: both registries end on the
+        // directories both took.
         Assert.Equal([@"D:\a"], configCalls[^1]);
+        Assert.Equal([@"D:\a\projects", @"D:\a\transcripts"], scanned);
     }
 
     /// <summary>A scan setter that fails leaves its registry as it was; the
