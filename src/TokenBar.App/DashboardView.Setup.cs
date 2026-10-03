@@ -4,6 +4,10 @@ using Microsoft.UI.Xaml.Media;
 using TokenBar.Core;
 using Windows.UI;
 
+// TokenBar.Core also has a Grid (the year grid); this file means the XAML one,
+// as DashboardView.xaml.cs does.
+using Grid = Microsoft.UI.Xaml.Controls.Grid;
+
 namespace TokenBar.App;
 
 /// <summary>
