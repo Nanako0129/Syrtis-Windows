@@ -8,13 +8,10 @@
 //! Ported from TokenBar-Native's `window_usage.rs` (crates/tb_core_ffi, macOS)
 //! with the cache kept — it exists because a full window scan is not a call
 //! any UI thread can make. macOS's own probe records 14.93 days and 109,278
-//! messages at 67 seconds. Windows differs from the macOS source in the cache
-//! mechanics: this crate has no generation-gated root registry
-//! (`root_generation`/`invalidate_scan_caches` on macOS), so publication here
-//! is unconditional — the same clear-then-insert-one-entry shape, without a
-//! generation check — and it reuses the source-context token probe
+//! messages at 67 seconds. Windows reuses the source-context token probe
 //! `graph_cached` already uses instead of the plain (non-source-context)
-//! probe the macOS module calls.
+//! probe the macOS module calls; publication is gated on the root generation
+//! (see the W4b section below).
 //!
 //! The key is `from_ms` alone, not `(from_ms, until_ms)`. macOS's own module
 //! quantises `until_ms` to the minute instead and carries the same defect:
@@ -71,15 +68,18 @@
 //! ## Scoped to one Claude account (W4b, macOS #258)
 //!
 //! A quota window belongs to one account, so its usage must come from that
-//! account's transcripts only. The scope is applied by narrowing the scan: the
-//! primary (`account == None`) scans without the registered extra roots (the
-//! same context inputs `main` uses for it); an extra account
+//! account's transcripts only. The primary (`account == None`) scans the
+//! process inputs with every extra account excluded — the configured
+//! directories and the registered Claude roots, as `excluded_scan_paths`,
+//! which the engine applies whichever route reached a directory (W4c,
+//! tokscale-core #65; macOS `primary_exclusions`). An extra account
 //! (`Some(<config dir>)`) reads only its own registered roots and the Claude
 //! client. Each scope runs
 //! on its own captured context (the engine reads scanner settings from the
 //! context, never from report options), memoized per root generation. With no
-//! extra account registered the primary uses the process context itself, so
-//! its output is what it was before this existed.
+//! extra account registered (no root, no config directory) the primary uses
+//! the process context itself, so its output is what it was before this
+//! existed.
 //!
 //! Since W4b the cache key is `(account, from_ms)` and publication is gated on
 //! the root generation the scan's context was captured at.
