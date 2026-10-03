@@ -249,9 +249,26 @@ public sealed class SettingsWindow : Window
                 {
                     RebuildPreview();
                 }
+
+                // The Quota lens's onboarding card is a second writer of the
+                // attribution tables. This page only redrew after its own
+                // writes (ApplyAttributionWrite), so an open Settings kept
+                // showing rows as unassigned after "Apply suggestions". Rebuild
+                // just this page, the way ApplyAttributionWrite does, rather
+                // than the whole panel, which would drop focus and scroll.
+                if (key.StartsWith(UsageAttributionKeyPrefix, StringComparison.Ordinal))
+                {
+                    _pages["attribution"] = BuildAttributionPage(AppSettings.Store);
+                    if (_selectedTag == "attribution")
+                    {
+                        ShowPage(_selectedTag);
+                    }
+                }
             });
         };
     }
+
+    private const string UsageAttributionKeyPrefix = "tokenbar.usage.attribution.";
 
     private void ApplySize()
     {
