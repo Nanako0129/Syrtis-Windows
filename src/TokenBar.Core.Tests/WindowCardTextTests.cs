@@ -772,6 +772,41 @@ public class WindowCardTextTests
         Assert.Contains("3", WindowCardText.UndatedNote(3));
     }
 
+    // ---- short window names (macOS SelfTest "WCP-label") -----------------
+
+    private static WindowCardTab Labelled(string label) =>
+        new(new QuotaWindowIdentity("antigravity", "S", "weekly.v1"), label, null, HasHistory: true);
+
+    [Fact]
+    public void GroupedWindowNamesAreShortenedOnTheTitleAndPillOnly()
+    {
+        const string gemini = "Gemini Models · Weekly Limit Remaining";
+        const string claudeGpt = "Claude and GPT models · Five Hour Limit Remaining";
+
+        Assert.Equal("Gemini · Weekly", WindowCardText.TabLabel(Labelled(gemini)));
+        Assert.Equal("Claude/GPT · 5h", WindowCardText.TabLabel(Labelled(claudeGpt)));
+        Assert.Equal("Gemini · Weekly window", WindowCardText.Title(Labelled(gemini)));
+        Assert.Equal("Session", WindowCardText.TabLabel(Labelled("Session")));
+        Assert.Equal("Codex Spark · 5h", WindowCardText.TabLabel(Labelled("Codex Spark · 5h")));
+
+        // Control: the shared namer every other surface uses keeps the full name.
+        Assert.Equal(gemini, QuotaLabels.Window(gemini, "weekly.v1"));
+
+        Localization.Load("zh-Hant", AppContext.BaseDirectory);
+        try
+        {
+            Assert.Equal("Gemini · 每週", WindowCardText.TabLabel(Labelled(gemini)));
+            Assert.Equal("Claude/GPT · 5 小時", WindowCardText.TabLabel(Labelled(claudeGpt)));
+            Assert.Equal("Gemini · 每週 時間窗", WindowCardText.Title(Labelled(gemini)));
+            Assert.Equal("工作階段", WindowCardText.TabLabel(Labelled("Session")));
+            Assert.Equal("Codex Spark · 5h", WindowCardText.TabLabel(Labelled("Codex Spark · 5h")));
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
+    }
+
     // ---- i18n ------------------------------------------------------------
     //
     // Against the *shipped* strings-zh-Hant.json, for the reason QuotaLensText's

@@ -102,7 +102,7 @@ public class ClientRegistryTests : IDisposable
     [InlineData("muse", "Muse Code", "#0064e0")]
     [InlineData("reasonix", "Reasonix", "#808000")]
     [InlineData("kimchi", "Kimchi", "#7f1d1d")]
-    [InlineData("senpi", "Senpi (OmO Native)", "#2f6f63")]
+    [InlineData("senpi", "Senpi", "#2f6f63")]
     [InlineData("omp", "Oh My Pi", "#d946ef")]
     public void EngineSyncClientsAreRegisteredWithUpstreamStyle(string id, string name, string color)
     {
@@ -138,6 +138,24 @@ public class ClientRegistryTests : IDisposable
         Assert.Equal(
             new HashSet<string> { "claude", "codex", "gemini" },
             ClientRegistry.QuotaExcludedClients(store));
+    }
+
+    /// <summary>The Settings switch writes what every reader parses: hiding
+    /// adds the id (sorted, comma-joined as macOS stores it), showing removes
+    /// only that id, and a fresh store reads the same set back.</summary>
+    [Fact]
+    public void SetLimitsHiddenRoundTripsThroughTheReaders()
+    {
+        var store = NewStore();
+        ClientRegistry.SetLimitsHidden(store, "gemini", hidden: true);
+        ClientRegistry.SetLimitsHidden(store, "codex", hidden: true);
+        Assert.Equal("codex,gemini", store.GetString(ClientRegistry.LimitsHiddenKey));
+
+        ClientRegistry.SetLimitsHidden(store, "gemini", hidden: false);
+        ClientRegistry.SetLimitsHidden(store, "claude", hidden: false);
+        var reread = NewStore();
+        Assert.Equal(new HashSet<string> { "codex" }, ClientRegistry.HiddenLimitsClients(reread));
+        Assert.Contains("codex", ClientRegistry.QuotaExcludedClients(reread));
     }
 
     [Fact]

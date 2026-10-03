@@ -380,10 +380,7 @@ public sealed class SettingsWindow : Window
             textColor.Children.Add(customColorRow);
         }
 
-        textColor.Children.Add(Hint(
-            ("Custom colors follow each item's remaining quota: normal above 25%, low above "
-                + "10% through 25%, and very low at 10% or below. Other text and unavailable "
-                + "quota use the normal color. Automatic keeps the original colors.").Localized()));
+        textColor.Children.Add(Hint(SettingsCopy.TextColorHint.Localized()));
         panel.Children.Add(Section("Font color".Localized(), textColor));
 
         // ── Tray icon ──────────────────────────────────────────────────
@@ -451,9 +448,7 @@ public sealed class SettingsWindow : Window
                 ],
                 store.GetString("tokenbar.icon.coloring", "warning") ?? "warning",
                 raw => store.SetString("tokenbar.icon.coloring", raw)));
-            icon.Children.Add(Hint(
-                "Battery-icon behavior: the gauge picks up color under 25% left."
-                .Localized()));
+            icon.Children.Add(Hint(SettingsCopy.GaugeColoringHint.Localized()));
         }
 
         panel.Children.Add(Section("Tray icon".Localized(), icon));
@@ -523,19 +518,10 @@ public sealed class SettingsWindow : Window
         var layoutRaw = store.GetString("tokenbar.limits.layout", "full") ?? "full";
         limitOptions.Children.Add(RadioGroup(
             "limits.layout",
-            [
-                ("full", "Layout: Full".Localized()),
-                ("classic", "Layout: Classic".Localized()),
-                ("chart", "Layout: Chart".Localized()),
-            ],
+            SettingsCopy.LayoutOptions.Select(o => (o.Raw, o.Label.Localized())),
             layoutRaw,
             raw => store.SetString("tokenbar.limits.layout", raw)));
-        limitOptions.Children.Add(Hint(
-            ("Full is the wide card with the pace bar; Classic is the original "
-                + "compact layout without pace; Chart draws each window's quota over "
-                + "time, with the pace estimate as a second line. Chart needs recorded "
-                + "quota history and falls back to a bar for windows that have none.")
-            .Localized()));
+        limitOptions.Children.Add(Hint(SettingsCopy.LayoutHint.Localized()));
         if (layoutRaw != "classic")
         {
             limitOptions.Children.Add(RadioGroup(
@@ -552,6 +538,7 @@ public sealed class SettingsWindow : Window
                     + "usage curve; Linear paces evenly by the clock; Off hides it.")
                 .Localized()));
         }
+        limitOptions.Children.Add(BuildLimitsClientToggles(store));
         if (limitsOn)
         {
             limits.Children.Add(limitOptions);
@@ -578,8 +565,8 @@ public sealed class SettingsWindow : Window
         detailed.Toggled += (_, _) =>
             store.SetBool("tokenbar.trace.detailed", detailed.IsOn);
         var trace = new StackPanel { Spacing = 8 };
-        trace.Children.Add(ToggleRow("Detailed rows".Localized(), detailed));
-        trace.Children.Add(Hint("One row per agent and model instead of per app.".Localized()));
+        trace.Children.Add(ToggleRow(SettingsCopy.LiveTraceToggle.Localized(), detailed));
+        trace.Children.Add(Hint(SettingsCopy.LiveTraceHint.Localized()));
         panel.Children.Add(Section("Live trace".Localized(), trace));
 
         // ── Flyout size ────────────────────────────────────────────────
@@ -965,9 +952,7 @@ public sealed class SettingsWindow : Window
             ],
             Math.Max(1, store.GetInt("tokenbar.refresh.intervalMin", 30)).ToString(),
             raw => store.SetInt("tokenbar.refresh.intervalMin", int.Parse(raw))));
-        refresh.Children.Add(Hint(
-            ("How often the tray forces a full log re-read; cached reads stay "
-                + "continuous either way.").Localized()));
+        refresh.Children.Add(Hint(SettingsCopy.RefreshHint.Localized()));
         panel.Children.Add(Section("Data refresh".Localized(), refresh));
 
         // ── Discord (macOS SettingsPanel :944-1007) ─────────────────────
@@ -1209,10 +1194,7 @@ public sealed class SettingsWindow : Window
                     .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
                     ?.InformationalVersion ?? "dev",
                 12)));
-        about.Children.Add(Hint(
-            ("Shared parsing engine from tokscale-core, originally derived "
-                + "from tokscale by junhoyeo; menu-bar concept from "
-                + "handlecusion's tokcat.").Localized()));
+        about.Children.Add(Hint(SettingsCopy.About.Localized()));
         panel.Children.Add(Section("About".Localized(), about));
 
         // ── Check for updates ──────────────────────────────────────────
@@ -1496,6 +1478,70 @@ public sealed class SettingsWindow : Window
         var full = order.Concat(visible).Where(seen.Add).ToList();
         var merged = ClientRegistry.MergeReorder(full, visible, from, to);
         store.SetString(ClientRegistry.TabOrderKey, string.Join(',', merged));
+    }
+
+    /// <summary>One switch per client that can show a quota card (macOS
+    /// SettingsPanel Agent limits rows): on = its card shows. A client whose
+    /// tab is hidden reads off and disabled, because a hidden tab already
+    /// hides its card (LimitsCardFilter); the stored limits flag is left
+    /// alone.</summary>
+    private StackPanel BuildLimitsClientToggles(SettingsStore store)
+    {
+        var panel = new StackPanel { Spacing = 4 };
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var present = (_graph()?.Summary.Clients ?? [])
+            .Select(ClientRegistry.CanonicalClient)
+            .Where(seen.Add)
+            .ToList();
+        var quotaSeen = new HashSet<string>(StringComparer.Ordinal);
+        var quotaIds = (_quota()?.Agents ?? [])
+            .Select(agent => agent.ClientId)
+            .Where(quotaSeen.Add)
+            .ToList();
+        var known = ClientRegistry.OrderedClients(
+            ClientRegistry.KnownLimitsClients(present, quotaIds, new HashSet<string>()), store);
+        if (known.Count == 0)
+        {
+            return panel;
+        }
+
+        var tabHidden = ClientRegistry.HiddenTabClients(store);
+        var limitsHidden = ClientRegistry.HiddenLimitsClients(store);
+        foreach (var id in known)
+        {
+            var isTabHidden = tabHidden.Contains(id);
+            var toggle = new ToggleSwitch
+            {
+                IsOn = !isTabHidden && !limitsHidden.Contains(id),
+                IsEnabled = !isTabHidden,
+                OnContent = null,
+                OffContent = null,
+            };
+            var clientId = id;
+            toggle.Toggled += (_, _) => ClientRegistry.SetLimitsHidden(store, clientId, !toggle.IsOn);
+            var name = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                VerticalAlignment = VerticalAlignment.Center,
+                Opacity = isTabHidden ? 0.5 : 1,
+            };
+            name.Children.Add(AgentIcon.Create(id, 14));
+            name.Children.Add(Ui.Text(ClientRegistry.ShortName(id), 12));
+            // ToggleRow's layout with an icon + name in place of its text.
+            var row = new Grid();
+            row.Children.Add(name);
+            toggle.HorizontalAlignment = HorizontalAlignment.Right;
+            toggle.MinWidth = 0;
+            toggle.Margin = new Thickness(0, -4, 0, -4);
+            row.Children.Add(toggle);
+            panel.Children.Add(row);
+        }
+
+        panel.Children.Add(Hint(
+            "Hide one client's quota card and keep its tab. Grayed out when the tab is hidden, which already hides the card."
+                .Localized()));
+        return panel;
     }
 
     private static void SetClientTabVisible(SettingsStore store, string id, bool visible)

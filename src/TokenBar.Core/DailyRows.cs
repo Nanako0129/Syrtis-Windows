@@ -112,6 +112,33 @@ public static class DailyRows
         return order.Select(key => grouped[key]);
     }
 
+    /// <summary>A Daily or Monthly row's drill-down: its stripes merged across
+    /// clients onto one row per grouped model and provider, as macOS keys
+    /// <c>"model|provider"</c> (DailyView.swift <c>models(for:)</c>). The row's
+    /// own Clients keep raw client ids because turn counting reads them; only
+    /// the drill-down drops the client, so <see cref="ContributionClient.Client"/>
+    /// is empty on every result. Inactive stripes are skipped and an empty
+    /// model id reads "unknown", both as macOS does.</summary>
+    public static IReadOnlyList<ContributionClient> ByModel(IEnumerable<ContributionClient> clients)
+    {
+        var grouped = new Dictionary<(string, string), ContributionClient>();
+        foreach (var client in clients)
+        {
+            if (!UsageActivity.IsActive(client.Tokens.Total, client.Cost, client.Messages))
+            {
+                continue;
+            }
+
+            var model = client.ModelId.Length == 0 ? "unknown" : ModelGrouping.GroupId(client.ModelId);
+            var key = (model, client.ProviderId);
+            grouped[key] = grouped.TryGetValue(key, out var merged)
+                ? MonthlyRows.Merge(merged, client)
+                : client with { Client = "", ModelId = model };
+        }
+
+        return [.. grouped.Values];
+    }
+
     private static long SumTurns(
         IReadOnlyDictionary<string, long>? turnsByClient,
         IReadOnlyList<ContributionClient> clients)

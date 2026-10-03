@@ -213,6 +213,22 @@ public class UsageAttributionSettingsTests : IDisposable
         Assert.Equal(["claude", "antigravity"], UsageAttributionSettings.SubscriptionClients(payload));
     }
 
+    [Fact]
+    public void SubscriptionClientsNeverAdmitTheOpencodeRouterEvenWithItsOwnQuota()
+    {
+        // The OpenCode Go card publishes an `opencode` snapshot with windows and a
+        // plan. That would pass the capability filter, but a router is never an
+        // attribution target. The `kiro` snapshot of the same shape is the control:
+        // it proves the filter would admit such a snapshot at all.
+        UsageWindow[] windows = [new UsageWindow("Weekly", 63, 37, CardId: "weekly.v1")];
+        var opencode = new AgentUsageSnapshot(
+            "opencode", "api", "now", windows, new AgentIdentity(null, "Go"));
+        var kiro = new AgentUsageSnapshot("kiro", "oauth", "now", windows);
+        var payload = new AgentUsagePayload("now", [opencode, kiro], []);
+
+        Assert.Equal(["kiro"], UsageAttributionSettings.SubscriptionClients(payload));
+    }
+
     [Theory]
     // The four renames, from ClientRegistry.subscriptionLabelAliases.
     [InlineData("Codex", "codex")]
