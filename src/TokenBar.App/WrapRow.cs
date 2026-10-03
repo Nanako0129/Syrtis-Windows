@@ -9,8 +9,12 @@ namespace TokenBar.App;
 /// counterpart of the macOS FlowLayout.</summary>
 public sealed partial class WrapRow : Panel
 {
-    private const double SpacingX = 10;
-    private const double SpacingY = 4;
+    /// <summary>Defaults are the chart legend's. Settable so a tighter row
+    /// (the window-card pills) can reuse the same layout; set before the
+    /// first measure.</summary>
+    public double SpacingX { get; set; } = 10;
+
+    public double SpacingY { get; set; } = 4;
 
     protected override Size MeasureOverride(Size availableSize)
     {

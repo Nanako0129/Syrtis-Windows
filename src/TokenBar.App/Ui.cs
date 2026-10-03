@@ -35,12 +35,41 @@ public static class Ui
             Width = new GridLength(1, GridUnitType.Star),
         });
         head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        head.Children.Add(new TextBlock
+        // The title owns the star column and trims with an ellipsis rather than
+        // running under the right-aligned subtitle (long window labels such as
+        // Antigravity's "Gemini Models · Weekly Limit Remaining"). Nothing
+        // changes when it fits. The full text shows on hover only when trimmed.
+        var titleText = new TextBlock
         {
             Text = title,
             FontSize = 13,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-        });
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            TextWrapping = TextWrapping.NoWrap,
+        };
+        titleText.PointerEntered += (_, e) =>
+        {
+            if (titleText.IsTextTrimmed && titleText.XamlRoot is { } root)
+            {
+                HoverTip.ShowAt(titleText, new TextBlock
+                {
+                    Text = title,
+                    FontSize = 11,
+                    TextWrapping = TextWrapping.Wrap,
+                    Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 240, 240, 245)),
+                }, e.GetCurrentPoint(root.Content).Position);
+            }
+        };
+        titleText.PointerMoved += (_, e) =>
+        {
+            if (titleText.XamlRoot is { } root)
+            {
+                HoverTip.MoveAt(titleText, e.GetCurrentPoint(root.Content).Position);
+            }
+        };
+        titleText.PointerExited += (_, _) => HoverTip.HideFor(titleText);
+        titleText.Unloaded += (_, _) => HoverTip.HideFor(titleText);
+        head.Children.Add(titleText);
         if (subtitle is not null || trailing is not null)
         {
             var end = new StackPanel

@@ -638,11 +638,18 @@ public sealed partial class DashboardView
             WindowMetricToggle());
     }
 
+    /// <summary>Pills keep their old 2px gap, and wrap onto further lines when
+    /// the row is wider than the card: Antigravity's window labels are long,
+    /// and horizontal scrolling is unusable in the focusless popover.</summary>
+    private static WrapRow PillRow() => new() { SpacingX = PillGap, SpacingY = PillGap };
+
+    private const double PillGap = 2;
+
     /// <summary>One pill per account with live windows; the choice is stored
     /// per client and never touches the window-tab key.</summary>
     private FrameworkElement AccountTabs(QuotaLensProjection.Client client)
     {
-        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
+        var row = PillRow();
         foreach (var account in client.Accounts)
         {
             var pill = LensPill(account.Label, account.Key == client.SelectedAccount);
@@ -664,7 +671,7 @@ public sealed partial class DashboardView
     private FrameworkElement WindowTabs(
         IReadOnlyList<WindowCardTab> tabs, WindowCardTab? selected)
     {
-        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
+        var row = PillRow();
         foreach (var tab in tabs)
         {
             var pill = LensPill(WindowCardText.TabLabel(tab), tab == selected);
