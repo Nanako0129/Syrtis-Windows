@@ -60,6 +60,12 @@ public partial class App : Application
 
         ProcessPower.EnsureNormalPriority();
 
+        // Before the graph coordinator: its scans, its snapshot id and the
+        // shared quota fetch wait for this push of the saved extra Claude
+        // accounts, off the UI thread (ClaudeExtraRoots.AwaitLaunch names the
+        // lanes that do not).
+        StartClaudeExtraRoots();
+
         try
         {
             DevLog.Write("launch: creating graph coordinator");
@@ -686,5 +692,29 @@ public partial class App : Application
         {
             e.Handled = true;
         }
+    }
+
+    private static void StartClaudeExtraRoots()
+    {
+        var store = AppSettings.Store;
+        Core.ClaudeExtraRoots.Log = DevLog.Write;
+        var pusher = new Core.ClaudeRootsPusher(
+            () => Core.ClaudeExtraRoots.Load(store),
+            Interop.TbCore.SetClaudeConfigDirs,
+            Interop.TbCore.SetExtraClaudeScanPaths,
+            DevLog.Write);
+        Core.ClaudeExtraRoots.Shared = pusher;
+        if (Core.ClaudeExtraRoots.Load(store).Count > 0)
+        {
+            Core.ClaudeExtraRoots.StartLaunch(pusher);
+        }
+
+        store.Changed += key =>
+        {
+            if (key == Core.ClaudeExtraRoots.Key)
+            {
+                _ = pusher.Request();
+            }
+        };
     }
 }
