@@ -143,6 +143,31 @@ public class AgentLimitsTextTests
             LimitsCardOrder.Dropped("claude,grok,codex,gemini", ["claude", "codex", "gemini"], "claude", "codex"));
     }
 
+    // Three groups 100 tall with 10px gaps: A 0-100, B 110-210, C 220-320.
+    private static readonly LimitsCardOrder.Span[] Spans =
+    [
+        new("C", 220, 320), new("A", 0, 100), new("B", 110, 210),
+    ];
+
+    [Theory]
+    // Dragging A down: the gap under B shows B's bottom line, so it is B's.
+    [InlineData("A", 50, "A")]
+    [InlineData("A", 105, "A")]
+    [InlineData("A", 150, "B")]
+    [InlineData("A", 215, "B")]
+    [InlineData("A", 400, "C")]
+    // Dragging C up: the gap above B shows B's top line, so it is B's.
+    [InlineData("C", 250, "C")]
+    [InlineData("C", 215, "C")]
+    [InlineData("C", 205, "B")]
+    [InlineData("C", 105, "B")]
+    [InlineData("C", 50, "A")]
+    [InlineData("C", -40, "A")]
+    public void EveryPointerPositionDropsOntoTheGroupWhoseLineItShows(string dragged, double y, string expected)
+    {
+        Assert.Equal(expected, LimitsCardOrder.DropTarget(Spans, dragged, y));
+    }
+
     [Fact]
     public void TheDropLineSitsBelowWhenDraggingDown()
     {

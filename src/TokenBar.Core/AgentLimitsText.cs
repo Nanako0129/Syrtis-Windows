@@ -62,6 +62,28 @@ public static class LimitsCardOrder
     /// <summary>Whether the drop line sits under the target (dragging down)
     /// rather than over it — the direction-aware insert
     /// <see cref="ClientRegistry.Reorder"/> performs.</summary>
+    /// <summary>One card group's vertical extent while dragging.</summary>
+    public readonly record struct Span(string Id, double Top, double Bottom);
+
+    /// <summary>The group a release at <paramref name="y"/> drops onto (the
+    /// dragged one itself means "no move"). The drop line is drawn in the gap
+    /// on the side the card moves toward — under the target when dragging
+    /// down, over it when dragging up — so each gap belongs to the group
+    /// whose line it shows: below the dragged group's top, the last group
+    /// whose top is at or above the pointer; above it, the first group whose
+    /// bottom is at or below it. Every point maps to a group, so there is no
+    /// dead zone where the line vanishes and a release silently does
+    /// nothing.</summary>
+    public static string DropTarget(IReadOnlyList<Span> spans, string dragged, double y)
+    {
+        var ordered = spans.OrderBy(static span => span.Top).ToList();
+        var from = ordered.First(span => span.Id == dragged);
+        // Never empty: the dragged group satisfies whichever side applies.
+        return y >= from.Top
+            ? ordered.Last(span => span.Top <= y).Id
+            : ordered.First(span => span.Bottom >= y).Id;
+    }
+
     public static bool DropsBelow(IReadOnlyList<string> visible, string from, string to)
     {
         List<string> list = [.. visible];
