@@ -222,14 +222,15 @@ public static class QuotaLensProjection
     }
 
     /// <summary>Whether a stored series may get a local-usage equivalence.
-    /// A client with one card keeps every series (as before). With several
-    /// cards only the PRIMARY's series qualify: Windows has no per-account
+    /// A client with no non-primary card keeps every series (as before). With
+    /// any non-primary card only the PRIMARY's series qualify (none when there
+    /// is no primary card or it has no scope): Windows has no per-account
     /// scan, so a non-primary (or unmatched) series would be priced from the
     /// primary's messages.</summary>
     internal static bool LocalUsageScopable(AgentUsagePayload? quota, QuotaHistorySeries series)
     {
         var cards = (quota?.Agents ?? []).Where(a => a.ClientId == series.ProviderId).ToList();
-        return cards.Count <= 1
+        return cards.All(a => a.Account.AccountKey is null)
             || cards.Any(a => a.Account.AccountKey is null && a.HistoryScope?.Scope == series.AccountScope);
     }
 

@@ -413,6 +413,11 @@ public class AccountIdentityTests
         var one = Payload(Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")));
         Assert.True(QuotaLensProjection.LocalUsageScopable(one, Series("old")));
         Assert.True(QuotaLensProjection.LocalUsageScopable(null, Series("S")));
+        Assert.True(QuotaLensProjection.LocalUsageScopable(Payload(), Series("S")));
+        // A lone non-primary card: nothing is scopable, not even its own series.
+        var lone = Payload(Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
+        Assert.False(QuotaLensProjection.LocalUsageScopable(lone, Series("S")));
+        Assert.False(QuotaLensProjection.LocalUsageScopable(lone, Series("P")));
 
         var graph = new UsagePayload(
             new UsageMeta("g", "v", new DateRange("2026-01-01", "2026-01-01"),
