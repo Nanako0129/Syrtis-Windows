@@ -1831,6 +1831,13 @@ public sealed partial class DashboardView : UserControl
 
             if (agent.Error is not null)
             {
+                // macOS keeps the card's shape under the red line: an errored
+                // snapshot with no windows still draws its placeholder rows.
+                if (agent.UniqueCardWindows.Count == 0)
+                {
+                    AddPlaceholderRows(section, id, classic, placeholderValue);
+                }
+
                 continue;
             }
 
