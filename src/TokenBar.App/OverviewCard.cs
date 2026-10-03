@@ -118,10 +118,13 @@ internal static class OverviewCards
     internal static string Id(OverviewCard card) =>
         char.ToLowerInvariant(card.ToString()[0]) + card.ToString()[1..];
 
-    /// <summary>Title-cased label (OverviewCard.swift <c>label</c>): a space
-    /// before each interior capital of the id, first letter upper-cased.</summary>
+    /// <summary>Sentence-cased label (OverviewCard.swift <c>label</c>, as of
+    /// Syrtis #464): a space and a lower-case letter for each interior capital
+    /// of the id, first letter upper-cased — "Quota summary", matching macOS's
+    /// English text and the key its string catalogs carry.</summary>
     internal static string Label(OverviewCard card) =>
-        System.Text.RegularExpressions.Regex.Replace(card.ToString(), "(?<!^)([A-Z])", " $1");
+        System.Text.RegularExpressions.Regex.Replace(
+            card.ToString(), "(?<!^)([A-Z])", m => " " + char.ToLowerInvariant(m.Value[0]));
 
     /// <summary>Master gate for the Agent-limits card (macOS
     /// OverviewView.swift:69-90, QuotaView.swift:57 and :116). Every place

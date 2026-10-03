@@ -428,7 +428,7 @@
   "Lots of agents at once, such as Claude Code's ultracode, or a plan like Claude Max 20x": "超多 agent 同時跑（例如 Claude Code 的 ultracode），或像 Claude Max 20x 這類方案",
   "The cat and parrot speed up as the live token rate climbs. The pace sets how much traffic reaches the top: Light at 600K tokens/min, Moderate at 3M, Heavy at 10M.": "即時 token 速率越高，貓和鸚鵡跑得越快。動畫速度決定多大的流量會到頂：輕度是每分鐘 60 萬 token、中度 300 萬、重度 1,000 萬。",
   "Overview cards": "總覽卡片",
-  "Quota Summary": "額度摘要",
+  "Quota summary": "額度摘要",
   "Limits": "Agent 額度",
   "Trace": "即時追蹤",
   "Choose which cards Overview shows. The usage chart always stays.": "選擇總覽要顯示哪些卡片。用量圖一定會保留。",

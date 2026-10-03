@@ -255,7 +255,9 @@ public sealed class SettingsWindow : Window
                 // writes (ApplyAttributionWrite), so an open Settings kept
                 // showing rows as unassigned after "Apply suggestions". Rebuild
                 // just this page, the way ApplyAttributionWrite does, rather
-                // than the whole panel, which would drop focus and scroll.
+                // than the whole panel, which would rebuild every other page
+                // and drop keyboard focus. Like ApplyAttributionWrite, ShowPage
+                // returns the page to the top.
                 if (key.StartsWith(UsageAttributionKeyPrefix, StringComparison.Ordinal))
                 {
                     _pages["attribution"] = BuildAttributionPage(AppSettings.Store);
