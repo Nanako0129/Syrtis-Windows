@@ -1897,7 +1897,12 @@ async fn fetch_claude_account(request: ClaudeAccountRequest) -> ClaudeAccountFet
             };
         }
         ClaudeAccountRequest::ConfigDir(dir) => {
-            let loaded = load_claude_config_dir_credentials(&dir);
+            let loaded = load_claude_config_dir_credentials_bounded(
+                dir.clone(),
+                CLAUDE_CONFIG_DIR_READ_TIMEOUT,
+                load_claude_config_dir_credentials,
+            )
+            .await;
             (ClaudeAccount::ConfigDir(dir), loaded)
         }
         ClaudeAccountRequest::Desktop(loaded) => (ClaudeAccount::Desktop, loaded),
@@ -3924,6 +3929,30 @@ fn load_claude_config_dir_credentials(
         ClaudeLoginResolution::Terminal => {
             Err(ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_READ_ERROR))
         }
+    }
+}
+
+/// How long one config directory's credential read may take before the card
+/// reports a transient failure. A directory on a stalled network drive would
+/// otherwise hold the whole provider poll, which runs every provider on one
+/// joined task (security review R5).
+const CLAUDE_CONFIG_DIR_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run the synchronous credential read on the blocking pool with a timeout.
+/// A timed-out read is reported as the existing transient "Retrying
+/// automatically" failure; the blocking thread finishes on its own and its
+/// result is discarded.
+async fn load_claude_config_dir_credentials_bounded<L>(
+    dir: String,
+    timeout: std::time::Duration,
+    load: L,
+) -> Result<ClaudeCredentials, ProviderFetchFailure>
+where
+    L: FnOnce(&str) -> Result<ClaudeCredentials, ProviderFetchFailure> + Send + 'static,
+{
+    match tokio::time::timeout(timeout, tokio::task::spawn_blocking(move || load(&dir))).await {
+        Ok(Ok(loaded)) => loaded,
+        Ok(Err(_)) | Err(_) => Err(claude_read_retry_failure(CLAUDE_CONFIG_DIR_READ_RETRY_ERROR)),
     }
 }
 
@@ -8360,6 +8389,40 @@ mod tests {
         assert_ne!(extra, primary_after);
         scope.cleanup();
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R5: a config-directory read that stalls (a hung network drive) turns
+    /// into the transient retry failure after the timeout instead of holding
+    /// the joined provider poll; a read that finishes in time is returned
+    /// unchanged. Control: the same loader without a stall.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_config_dir_read_times_out_into_the_retry_failure() {
+        let stalled = load_claude_config_dir_credentials_bounded(
+            "C:\\stalled".to_string(),
+            std::time::Duration::from_millis(50),
+            |_| {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                Err(ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR))
+            },
+        )
+        .await;
+        assert!(matches!(
+            stalled,
+            Err(ProviderFetchFailure::Transient { display, .. })
+                if display == CLAUDE_CONFIG_DIR_READ_RETRY_ERROR
+        ));
+
+        let prompt = load_claude_config_dir_credentials_bounded(
+            "C:\\prompt".to_string(),
+            std::time::Duration::from_secs(5),
+            |_| Err(ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR)),
+        )
+        .await;
+        assert!(matches!(
+            prompt,
+            Err(ProviderFetchFailure::Terminal { display })
+                if display == CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR
+        ));
     }
 
     #[test]

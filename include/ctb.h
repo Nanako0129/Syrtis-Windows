@@ -71,7 +71,9 @@ char *tb_hourly_report(const char *year, const char *clients);
 // Per-(sub-)agent report (AgentsReport). `clients` as in tb_hourly_report.
 char *tb_agents_report(const char *year, const char *clients);
 
-// Process-stable source configuration identity. Success uses the standard
+// Source configuration identity. Stable while the scan roots are; it changes
+// when tb_set_extra_scan_paths replaces them, so read it again after that
+// call rather than once per process. Success uses the standard
 // envelope with `data` equal to exactly `sc1:` plus 64 lowercase hex digits.
 // Failure is the fixed redacted `sourceContextUnavailable`; no path, descriptor,
 // panic payload, or native cause crosses this boundary. The ID is not a secret
@@ -125,18 +127,31 @@ char *tb_quota_history(void);
 // (HourlyReport's hour buckets and tb_usage_trace's trailing live window can't
 // slice an arbitrary five-hour cycle). Expensive: an unbounded window scans
 // the whole local corpus, so this is never a call the UI thread should make
-// directly. Cached by from_ms alone; until_ms is NOT quantised and is NOT
-// part of the cache key. A poll-every-60s caller gets a cache hit on every
+// directly. Cached per (account_key, from_ms); until_ms is NOT quantised and
+// is NOT part of the cache key. A poll-every-60s caller gets a cache hit on every
 // call after the first through a source-change-token probe — see the
-// tb_core_ffi window_usage module.
-char *tb_window_usage(int64_t from_ms, int64_t until_ms);
+// tb_core_ffi window_usage module. account_key is NULL for the primary Claude
+// account (its window excludes every registered extra account's roots), or an
+// extra account's config directory exactly as registered (its window reads
+// only that account's registered roots; none registered is an error, never an
+// empty window). The cache is per (account, from_ms).
+char *tb_window_usage(const char *account_key, int64_t from_ms, int64_t until_ms);
+
+// Replace the extra scan-root registry with {"<client>":["<path>",...]} (only
+// "claude"; absolute drive paths, e.g. an extra account's <dir>\projects and
+// <dir>\transcripts); {} clears it. The next report scans the new roots.
+// Success data: {"registeredCount":N,"rejected":[{"client","index","reason"}],
+// "unreadable":[{"client","index","reason":"unreadable"}]}. Errors and reasons
+// are fixed codes; the input is never echoed. On error nothing changed.
+char *tb_set_extra_scan_paths(const char *json);
 
 // Replace the registry of extra Claude config directories (CLAUDE_CONFIG_DIR
 // accounts) with a JSON array of absolute drive paths; [] clears it. Each
 // directory becomes its own Claude card (accountKey = the directory) on the
 // next tb_agent_usage, read only from <dir>\.credentials.json. Success data:
 // {"registeredCount":N,"rejected":[{"index":i,"reason":code}]}. Errors and
-// reasons are fixed codes; the input is never echoed. On error the registry is
+// reasons are fixed codes (including defaultConfigDir for the primary's own
+// <home>\.claude); the input is never echoed. On error the registry is
 // unchanged.
 char *tb_set_claude_config_dirs(const char *json);
 

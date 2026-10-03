@@ -68,6 +68,22 @@
 //! (`narrow_to_request`) alone, with no rescan and no clock read anywhere in
 //! this module.
 //!
+//! ## Scoped to one Claude account (W4b, macOS #258)
+//!
+//! A quota window belongs to one account, so its usage must come from that
+//! account's transcripts only. The scope is applied by narrowing the scan: the
+//! primary (`account == None`) scans without the registered extra roots (the
+//! same context inputs `main` uses for it); an extra account
+//! (`Some(<config dir>)`) reads only its own registered roots and the Claude
+//! client. Each scope runs
+//! on its own captured context (the engine reads scanner settings from the
+//! context, never from report options), memoized per root generation. With no
+//! extra account registered the primary uses the process context itself, so
+//! its output is what it was before this existed.
+//!
+//! Since W4b the cache key is `(account, from_ms)` and publication is gated on
+//! the root generation the scan's context was captured at.
+//!
 //! A future reader tempted to re-add `until_ms` as the scan's own upper bound
 //! to "avoid scanning too far" should read the `tokscale_core` comment above
 //! first — the bound buys nothing there, and every fix this module made to
@@ -81,7 +97,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-pub(crate) type CacheKey = i64;
+pub(crate) type CacheKey = (Option<String>, i64);
 /// (published-at [`Instant`, re-stamped on every token-match hit — see
 /// `cached` below, matching `graph_cached`'s own re-stamp shape], source
 /// token, the `until_ms` this entry was scanned through — always `i64::MAX`,
@@ -92,14 +108,134 @@ static SCAN_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// key → cache entry. Same role as `GRAPH_CACHE` in lib.rs. The key is the
 /// window's stable lower bound; see the module doc comment for why `until_ms`
-/// is not part of it. `publish` clears before inserting: one entry, not a
-/// history, so a window scan (tens of seconds on a large store) left resident
-/// forever is one window's messages, not one per poll the lens stayed open.
+/// is not part of it, and the account (`None` = primary) is. `publish` keeps
+/// one entry per account: not a history, so a window scan (tens of seconds on
+/// a large store) left resident forever is one window's messages per account,
+/// not one per poll the lens stayed open.
 static WINDOW_USAGE_CACHE: LazyLock<Mutex<HashMap<CacheKey, CacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-pub(crate) fn cache_key(from_ms: i64) -> CacheKey {
-    from_ms
+pub(crate) fn cache_key(account: &Option<String>, from_ms: i64) -> CacheKey {
+    (account.clone(), from_ms)
+}
+
+const CLAUDE: &str = "claude";
+
+/// An extra account whose roots are not registered cannot be answered for,
+/// and says so instead of reporting an empty window (macOS wording): an empty
+/// scan means "nothing was read", and rendering it would mean "this account
+/// used nothing". The two registries are set by separate calls, so a
+/// just-added account can briefly be in this state.
+pub(crate) const NO_REGISTERED_ROOTS: &str =
+    "This Claude account has no registered scan root yet, so its window cannot be read.";
+
+/// `(root generation, account)` → the context that account's window scans.
+/// Inserted only while its generation is current; cleared with the cache.
+static SCOPED_CONTEXTS: LazyLock<Mutex<HashMap<(u64, Option<String>), crate::LocalSourceContext>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The registered `claude` roots that belong to the config directory `dir`:
+/// direct children only (macOS `registered_roots_under`), so a nested
+/// account's roots are not folded into the outer one. Compared on the folded
+/// form (`duplicate_key`), which is how both registries de-duplicate.
+fn registered_roots_under(
+    dir: &str,
+    registry: &std::collections::BTreeMap<String, Vec<std::path::PathBuf>>,
+) -> Vec<std::path::PathBuf> {
+    let owner = crate::claude_config_dirs::duplicate_key(dir);
+    let prefix = format!("{owner}\\");
+    registry
+        .get(CLAUDE)
+        .map(|roots| {
+            roots
+                .iter()
+                .filter(|root| {
+                    let key = crate::claude_config_dirs::duplicate_key(&root.to_string_lossy());
+                    key.strip_prefix(&prefix)
+                        .is_some_and(|rest| !rest.is_empty() && !rest.contains('\\'))
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The context `account`'s window scans. `context` is the process context the
+/// caller already holds (taken before any registry or memo lock, per the W4b
+/// lock order); a derived context carries its generation.
+fn scoped_context(
+    context: &crate::LocalSourceContext,
+    account: &Option<String>,
+) -> Result<crate::LocalSourceContext, String> {
+    let registry = crate::extra_scan_paths::snapshot();
+    let roots = registry.get(CLAUDE).cloned().unwrap_or_default();
+    // The primary window scans exactly what it scanned before W4b: the
+    // process context when no extra root is registered, otherwise a context
+    // captured with the same inputs `main` uses for it (`user_home_dir()`,
+    // env roots on, `ScannerSettings::default()`), which simply never contains
+    // the registered roots. Excluding them instead does not work: the engine
+    // applies `excluded_scan_paths` only on its context-free scan path, not in
+    // `scan_all_clients_resolved_inner`, which every scan here goes through.
+    // Roots the engine reaches by its own routes (a `.cc-mirror` variant
+    // naming an extra account's directory, `TOKSCALE_EXTRA_DIRS`) are still
+    // counted for the primary, exactly as on `main`; closing them needs that
+    // engine fix (Plan slice W4c).
+    if account.is_none() && roots.is_empty() {
+        return Ok(context.clone());
+    }
+    let memo_key = (context.generation(), account.clone());
+    if let Some(found) = SCOPED_CONTEXTS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&memo_key)
+    {
+        return Ok(found.clone());
+    }
+    let resolved = match account {
+        None => tokscale_core::ResolvedLocalSourceContext::capture(
+            crate::user_home_dir(),
+            true,
+            tokscale_core::ScannerSettings::default(),
+        ),
+        Some(dir) => {
+            let own = registered_roots_under(dir, &registry);
+            if own.is_empty() {
+                return Err(NO_REGISTERED_ROOTS.to_string());
+            }
+            // `use_env_roots = false`: `TOKSCALE_EXTRA_DIRS` can name `claude:`
+            // roots of its own and would pour another account's files into
+            // this one's window (macOS `account_options`).
+            tokscale_core::ResolvedLocalSourceContext::capture(
+                Some(std::path::PathBuf::from(dir)),
+                false,
+                tokscale_core::ScannerSettings {
+                    extra_scan_paths: std::collections::BTreeMap::from([(CLAUDE.to_string(), own)]),
+                    ..Default::default()
+                },
+            )
+        }
+    }
+    .map_err(|_| "sourceContextUnavailable".to_string())?;
+    let scoped = crate::LocalSourceContext::derived(resolved, context.generation());
+    let mut memo = SCOPED_CONTEXTS.lock().unwrap_or_else(|p| p.into_inner());
+    if scoped.is_current() {
+        memo.insert(memo_key, scoped.clone());
+    }
+    Ok(scoped)
+}
+
+/// Drop every cached window and scoped context (root change).
+pub(crate) fn clear_all() {
+    WINDOW_USAGE_CACHE.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    SCOPED_CONTEXTS.lock().unwrap_or_else(|p| p.into_inner()).clear();
+}
+
+#[cfg(test)]
+pub(crate) fn scoped_context_for_test(
+    context: &crate::LocalSourceContext,
+    account: &Option<String>,
+) -> Result<crate::LocalSourceContext, String> {
+    scoped_context(context, account)
 }
 
 // Only read from tests (asserting the cache actually avoids a re-scan); no
@@ -111,10 +247,13 @@ pub(crate) fn scan_count() -> usize {
 
 pub(crate) fn cached(
     context: &crate::LocalSourceContext,
+    account: &Option<String>,
     from_ms: i64,
     until_ms: i64,
 ) -> Result<Value, String> {
-    let key = cache_key(from_ms);
+    let scoped = scoped_context(context, account)?;
+    let context = &scoped;
+    let key = cache_key(account, from_ms);
     let cached = {
         let cache = WINDOW_USAGE_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.get(&key).map(|(published_at, token, cached_until, data)| {
@@ -189,6 +328,21 @@ fn narrow_to_request(data: Value, until_ms: i64, cached_until: i64) -> Value {
 /// queue costs nothing that running them concurrently was buying.
 static COMPUTE: Mutex<()> = Mutex::new(());
 
+/// Test seam: hold the scan lock so a concurrent `tb_window_usage` blocks
+/// after it has taken its context (the W4b gate test).
+#[cfg(test)]
+pub(crate) fn lock_compute_for_test() -> std::sync::MutexGuard<'static, ()> {
+    COMPUTE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+pub(crate) fn has_entry_for_test(account: &Option<String>, from_ms: i64) -> bool {
+    WINDOW_USAGE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains_key(&cache_key(account, from_ms))
+}
+
 fn compute(context: &crate::LocalSourceContext, from_ms: i64, until_ms: i64, key: CacheKey) -> Result<Value, String> {
     let _serialised = COMPUTE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // Re-check under the lock. A caller that queued behind another's scan is
@@ -237,21 +391,31 @@ fn compute(context: &crate::LocalSourceContext, from_ms: i64, until_ms: i64, key
             // to, by construction, for any `until_ms` a later caller asks
             // for.
             let scan_until = i64::MAX;
-            let data = run(context, from_ms, scan_until)?;
-            publish(key, (Instant::now(), token, scan_until, data.clone()));
+            // An extra account's window is a Claude quota window: scan only the
+            // Claude client, so other clients' data (some of which lives in
+            // Windows Known Folders that an account root does not move) never
+            // lands in it.
+            let clients = key.0.as_ref().map(|_| vec![CLAUDE.to_string()]);
+            let data = run_with_clients(context, clients, from_ms, scan_until)?;
+            publish(context, key, (Instant::now(), token, scan_until, data.clone()));
             (data, scan_until)
         }
     };
     Ok(narrow_to_request(data, until_ms, cached_until))
 }
 
-/// Cache a freshly scanned window. Unlike the macOS source, there is no root
-/// generation to check here (this crate has no dynamic root registry), so
-/// publication is unconditional — clear then insert, keeping only the newest
-/// entry (see the `WINDOW_USAGE_CACHE` doc comment for why).
-fn publish(key: CacheKey, entry: CacheEntry) {
+/// Cache a freshly scanned window, keeping only the newest entry per account
+/// (macOS `publish`: a whole-map clear would make the primary and an extra
+/// account evict each other on every poll). Dropped when the roots changed
+/// since `context` was captured. The recheck and re-stamp read paths above are
+/// deliberately not gated: the setters clear this cache right after they move
+/// the generation.
+fn publish(context: &crate::LocalSourceContext, key: CacheKey, entry: CacheEntry) {
     let mut cache = WINDOW_USAGE_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.clear();
+    if !context.is_current() {
+        return;
+    }
+    cache.retain(|(account, _), _| *account != key.0);
     cache.insert(key, entry);
 }
 
@@ -293,7 +457,16 @@ pub(crate) fn run(
     from_ms: i64,
     until_ms: i64,
 ) -> Result<Value, String> {
-    let options = context.report_options(None, None);
+    run_with_clients(context, None, from_ms, until_ms)
+}
+
+fn run_with_clients(
+    context: &crate::LocalSourceContext,
+    clients: Option<Vec<String>>,
+    from_ms: i64,
+    until_ms: i64,
+) -> Result<Value, String> {
+    let options = context.report_options(None, clients);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -371,7 +544,7 @@ mod tests {
     fn repeated_identical_request_reuses_one_scan() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let from_ms = 1_700_000_000_000;
-        let key = cache_key(from_ms);
+        let key = cache_key(&None, from_ms);
         WINDOW_USAGE_CACHE
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -379,8 +552,8 @@ mod tests {
         let before = scan_count();
         let context = test_context("polling-drift");
 
-        cached(&context, from_ms, from_ms + 60_000).expect("first window scan");
-        cached(&context, from_ms, from_ms + 60_000).expect("second request, same bound, cache reused");
+        cached(&context, &None, from_ms, from_ms + 60_000).expect("first window scan");
+        cached(&context, &None, from_ms, from_ms + 60_000).expect("second request, same bound, cache reused");
 
         assert_eq!(
             scan_count(),
@@ -401,7 +574,7 @@ mod tests {
     fn widening_request_reuses_one_scan() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let from_ms = 1_700_000_000_000;
-        let key = cache_key(from_ms);
+        let key = cache_key(&None, from_ms);
         WINDOW_USAGE_CACHE
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -409,8 +582,8 @@ mod tests {
         let before = scan_count();
         let context = test_context("widening-request");
 
-        cached(&context, from_ms, from_ms + 60_000).expect("first window scan");
-        let result = cached(&context, from_ms, from_ms + 65_000).expect("widened request, unchanged source");
+        cached(&context, &None, from_ms, from_ms + 60_000).expect("first window scan");
+        let result = cached(&context, &None, from_ms, from_ms + 65_000).expect("widened request, unchanged source");
 
         assert_eq!(
             scan_count(),
@@ -434,7 +607,7 @@ mod tests {
     fn production_widening_drift_reuses_one_scan() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let from_ms = wall_clock_now_ms() - 3_600_000;
-        let key = cache_key(from_ms);
+        let key = cache_key(&None, from_ms);
         WINDOW_USAGE_CACHE
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -443,7 +616,7 @@ mod tests {
         let before = scan_count();
 
         // First poll: until_ms = now, exactly DashboardModel.cs:570's shape.
-        cached(&context, from_ms, wall_clock_now_ms()).expect("first poll");
+        cached(&context, &None, from_ms, wall_clock_now_ms()).expect("first poll");
 
         // The smallest sleep that buys a real, measurable drift between two
         // wall-clock reads a real caller a moment apart would also see.
@@ -451,7 +624,7 @@ mod tests {
 
         // Second poll: until_ms grew past the first call (ordinary drift),
         // same unchanged source.
-        cached(&context, from_ms, wall_clock_now_ms()).expect("second poll, drifted wider");
+        cached(&context, &None, from_ms, wall_clock_now_ms()).expect("second poll, drifted wider");
 
         assert_eq!(
             scan_count(),
@@ -467,7 +640,7 @@ mod tests {
     fn genuine_source_change_forces_a_rescan() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let from_ms = 1_700_000_000_000;
-        let key = cache_key(from_ms);
+        let key = cache_key(&None, from_ms);
         let context = test_context("source-change");
         let stale_at = Instant::now()
             .checked_sub(Duration::from_secs(crate::ONESHOT_MAX_AGE_SECS + 5))
@@ -488,7 +661,7 @@ mod tests {
         }
         let before = scan_count();
 
-        let result = cached(&context, from_ms, from_ms + 60_000).expect("rescan after stale mismatched token");
+        let result = cached(&context, &None, from_ms, from_ms + 60_000).expect("rescan after stale mismatched token");
 
         assert_eq!(
             scan_count(),
@@ -501,7 +674,7 @@ mod tests {
 
     #[test]
     fn different_from_uses_different_key() {
-        assert_ne!(cache_key(1_700_000_000_000), cache_key(1_700_000_060_000));
+        assert_ne!(cache_key(&None, 1_700_000_000_000), cache_key(&None, 1_700_000_060_000));
     }
 
     #[test]
@@ -527,7 +700,7 @@ mod tests {
     fn a_narrower_request_does_not_return_messages_past_its_own_until_ms() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let from_ms = 1_700_000_000_000;
-        let key = cache_key(from_ms);
+        let key = cache_key(&None, from_ms);
         let context = test_context("narrow-request");
         let wide_until = from_ms + 120_000;
         let narrow_until = from_ms + 60_000;
@@ -554,11 +727,11 @@ mod tests {
         {
             let mut cache =
                 WINDOW_USAGE_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            cache.insert(key, (Instant::now(), token, wide_until, wide));
+            cache.insert(key.clone(), (Instant::now(), token, wide_until, wide));
         }
         let before = scan_count();
 
-        let result = cached(&context, from_ms, narrow_until).expect("narrower request served from cache");
+        let result = cached(&context, &None, from_ms, narrow_until).expect("narrower request served from cache");
 
         assert_eq!(
             scan_count(),
@@ -591,7 +764,7 @@ mod tests {
     fn compute_narrows_a_cache_hit_found_under_its_own_lock() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let from_ms = 1_700_000_000_000;
-        let key = cache_key(from_ms);
+        let key = cache_key(&None, from_ms);
         let context = test_context("compute-recheck-narrow");
         let wide_until = from_ms + 120_000;
         let narrow_until = from_ms + 60_000;
@@ -618,7 +791,7 @@ mod tests {
         {
             let mut cache =
                 WINDOW_USAGE_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            cache.insert(key, (Instant::now(), token, wide_until, wide));
+            cache.insert(key.clone(), (Instant::now(), token, wide_until, wide));
         }
         let before = scan_count();
 

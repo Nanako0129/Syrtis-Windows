@@ -86,8 +86,10 @@ public static class TbCore
         Unwrap<AgentsReport>(NativeMethods.tb_agents_report(year, JoinClients(clients)));
 
     /// <summary>
-    /// Process-stable source configuration identity. The full value is for
-    /// cache binding only and must not be written to normal diagnostics or UI.
+    /// Source configuration identity. Stable while the scan roots are; it
+    /// changes when <c>tb_set_extra_scan_paths</c> replaces them, so read it
+    /// after that call, not once per process. The full value is for cache
+    /// binding only and must not be written to normal diagnostics or UI.
     /// </summary>
     public static string SourceContextId() =>
         ValidateSourceContextId(Unwrap<string>(NativeMethods.tb_source_context_id()));
@@ -146,11 +148,13 @@ public static class TbCore
     /// <summary>Per-message usage rows inside the absolute interval
     /// <c>[fromMs, untilMs)</c>. Expensive — scans the whole local corpus when
     /// the cdylib's cache is cold — and must be called off the UI thread. The
-    /// cache is keyed by <c>fromMs</c> alone; <c>untilMs</c> is not quantised
-    /// and is not part of the key. See <c>ctb.h</c>'s <c>tb_window_usage</c>
-    /// for the cache shape this is built on.</summary>
+    /// cache is keyed by account and <c>fromMs</c>; <c>untilMs</c> is not
+    /// quantised and is not part of the key. See <c>ctb.h</c>'s <c>tb_window_usage</c>
+    /// for the cache shape this is built on. Always the primary Claude
+    /// account (<c>accountKey</c> NULL); an extra account's window is not
+    /// requested until its Settings slice exists.</summary>
     public static WindowUsage WindowUsage(long fromMs, long untilMs) =>
-        Unwrap<WindowUsage>(NativeMethods.tb_window_usage(fromMs, untilMs));
+        Unwrap<WindowUsage>(NativeMethods.tb_window_usage(null, fromMs, untilMs));
 
     /// <summary>
     /// Decodes the standard FFI envelope, returning the payload or throwing

@@ -47,7 +47,10 @@ pub(crate) fn snapshot() -> (Vec<String>, u64) {
 /// an extension).
 ///
 /// Returns a fixed reason code on refusal; never the input.
-fn normalize(raw: &str) -> Result<String, &'static str> {
+///
+/// Shared with the scan-root registry (`extra_scan_paths`), so both registries
+/// apply one path rule.
+pub(crate) fn normalize(raw: &str) -> Result<String, &'static str> {
     if raw.is_empty() {
         return Err("empty");
     }
@@ -96,8 +99,47 @@ fn valid_component(component: &str) -> bool {
 /// one account. Windows paths are case-insensitive and accept either
 /// separator, so duplicates are detected on a folded form; the stored string
 /// stays exactly as given.
-fn duplicate_key(dir: &str) -> String {
+pub(crate) fn duplicate_key(dir: &str) -> String {
     dir.to_lowercase().replace('/', "\\")
+}
+
+/// The primary account's own config directory, `<home>\.claude`, folded like
+/// [`duplicate_key`]. Its `.credentials.json` IS the primary's credential and
+/// its transcripts are the primary's usage, so registering it as an extra
+/// account would show the primary twice and, once its roots are excluded from
+/// the primary window, hide the primary's own usage (security review R2).
+fn default_config_dir_key(home: &std::path::Path) -> String {
+    duplicate_key(&home.join(".claude").to_string_lossy())
+}
+
+/// Whether `dir` (already normalized) is the primary's `<home>\.claude` or an
+/// ancestor of it (the home directory, a drive folder above it). An ancestor
+/// is refused too: the primary window excludes registered directories by
+/// component prefix, so registering `C:\Users\x` would hide the primary's own
+/// `C:\Users\x\.claude` usage, which is the harm R2 exists to prevent. Alias
+/// forms a junction could create are not detected; literal and folded matches
+/// are.
+pub(crate) fn is_default_config_dir(dir: &str, home: Option<&std::path::Path>) -> bool {
+    let Some(home) = home else {
+        return false;
+    };
+    let base = default_config_dir_key(home);
+    let key = duplicate_key(dir);
+    key == base || base.starts_with(&format!("{key}\\"))
+}
+
+/// Whether `dir` is the primary's `<home>\.claude`, anything under it, or an
+/// ancestor of it — the scan-root rule: the scan registry is handed
+/// `<dir>\projects` and `<dir>\transcripts`, never the config directory
+/// itself, and an ancestor root would both walk the whole profile and, once
+/// excluded from the primary window, hide the primary's usage.
+pub(crate) fn is_at_or_under_default_config_dir(dir: &str, home: Option<&std::path::Path>) -> bool {
+    let Some(home) = home else {
+        return false;
+    };
+    let base = default_config_dir_key(home);
+    let key = duplicate_key(dir);
+    is_default_config_dir(dir, Some(home)) || key.starts_with(&format!("{base}\\"))
 }
 
 /// Replace the whole registry from a JSON array of directory strings and
@@ -112,8 +154,10 @@ pub(crate) fn set_from_json(raw: &str) -> Result<(serde_json::Value, Vec<String>
 
     let mut registered: Vec<String> = Vec::new();
     let mut rejected: Vec<serde_json::Value> = Vec::new();
+    let home = crate::user_home_dir();
     for (index, raw_dir) in input.iter().enumerate() {
         let reason = match normalize(raw_dir) {
+            Ok(dir) if is_default_config_dir(&dir, home.as_deref()) => "defaultConfigDir",
             Ok(dir)
                 if registered
                     .iter()
@@ -245,6 +289,21 @@ mod tests {
                 Err("invalidComponent"),
                 "{name} as a middle component"
             );
+        }
+    }
+
+    #[test]
+    fn the_primary_config_dir_and_its_ancestors_are_refused() {
+        let home = std::path::Path::new(r"C:\Users\x");
+        for dir in [r"C:\Users\x\.claude", "c:/users/X/.CLAUDE", r"C:\Users\x", r"C:\Users"] {
+            assert!(is_default_config_dir(dir, Some(home)), "{dir}");
+            assert!(is_at_or_under_default_config_dir(dir, Some(home)), "{dir}");
+        }
+        assert!(is_at_or_under_default_config_dir(r"C:\Users\x\.claude\projects", Some(home)));
+        assert!(!is_default_config_dir(r"C:\Users\x\.claude\projects", Some(home)));
+        for dir in [r"C:\Users\x\.claude-work", r"C:\Users\xy", r"D:\Users\x"] {
+            assert!(!is_default_config_dir(dir, Some(home)), "{dir}");
+            assert!(!is_at_or_under_default_config_dir(dir, Some(home)), "{dir}");
         }
     }
 

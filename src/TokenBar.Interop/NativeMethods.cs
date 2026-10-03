@@ -54,8 +54,8 @@ internal static partial class NativeMethods
     [LibraryImport(Lib)]
     internal static partial nint tb_quota_history();
 
-    [LibraryImport(Lib)]
-    internal static partial nint tb_window_usage(long fromMs, long untilMs);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_window_usage(string? accountKey, long fromMs, long untilMs);
 
     [LibraryImport(Lib)]
     internal static partial void tb_free(nint ptr);
