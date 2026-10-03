@@ -280,11 +280,6 @@ async fn fetch_with_credentials(
     // withdrawal that lands after the decodes resolves and sends nothing.
     let consent_withdrawn =
         || matches!(credentials, GrokBotCredentials::Desktop { .. }) && !consent();
-    if consent_withdrawn() {
-        return Err(ProviderFetchFailure::terminal(
-            GROK_BOT_KEYCHAIN_CONSENT_REQUIRED,
-        ));
-    }
     let scope = credentials
         .resolve_account_scope(resolve_credential)
         .map_err(|_| {
