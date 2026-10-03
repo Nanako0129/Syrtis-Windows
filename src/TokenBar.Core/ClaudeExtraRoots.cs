@@ -125,18 +125,17 @@ public static class ClaudeExtraRoots
     /// faults: see <see cref="Observe"/>.</summary>
     public static Task LaunchPush { get; private set; } = Task.CompletedTask;
 
-    /// <summary>Queue the launch push. Its push is the pusher's first
-    /// (<see cref="ClaudeRootsPush.Sequence"/> 1), which the dashboard skips:
-    /// its readers already waited for it.</summary>
-    public static void StartLaunch(ClaudeRootsPusher pusher)
-    {
-        LaunchRequested = true;
-        LaunchPush = Observe(pusher.Request(), Log);
-    }
+    /// <summary>Queue the launch push (<see cref="ClaudeRootsPush.Launch"/>).</summary>
+    public static void StartLaunch(ClaudeRootsPusher pusher) =>
+        LaunchPush = Observe(pusher.Request(launch: true), Log);
 
-    public static bool LaunchRequested { get; private set; }
+    private static volatile bool s_launchTimedOut;
 
-    public static bool IsLaunchPush(ClaudeRootsPush push) => LaunchRequested && push.Sequence == 1;
+    /// <summary>Whether every reader <paramref name="push"/> affects already
+    /// waited for it, so the dashboard need not refresh for it: the launch
+    /// push, unless a reader gave up waiting first (then the refresh is what
+    /// brings the saved roots in).</summary>
+    public static bool ReadersAlreadyWaited(ClaudeRootsPush push) => push.Launch && !s_launchTimedOut;
 
     /// <summary><paramref name="push"/>, logged once if it failed (type only)
     /// and never faulting, so every later reader waits on a finished task and
@@ -157,7 +156,8 @@ public static class ClaudeExtraRoots
     /// <summary>How long a background reader waits for the launch push.
     /// ponytail: a fixed guess, not measured; the push is two setters and one
     /// context capture. A slower push only means that read uses the context
-    /// that was current, and the push's own refresh corrects it.</summary>
+    /// that was current; the dashboard then refreshes when the push lands
+    /// (<see cref="ReadersAlreadyWaited"/>).</summary>
     public static readonly TimeSpan LaunchWait = TimeSpan.FromSeconds(10);
 
     /// <summary>Block a background reader until the launch push has landed.
@@ -171,6 +171,7 @@ public static class ClaudeExtraRoots
     {
         if (!launch.Wait(timeout))
         {
+            s_launchTimedOut = true;
             log("claudeRoots launch push timed out; using the current context");
         }
     }
@@ -187,7 +188,7 @@ public static class ClaudeExtraRoots
 public sealed record ClaudeRootsPush(
     IReadOnlyList<string> Dirs,
     IReadOnlyDictionary<int, string> Rejected,
-    int Sequence);
+    bool Launch);
 
 /// <summary>
 /// One serialized worker for both full-replace setters (security review R7):
@@ -211,7 +212,7 @@ public sealed class ClaudeRootsPusher(
     private TaskCompletionSource? _next;
     // Touched only by the worker loop. A fresh process's registries are empty.
     private IReadOnlyList<string> _applied = [];
-    private int _sequence;
+    private bool _nextIsLaunch;
 
     /// <summary>Raised after every push that reached both setters.</summary>
     public event Action<ClaudeRootsPush>? Pushed;
@@ -221,10 +222,13 @@ public sealed class ClaudeRootsPusher(
     /// <summary>Queue a push. The returned task completes when a push that
     /// started after this call finishes, and is faulted if that push threw.
     /// Requests made while a push runs share the one push after it.</summary>
-    public Task Request()
+    public Task Request(bool launch = false)
     {
         lock (_gate)
         {
+            // A launch request is the process's first, so nothing coalesces
+            // into it; any later request makes the shared push a normal one.
+            _nextIsLaunch = _next is null && launch;
             _next ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var task = _next.Task;
             if (!_running)
@@ -242,6 +246,7 @@ public sealed class ClaudeRootsPusher(
         while (true)
         {
             TaskCompletionSource waiter;
+            bool launch;
             lock (_gate)
             {
                 if (_next is null)
@@ -251,12 +256,13 @@ public sealed class ClaudeRootsPusher(
                 }
 
                 waiter = _next;
+                launch = _nextIsLaunch;
                 _next = null;
             }
 
             try
             {
-                PushOnce();
+                PushOnce(launch);
                 waiter.SetResult();
             }
             catch (Exception ex)
@@ -268,7 +274,7 @@ public sealed class ClaudeRootsPusher(
         }
     }
 
-    private void PushOnce()
+    private void PushOnce(bool launch)
     {
         var dirs = load();
         var rejected = new Dictionary<int, string>();
@@ -314,7 +320,7 @@ public sealed class ClaudeRootsPusher(
         }
 
         _applied = both;
-        var push = new ClaudeRootsPush(dirs, rejected, ++_sequence);
+        var push = new ClaudeRootsPush(dirs, rejected, launch);
         Last = push;
         Pushed?.Invoke(push);
     }

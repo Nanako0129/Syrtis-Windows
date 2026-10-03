@@ -250,11 +250,11 @@ public sealed class DashboardModel
     /// 60 s tick. Forced: a graph request already in flight was scanned with
     /// the old roots and must not absorb this one, and a new generation also
     /// stops that scan's snapshot write. With the flyout closed the force
-    /// waits for <see cref="Start"/>. The launch push is skipped: every reader
-    /// it affects already waited for it.</summary>
+    /// waits for <see cref="Start"/>. A launch push its readers waited for is
+    /// skipped (<see cref="ClaudeExtraRoots.ReadersAlreadyWaited"/>).</summary>
     private void OnClaudeRootsPushed(ClaudeRootsPush push)
     {
-        if (ClaudeExtraRoots.IsLaunchPush(push))
+        if (ClaudeExtraRoots.ReadersAlreadyWaited(push))
         {
             return;
         }
