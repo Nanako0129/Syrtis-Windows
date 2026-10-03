@@ -136,4 +136,15 @@ public static class HeatmapMath
         var baseWidth = CellOrigin(lastCol, 0).X + Cell + HoverRingReach;
         return labels.Any(l => l.Col == lastCol) ? baseWidth + LastColumnLabelMargin : baseWidth;
     }
+
+    /// <summary>Where a rebuilt heatmap opens: the position the user left it at
+    /// while the year and cutoff day are unchanged, otherwise null, meaning the
+    /// most recent column. The flyout rebuilds the heatmap on every snapshot,
+    /// so without this a refresh snapped a scrolled-back view to today; macOS
+    /// re-anchors only on first appearance and on a cutoff change
+    /// (ContributionHeatmap.swift:413-415).</summary>
+    public static double? RestoreOffset(string? previousAnchor, string anchor, double? savedOffset) =>
+        anchor == previousAnchor ? savedOffset : null;
+
+    public static string Anchor(string year, string cutoff) => $"{year}|{cutoff}";
 }

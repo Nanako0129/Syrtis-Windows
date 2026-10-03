@@ -101,4 +101,20 @@ public class HeatmapMathTests
     [Fact]
     public void CellOriginUsesTheStep() =>
         Assert.Equal((HeatmapMath.GridLeading + 2 * 14, HeatmapMath.GridTop + 3 * 14), HeatmapMath.CellOrigin(2, 3));
+
+    [Fact]
+    public void ARefreshKeepsTheScrolledPositionForTheSameYearAndCutoff() =>
+        Assert.Equal(120.0, HeatmapMath.RestoreOffset(
+            HeatmapMath.Anchor("2026", "2026-10-03"), HeatmapMath.Anchor("2026", "2026-10-03"), 120.0));
+
+    [Theory]
+    [InlineData("2026", "2026-10-04")] // the day rolled over: re-anchor to today
+    [InlineData("2025", "2025-12-31")] // another year
+    public void ANewYearOrCutoffReanchorsToTheLatestColumn(string year, string cutoff) =>
+        Assert.Null(HeatmapMath.RestoreOffset(
+            HeatmapMath.Anchor("2026", "2026-10-03"), HeatmapMath.Anchor(year, cutoff), 120.0));
+
+    [Fact]
+    public void TheFirstBuildOpensAtTheLatestColumn() =>
+        Assert.Null(HeatmapMath.RestoreOffset(null, HeatmapMath.Anchor("2026", "2026-10-03"), null));
 }

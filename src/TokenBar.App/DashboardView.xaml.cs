@@ -48,6 +48,13 @@ public sealed partial class DashboardView : UserControl
     // router can scroll it like the tab rows; null otherwise.
     private ScrollViewer? _heatmapScroll;
 
+    /// <summary>The heatmap is rebuilt on every snapshot (about every 10 s), so
+    /// its horizontal position is kept here and restored, and it is re-anchored
+    /// to the most recent column only when the year or cutoff day changes, as
+    /// macOS does (ContributionHeatmap.swift:413-415).</summary>
+    private string? _heatmapAnchor;
+    private double? _heatmapOffset;
+
     public DashboardView()
     {
         InitializeComponent();
@@ -314,15 +321,29 @@ public sealed partial class DashboardView : UserControl
 
     private void SelectTabByNumber(int number)
     {
+        // Before the first snapshot the tab row is empty, so every target would
+        // resolve to Overview and overwrite the saved tab with nothing visible.
+        if (_snapshot is null)
+        {
+            return;
+        }
+
         if (TabShortcuts.Target(TabShortcuts.Tabs(_displayClients), number) is { } id)
         {
             SelectClientTab(id);
         }
     }
 
-    private void StepTab(int step) =>
+    private void StepTab(int step)
+    {
+        if (_snapshot is null)
+        {
+            return; // same reason as SelectTabByNumber
+        }
+
         SelectClientTab(TabShortcuts.Step(
             TabShortcuts.Tabs(_displayClients), _activeClientTab, step));
+    }
 
     private static bool IsKeyDown(Windows.System.VirtualKey key) =>
         Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(key)
@@ -676,6 +697,14 @@ public sealed partial class DashboardView : UserControl
     /// is already at the end it is being pushed toward, so the wheel falls
     /// through to the dashboard's vertical scroll instead of dying under the
     /// cursor.</summary>
+    private bool PointIsInside(FrameworkElement element, Windows.Foundation.Point point)
+    {
+        var origin = element.TransformToVisual(this)
+            .TransformPoint(new Windows.Foundation.Point(0, 0));
+        return point.X >= origin.X && point.X <= origin.X + element.ActualWidth
+            && point.Y >= origin.Y && point.Y <= origin.Y + element.ActualHeight;
+    }
+
     private bool TryScrollTabRowAt(Windows.Foundation.Point point, int delta)
     {
         foreach (var row in new[] { ClientTabsScroll, TabsScroll, _heatmapScroll })
@@ -685,10 +714,16 @@ public sealed partial class DashboardView : UserControl
                 continue;
             }
 
-            var origin = row.TransformToVisual(this)
-                .TransformPoint(new Windows.Foundation.Point(0, 0));
-            if (point.X < origin.X || point.X > origin.X + row.ActualWidth
-                || point.Y < origin.Y || point.Y > origin.Y + row.ActualHeight)
+            if (!PointIsInside(row, point))
+            {
+                continue;
+            }
+
+            // The heatmap lives inside CardsScroll and can be scrolled out of
+            // sight; its bounds still extend under the header, so a wheel there
+            // must reach the dashboard, not the hidden grid. The tab rows are
+            // never clipped.
+            if (row == _heatmapScroll && !PointIsInside(CardsScroll, point))
             {
                 continue;
             }
@@ -1304,10 +1339,22 @@ public sealed partial class DashboardView : UserControl
             VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
             Margin = new Thickness(0, 6, 0, 0),
         };
-        // Land on the most recent columns, not Jan 1 (ChangeView clamps).
+        // Land on the most recent columns, not Jan 1 (ChangeView clamps), the
+        // first time and when the year or cutoff changes; otherwise keep the
+        // position the user scrolled to.
+        var anchor = HeatmapMath.Anchor(GridYear, cutoff);
+        var restore = HeatmapMath.RestoreOffset(_heatmapAnchor, anchor, _heatmapOffset);
+        _heatmapAnchor = anchor;
         scroll.Loaded += (_, _) => DispatcherQueue.TryEnqueue(
             Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
-            () => scroll.ChangeView(canvas.Width, null, null, disableAnimation: true));
+            () => scroll.ChangeView(restore ?? canvas.Width, null, null, disableAnimation: true));
+        scroll.ViewChanged += (_, e) =>
+        {
+            if (!e.IsIntermediate)
+            {
+                _heatmapOffset = scroll.HorizontalOffset;
+            }
+        };
         _heatmapScroll = scroll;
         return scroll;
     }
