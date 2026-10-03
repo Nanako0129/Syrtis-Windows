@@ -74,35 +74,79 @@ public class ClaudeRootsNativeTests
         }
     }
 
-    /// <summary>The picker's path-shape rules: the one list of cases, each
-    /// checked against the expected reason code in UiRejection AND in the
-    /// real tb_set_claude_config_dirs (null = accepted). A sample of shapes,
-    /// not every native rule (components and reserved names stay native-only;
-    /// the profile rules are left out because native reads the real home).
-    /// Runs on every OS: the config setter's normalize touches no
-    /// filesystem.</summary>
+    /// <summary>The picker's pre-save check is the native answer
+    /// (<c>tb_validate_claude_config_dir</c>), and for a single path it is
+    /// the config setter's own: one rule, kept in Rust. The rule's full table
+    /// is the Rust test <c>validate_answers_as_the_setter_would_for_the_appended_entry</c>;
+    /// these rows prove the C# wiring.</summary>
     [Theory]
     [InlineData(@"E:\", "rootDirectory")]
-    [InlineData(@"c:/", "rootDirectory")]
-    [InlineData(@"C:\\\", "rootDirectory")]
-    [InlineData(@"C:", "unsupportedPath")]
     [InlineData(@"C:work", "unsupportedPath")]
-    [InlineData(@"\", "unsupportedPath")]
     [InlineData(@"\Users\x", "unsupportedPath")]
     [InlineData(@"\\server\share\.claude", "unsupportedPath")]
     [InlineData(@"//wsl.localhost/Ubuntu/home/me/.claude", "unsupportedPath")]
+    [InlineData(@"D:\a\con", "invalidComponent")]
     [InlineData(@"D:\parity\.claude-work", null)]
-    public void UiRulesAgreeWithTheNativeSetter(string path, string? expected)
+    public void UiRejectionIsTheNativeAnswer(string path, string? expected)
     {
         try
         {
-            Assert.Equal(expected, ClaudeExtraRoots.UiRejection(path, [], userProfile: null));
+            Assert.Equal(expected, ClaudeExtraRoots.UiRejection(path, []));
             Assert.Equal(expected, TbCore.SetClaudeConfigDirs([path]).Rejected.SingleOrDefault()?.Reason);
         }
         finally
         {
             TbCore.SetClaudeConfigDirs([]);
         }
+    }
+
+    [Fact]
+    public void UiRejectionReadsTheSavedList()
+    {
+        Assert.Equal("duplicate", ClaudeExtraRoots.UiRejection("d:/WORK/.claude/", [@"D:\work\.claude"]));
+        IReadOnlyList<string> eight = [.. Enumerable.Range(0, 8).Select(i => $@"D:\a{i}")];
+        Assert.Equal("limitExceeded", ClaudeExtraRoots.UiRejection(@"D:\b", eight));
+        // A refused saved entry takes no slot.
+        Assert.Null(ClaudeExtraRoots.UiRejection(@"D:\b", [.. eight.Take(7), @"\\server\share"]));
+    }
+
+    /// <summary>Security review R2 against the real profile: the primary's
+    /// .claude, anything under it and any folder above it. Windows only, since
+    /// native compares against the real home, which is a drive path only
+    /// there.</summary>
+    [Fact]
+    public void UiRejectionRefusesThePrimaryFolder()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        foreach (var path in new[]
+                 {
+                     home, home + @"\.claude", (home + @"/.CLAUDE/").ToLowerInvariant(),
+                     home + @"\.claude\work", Path.GetDirectoryName(home)!,
+                 })
+        {
+            Assert.Equal("defaultConfigDir", ClaudeExtraRoots.UiRejection(path, []));
+        }
+
+        Assert.Null(ClaudeExtraRoots.UiRejection(home + @"\.claude-work", []));
+    }
+
+    /// <summary>Settings stats only a path the registries accept: never a UNC,
+    /// WSL, rooted or drive-relative one.</summary>
+    [Theory]
+    [InlineData(@"\\wsl.localhost\Ubuntu\home\me\.claude", false)]
+    [InlineData(@"//WSL$/Ubuntu/home/me/.claude", false)]
+    [InlineData(@"\\server\share", false)]
+    [InlineData(@"C:work", false)]
+    [InlineData(@"\Users\x", false)]
+    [InlineData(@"D:\work\.claude", true)]
+    public void SettingsStatsOnlyAcceptedPaths(string dir, bool mayCheck)
+    {
+        Assert.Equal(mayCheck, ClaudeExtraRoots.MayCheckExists(dir));
     }
 
     /// <summary>

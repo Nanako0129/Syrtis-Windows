@@ -42,79 +42,23 @@ public static class ClaudeExtraRoots
     public static void Save(SettingsStore store, IReadOnlyList<string> dirs) =>
         store.SetString(Key, JsonSerializer.Serialize(dirs));
 
-    /// <summary>Windows paths are case-insensitive and take either separator;
-    /// the same fold as Rust's <c>duplicate_key</c>.</summary>
-    public static string Fold(string path) =>
-        path.TrimEnd('\\', '/').Replace('/', '\\').ToLowerInvariant();
-
-    /// <summary>Most directories Rust's registries take (the same cap).</summary>
-    public const int MaxDirs = 8;
-
     /// <summary>Why the picker refuses <paramref name="path"/> before saving,
-    /// or null, so a path the registries would refuse anyway never reaches the
-    /// list. Mirrors the native rules: anything but an absolute drive path
-    /// (<c>X:\</c> or <c>X:/</c>; UNC, WSL, rooted and drive-relative paths); a
-    /// drive root; the profile folder itself; the primary's <c>.claude</c>,
-    /// anything under it or any folder above it (security review R2); a
-    /// duplicate; a ninth folder. Rust stays authoritative for everything else
-    /// (components, reserved names).</summary>
-    public static string? UiRejection(string path, IReadOnlyList<string> existing, string? userProfile)
-    {
-        if (!IsDrivePath(path))
-        {
-            return "unsupportedPath";
-        }
+    /// or null: the native registries' own answer for appending it to
+    /// <paramref name="existing"/> (<c>tb_validate_claude_config_dir</c>), so
+    /// a path they would refuse never reaches the list and the rule lives only
+    /// in Rust. Touches no filesystem.</summary>
+    public static string? UiRejection(string path, IReadOnlyList<string> existing) =>
+        TbCore.ValidateClaudeConfigDir(path, existing);
 
-        var key = Fold(path);
-        if (key.Length == 2)
-        {
-            return "rootDirectory";
-        }
-
-        if (!string.IsNullOrEmpty(userProfile))
-        {
-            var home = Fold(userProfile);
-            if (key == home)
-            {
-                return "homeDirectory";
-            }
-
-            var primary = home + "\\.claude";
-            if (key == primary
-                || key.StartsWith(primary + "\\", StringComparison.Ordinal)
-                || primary.StartsWith(key + "\\", StringComparison.Ordinal))
-            {
-                return "defaultConfigDir";
-            }
-        }
-
-        if (existing.Any(dir => Fold(dir) == key))
-        {
-            return "duplicate";
-        }
-
-        return existing.Count >= MaxDirs ? "limitExceeded" : null;
-    }
-
-    /// <summary>The native normalize's shape test on the raw string: a drive
-    /// letter, a colon and a separator (<c>X:\</c> or <c>X:/</c>). Everything
-    /// else (UNC, WSL, rooted, drive-relative) is refused by both registries.
-    /// <c>ClaudeRootsNativeTests.UiRulesAgreeWithTheNativeSetter</c> checks a
-    /// fixed set of shape cases against the real setter; it is a sample, not
-    /// a proof that the two rules match.</summary>
-    public static bool IsDrivePath(string path) =>
-        path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] is '\\' or '/';
-
-    /// <summary>Whether Settings may check that <paramref name="dir"/>
-    /// exists: only an absolute drive path. Anything else is refused by the
-    /// registries anyway and already shows its reason; a drive-relative or
-    /// rooted path would resolve against some current directory rather than
-    /// name a folder; and on a Windows 11
-    /// machine without WSL, touching <c>\\wsl.localhost</c> starts a WSL
-    /// download and install that ends in a reboot (observed on the 188 test
-    /// host through Explorer's picker; whether a plain stat does the same is
-    /// unverified, so no such path is touched at all).</summary>
-    public static bool MayCheckExists(string dir) => IsDrivePath(dir);
+    /// <summary>Whether Settings may check that a saved <paramref name="dir"/>
+    /// exists: only one the registries accept on its own. A refused one
+    /// already shows its reason; a UNC, rooted or drive-relative path does
+    /// not name a local folder; and on a Windows 11 machine without WSL,
+    /// touching <c>\\wsl.localhost</c> starts a WSL download and install that
+    /// ends in a reboot (observed on the 188 test host through Explorer's
+    /// picker; whether a plain stat does the same is unverified, so no such
+    /// path is touched at all).</summary>
+    public static bool MayCheckExists(string dir) => UiRejection(dir, []) is null;
 
     /// <summary>The transcript roots of each directory, as macOS
     /// <c>ClaudeExtraRoots.expand</c>: <c>projects</c> and <c>transcripts</c>.

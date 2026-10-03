@@ -171,6 +171,14 @@ public static class TbCore
         Unwrap<RootsResult>(NativeMethods.tb_set_claude_config_dirs(
             JsonSerializer.Serialize(directories, JsonOpts)));
 
+    /// <summary>Whether appending <paramref name="candidate"/> to the saved
+    /// list <paramref name="existing"/> would add a working extra Claude
+    /// account: null, or the fixed reason code the registries would give.
+    /// Changes no registry and touches no filesystem.</summary>
+    public static string? ValidateClaudeConfigDir(string candidate, IReadOnlyList<string> existing) =>
+        Unwrap<ClaudeConfigDirCheck>(NativeMethods.tb_validate_claude_config_dir(
+            JsonSerializer.Serialize(new { candidate, existing }, JsonOpts))).Reason;
+
     /// <summary>Full-replace the extra Claude scan roots (each account's
     /// <c>projects</c> and <c>transcripts</c>). The next report scans them and
     /// <see cref="SourceContextId"/> changes with them.</summary>

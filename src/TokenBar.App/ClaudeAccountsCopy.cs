@@ -35,12 +35,11 @@ internal static class ClaudeAccountsCopy
     internal const string RemoveMeans =
         "Remove only stops Syrtis reading the folder. The folder and its sign-in stay as they are, nothing is revoked at Anthropic, and the card's history is kept: adding the same folder again continues it.";
 
-    /// <summary>One sentence per fixed reason code from the C# UI rules
-    /// (<c>ClaudeExtraRoots.UiRejection</c>) and the native registries
-    /// (<c>ctb.h</c>); an unknown code gets the generic sentence.</summary>
+    /// <summary>One sentence per fixed reason code the native registries and
+    /// <c>tb_validate_claude_config_dir</c> return (<c>ctb.h</c>); an unknown
+    /// code gets the generic sentence.</summary>
     internal static string Reason(string code) => code switch
     {
-        "homeDirectory" => "That's your user folder. Pick the Claude config folder inside it.",
         "defaultConfigDir" => "That folder overlaps your main Claude account's folder, which is already shown.",
         "duplicate" => "Already added.",
         "unsupportedPath" => "Only a full folder path that starts with a drive letter, like D:\\folder, can be added. Network paths can't, and WSL paths can't yet.",
@@ -53,7 +52,7 @@ internal static class ClaudeAccountsCopy
 
     internal static readonly string[] ReasonCodes =
     [
-        "homeDirectory", "defaultConfigDir", "duplicate", "unsupportedPath", "rootDirectory",
+        "defaultConfigDir", "duplicate", "unsupportedPath", "rootDirectory",
         "invalidComponent", "limitExceeded", "notDirectory", "empty",
     ];
 

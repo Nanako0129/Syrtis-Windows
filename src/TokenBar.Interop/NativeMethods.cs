@@ -63,6 +63,9 @@ internal static partial class NativeMethods
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial nint tb_set_extra_scan_paths(string json);
 
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_validate_claude_config_dir(string json);
+
     [LibraryImport(Lib)]
     internal static partial void tb_free(nint ptr);
 }

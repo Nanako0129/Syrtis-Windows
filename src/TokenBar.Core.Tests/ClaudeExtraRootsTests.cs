@@ -40,41 +40,6 @@ public class ClaudeExtraRootsTests
         Assert.Empty(ClaudeExtraRoots.Load(store));
     }
 
-    [Theory]
-    [InlineData(@"C:\Users\Me", "homeDirectory")]
-    [InlineData(@"c:/users/me/", "homeDirectory")]
-    [InlineData(@"C:\Users\Me\.claude", "defaultConfigDir")]
-    [InlineData(@"c:/USERS/me/.CLAUDE/", "defaultConfigDir")]
-    [InlineData(@"d:/WORK/.claude", "duplicate")]
-    [InlineData(@"C:\Users\Me\.claude\work", "defaultConfigDir")]
-    [InlineData(@"C:\Users", "defaultConfigDir")]
-    [InlineData(@"C:\Users\Me\.claude-work", null)]
-    [InlineData(@"C:\Users\Mee\.claude", null)]
-    public void UiRulesFoldCaseAndSeparators(string path, string? expected)
-    {
-        Assert.Equal(expected, ClaudeExtraRoots.UiRejection(path, [@"D:\work\.claude"], @"C:\Users\Me"));
-    }
-
-    [Fact]
-    public void ANinthFolderIsRefusedBeforeSaving()
-    {
-        var eight = Enumerable.Range(0, ClaudeExtraRoots.MaxDirs).Select(i => $@"D:\a{i}").ToList();
-        Assert.Equal("limitExceeded", ClaudeExtraRoots.UiRejection(@"D:\b", eight, null));
-        Assert.Null(ClaudeExtraRoots.UiRejection(@"D:\b", eight[..^1], null));
-    }
-
-    [Theory]
-    [InlineData(@"\\wsl.localhost\Ubuntu\home\me\.claude", false)]
-    [InlineData(@"//WSL$/Ubuntu/home/me/.claude", false)]
-    [InlineData(@"\\server\share", false)]
-    [InlineData(@"C:work", false)]
-    [InlineData(@"\Users\x", false)]
-    [InlineData(@"D:\work\.claude", true)]
-    public void SettingsStatsOnlyAbsoluteDrivePaths(string dir, bool mayCheck)
-    {
-        Assert.Equal(mayCheck, ClaudeExtraRoots.MayCheckExists(dir));
-    }
-
     [Fact]
     public void EachDirectoryScansProjectsAndTranscripts()
     {

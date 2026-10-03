@@ -155,6 +155,13 @@ char *tb_set_extra_scan_paths(const char *json);
 // unchanged.
 char *tb_set_claude_config_dirs(const char *json);
 
+// Pre-save check for one extra Claude config directory:
+// {"candidate":"<dir>","existing":["<dir>",...]} -> data {"reason":null} or
+// {"reason":"<code>"}: the config registry's code for that position, or
+// defaultConfigDir for anything at or under <home>\.claude. Changes no
+// registry and touches no filesystem; the input is never echoed.
+char *tb_validate_claude_config_dir(const char *json);
+
 // Release a string returned by any tb_* entry point.
 void tb_free(char *p);
 

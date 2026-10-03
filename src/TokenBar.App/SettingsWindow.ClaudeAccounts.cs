@@ -72,9 +72,9 @@ public sealed partial class SettingsWindow
             Grid.SetColumn(missing, 1);
             row.Children.Add(missing);
             // Off the UI thread: a stat on a stalled network drive can block.
-            // Only an absolute drive path is stat-ed (MayCheckExists): never a
-            // UNC/WSL, rooted or drive-relative one, which already shows its
-            // refusal reason.
+            // Only a path the registries accept is stat-ed (MayCheckExists):
+            // never a UNC/WSL, rooted or drive-relative one, which already
+            // shows its refusal reason.
             _ = Task.Run(() => !ClaudeExtraRoots.MayCheckExists(dir) || Directory.Exists(dir)).ContinueWith(
                 exists =>
                 {
@@ -164,8 +164,7 @@ public sealed partial class SettingsWindow
         }
 
         var dirs = ClaudeExtraRoots.Load(store);
-        if (ClaudeExtraRoots.UiRejection(
-                path, dirs, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)) is { } reason)
+        if (ClaudeExtraRoots.UiRejection(path, dirs) is { } reason)
         {
             _claudeAccountsNotice = ClaudeAccountsCopy.Reason(reason).Localized();
             FillClaudeAccounts(store);
