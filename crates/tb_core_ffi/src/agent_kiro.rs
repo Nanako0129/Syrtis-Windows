@@ -5,7 +5,8 @@
 //! used amount against a limit, plus the next reset time. We authenticate with
 //! the Bearer token Kiro already stored — the kiro-cli SQLite store (macOS and
 //! Linux only) or the Kiro IDE token file (`kiro_integrations.rs`; the only
-//! source on Windows) — so the card appears whenever Kiro is signed in. The one allowance maps to one `UsageWindow`.
+//! source on Windows) — so the card appears whenever one of those sources
+//! holds a sign-in (on Windows, a kiro-cli-only sign-in shows no card). The one allowance maps to one `UsageWindow`.
 //!
 //! Two contracts this file honors, both stricter than mana.bar's original:
 //!
@@ -83,9 +84,9 @@ pub(crate) type ResolveCredential =
 /// Takes no `now`: it reads the clock after the response arrives, because the
 /// reset validation below is a comparison against the present.
 ///
-/// The caller used to capture `Utc::now()` on its first line and hold it across
-/// credential discovery (a `sqlite3` subprocess, up to 5s) and the request
-/// itself (up to 10s), so the instant the reset was judged against was older
+/// On macOS the caller used to capture `Utc::now()` on its first line and hold
+/// it across credential discovery (a `sqlite3` subprocess, up to 5s) and the
+/// request itself (up to 10s), so the instant the reset was judged against was older
 /// than the response by construction. A reset that expired inside that window
 /// would still compare as future, and — now that an expired reset is terminal
 /// rather than merely reset-less — the stale card would be published as a
@@ -93,7 +94,7 @@ pub(crate) type ResolveCredential =
 /// this adapter rejects an expired reset to prevent.
 ///
 /// `agent_usage.rs`'s `apply_provider_outcome` dropped its own `now` parameter
-/// for the same reason (`bf7a6b92`); the parameter is removed rather than moved
+/// for the same reason (macOS `bf7a6b92`); the parameter is removed rather than moved
 /// below the `await` so a pre-request timestamp cannot be handed back in.
 /// `decode_usage_response` keeps its parameter, because its tests need to state
 /// the instant they are asserting about.
@@ -101,7 +102,9 @@ pub(crate) type ResolveCredential =
 /// Windows: `usage_url` and `resolve_credential` come from the caller
 /// (`agent_usage::KiroDeps`), whose only non-test value is `USAGE_URL` and
 /// `agent_account_scope::resolve_credential`; a test points them at a loopback
-/// mock and a temporary account-scope root.
+/// mock and a temporary account-scope root. `fetch_kiro_with` still takes
+/// one `now` before the load for the snapshot's `updated_at` (as macOS's
+/// `fetch_kiro` does); only the reset comparison reads the clock afterwards.
 pub(crate) async fn fetch(
     credential: KiroCredential,
     usage_url: &str,

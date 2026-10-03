@@ -76,6 +76,8 @@ macOS 159 個 commit，Windows 37 個——四倍以上的落差。對應到檔�
 只存在 macOS 的檔案：`agent_grokbot.rs`、`agent_kiro.rs`、
 `agent_opencode_go.rs`、`kiro_integrations.rs`、`keychain_consent.rs`、
 `macos_safe_storage.rs`、`claude_config_dirs.rs`、`extra_scan_paths.rs`。
+（這份清單和下方的 `comm` 輸出是撰寫當時的量測；之後 `claude_config_dirs.rs`、
+`extra_scan_paths.rs` 由 W4 補上，`agent_kiro.rs`、`kiro_integrations.rs` 由 #176 補上。）
 
 只存在 Windows 的檔案：`agent_history.rs`——macOS 在 2ea81af1（#121，2026-07-31）
 退休了這個模組（沒有出貨路徑呼叫它），把裡面唯一還在用的

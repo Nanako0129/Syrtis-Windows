@@ -5338,11 +5338,11 @@ fn enrich_snapshot(snapshot: &mut AgentUsageSnapshot, now: i64) {
 /// history lock — because it needs the installation key and the account-scope
 /// metadata lock.
 ///
-/// Built for all five providers that recorded history before schema 3 (Kiro
-/// and later providers never did, so they have nothing stranded), not for
-/// the one being recorded: whichever
-/// provider writes first under this build is the only transaction that folds,
-/// and a provider left out of it would stay stranded. Passed lazily: once this
+/// Built for all five providers that recorded history before schema 3, not
+/// for the one being recorded: whichever provider writes first under this
+/// build is the only transaction that folds, and a provider left out of it
+/// would stay stranded. Kiro and later providers never recorded before
+/// schema 3, so they have nothing stranded and are not in it. Passed lazily: once this
 /// process has seen the store past schema 3, the history module stops calling
 /// it (`FOLD_SETTLED`).
 ///
