@@ -112,7 +112,9 @@ public class OverviewScopeTests
         Assert.Null(OverviewScope.LimitsClients(null));
         // The card title is what ships: TabDisplayName of the tab's own id.
         Assert.Equal("Grok Build & Bot", ClientRegistry.TabDisplayName("grok"));
-        Assert.Equal(ClientRegistry.TabLabel("antigravity"), ClientRegistry.TabDisplayName("antigravity-cli"));
+        Assert.Equal("Antigravity", ClientRegistry.TabDisplayName("antigravity"));
+        // antigravity-cli is not a TabGroups key (TabSlice has one member), so it keeps its own name.
+        Assert.Equal("Antigravity CLI", ClientRegistry.TabDisplayName("antigravity-cli"));
     }
 
     [Fact]
