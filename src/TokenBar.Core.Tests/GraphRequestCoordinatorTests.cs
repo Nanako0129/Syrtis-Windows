@@ -710,8 +710,71 @@ public class GraphRequestCoordinatorTests
         Assert.Equal(3, publications.Count);
         Assert.Equal(requestId, publications.First().RequestId);
         Assert.Same(snapshot, publications.First().Payload);
+        Assert.Equal(now.AddMinutes(-5), publications.First().RestoredFrom);
         Assert.Contains(publications, value => ReferenceEquals(value.Payload, local));
         Assert.Contains(publications, value => ReferenceEquals(value.Payload, richer));
+        Assert.All(publications.Skip(1), value => Assert.Null(value.RestoredFrom));
+    }
+
+    /// <summary>A cold start the next day shows the last run's graph, marked
+    /// with its capture time, instead of nothing (macOS keeps 90 days; the old
+    /// 30-minute limit dropped it). The live stages still follow, unmarked.</summary>
+    [Fact]
+    public async Task DayOldSnapshotIsRestoredAndMarkedWithItsCaptureTime()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var capturedAt = now.AddHours(-25);
+        var completion = new TaskCompletionSource<GraphRequestCompletion>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        // The live local stage is held until the snapshot has published: a
+        // snapshot that loses the race to a live stage is dropped by design,
+        // and that is not what this test is about.
+        var releaseLocal = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var snapshotPublished = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var snapshot = Payload("2026", PricingMode.BestEffort);
+        var publications = new ConcurrentQueue<GraphPublication>();
+        var coordinator = new GraphRequestCoordinator(
+            _ =>
+            {
+                releaseLocal.Task.GetAwaiter().GetResult();
+                return Payload("2026");
+            },
+            _ => Payload("2026", PricingMode.BestEffort, CostCoverage.Complete),
+            snapshot: new SnapshotAccess(
+                _ => new GraphSnapshotReadResult(GraphSnapshotReadStatus.Hit, snapshot, capturedAt),
+                (_, _, _, _) => GraphSnapshotWriteStatus.Skipped),
+            utcNow: () => now);
+        coordinator.Published += publication =>
+        {
+            publications.Enqueue(publication);
+            if (ReferenceEquals(publication.Payload, snapshot))
+            {
+                snapshotPublished.TrySetResult(true);
+            }
+        };
+        coordinator.Completed += value => completion.TrySetResult(value);
+
+        coordinator.Attach("2026");
+        await snapshotPublished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseLocal.TrySetResult(true);
+        await completion.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var restored = Assert.Single(publications, value => ReferenceEquals(value.Payload, snapshot));
+        Assert.Equal(capturedAt, restored.RestoredFrom);
+        Assert.Equal(3, publications.Count);
+        Assert.Equal(2, publications.Count(value => value.RestoredFrom is null));
+    }
+
+    [Fact]
+    public void RefreshTipSaysHowOldRestoredDataIs()
+    {
+        var now = new DateTimeOffset(2026, 10, 4, 12, 0, 0, TimeSpan.Zero);
+        Assert.Equal("Refresh usage data", RefreshTip.Text(null, now));
+        Assert.Equal(
+            "Refresh usage data — showing data from 1d ago",
+            RefreshTip.Text(now.AddHours(-25), now));
     }
 
     [Fact]
@@ -817,7 +880,11 @@ public class GraphRequestCoordinatorTests
         Assert.Equal(2, thrownPublications.Count);
 
         var now = DateTimeOffset.UtcNow;
-        foreach (var capturedAt in new[] { now.AddMinutes(-31), now.AddMinutes(1) })
+        foreach (var capturedAt in new[]
+        {
+            now - GraphRequestCoordinator.SnapshotMaxAge - TimeSpan.FromMinutes(1),
+            now.AddMinutes(1),
+        })
         {
             var completion = new TaskCompletionSource<GraphRequestCompletion>(
                 TaskCreationOptions.RunContinuationsAsynchronously);

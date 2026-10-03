@@ -1,3 +1,4 @@
+using TokenBar.Core;
 using TokenBar.Interop;
 
 namespace TokenBar.App;
@@ -19,6 +20,18 @@ public static class GraphCompletionPolicy
         var shouldRerun = polling && (!sameYear || forceRequested);
         return (true, shouldRerun, refreshing && !shouldRerun);
     }
+}
+
+/// <summary>The Refresh button's tooltip (macOS <c>PopoverView.refreshHelp</c>):
+/// while the graph on screen is a restored snapshot, it says how old the data
+/// is.</summary>
+public static class RefreshTip
+{
+    public static string Text(DateTimeOffset? restoredAt, DateTimeOffset now) =>
+        restoredAt is { } at
+            ? "Refresh usage data — showing data from {0}".Localized(
+                Format.RelativeTime((ulong)Math.Max(0, at.ToUnixTimeSeconds()), now))
+            : "Refresh usage data".Localized();
 }
 
 public static class GraphResumePolicy

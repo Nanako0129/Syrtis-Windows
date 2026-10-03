@@ -252,6 +252,11 @@ public sealed class DashboardModel
         DateTimeOffset FetchedAt,
         bool CostAuthoritative = false)
     {
+        /// <summary>Capture time of the persisted snapshot <see cref="Graph"/>
+        /// came from; null once a live pass has published (macOS
+        /// <c>restoredSnapshot</c>).</summary>
+        public DateTimeOffset? RestoredAt { get; init; }
+
         // Lazily-loaded lenses (macOS ensureData parity): fetched on first
         // visit, then refreshed by the slow lane like everything else.
         public HourlyReport? Hourly { get; init; }
@@ -844,6 +849,7 @@ public sealed class DashboardModel
                 Models = pendingModel ?? baseline.Models,
                 CostAuthoritative = _graphState.CostAuthoritative,
                 FetchedAt = DateTimeOffset.Now,
+                RestoredAt = publication.RestoredFrom,
             };
             _lastSnapshot = Current;
             Updated?.Invoke();

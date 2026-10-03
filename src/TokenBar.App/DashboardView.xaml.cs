@@ -107,7 +107,7 @@ public sealed partial class DashboardView : UserControl
             _model?.RefreshForce();
             UpdateRefreshControl();
         };
-        HoverTip.Attach(RefreshButton, () => "Refresh usage data".Localized());
+        HoverTip.Attach(RefreshButton, () => RefreshTip.Text(_model.Current?.RestoredAt, DateTimeOffset.Now));
 
         SettingsButton.Click += (_, _) => TrayService.OpenSettings?.Invoke();
         HoverTip.Attach(SettingsButton, () => "Settings".Localized());
