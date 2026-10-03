@@ -40,30 +40,29 @@ public static class LimitsCardFilter
     /// usageAttempted</c> (:529); a card with no rows yet and no answer waits
     /// (:547), and a known client with no snapshot draws placeholder rows
     /// (:784-787). An empty client list hides nothing (:502-504).</para>
-    /// <para>Windows has no placeholder rows, so a member with no snapshot can
-    /// never be shown. Rule here: the members considered are those with at
-    /// least one snapshot in <paramref name="agents"/>; if none has one (still
-    /// loading, failed, or not signed in), every member is considered, which is
-    /// macOS's <c>allRestrictedClientsHidden</c> over all <c>clients</c>
-    /// (:502-510). The card is hidden iff every considered member is
-    /// limits-hidden and none has an extra account. So a single-client tab
-    /// behaves exactly as main's #181 (the switch hides the card at once, data
-    /// or not), and a grouped tab with one member hidden keeps its loading card
-    /// until data arrives, as macOS.
-    /// Differences from macOS, all from Windows lacking placeholder rows
-    /// (:228-234, :784-787) and the :529 branch: (1) a client with macOS
-    /// placeholder rows (codex, claude, gemini, grok, grok-bot), not switched
-    /// off and with no snapshot, shows the card's own "No quota data yet." or
-    /// could-not-check state where macOS draws placeholder rows; (2) on the Grok
-    /// tab, when one member is hidden and only that member has a snapshot (grok
-    /// hidden with no grok-bot snapshot, or grok-bot hidden with no grok
-    /// snapshot), the card is hidden where macOS draws the other member's
-    /// placeholder row; (3) a tab not switched off whose members have no
-    /// placeholder rows and are all absent from an answered payload (e.g.
-    /// Antigravity signed out) keeps "No quota data yet." or could-not-check
-    /// where macOS draws nothing (:529). To align once Windows has placeholder
-    /// rows (G3b): consider macOS's known() set (placeholder or snapshot)
-    /// instead of "members with a snapshot", and port :529.</para>
+    /// <para>Windows has no macOS known() (placeholder rows or a snapshot,
+    /// :437-439), so this rule is an interim one chosen to leave every tab that
+    /// existed before the Grok group exactly as main's #181: the members
+    /// considered are those with at least one snapshot in
+    /// <paramref name="agents"/>; if none has one (loading, failed, not signed
+    /// in), the tab's quota owner (<c>clientIds[0]</c>, the first member of
+    /// <see cref="ClientRegistry.TabSlice"/>) stands in. The card is hidden iff
+    /// every considered member is limits-hidden and none has an extra account.
+    /// A single-client tab is therefore main's rule exactly, and the Antigravity
+    /// tab hides with antigravity switched off whatever antigravity-cli does
+    /// (it has no snapshot and no Settings switch).</para>
+    /// <para>Known differences from macOS (not a complete list; reviewed against
+    /// AgentLimitsCard.swift): placeholder rows (:228-234, drawn :784-787) for a
+    /// codex/claude/gemini/grok member with no snapshot, and grok-bot's
+    /// sign-in/loading line (:763-769) — Windows draws neither, so such a member
+    /// is simply absent, and a tab with no visible member shows "No quota data
+    /// yet." or could-not-check; the :529 branch (no card once answered with
+    /// nothing visible); on the Grok tab before any snapshot, Windows follows
+    /// the owner (grok) alone, while macOS keeps the card for an unhidden
+    /// grok-bot; the opencode tab's routed subscriptions (:421-436); and a
+    /// member with only an extra-account snapshot, which macOS's known()
+    /// excludes. Align all of these by switching the considered set to the
+    /// Core known() from the placeholder-rows slice (G3b-2) once it merges.</para>
     /// <para>Read from the setting plus the payload, not from an empty
     /// <see cref="Visible"/> list, which is also empty before the first payload;
     /// that card must keep its loading state.</para></summary>
@@ -78,7 +77,7 @@ public static class LimitsCardFilter
         }
 
         var withSnapshot = clientIds.Where(id => agents.Any(agent => agent.ClientId == id)).ToList();
-        IReadOnlyList<string> members = withSnapshot.Count > 0 ? withSnapshot : clientIds;
+        IReadOnlyList<string> members = withSnapshot.Count > 0 ? withSnapshot : [clientIds[0]];
         return members.All(id =>
                 limitsHidden.Contains(id)
                 && !agents.Any(agent => agent.ClientId == id && agent.Account.AccountKey is not null));

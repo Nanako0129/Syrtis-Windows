@@ -136,17 +136,18 @@ public sealed class LimitsCardFilterTests
         Assert.True(LimitsCardFilter.HidesClientCard([], [client], new HashSet<string> { client }));
     }
 
-    /// <summary>No member has a snapshot yet: every member is considered
-    /// (macOS allRestrictedClientsHidden over all clients, :502-510), so a
-    /// grouped tab with one member hidden keeps its loading card, and hides
-    /// only when every member is switched off.</summary>
+    /// <summary>No member has a snapshot yet: the tab's owner stands in, so
+    /// every pre-existing tab keeps main's hide-at-once rule (the Antigravity
+    /// tab hides with antigravity off; antigravity-cli has no switch). On the
+    /// Grok tab this follows grok alone before any data (macOS differs; see
+    /// the LimitsCardFilter doc).</summary>
     [Fact]
-    public void GroupedTabWithNoSnapshotConsidersEveryMember()
+    public void TabWithNoSnapshotFollowsItsOwner()
     {
-        Assert.False(LimitsCardFilter.HidesClientCard([], Grok, new HashSet<string> { "grok" }));
+        Assert.True(LimitsCardFilter.HidesClientCard([], ["antigravity", "antigravity-cli"], new HashSet<string> { "antigravity" }));
+        Assert.True(LimitsCardFilter.HidesClientCard([], Grok, new HashSet<string> { "grok" }));
         Assert.False(LimitsCardFilter.HidesClientCard([], Grok, new HashSet<string> { "grok-bot" }));
         Assert.True(LimitsCardFilter.HidesClientCard([], Grok, new HashSet<string> { "grok", "grok-bot" }));
-        Assert.False(LimitsCardFilter.HidesClientCard([], ["antigravity", "antigravity-cli"], new HashSet<string> { "antigravity" }));
     }
 
     [Fact]
@@ -154,7 +155,7 @@ public sealed class LimitsCardFilterTests
     {
         var grokHidden = new HashSet<string> { "grok" };
         Assert.False(LimitsCardFilter.HidesClientCard([Card("grok"), Card("grok-bot")], Grok, grokHidden));
-        // Documented divergence: macOS draws a grok-bot placeholder row here.
+        // Documented divergence: macOS shows grok-bot's sign-in/loading line here (:763-769).
         Assert.True(LimitsCardFilter.HidesClientCard([Card("grok")], Grok, grokHidden));
     }
 
