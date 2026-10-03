@@ -20,8 +20,9 @@ public sealed partial class DashboardView : UserControl
 {
     private DashboardModel.Snapshot? _snapshot;
 
-    /// <summary>A model update arrived while a limits card was being dragged
-    /// (<see cref="LimitsDrag.InProgress"/>) and is rendered when it ends.</summary>
+    /// <summary>A content rebuild was asked for while a limits card was being
+    /// dragged (<see cref="LimitsDrag.InProgress"/>); it runs when the drag
+    /// ends.</summary>
     private bool _renderHeldForDrag;
     private DashboardModel? _model;
     private AppView _view = AppView.Overview;
@@ -120,10 +121,13 @@ public sealed partial class DashboardView : UserControl
         // panel's right-column preview equivalent is the flyout itself).
         LimitsDrag.Finished += () =>
         {
+            // Queued, not inline: Finished fires inside the grip's own pointer
+            // handler, and rebuilding the panel there would detach the
+            // element whose handler is still running.
             if (_renderHeldForDrag)
             {
                 _renderHeldForDrag = false;
-                Render(_snapshot);
+                _ = DispatcherQueue.TryEnqueue(() => RenderContent(animated: false));
             }
         };
 
@@ -267,6 +271,7 @@ public sealed partial class DashboardView : UserControl
     public void OnFlyoutHidden()
     {
         _flyoutVisible = false;
+        LimitsDrag.CancelActive();
         _graph3d?.Release();
         UpdateHints(false); // a Ctrl release while hidden is never seen
     }
@@ -532,12 +537,6 @@ public sealed partial class DashboardView : UserControl
     public void Render(DashboardModel.Snapshot? snapshot)
     {
         _snapshot = snapshot;
-        if (LimitsDrag.InProgress)
-        {
-            _renderHeldForDrag = true;
-            return;
-        }
-
         UpdateRefreshControl(loading: snapshot is null);
         if (snapshot is null)
         {
@@ -940,6 +939,12 @@ public sealed partial class DashboardView : UserControl
     {
         if (_snapshot is null)
         {
+            return;
+        }
+
+        if (LimitsDrag.InProgress)
+        {
+            _renderHeldForDrag = true;
             return;
         }
 

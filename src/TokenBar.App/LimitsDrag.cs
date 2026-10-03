@@ -23,15 +23,22 @@ internal sealed class LimitsDrag
     /// <summary>The dragged card's opacity, as on macOS.</summary>
     private const double DraggedOpacity = 0.5;
 
-    /// <summary>Whether a card is being dragged. The dashboard re-renders on
-    /// every model update (the 10 s fast refresh among them), and rebuilding
-    /// this panel takes the grip — and its pointer capture — away mid-drag;
-    /// macOS keeps its drag in view state that survives a refresh. The
-    /// dashboard holds its render while this is set and catches up on
+    /// <summary>The drag under way, if any. The dashboard re-renders on every
+    /// model update (the 10 s fast refresh among them) and on keyboard
+    /// shortcuts, and rebuilding this panel takes the grip — and its pointer
+    /// capture — away mid-drag; macOS keeps its drag in view state that
+    /// survives a refresh. DashboardView.RenderContent, which every rebuild
+    /// goes through, holds while this is set and catches up on
     /// <see cref="Finished"/>.</summary>
-    public static bool InProgress { get; private set; }
+    private static LimitsDrag? _active;
+
+    public static bool InProgress => _active is not null;
 
     public static event Action? Finished;
+
+    /// <summary>Ends a drag without saving it — for the flyout hiding, where
+    /// WinUI is not relied on to report the lost capture.</summary>
+    public static void CancelActive() => _active?.End(commit: false);
 
     private readonly Panel _panel;
     private readonly List<string> _visible;
@@ -74,7 +81,7 @@ internal sealed class LimitsDrag
             if (grip.CapturePointer(e.Pointer))
             {
                 _dragId = id;
-                InProgress = true;
+                _active = this;
                 if (_cards.TryGetValue(id, out var card))
                 {
                     card.Host.Opacity = DraggedOpacity;
@@ -150,14 +157,21 @@ internal sealed class LimitsDrag
             card.Host.Opacity = 1;
         }
 
-        if (commit && to is not null)
+        try
         {
-            var raw = AppSettings.Store.GetString(ClientRegistry.TabOrderKey) ?? "";
-            AppSettings.Store.SetString(
-                ClientRegistry.TabOrderKey, LimitsCardOrder.Dropped(raw, _visible, from, to));
+            if (commit && to is not null)
+            {
+                var raw = AppSettings.Store.GetString(ClientRegistry.TabOrderKey) ?? "";
+                AppSettings.Store.SetString(
+                    ClientRegistry.TabOrderKey, LimitsCardOrder.Dropped(raw, _visible, from, to));
+            }
         }
-
-        InProgress = false;
-        Finished?.Invoke();
+        finally
+        {
+            // Always, or a throwing Changed subscriber would leave every later
+            // render held and the flyout frozen.
+            _active = null;
+            Finished?.Invoke();
+        }
     }
 }
