@@ -498,7 +498,7 @@
   "That's your user folder. Pick the Claude config folder inside it.": "這是你的使用者資料夾，請選它裡面的 Claude 設定資料夾。",
   "That folder overlaps your main Claude account's folder, which is already shown.": "這個資料夾和主要 Claude 帳號的資料夾重疊，而主要帳號已經有顯示了。",
   "Already added.": "已經加入過了。",
-  "Only folders on a drive letter can be added, not network or WSL paths.": "只能加入磁碟機代號底下的資料夾，網路路徑和 WSL 路徑不行。",
+  "Only a full folder path that starts with a drive letter, like D:\\folder, can be added. Network and WSL paths can't.": "只能加入以磁碟機代號開頭的完整資料夾路徑，例如 D:\\folder。網路路徑和 WSL 路徑不行。",
   "A drive's root can't be added.": "不能加入磁碟機的根目錄。",
   "Windows can't open this path as written.": "Windows 無法照這個寫法開啟這個路徑。",
   "Up to 8 folders can be added.": "最多只能加入 8 個資料夾。",
