@@ -148,7 +148,6 @@
   "Move {0} down": "将 {0} 下移",
   "Move {0} up": "将 {0} 上移",
   "Never colored": "始终不显示颜色",
-  "No active days.": "没有有用量的日子。",
   "No allowance consumed in this slot": "此时段未消耗额度",
   "No allowance movement recorded yet. It accumulates as TokenBar runs.": "尚未记录额度变化。TokenBar 运行期间会逐步积累。",
   "No attributed usage in this range.": "此范围内没有已归属用量。",
@@ -470,5 +469,9 @@
   "Custom colors follow remaining quota: normal above 25%, low at 25% or less, very low at 10% or less. A stale reading always turns grey.": "自定义颜色会随剩余额度变化：高于 25% 为正常，25% 及以下为偏低，10% 及以下为不足。读数过时时一律变灰。",
   "Gauge icons empty as quota is used. \"Color on warning only\" keeps one color until 25% is left, then amber, and red at 10%.": "仪表图标会随额度用掉而变空。“仅警示时上色”平时保持单色，剩 25% 变为琥珀色，剩 10% 变为红色。",
   "How often Syrtis rereads all logs in full. In between, new activity still shows up within 5 minutes.": "Syrtis 多久完整重读一次所有日志。两次之间，新的用量仍会在 5 分钟内出现。",
-  "Syrtis started as a fork of tokcat by handlecusion. Log parsing and pricing come from tokscale by Junho Yeo, the menu bar design draws on CodexBar by Peter Steinberger, and the running cat comes from RunCat by Takuto Nakamura. MIT licensed.": "Syrtis 最初是从 handlecusion 的 tokcat 分支出来的。日志解析和计价来自 Junho Yeo 的 tokscale；菜单栏设计参考 Peter Steinberger 的 CodexBar；奔跑的猫来自 Takuto Nakamura 的 RunCat。采用 MIT 授权。"
+  "Syrtis started as a fork of tokcat by handlecusion. Log parsing and pricing come from tokscale by Junho Yeo, the menu bar design draws on CodexBar by Peter Steinberger, and the running cat comes from RunCat by Takuto Nakamura. MIT licensed.": "Syrtis 最初是从 handlecusion 的 tokcat 分支出来的。日志解析和计价来自 Junho Yeo 的 tokscale；菜单栏设计参考 Peter Steinberger 的 CodexBar；奔跑的猫来自 Takuto Nakamura 的 RunCat。采用 MIT 授权。",
+  "{0} active day": "{0} 天有用量",
+  "{0} active days": "{0} 个活跃日",
+  "{0} active month": "{0} 个月有用量",
+  "{0} active months": "{0} 个月有用量"
 }

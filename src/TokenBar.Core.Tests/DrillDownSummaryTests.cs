@@ -141,4 +141,14 @@ public class DrillDownSummaryTests
     [Fact]
     public void AnUnpricedMonthReadsAsUnpricedNotFree() =>
         Assert.Equal("12 msgs · 12.3K · —", DrillDownSummary.Text(Month(cost: 0), true));
+
+    // The lens card's trailing count, singular at one as macOS words it.
+    [Theory]
+    [InlineData(1, "1 active day", "1 active month")]
+    [InlineData(3, "3 active days", "3 active months")]
+    public void ActiveCountsAgreeInNumber(int count, string days, string months)
+    {
+        Assert.Equal(days, DrillDownSummary.ActiveDays(count));
+        Assert.Equal(months, DrillDownSummary.ActiveMonths(count));
+    }
 }
