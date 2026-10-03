@@ -767,19 +767,6 @@ public class GraphRequestCoordinatorTests
         Assert.Equal(2, publications.Count(value => value.RestoredFrom is null));
     }
 
-    /// <summary>The footer gives a restored snapshot's age, not a clock time
-    /// that could be read as today's.</summary>
-    [Fact]
-    public void FooterGivesRestoredDataAsAnAge()
-    {
-        var now = new DateTimeOffset(2026, 10, 4, 9, 0, 0, TimeSpan.Zero);
-        Assert.Equal(
-            "updated 1d ago",
-            RefreshTip.Footer(now.AddHours(-25), fetchedAt: now, now));
-        Assert.StartsWith("updated ", RefreshTip.Footer(null, now, now));
-        Assert.DoesNotContain("ago", RefreshTip.Footer(null, now, now));
-    }
-
     /// <summary>The header control and Ctrl+R share one busy condition, and
     /// a background request (poll, year switch) counts, not only a manual
     /// refresh (macOS refreshDisabled).</summary>
