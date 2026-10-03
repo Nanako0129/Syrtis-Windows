@@ -60,11 +60,6 @@ public static class ClaudeExtraRoots
     /// (components, reserved names).</summary>
     public static string? UiRejection(string path, IReadOnlyList<string> existing, string? userProfile)
     {
-        if (path.Length == 0)
-        {
-            return "empty";
-        }
-
         if (!IsDrivePath(path))
         {
             return "unsupportedPath";
@@ -104,15 +99,17 @@ public static class ClaudeExtraRoots
     /// <summary>The native normalize's shape test on the raw string: a drive
     /// letter, a colon and a separator (<c>X:\</c> or <c>X:/</c>). Everything
     /// else (UNC, WSL, rooted, drive-relative) is refused by both registries.
-    /// <c>ClaudeRootsNativeTests.UiRulesAgreeWithTheNativeSetter</c> holds
-    /// the two sides to the same answers.</summary>
+    /// <c>ClaudeRootsNativeTests.UiRulesAgreeWithTheNativeSetter</c> checks a
+    /// fixed set of shape cases against the real setter; it is a sample, not
+    /// a proof that the two rules match.</summary>
     public static bool IsDrivePath(string path) =>
         path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] is '\\' or '/';
 
     /// <summary>Whether Settings may check that <paramref name="dir"/>
     /// exists: only an absolute drive path. Anything else is refused by the
-    /// registries anyway and already shows its reason; a drive-relative path
-    /// would resolve against the app's working directory; and on a Windows 11
+    /// registries anyway and already shows its reason; a drive-relative or
+    /// rooted path would resolve against some current directory rather than
+    /// name a folder; and on a Windows 11
     /// machine without WSL, touching <c>\\wsl.localhost</c> starts a WSL
     /// download and install that ends in a reboot (observed on the 188 test
     /// host through Explorer's picker; whether a plain stat does the same is

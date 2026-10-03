@@ -55,24 +55,6 @@ public class ClaudeExtraRootsTests
         Assert.Equal(expected, ClaudeExtraRoots.UiRejection(path, [@"D:\work\.claude"], @"C:\Users\Me"));
     }
 
-    /// <summary>Everything but an absolute drive path, before any profile
-    /// rule. Parity with the native setter: ClaudeRootsNativeTests.</summary>
-    [Theory]
-    [InlineData("", "empty")]
-    [InlineData(@"E:\", "rootDirectory")]
-    [InlineData(@"c:/", "rootDirectory")]
-    [InlineData(@"C:\\\", "rootDirectory")]
-    [InlineData(@"C:", "unsupportedPath")]
-    [InlineData(@"C:work", "unsupportedPath")]
-    [InlineData(@"\", "unsupportedPath")]
-    [InlineData(@"\Users\x", "unsupportedPath")]
-    [InlineData(@"\\server\share\.claude", "unsupportedPath")]
-    [InlineData(@"//wsl.localhost/Ubuntu/home/me/.claude", "unsupportedPath")]
-    public void UiRefusesEverythingButAnAbsoluteDrivePath(string path, string expected)
-    {
-        Assert.Equal(expected, ClaudeExtraRoots.UiRejection(path, [], @"C:\Users\Me"));
-    }
-
     [Fact]
     public void ANinthFolderIsRefusedBeforeSaving()
     {
@@ -88,7 +70,7 @@ public class ClaudeExtraRootsTests
     [InlineData(@"C:work", false)]
     [InlineData(@"\Users\x", false)]
     [InlineData(@"D:\work\.claude", true)]
-    public void SettingsNeverStatsAUncPath(string dir, bool mayCheck)
+    public void SettingsStatsOnlyAbsoluteDrivePaths(string dir, bool mayCheck)
     {
         Assert.Equal(mayCheck, ClaudeExtraRoots.MayCheckExists(dir));
     }
