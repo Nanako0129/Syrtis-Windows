@@ -475,23 +475,6 @@ public sealed class DiscordWiringTests : IDisposable
         }
     }
 
-    // ---- intro --------------------------------------------------------------
-
-    [Fact]
-    public void IntroShowsOnceAndNeverToSomeoneAlreadyUsingIt()
-    {
-        var fresh = NewStore();
-        Assert.True(DiscordIntro.Consume(fresh));
-        Assert.False(DiscordIntro.Consume(fresh));
-        Assert.False(DiscordPresence.Enabled(fresh)); // presenting enables nothing
-
-        var existing = NewStore();
-        existing.SetBool(DiscordPresence.EnabledKey, true);
-        Assert.False(DiscordIntro.Consume(existing));
-        existing.SetBool(DiscordPresence.EnabledKey, false);
-        Assert.False(DiscordIntro.Consume(existing)); // consumed, not deferred
-    }
-
     // ---- consent copy -------------------------------------------------------
 
     // The macOS copy VERBATIM — SettingsPanel.swift :944-1006 and

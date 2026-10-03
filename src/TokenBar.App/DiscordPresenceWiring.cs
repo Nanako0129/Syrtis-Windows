@@ -357,31 +357,6 @@ internal sealed class DiscordPresenceController
     }
 }
 
-/// <summary>The one-time card that makes the default-off feature findable.
-/// It enables nothing and offers no path to on: the only route is the
-/// Settings toggle, where the full disclosure is (DiscordIntro.swift
-/// :5-19).</summary>
-internal static class DiscordIntro
-{
-    /// <summary>Set when the card is PRESENTED, not when it is acted on, and
-    /// deliberately not versioned (DiscordIntro.swift :21-31).</summary>
-    internal const string ShownKey = "tokenbar.discord.introShown";
-
-    /// <summary>Whether to present — and it CONSUMES the flag either way, so
-    /// someone who already had the feature on is never introduced to it later
-    /// after switching it off (DiscordIntro.swift :39-51).</summary>
-    internal static bool Consume(SettingsStore store)
-    {
-        if (store.GetBool(ShownKey, false))
-        {
-            return false;
-        }
-
-        store.SetBool(ShownKey, true);
-        return !DiscordPresence.Enabled(store);
-    }
-}
-
 /// <summary>Every string the Discord section and the intro show, as English
 /// keys into strings-zh-Hant.json. The consent copy is macOS SettingsPanel
 /// :944-1006 and DiscordIntro.swift :104-108, and its zh-Hant is macOS
