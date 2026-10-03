@@ -113,7 +113,9 @@ public static class CostSurfaceProjection
         IReadOnlyList<ModelReportEntry> entries, bool authoritative)
     {
         var tokens = entries.Aggregate(0L, (sum, e) => sum.SaturatingAdd(e.Total));
-        return "{0} models · {1} · {2}".Localized(
+        // One key per plural form, as macOS ModelsView does ("%lld model · %@ · %@"
+        // / "%lld models · %@ · %@"), so English reads "1 model".
+        return (entries.Count == 1 ? "{0} model · {1} · {2}" : "{0} models · {1} · {2}").Localized(
             entries.Count,
             Format.CompactTokens(tokens),
             authoritative ? Format.Money(tokens, entries.Sum(e => e.Cost)) : Checking);
