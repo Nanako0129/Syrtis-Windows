@@ -382,12 +382,13 @@ public sealed class SettingsWindow : Window
         icon.Children.Add(RadioGroup(
             "tray.style",
             [
-                ("cat", "Cat".Localized()), ("parrot", "Parrot".Localized()), ("bars", "Signal bars".Localized()),
+                ("cat", "Cat".Localized()), ("parrot", "Parrot".Localized()),
+                (SandShoal.Style, SandShoal.Label), ("bars", "Signal bars".Localized()),
                 ("ring", "Ring gauge".Localized()), ("popsicle", "Melting popsicle".Localized()),
             ],
             styleRaw,
             raw => store.SetString("tokenbar.tray.animationStyle", raw)));
-        if (styleRaw is "cat" or "parrot")
+        if (SandShoal.IsAnimated(styleRaw))
         {
             var animate = new ToggleSwitch
             {
@@ -1686,8 +1687,11 @@ public sealed class SettingsWindow : Window
         {
             var dir = Path.Combine(
                 AppContext.BaseDirectory, "Assets",
-                $"anim-{(styleRaw == "parrot" ? "parrot" : "cat2")}{(dark ? "" : "-light")}");
-            using var raw = new System.Drawing.Bitmap(Path.Combine(dir, "frame-00.png"));
+                SandShoal.AssetDirectory(styleRaw + "0", dark)
+                    ?? $"anim-{(styleRaw == "parrot" ? "parrot" : "cat2")}{(dark ? "" : "-light")}");
+            // Sand frames are numbered frame-000; first file either way.
+            using var raw = new System.Drawing.Bitmap(
+                Directory.GetFiles(dir, "frame-*.png").OrderBy(f => f).First());
             using var g = System.Drawing.Graphics.FromImage(canvas);
             g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
             var scale = Math.Min(32.0 / raw.Width, 32.0 / raw.Height);
