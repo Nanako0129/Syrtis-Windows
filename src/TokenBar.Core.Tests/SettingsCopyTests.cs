@@ -45,6 +45,25 @@ public class SettingsCopyTests
             entries["Color on warning only"], entries[SettingsCopy.GaugeColoringHint]);
     }
 
+    // The layout hint names the three layouts; a reader must find each name it
+    // uses among the picker's options, as the picker shows them ("版面：完整"
+    // is quoted as 完整, not as the English "Full").
+    [Theory]
+    [InlineData("strings-zh-Hant.json")]
+    [InlineData("strings-zh-Hans.json")]
+    public void LayoutHintQuotesEachTranslatedLayoutName(string table)
+    {
+        var entries = JsonSerializer.Deserialize<Dictionary<string, string>>(
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, table)))!;
+        var hint = entries[SettingsCopy.LayoutHint];
+
+        foreach (var (_, label) in SettingsCopy.LayoutOptions)
+        {
+            var name = entries[label].Split('：')[^1];
+            Assert.True(hint.Contains(name, StringComparison.Ordinal), $"{table}: {name}");
+        }
+    }
+
     [Theory]
     [InlineData("cat", "Spinning cat")]
     [InlineData("parrot", "Party parrot")]

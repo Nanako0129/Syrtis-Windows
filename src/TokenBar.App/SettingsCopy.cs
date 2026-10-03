@@ -33,6 +33,19 @@ internal static class SettingsCopy
         "How often Syrtis rereads all logs in full. In between, new activity still shows up "
         + "within 5 minutes.";
 
+    // Windows only: macOS has no hint under the layout picker. It names the
+    // three "Layout: X" options, so each translation must quote them as the
+    // picker shows them.
+    internal const string LayoutHint =
+        "Full is the wide card with the pace bar; Classic is the original compact layout "
+        + "without pace; Chart draws each window's quota over time, with the pace estimate "
+        + "as a second line. Chart needs recorded quota history and falls back to a bar for "
+        + "windows that have none.";
+
+    internal static IReadOnlyList<(string Raw, string Label)> LayoutOptions =>
+        [("full", "Layout: Full"), ("classic", "Layout: Classic"), ("chart", "Layout: Chart")];
+
     internal static IReadOnlyList<string> All =>
-        [About, TextColorHint, GaugeColoringHint, LiveTraceToggle, LiveTraceHint, RefreshHint];
+        [About, TextColorHint, GaugeColoringHint, LiveTraceToggle, LiveTraceHint, RefreshHint,
+            LayoutHint];
 }
