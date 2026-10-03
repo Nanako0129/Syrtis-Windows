@@ -474,18 +474,20 @@ public sealed partial class DashboardView : UserControl
         SwitchTo(_view);
     }
 
-    private bool _refreshLoading;
-
+    /// <summary>Button and Ctrl+R. Refused while a request runs, but not
+    /// for "nothing loaded yet": when a first load failed with no snapshot,
+    /// a manual retry must stay possible (macOS refreshDisabled has no
+    /// loading term either).</summary>
     private void TryRefresh()
     {
         if (_model is null
-            || RefreshTip.Busy(_refreshLoading, _model.Refreshing, _model.GraphInFlight))
+            || RefreshTip.Busy(loading: false, _model.Refreshing, _model.GraphInFlight))
         {
             return;
         }
 
         _model.RefreshForce();
-        UpdateRefreshControl(_refreshLoading);
+        UpdateRefreshControl(loading: _model.Current is null);
     }
 
     /// <summary>One control (macOS refreshButton): a spinner, disabled, while
@@ -493,7 +495,6 @@ public sealed partial class DashboardView : UserControl
     /// tinted when restored data is on screen and its refresh failed.</summary>
     private void UpdateRefreshControl(bool loading = false)
     {
-        _refreshLoading = loading;
         var spinning = RefreshTip.Busy(
             loading, _model?.Refreshing == true, _model?.GraphInFlight == true);
         RefreshButton.Visibility = spinning ? Visibility.Collapsed : Visibility.Visible;

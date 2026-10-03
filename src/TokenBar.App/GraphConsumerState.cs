@@ -33,10 +33,11 @@ public static class RefreshTip
                 Format.RelativeTime((ulong)Math.Max(0, at.ToUnixTimeSeconds()), now))
             : "Refresh usage data".Localized();
 
-    /// <summary>The Refresh button is busy (spinning, disabled, Ctrl+R
-    /// ignored) while a manual refresh or any graph request runs, or while
-    /// the first load has nothing to show (macOS <c>refreshDisabled</c>: one
-    /// condition for the control and the shortcut).</summary>
+    /// <summary>The Refresh control is busy (spinning, disabled) while a
+    /// manual refresh or any graph request the dashboard started runs, or
+    /// while nothing is loaded yet. Ctrl+R passes <c>loading: false</c>, so a
+    /// failed first load can still be retried by hand (macOS
+    /// <c>refreshDisabled</c> has no loading term).</summary>
     public static bool Busy(bool loading, bool manualRefresh, bool graphInFlight) =>
         loading || manualRefresh || graphInFlight;
 
