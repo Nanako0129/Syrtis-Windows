@@ -3544,7 +3544,7 @@ fn load_codex_credentials_from(auth_path: &Path) -> Result<CodexCredentials, Str
 /// (`load_claude_raw_token_from_keychain`, `harvest_shell_env_token_uncached`).
 /// The environment variable is read when the process starts, hence the
 /// reopen.
-const CLAUDE_UNCONFIGURED_ERROR: &str = "Claude OAuth credentials not found. Run `claude` to authenticate, or, to use a setup-token, set CLAUDE_CODE_OAUTH_TOKEN as a user environment variable, then quit Syrtis and reopen it from the Start menu.";
+const CLAUDE_UNCONFIGURED_ERROR: &str = "Claude OAuth credentials not found. Run `claude` to authenticate, or set CLAUDE_CODE_OAUTH_TOKEN / add a `tokenbar-claude-oauth-token` Keychain item to use a setup-token.";
 const CLAUDE_CREDENTIALS_LOAD_ERROR: &str = "Claude credentials could not be loaded.";
 
 /// Full-login credentials: structured `claudeAiOauth` blobs (Keychain
