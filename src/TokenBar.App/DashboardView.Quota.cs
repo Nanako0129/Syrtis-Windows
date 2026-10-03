@@ -118,6 +118,10 @@ public sealed partial class DashboardView
             store, snapshot.Models, snapshot.Quota, Environment.GetCommandLineArgs())
             is not { } summary)
         {
+            // A failure belongs to the attempt that produced it; once the card
+            // is gone (confirmed elsewhere, dismissed, nothing to offer) it must
+            // not come back carrying an old error nobody has just caused.
+            _attributionOnboardingFailure = null;
             return null;
         }
 
@@ -158,6 +162,7 @@ public sealed partial class DashboardView
         notNow.Click += (_, _) =>
         {
             AttributionOnboardingCard.MarkDismissed(store);
+            _attributionOnboardingFailure = null;
             RenderContent(animated: false);
         };
         buttons.Children.Add(notNow);

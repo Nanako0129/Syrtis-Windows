@@ -1546,7 +1546,14 @@ public sealed class SettingsWindow : Window
 
         // Agent limits preview: mock windows through the real bar pipeline,
         // so asUsed/layout/paceMode picks show their effect immediately.
-        _preview.Children.Add(Ui.Text("AGENT LIMITS".Localized(), 10, 0.55, bold: true));
+        // The master switch hides this preview too (macOS
+        // SettingsWindowView.swift:344), through the same gate every other
+        // surface that draws the limits card asks.
+        var showLimitsPreview = OverviewCards.ShowsLimitsCard(OverviewCards.LimitsEnabled(store));
+        if (showLimitsPreview)
+        {
+            _preview.Children.Add(Ui.Text("AGENT LIMITS".Localized(), 10, 0.55, bold: true));
+        }
         var asUsed = store.GetBool("tokenbar.limits.asUsed", false);
         var classic = store.GetString("tokenbar.limits.layout", "full") == "classic";
         var paceMode = store.GetString("tokenbar.limits.paceMode", "historical") switch
@@ -1626,7 +1633,10 @@ public sealed class SettingsWindow : Window
             card.Children.Add(DashboardView.QuotaRow(window, row, classic));
         }
 
-        _preview.Children.Add(card);
+        if (showLimitsPreview)
+        {
+            _preview.Children.Add(card);
+        }
 
         // Live session (macOS UsageTraceCard, the preview column's third
         // block). Rendered through the same Ui.TraceRows the Overview lens
