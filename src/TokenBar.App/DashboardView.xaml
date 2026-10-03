@@ -16,8 +16,15 @@
                 <ResourceDictionary x:Key="Dark">
                     <SolidColorBrush x:Key="SyrtisAccentBrush" Color="#56B7A6" />
                 </ResourceDictionary>
+                <!-- A contrast theme sets the colors itself, so the wordmark
+                     takes its window text color. -->
+                <ResourceDictionary x:Key="HighContrast">
+                    <SolidColorBrush
+                        x:Key="SyrtisAccentBrush"
+                        Color="{ThemeResource SystemColorWindowTextColor}" />
+                </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
-            <!-- Mark size: macOS frames BrandMark at 17×17 (PopoverView.swift:490). -->
+            <!-- Mark size: macOS frames BrandMark at 17×17 (PopoverView.swift:491). -->
             <x:Double x:Key="BrandMarkSize">17</x:Double>
             <!-- Wordmark size: macOS .syrtisWordmark(size: 15) (PopoverView.swift:493). -->
             <x:Double x:Key="BrandWordmarkSize">15</x:Double>
