@@ -136,5 +136,8 @@ public class LensSummaryTests
         Assert.Equal("Checking", StatsSummary.BestDay(stats, false));
         Assert.Null(StatsSummary.BestDay(
             new UsageStats(Payload(), new HashSet<string> { "nobody" }), true));
+        // No usage at all: no line, whether or not costs are confirmed yet.
+        Assert.Null(StatsSummary.BestDay(
+            new UsageStats(Payload(), new HashSet<string> { "nobody" }), false));
     }
 }

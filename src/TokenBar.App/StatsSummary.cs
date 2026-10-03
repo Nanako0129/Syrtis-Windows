@@ -28,9 +28,9 @@ public static class StatsSummary
 
     /// <summary>"MM-DD · $", or null when there is no best day, so the line
     /// is left out as macOS leaves it out. While costs are unconfirmed the
-    /// best day itself is unknown, so the line reads "Checking".</summary>
+    /// day that ranks first is not known yet, so the line reads "Checking".</summary>
     public static string? BestDay(UsageStats stats, bool authoritative) =>
-        !authoritative ? CostSurfaceProjection.Checking
-        : stats.BestDay is { } best ? $"{Format.MonthDay(best.Date)} · {Format.Usd(best.Cost)}"
-        : null;
+        stats.BestDay is not { } best ? null
+        : !authoritative ? CostSurfaceProjection.Checking
+        : $"{Format.MonthDay(best.Date)} · {Format.Usd(best.Cost)}";
 }
