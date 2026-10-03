@@ -523,13 +523,12 @@ public static class WindowCardText
     }
 
     /// <summary>The card's own heading. The window half goes through
-    /// <see cref="QuotaLabels.Window"/> — the one place a window is named — so
-    /// this title, the tab pill above it and the strip card's row cannot
-    /// disagree about what the same window is called.</summary>
+    /// <see cref="ShortWindow"/>, shared with the tab pill above it, so the
+    /// two cannot disagree about what the same window is called.</summary>
     public static string Title(WindowCardTab? tab) =>
         tab is null
             ? "Session window".Localized()
-            : "{0} window".Localized(QuotaLabels.Window(tab.Label, tab.Id.WindowKey));
+            : "{0} window".Localized(ShortWindow(tab));
 
     /// <summary>The note a model-scoped window shows when the scope join found
     /// none of this subscription's usage in it, though some unscoped usage
@@ -544,8 +543,53 @@ public static class WindowCardText
 
     /// <summary>The tab pill's text. Same naming as <see cref="Title"/>, without
     /// the "window" noun the heading adds.</summary>
-    public static string TabLabel(WindowCardTab tab) =>
-        QuotaLabels.Window(tab.Label, tab.Id.WindowKey);
+    public static string TabLabel(WindowCardTab tab) => ShortWindow(tab);
+
+    /// <summary><see cref="QuotaLabels.Window"/>, with a live label shortened
+    /// by <see cref="ShortLabel"/>. A window with no live label is named from
+    /// its key, which is never the long grouped shape.</summary>
+    private static string ShortWindow(WindowCardTab tab) =>
+        string.IsNullOrWhiteSpace(tab.Label)
+            ? QuotaLabels.Window(tab.Label, tab.Id.WindowKey)
+            : ShortLabel(tab.Label);
+
+    private const string LimitRemaining = " Limit Remaining";
+
+    /// <summary>The card title and window pills are narrow; Antigravity's
+    /// grouped buckets arrive as "Gemini Models · Weekly Limit Remaining",
+    /// which overflowed the pill row. Port of macOS
+    /// <c>WindowUsageCard.shortLabel</c>: shortens only the
+    /// "&lt;group&gt; · &lt;bucket&gt; Limit Remaining" shape to
+    /// "Gemini · Weekly", "Claude/GPT · 5h" (bucket localized); any other
+    /// label is returned localized and unchanged. The Agent-limits card,
+    /// history, heatmap, Overview, tray and tooltips keep the full name.</summary>
+    public static string ShortLabel(string label)
+    {
+        var parts = label.Split(" · ");
+        if (parts.Length != 2 || !parts[1].EndsWith(LimitRemaining, StringComparison.Ordinal))
+        {
+            return label.Localized();
+        }
+
+        var group = parts[0];
+        foreach (var suffix in new[] { " Models", " models" })
+        {
+            if (group.EndsWith(suffix, StringComparison.Ordinal))
+            {
+                group = group[..^suffix.Length];
+            }
+        }
+
+        group = group.Replace(" and ", "/", StringComparison.Ordinal);
+        var bucket = parts[1][..^LimitRemaining.Length];
+        var window = bucket switch
+        {
+            "Weekly" => "Weekly".Localized(),
+            "Five Hour" => "5h".Localized(),
+            _ => bucket.Localized(),
+        };
+        return $"{group} · {window}";
+    }
 
     /// <summary>The line under the title. Every state names itself, so the
     /// subtitle can never say "waiting" while the body says it gave up.</summary>
