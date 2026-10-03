@@ -1634,9 +1634,6 @@ public sealed partial class DashboardView : UserControl
 
         var now = DateTimeOffset.Now;
         var liveClients = AgentLimitsText.LiveClients(snapshot.Trace);
-        // macOS draws the trend only on the multi-client card: a client tab
-        // passes no curves, since the full window card sits right above it.
-        var withTrend = clientId is null;
         foreach (var agent in agents)
         {
             var section = new StackPanel { Spacing = 5 };
@@ -1674,20 +1671,18 @@ public sealed partial class DashboardView : UserControl
             // lines each tab up with the window it belongs to.
             var windows = agent.UniqueCardWindows;
             // The same tabs feed the trend, which is information rather than a
-            // density option, so it appears in every layout.
-            var tabs = layout == LimitsLayout.Chart || withTrend
-                ? WindowCardText.Tabs(
-                    snapshot.QuotaHistory, snapshot.Quota, agent.ClientId, agent.Account.AccountKey)
-                : [];
+            // density option, so it appears in every layout and on every
+            // surface — macOS passes the curves to the client tab's card too
+            // (OverviewView.swift, QuotaView.swift:74).
+            var tabs = WindowCardText.Tabs(
+                snapshot.QuotaHistory, snapshot.Quota, agent.ClientId, agent.Account.AccountKey);
             for (var i = 0; i < windows.Count; i++)
             {
                 var window = windows[i];
                 var row = UsagePace.RowPresentation(
                     window, paceMode, asUsed, classic, now);
                 var samples = i < tabs.Count ? tabs[i].Active?.Samples : null;
-                var trend = withTrend
-                    ? AgentLimitsText.Trend(window, samples, now.ToUnixTimeMilliseconds())
-                    : null;
+                var trend = AgentLimitsText.Trend(window, samples, now.ToUnixTimeMilliseconds());
                 section.Children.Add(QuotaRow(
                     window, row, classic, metric,
                     layout == LimitsLayout.Chart ? samples : null, trend));
