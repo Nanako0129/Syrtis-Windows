@@ -583,6 +583,13 @@ public sealed partial class DashboardView
         body.Children.Add(headline);
         body.Children.Add(WindowChart(geometry, mine));
         body.Children.Add(WindowLegend(geometry));
+        if (WindowCardText.ScopeNote(client.ScopeMatchedNothing, selected) is { } scopeNote)
+        {
+            var line = Ui.Text(scopeNote, 9);
+            line.Foreground = Ui.BrushFromHex(PaceOrange);
+            line.TextWrapping = TextWrapping.Wrap;
+            body.Children.Add(line);
+        }
 
         // "10% of quota ~ X tokens · $Y", live off this window's own samples —
         // the same line the History card prints pooled over past cycles, here

@@ -443,5 +443,6 @@
   "Set up manually…": "手動設定…",
   "Apply suggestions": "套用建議",
   "Bars": "長條圖",
-  "Heatmap": "熱點圖"
+  "Heatmap": "熱點圖",
+  "No local usage matched {0}, though this subscription has other usage in this window": "本機沒有任何用量對應到「{0}」，但這個訂閱在此視窗內有其他用量"
 }
