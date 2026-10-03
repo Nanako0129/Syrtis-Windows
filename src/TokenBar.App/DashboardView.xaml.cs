@@ -2765,13 +2765,30 @@ public sealed partial class DashboardView : UserControl
     private const double SetupCommandCorner = 6;
     private const byte SetupCommandFillAlpha = 15;
 
+    private static readonly FontFamily SetupCommandFont = new("Consolas, Cascadia Mono, monospace");
+
     /// <summary>An unconfigured card's instructions (macOS
     /// <c>claudeSetupPrompt</c> / <c>providerMessage</c>): the text, and when
     /// there is a command, a selectable monospace box with a copy
     /// button.</summary>
     private static FrameworkElement SetupPrompt(LimitsSetupPrompt prompt)
     {
-        var text = Ui.Dim(prompt.Text, 10);
+        var text = Ui.Dim("", 10);
+        // `code` spans in monospace, as macOS Text renders the same copy's
+        // Markdown; the backticks themselves are not shown. Provider messages
+        // ("Run `codex` to log in") use the same markup.
+        var parts = prompt.Text.Split('`');
+        for (var i = 0; i < parts.Length; i++)
+        {
+            var run = new Microsoft.UI.Xaml.Documents.Run { Text = parts[i] };
+            if (i % 2 == 1)
+            {
+                run.FontFamily = SetupCommandFont;
+            }
+
+            text.Inlines.Add(run);
+        }
+
         if (prompt.Command is not { } command)
         {
             return text;
@@ -2787,7 +2804,7 @@ public sealed partial class DashboardView : UserControl
             Child = new TextBlock
             {
                 Text = command,
-                FontFamily = new FontFamily("Consolas, Cascadia Mono, monospace"),
+                FontFamily = SetupCommandFont,
                 FontSize = 10,
                 TextWrapping = TextWrapping.Wrap,
                 IsTextSelectionEnabled = true,
