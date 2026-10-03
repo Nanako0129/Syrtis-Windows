@@ -78,25 +78,26 @@ public sealed class LimitsCardFilterTests
     private static readonly IReadOnlyList<AgentUsageSnapshot> GrokAgents =
         [Card("grok"), Card("grok-bot"), Card("codex")];
 
-    /// <summary>A grouped tab lists every member's rows, and a limits-hidden
-    /// member drops only its own primary card.</summary>
+    /// <summary>Grouped tab (grok + grok-bot), card result per hidden set:
+    /// (a) only grok-bot hidden, (b) only grok hidden, (c) both hidden
+    /// (macOS allRestrictedClientsHidden).</summary>
     [Fact]
-    public void GroupedTabShowsEveryMemberAndDropsOnlyTheHiddenOne()
+    public void GroupedTabCardResultPerHiddenSet()
     {
         Assert.Equal(["grok", "grok-bot"], Ids(LimitsCardFilter.Visible(GrokAgents, Grok, None, None)));
-        Assert.Equal(
-            ["grok-bot"],
-            Ids(LimitsCardFilter.Visible(GrokAgents, Grok, None, new HashSet<string> { "grok" })));
-    }
-
-    /// <summary>Grouped-tab rule: hidden only if every member is hidden.</summary>
-    [Fact]
-    public void GroupedTabCardIsHiddenOnlyWhenEveryMemberIsHidden()
-    {
-        Assert.False(LimitsCardFilter.HidesClientCard(GrokAgents, Grok, new HashSet<string> { "grok" }));
-        Assert.False(LimitsCardFilter.HidesClientCard(GrokAgents, Grok, new HashSet<string> { "grok-bot" }));
-        Assert.True(LimitsCardFilter.HidesClientCard(GrokAgents, Grok, new HashSet<string> { "grok", "grok-bot" }));
         Assert.False(LimitsCardFilter.HidesClientCard(GrokAgents, Grok, None));
+
+        var botHidden = new HashSet<string> { "grok-bot" };
+        Assert.Equal(["grok"], Ids(LimitsCardFilter.Visible(GrokAgents, Grok, None, botHidden)));
+        Assert.False(LimitsCardFilter.HidesClientCard(GrokAgents, Grok, botHidden));
+
+        var grokHidden = new HashSet<string> { "grok" };
+        Assert.Equal(["grok-bot"], Ids(LimitsCardFilter.Visible(GrokAgents, Grok, None, grokHidden)));
+        Assert.False(LimitsCardFilter.HidesClientCard(GrokAgents, Grok, grokHidden));
+
+        var both = new HashSet<string> { "grok", "grok-bot" };
+        Assert.Empty(LimitsCardFilter.Visible(GrokAgents, Grok, None, both));
+        Assert.True(LimitsCardFilter.HidesClientCard(GrokAgents, Grok, both));
     }
 
     /// <summary>An extra account on one member keeps that member, so the

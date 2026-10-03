@@ -33,9 +33,13 @@ public static class LimitsCardFilter
     /// not inferred from an empty <see cref="Visible"/> list, which is also
     /// empty before the first quota payload arrives; that card must keep its
     /// loading state, while a hidden one must not claim to be loading.
-    /// Grouped tab rule: the card is hidden only when EVERY member is
-    /// hidden (switched off with no extra account); one visible member keeps
-    /// the card, which then lists just that member's rows.</summary>
+    /// Grouped tab rule, as macOS: the card is hidden only when EVERY member is
+    /// switched off AND no member has an extra account
+    /// (<c>AgentLimitsCard.allRestrictedClientsHidden</c>, AgentLimitsCard.swift
+    /// :502-510; per-member row filtering <c>baseClients</c> :402-413, :445-447;
+    /// Settings toggles each id on its own, SettingsPanel.swift :477-503). One
+    /// visible member keeps the card, which then lists just that member's
+    /// rows.</summary>
     public static bool HidesClientCard(
         IReadOnlyList<AgentUsageSnapshot> agents,
         IReadOnlyList<string> clientIds,
