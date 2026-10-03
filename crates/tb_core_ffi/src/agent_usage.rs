@@ -1614,12 +1614,8 @@ mod kiro_deps {
     use crate::kiro_integrations::KiroCredentialLoad;
 
     pub(super) type KiroLoad = Pin<Box<dyn Future<Output = KiroCredentialLoad>>>;
-    pub(super) use crate::agent_kiro::ResolveCredential;
+    pub(super) use crate::agent_kiro::{ResolveCredential, ResolveHistoryScope};
     pub(super) type Enrich = dyn Fn(&mut AgentUsageSnapshot, i64);
-    pub(super) type ResolveHistoryScope = dyn Fn(
-        &str,
-        Option<(AuthoritativeIdKind, &str)>,
-    ) -> Result<HistoryScope, AccountScopeError>;
 
     pub(super) struct KiroDeps<'a> {
         pub(super) load_credential: &'a dyn Fn(DateTime<Utc>) -> KiroLoad,

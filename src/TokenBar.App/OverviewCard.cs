@@ -106,6 +106,13 @@ internal static class OverviewScope
             ? (count, "Show less".Localized())
             : (ModelRowCap, "Show {0} more".Localized(hidden));
     }
+
+    /// <summary>Every client id whose rows the limits card shows: the owner's
+    /// whole tab group, so the "Grok Build &amp; Bot" tab carries the
+    /// <c>grok-bot</c> card beside <c>grok</c>. Null on the Overview tab
+    /// (every agent).</summary>
+    internal static IReadOnlyList<string>? LimitsClients(string? singleClient) =>
+        LimitsClientId(singleClient) is { } owner ? ClientRegistry.TabSlice(owner) : null;
 }
 
 internal static class OverviewCards

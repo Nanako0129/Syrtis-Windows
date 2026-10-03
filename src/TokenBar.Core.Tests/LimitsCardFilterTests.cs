@@ -42,7 +42,7 @@ public sealed class LimitsCardFilterTests
     public void LimitsHiddenAppliesOnTheClientsOwnTab() =>
         Assert.Equal(
             [@"claude|D:\work\.claude"],
-            Ids(LimitsCardFilter.Visible(Agents, "claude", None, new HashSet<string> { "claude" })));
+            Ids(LimitsCardFilter.Visible(Agents, ["claude"], None, new HashSet<string> { "claude" })));
 
     [Fact]
     public void TabHiddenDropsEveryCardOfThatClientOnOverview() =>
@@ -56,7 +56,7 @@ public sealed class LimitsCardFilterTests
     public void ClientTabNarrowsAndIgnoresTabHidden() =>
         Assert.Equal(
             ["codex"],
-            Ids(LimitsCardFilter.Visible(Agents, "codex", new HashSet<string> { "codex" }, None)));
+            Ids(LimitsCardFilter.Visible(Agents, ["codex"], new HashSet<string> { "codex" }, None)));
 
     /// <summary>A client tab whose card is switched off draws no card, rather
     /// than one saying "No quota data yet" over a payload that exists (macOS
@@ -66,10 +66,45 @@ public sealed class LimitsCardFilterTests
     public void ClientTabCardIsDroppedOnlyWhenSwitchedOffWithNoExtraAccount()
     {
         var hidden = new HashSet<string> { "codex", "claude" };
-        Assert.True(LimitsCardFilter.HidesClientCard(Agents, "codex", hidden));
-        Assert.True(LimitsCardFilter.HidesClientCard([], "codex", hidden));
-        Assert.False(LimitsCardFilter.HidesClientCard(Agents, "claude", hidden));
-        Assert.False(LimitsCardFilter.HidesClientCard(Agents, "gemini", hidden));
-        Assert.False(LimitsCardFilter.HidesClientCard([], "gemini", hidden));
+        Assert.True(LimitsCardFilter.HidesClientCard(Agents, ["codex"], hidden));
+        Assert.True(LimitsCardFilter.HidesClientCard([], ["codex"], hidden));
+        Assert.False(LimitsCardFilter.HidesClientCard(Agents, ["claude"], hidden));
+        Assert.False(LimitsCardFilter.HidesClientCard(Agents, ["gemini"], hidden));
+        Assert.False(LimitsCardFilter.HidesClientCard([], ["gemini"], hidden));
+    }
+
+    private static readonly string[] Grok = ["grok", "grok-bot"];
+
+    private static readonly IReadOnlyList<AgentUsageSnapshot> GrokAgents =
+        [Card("grok"), Card("grok-bot"), Card("codex")];
+
+    /// <summary>A grouped tab lists every member's rows, and a limits-hidden
+    /// member drops only its own primary card.</summary>
+    [Fact]
+    public void GroupedTabShowsEveryMemberAndDropsOnlyTheHiddenOne()
+    {
+        Assert.Equal(["grok", "grok-bot"], Ids(LimitsCardFilter.Visible(GrokAgents, Grok, None, None)));
+        Assert.Equal(
+            ["grok-bot"],
+            Ids(LimitsCardFilter.Visible(GrokAgents, Grok, None, new HashSet<string> { "grok" })));
+    }
+
+    /// <summary>Grouped-tab rule: hidden only if every member is hidden.</summary>
+    [Fact]
+    public void GroupedTabCardIsHiddenOnlyWhenEveryMemberIsHidden()
+    {
+        Assert.False(LimitsCardFilter.HidesClientCard(GrokAgents, Grok, new HashSet<string> { "grok" }));
+        Assert.False(LimitsCardFilter.HidesClientCard(GrokAgents, Grok, new HashSet<string> { "grok-bot" }));
+        Assert.True(LimitsCardFilter.HidesClientCard(GrokAgents, Grok, new HashSet<string> { "grok", "grok-bot" }));
+        Assert.False(LimitsCardFilter.HidesClientCard(GrokAgents, Grok, None));
+    }
+
+    /// <summary>An extra account on one member keeps that member, so the
+    /// card stays even with both switches off.</summary>
+    [Fact]
+    public void GroupedTabKeepsTheCardWhenAHiddenMemberHasAnExtraAccount()
+    {
+        IReadOnlyList<AgentUsageSnapshot> agents = [Card("grok"), Card("grok-bot", "acct")];
+        Assert.False(LimitsCardFilter.HidesClientCard(agents, Grok, new HashSet<string> { "grok", "grok-bot" }));
     }
 }

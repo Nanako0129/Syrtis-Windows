@@ -25,7 +25,7 @@
 use crate::agent_account_scope::{
     self, AccountScope, AccountScopeError, AuthoritativeIdKind, HistoryScope,
 };
-use crate::agent_kiro::ResolveCredential;
+use crate::agent_kiro::{ResolveCredential, ResolveHistoryScope};
 use crate::agent_quota_duration::DurationEvidence;
 use crate::agent_usage::{
     provider_http_client_builder, read_response_body, AgentIdentity, ProviderCacheBinding,
@@ -52,9 +52,6 @@ pub(crate) const WEEKLY_WINDOW_KEY: &str = "weekly.v1";
 /// Bot install is present, so the Cursor login must not be used instead.
 pub(crate) const GROK_BOT_DESKTOP_UNSUPPORTED: &str =
     "Grok Bot sign-in on Windows isn't supported yet.";
-
-pub(crate) type ResolveHistoryScope =
-    dyn Fn(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>;
 
 #[derive(Debug)]
 pub(crate) struct GrokBotData {
@@ -269,7 +266,7 @@ pub(crate) fn map_response(body: &str, now: DateTime<Utc>) -> Result<GrokBotData
         .filter(|s| !s.is_empty())
         .is_some()
     {
-        return Err("Grok Bot usage is unavailable. Open Grok Bot, then refresh.".to_string());
+        return Err("Grok Bot usage is unavailable. Open Cursor, then refresh.".to_string());
     }
     // Both spellings, like every other field below. Reading only camelCase
     // publishes a pooled team allowance as an individual weekly quota.
@@ -312,7 +309,7 @@ pub(crate) fn map_response(body: &str, now: DateTime<Utc>) -> Result<GrokBotData
     // last-good entry rather than be discarded.
     if reset <= now {
         return Err(
-            "Grok Bot reported a quota reset that has already passed. Open Grok Bot, then refresh."
+            "Grok Bot reported a quota reset that has already passed. Open Cursor, then refresh."
                 .to_string(),
         );
     }
@@ -645,7 +642,7 @@ pub(crate) mod tests {
         let err = map_response(r#"{"error": "private-response-canary"}"#, now()).unwrap_err();
         assert_eq!(
             err,
-            "Grok Bot usage is unavailable. Open Grok Bot, then refresh."
+            "Grok Bot usage is unavailable. Open Cursor, then refresh."
         );
     }
 
@@ -890,7 +887,10 @@ pub(crate) mod tests {
             now(),
         )
         .unwrap_err();
-        assert!(expired.contains("already passed"), "got {expired}");
+        assert_eq!(
+            expired,
+            "Grok Bot reported a quota reset that has already passed. Open Cursor, then refresh."
+        );
 
         assert!(map_response(
             r#"{

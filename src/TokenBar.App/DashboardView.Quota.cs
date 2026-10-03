@@ -533,13 +533,16 @@ public sealed partial class DashboardView
         // Off by the master switch: a client tab drops the card too (macOS QuotaView.swift:116).
         // Switched off for this client (and no extra account): no card, not a
         // card claiming the data is still loading (LimitsCardFilter.HidesClientCard).
+        var members = ClientRegistry.TabSlice(client.Owner);
         if (OverviewCards.ShowsLimitsCard(OverviewCards.LimitsEnabled(AppSettings.Store))
             && !LimitsCardFilter.HidesClientCard(
                 snapshot.Quota?.Agents ?? [],
-                client.Owner,
+                members,
                 ClientRegistry.HiddenLimitsClients(AppSettings.Store)))
         {
-            stack.Children.Add(Ui.Card("Agent limits".Localized(), BuildLimits(snapshot, client.Owner)));
+            stack.Children.Add(Ui.Card(
+                "Agent limits".Localized(),
+                BuildLimits(snapshot, members)));
         }
 
         // Every subscription-facing lookup, including the history card's
@@ -664,7 +667,10 @@ public sealed partial class DashboardView
             var key = account.Key ?? string.Empty;
             pill.Click += (_, _) =>
             {
-                AppSettings.Store.SetString(WindowCardText.AccountKeyPrefix + client.Owner, key);
+                // The key BuildQuotaLens reads back: the tab's quota owner,
+                // not client.Owner, which is grok-bot on a Bot-only Grok tab.
+                AppSettings.Store.SetString(
+                    WindowCardText.AccountKeyPrefix + ClientRegistry.QuotaOwner(_activeClientTab), key);
                 RenderContent(animated: false);
             };
             row.Children.Add(pill);

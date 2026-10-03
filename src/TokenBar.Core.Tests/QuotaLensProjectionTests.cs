@@ -726,4 +726,79 @@ public class QuotaLensProjectionTests
         Assert.Equal(breakdownTokens, displayRow.Tokens);
         Assert.Equal(breakdownCost, displayRow.Cost);
     }
+
+    // ---- grouped tabs: which member's window card a tab draws -------------
+
+    private static AgentUsagePayload Agents(params AgentUsageSnapshot[] agents) =>
+        new("2026-01-01T00:00:00Z", agents);
+
+    private static AgentUsageSnapshot Agent(string clientId, params UsageWindow[] windows) =>
+        new(clientId, "source", "2026-01-01T00:00:00Z", windows);
+
+    private static QuotaLensProjection.Client GrokTab(
+        AgentUsagePayload quota, IReadOnlyList<QuotaHistorySeries> history, string tab = "grok") =>
+        QuotaLensProjection.Build(
+            history, quota, EmptyGraph(),
+            windowUsage: new WindowUsage([Message(InActiveSpanMs, "grok", "xai", 1000, 1.0)], 0, 0),
+            windowUsageOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            Confirmed(),
+            year: null,
+            new QuotaLensProjection.Selection(tab, string.Empty, LocalUsageClients: ["grok"])).Client!;
+
+    // A Grok Bot-only user: the "Grok Build & Bot" tab used to key the card by
+    // QuotaOwner("grok") = "grok", which reports nothing, so the Bot's weekly
+    // window and its history never appeared. The tab's other member draws it.
+    [Fact]
+    public void ABotOnlyGrokTabDrawsTheBotWeeklyWindowAndItsHistory()
+    {
+        var quota = Agents(Agent("grok-bot", Window("grok-bot|weekly.v1", "Weekly", "weekly.v1")));
+        var history = new[] { TwoCycleSeries("grok-bot", "primary", "weekly.v1") };
+
+        var client = GrokTab(quota, history);
+
+        Assert.Equal("grok-bot", client.Owner);
+        Assert.Equal(["grok-bot|weekly.v1"], client.Tabs.Select(tab => tab.Id.ProviderId + "|" + tab.Id.WindowKey));
+        Assert.Equal("grok-bot", client.Selected!.Id.ProviderId);
+        Assert.NotEmpty(client.History.Cycles);
+        // Grok Bot has no local usage: Build's messages are not its usage.
+        Assert.True(client.LocalUsageUnattributed);
+        Assert.Empty(client.Messages);
+    }
+
+    // With both members reporting, the tab keeps the owner's card (macOS draws
+    // one window card per tab); Build's local usage stays attributed.
+    [Fact]
+    public void AGrokTabWithBuildAndBotDrawsTheBuildCard()
+    {
+        var quota = Agents(
+            Agent("grok", Window("grok|billing.weekly.v1", "Weekly", "billing.weekly.v1")),
+            Agent("grok-bot", Window("grok-bot|weekly.v1", "Weekly", "weekly.v1")));
+
+        var client = GrokTab(quota, []);
+
+        Assert.Equal("grok", client.Owner);
+        Assert.Equal("grok", client.Selected!.Id.ProviderId);
+        Assert.False(client.LocalUsageUnattributed);
+        Assert.Equal("grok-bot", QuotaLensProjection.WindowCardOwner([], Agents(Agent("grok-bot", Window("grok-bot|weekly.v1", "Weekly", "weekly.v1"))), "grok"));
+    }
+
+    // Control: the Antigravity group's other member, antigravity-cli, is
+    // never a quota provider, so its tab keeps the antigravity card whether
+    // or not antigravity reports windows.
+    [Fact]
+    public void TheAntigravityTabKeepsTheAntigravityCard()
+    {
+        var withWindows = Agents(Agent("antigravity", Window("antigravity|session.v1", "Session", "session.v1")));
+        var noWindows = Agents(Agent("antigravity"), Agent("codex", Window("codex|weekly.v1", "Weekly", "weekly.v1")));
+
+        Assert.Equal("antigravity", QuotaLensProjection.WindowCardOwner([], withWindows, "antigravity"));
+        Assert.Equal("antigravity", QuotaLensProjection.WindowCardOwner([], withWindows, "antigravity-cli"));
+        Assert.Equal("antigravity", QuotaLensProjection.WindowCardOwner([], noWindows, "antigravity"));
+        Assert.Equal("codex", QuotaLensProjection.WindowCardOwner([], noWindows, "codex"));
+
+        var client = GrokTab(withWindows, [], tab: "antigravity");
+        Assert.Equal("antigravity", client.Owner);
+        Assert.Equal("antigravity", client.Selected!.Id.ProviderId);
+    }
 }

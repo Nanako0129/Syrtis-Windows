@@ -1024,6 +1024,7 @@ public sealed partial class DashboardView : UserControl
         // own doc comment for why that changes what below renders.
         var singleClient = OverviewScope.SingleClient(_activeClientTab);
         var limitsClientId = OverviewScope.LimitsClientId(singleClient);
+        var limitsClients = OverviewScope.LimitsClients(singleClient);
 
         // First-run setup cards, at the top of the global Overview lens only
         // (macOS PopoverView.swift:712-720).
@@ -1048,17 +1049,17 @@ public sealed partial class DashboardView : UserControl
                     ? BuildQuotaSummary(snapshot)
                     : null,
                 OverviewCard.Chart => BuildUsageChartCard(snapshot),
-                OverviewCard.Limits => limitsClientId is { } hiddenCid
+                OverviewCard.Limits => limitsClients is not null
                     && LimitsCardFilter.HidesClientCard(
                         snapshot.Quota?.Agents ?? [],
-                        hiddenCid,
+                        limitsClients,
                         ClientRegistry.HiddenLimitsClients(AppSettings.Store))
                     ? null
                     : Ui.Card(
                         limitsClientId is { } cid
-                            ? "{0} limits".Localized(ClientRegistry.ShortName(cid))
+                            ? "{0} limits".Localized(ClientRegistry.TabLabel(cid))
                             : "Agent limits".Localized(),
-                        BuildLimits(snapshot, limitsClientId)),
+                        BuildLimits(snapshot, limitsClients)),
                 // Absent when there is no live session, or when this tab is
                 // scoped to one client — the trace answers "across everything
                 // right now", which a single-client tab did not ask.
@@ -1646,21 +1647,21 @@ public sealed partial class DashboardView : UserControl
             _ => PaceMode.Historical,
         };
 
-    /// <summary><paramref name="clientId"/> narrows the card to one
-    /// subscription for the per-client Quota lens (5e). A parameter rather than
-    /// a second builder: this card answers "where does the allowance stand
-    /// right now", and a copy of it would be free to disagree with the original
-    /// on the same window.</summary>
+    /// <summary><paramref name="clientIds"/> narrows the card to one tab's
+    /// subscriptions (a grouped tab has more than one) for a client tab and the
+    /// per-client Quota lens (5e). A parameter rather than a second builder:
+    /// this card answers "where does the allowance stand right now", and a copy
+    /// of it would be free to disagree with the original on the same window.</summary>
     private static FrameworkElement BuildLimits(
-        DashboardModel.Snapshot snapshot, string? clientId = null)
+        DashboardModel.Snapshot snapshot, IReadOnlyList<string>? clientIds = null)
     {
         var panel = new StackPanel { Spacing = 10 };
-        // Narrowed to the tab's client, then the per-client limits toggle and
-        // (Overview only) tab visibility applied, before any exit below reads
-        // the list (LimitsCardFilter).
+        // Narrowed to the tab's clients (every member of a grouped tab), then
+        // the per-client limits toggle and (Overview only) tab visibility
+        // applied, before any exit below reads the list (LimitsCardFilter).
         var agents = LimitsCardFilter.Visible(
             snapshot.Quota?.Agents ?? [],
-            clientId,
+            clientIds,
             ClientRegistry.HiddenTabClients(AppSettings.Store),
             ClientRegistry.HiddenLimitsClients(AppSettings.Store));
 
@@ -1675,7 +1676,7 @@ public sealed partial class DashboardView : UserControl
         // for an empty visible list). A client tab whose card is off draws no
         // card at all (LimitsCardFilter.HidesClientCard, at the callers).
         var payloadHasCards = (snapshot.Quota?.Agents.Count ?? 0) > 0;
-        if (clientId is null && payloadHasCards && agents.Count == 0)
+        if (clientIds is null && payloadHasCards && agents.Count == 0)
         {
             panel.Children.Add(Ui.Dim("No supported agents yet".Localized()));
             return panel;
