@@ -2038,7 +2038,8 @@ public sealed partial class DashboardView : UserControl
     // ── Daily lens ───────────────────────────────────────────────────────
 
     /// <summary>One model stripe inside an expanded Daily or Monthly card:
-    /// provider-tinted disc, model and client name, tokens and cost, with the
+    /// provider-tinted disc, model (merged across clients by
+    /// <see cref="DailyRows.ByModel"/>), tokens and cost, with the
     /// disc and the row outline lighting together on hover so the rich tooltip
     /// points at an unambiguous row. Shared so the two lenses cannot drift —
     /// the hover/glow/tooltip wiring is the fiddly part, and a copy of it is
@@ -2055,8 +2056,7 @@ public sealed partial class DashboardView : UserControl
         var (subDiscHost, subDiscGlow) =
             GlowingDisc(colors.Color(client.ProviderId, client.ModelId), 6);
         name.Children.Add(subDiscHost);
-        name.Children.Add(Ui.Text(
-            $"{client.ModelId} · {ClientRegistry.ShortName(client.Client)}", 10, 0.85));
+        name.Children.Add(Ui.Text(client.ModelId, 10, 0.85));
         // Token-aware, like the Models row: this sub-row's hover card is the
         // same ModelTip (attached below), which reads "—" for an unpriced model,
         // and a row must not say "$0.00" while its own tooltip says "—".
@@ -2107,7 +2107,7 @@ public sealed partial class DashboardView : UserControl
         var days = DailyRows.Build(snapshot.Graph, _selectedClients);
         if (days.Count == 0)
         {
-            panel.Children.Add(Ui.Dim("No active days.".Localized()));
+            panel.Children.Add(Ui.Dim("No usage in this range.".Localized()));
         }
         else if (DrillDownSummary.ScopeLine(DailyRows.TurnScope(_selectedClients)) is { } scope)
         {
@@ -2126,18 +2126,20 @@ public sealed partial class DashboardView : UserControl
             if (_expandedDay == selectedDay.Date)
             {
                 foreach (var client in CostSurfaceProjection.OrderContributionClients(
-                    selectedDay.Clients, snapshot.CostAuthoritative))
+                    DailyRows.ByModel(selectedDay.Clients), snapshot.CostAuthoritative))
                 {
                     block.Children.Add(ModelStripeRow(
                         client, colors, snapshot.CostAuthoritative));
                 }
             }
 
+            // A row inside the lens card, as macOS lists them inside one
+            // DashCard: no card fill of its own, and a transparent (not
+            // null) background so the whole row still takes the tap.
             var card = new Border
             {
-                Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
-                CornerRadius = new CornerRadius(6),
-                Padding = new Thickness(10, 8, 10, 8),
+                Background = new SolidColorBrush(Colors.Transparent),
+                Padding = new Thickness(0, 4, 0, 4),
                 Child = block,
             };
             var date = selectedDay.Date;
@@ -2150,7 +2152,8 @@ public sealed partial class DashboardView : UserControl
             panel.Children.Add(card);
         }
 
-        return panel;
+        return Ui.Card(
+            "Daily".Localized(), panel, DrillDownSummary.ActiveDays(days.Count));
     }
 
     // ── Monthly lens ─────────────────────────────────────────────────────
@@ -2185,18 +2188,20 @@ public sealed partial class DashboardView : UserControl
             if (_expandedMonth == month.Month)
             {
                 foreach (var client in CostSurfaceProjection.OrderContributionClients(
-                    month.Clients, snapshot.CostAuthoritative))
+                    DailyRows.ByModel(month.Clients), snapshot.CostAuthoritative))
                 {
                     block.Children.Add(ModelStripeRow(
                         client, colors, snapshot.CostAuthoritative));
                 }
             }
 
+            // A row inside the lens card, as macOS lists them inside one
+            // DashCard: no card fill of its own, and a transparent (not
+            // null) background so the whole row still takes the tap.
             var card = new Border
             {
-                Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
-                CornerRadius = new CornerRadius(6),
-                Padding = new Thickness(10, 8, 10, 8),
+                Background = new SolidColorBrush(Colors.Transparent),
+                Padding = new Thickness(0, 4, 0, 4),
                 Child = block,
             };
             var key = month.Month;
@@ -2209,7 +2214,8 @@ public sealed partial class DashboardView : UserControl
             panel.Children.Add(card);
         }
 
-        return panel;
+        return Ui.Card(
+            "Monthly".Localized(), panel, DrillDownSummary.ActiveMonths(months.Count));
     }
 
     // ── Hourly lens ──────────────────────────────────────────────────────
@@ -2736,8 +2742,14 @@ public sealed partial class DashboardView : UserControl
         head.Children.Add(Ui.Disc(colors.Color(entry.Provider, entry.Model), 7));
         head.Children.Add(TipText(entry.Model, 12, bold: true));
         panel.Children.Add(head);
+        // A Daily/Monthly drill-down row is merged across clients
+        // (DailyRows.ByModel) and has no client to name.
         panel.Children.Add(TipText(
-            $"{ClientRegistry.ShortName(entry.Client)} · {entry.Provider}", 10, 0.6));
+            entry.Client.Length == 0
+                ? entry.Provider
+                : $"{ClientRegistry.ShortName(entry.Client)} · {entry.Provider}",
+            10,
+            0.6));
         panel.Children.Add(TipRow(
             TipText("{0} tokens".Localized(Format.CompactTokens(entry.Total)), 11, 0.9),
             CostSurfaceProjection.ModelTipCost(
