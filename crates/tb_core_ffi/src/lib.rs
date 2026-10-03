@@ -951,6 +951,13 @@ fn set_claude_config_dirs(raw: &str) -> Result<serde_json::Value, String> {
     let _setter = ROOTS_SETTER.lock().unwrap_or_else(|p| p.into_inner());
     let result = agent_usage::replace_claude_config_dirs(|| claude_config_dirs::set_from_json(raw))
         .map_err(str::to_string)?;
+    bump_after_config_dirs_commit();
+    Ok(result)
+}
+
+/// The config-dir setter's half after a successful registry commit. Caller
+/// holds `ROOTS_SETTER`.
+fn bump_after_config_dirs_commit() {
     #[cfg(test)]
     GENERATION_AT_CONFIG_DIR_COMMIT.store(ROOT_GENERATION.load(Ordering::SeqCst), Ordering::SeqCst);
     {
@@ -965,7 +972,20 @@ fn set_claude_config_dirs(raw: &str) -> Result<serde_json::Value, String> {
     // and the tail, and a refresh in flight across it is dropped, so a stale
     // pre-refresh graph must not stay cached and keep being served.
     invalidate_scan_caches();
-    Ok(result)
+}
+
+/// Test seam: install config directories through the setter's commit path
+/// (registry replace + purge, then the generation bump and cache clears),
+/// skipping only the drive-path rule, so a POSIX fixture can register one on
+/// macOS (the twin of `apply_scan_roots_for_test`).
+#[cfg(test)]
+pub(crate) fn apply_config_dirs_for_test(dirs: Vec<String>) {
+    let _setter = ROOTS_SETTER.lock().unwrap_or_else(|p| p.into_inner());
+    agent_usage::replace_claude_config_dirs(|| {
+        Ok::<_, ()>(((), claude_config_dirs::commit_for_test(dirs)))
+    })
+    .unwrap();
+    bump_after_config_dirs_commit();
 }
 
 /// Test seam: the generation observed right after the config-dir registry

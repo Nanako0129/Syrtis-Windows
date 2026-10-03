@@ -197,6 +197,19 @@ pub(crate) fn set_from_json(raw: &str) -> Result<(serde_json::Value, Vec<String>
 #[cfg(test)]
 pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Commit `dirs` as given (no `normalize`), moving the registry generation as
+/// a real replace does; returns what was registered. Only for
+/// `apply_config_dirs_for_test`.
+#[cfg(test)]
+pub(crate) fn commit_for_test(dirs: Vec<String>) -> Vec<String> {
+    let mut state = CLAUDE_CONFIG_DIRS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.0 = dirs.clone();
+    state.1 = state.1.wrapping_add(1);
+    dirs
+}
+
 #[cfg(test)]
 pub(crate) fn reset_for_test() {
     CLAUDE_CONFIG_DIRS
