@@ -23,14 +23,13 @@ use crate::agent_account_scope::{
 use crate::agent_usage::{
     clean_plan, parse_datetime, percent_encode, provider_http_client_builder, read_response_body,
     request_after_verified_binding, AgentIdentity, ProviderCacheBinding, ProviderFetchFailure,
-    ResponseReadFailure, TransportErrorFacts, TransportPhase, UsageWindow,
+    ResponseReadFailure, SafeTransportDiagnostic, TransportErrorFacts, TransportPhase, UsageWindow,
 };
-#[cfg(any(windows, test))]
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, value::RawValue, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -51,6 +50,9 @@ pub(crate) const ANTIGRAVITY_UNCONFIGURED_ERROR: &str =
 /// say so rather than reading as "you never set this up".
 const ANTIGRAVITY_UNREADABLE_ERROR: &str =
     "Antigravity credentials could not be read. Re-login in Antigravity.";
+/// A Code Assist 401. A captured account rewrites it (`fetch_captured_with`):
+/// re-login in Antigravity would sign in the wrong account.
+const ANTIGRAVITY_AUTH_EXPIRED: &str = "Antigravity Google auth expired. Re-login in Antigravity.";
 
 #[derive(Debug)]
 pub(crate) struct Fetched {
@@ -179,7 +181,8 @@ const AGY_PAUSED_MESSAGE: &str =
 const AGY_TIMED_OUT_MESSAGE: &str =
     "Antigravity CLI quota check timed out; agy was probably waiting for a sign-in. Sign in to agy again, or restart Syrtis, to retry.";
 
-#[cfg(windows)]
+/// agy's own login. Syrtis only ever reads it: the poll path for `LastWritten`,
+/// and the captured-account path (`agy_read_call`) for the blob.
 const AGY_CREDENTIAL_TARGET: &str = "gemini:antigravity";
 
 #[cfg(windows)]
@@ -207,9 +210,8 @@ enum AgyRunFailure {
     TimedOut,
 }
 
-#[cfg(any(windows, test))]
 #[derive(Debug)]
-struct CredentialUnreadable;
+pub(crate) struct CredentialUnreadable;
 
 /// Once a spawned `agy` fails, it is not spawned again while its credential
 /// keeps the same `LastWritten` — a failure may be the signed-out browser
@@ -1249,15 +1251,26 @@ struct RemoteContext {
 
 impl RemoteContext {
     fn finish(self, windows: Vec<UsageWindow>) -> Fetched {
+        // Remote OAuth carries no authoritative owner ID today: the stored
+        // Google `id_token` is not read yet (macOS HISTID-B, not ported).
+        let history_scope = agent_account_scope::resolve_history_scope("antigravity", None);
+        self.finish_with_history(windows, history_scope)
+    }
+
+    /// `finish` with the caller's history scope: a captured account keys its
+    /// history on its own key, not the per-installation constant.
+    fn finish_with_history(
+        self,
+        windows: Vec<UsageWindow>,
+        history_scope: Result<HistoryScope, AccountScopeError>,
+    ) -> Fetched {
         Fetched {
             source: "oauth".to_string(),
             // google_accounts.active is unrelated local state, not authenticated
             // by the credential that fetched these quotas.
             identity: Some(remote_identity(self.plan)),
             account_scope: Ok(self.account_scope),
-            // Remote OAuth carries no authoritative owner ID today: the stored
-            // Google `id_token` is not read yet (macOS HISTID-B, not ported).
-            history_scope: agent_account_scope::resolve_history_scope("antigravity", None),
+            history_scope,
             cache_binding: self.cache_binding,
             windows,
         }
@@ -1763,9 +1776,9 @@ async fn code_assist_post(
                 attempt_binding,
                 diagnostic,
             ),
-            ResponseReadFailure::Terminal(401) => ProviderFetchFailure::terminal(
-                "Antigravity Google auth expired. Re-login in Antigravity.",
-            ),
+            ResponseReadFailure::Terminal(401) => {
+                ProviderFetchFailure::terminal(ANTIGRAVITY_AUTH_EXPIRED)
+            }
             ResponseReadFailure::Terminal(403) => ProviderFetchFailure::terminal(format!(
                 "Antigravity {method} permission was denied."
             )),
@@ -2299,6 +2312,1243 @@ fn gemini_home_from(
         Ok(_) | Err(_) => format!("{}/.gemini", user_home?.to_string_lossy()),
     };
     Some(PathBuf::from(root))
+}
+
+// ── Captured accounts (extra Google accounts copied from agy's login) ─────────
+//
+// Ported from macOS `agent_antigravity.rs` (945dbcc2) with Windows Credential
+// Manager in place of the login keychain. A captured account is a second
+// Google login the user signed `agy` into once and asked Syrtis to keep.
+// Capture copies that login's refresh token, plus the OAuth client that issued
+// it, into a generic credential Syrtis owns; every later poll refreshes from
+// that credential and calls the same Code Assist quota methods as the primary
+// remote route.
+//
+// It deliberately does not reuse the primary's file-bound refresh path
+// (`refresh_access_token_with`): that path exists to share a credential with an
+// external writer, and this credential has exactly one writer, Syrtis. So there
+// is no refresh lock, no lineage binding and no compare-and-swap.
+//
+// What crosses each boundary:
+// - agy's own credential (`gemini:antigravity`) is read (`agy_read_call`) when
+//   the user presses Capture, or once per login change while automatic capture
+//   is on (`auto_capture_with`), and never written or deleted: no builder
+//   produces a write or delete for it. The poll path reads only its
+//   `LastWritten` (`login_marker_with`). Nothing on this path starts a process.
+// - Syrtis's credential (`CAPTURED_TARGET_PREFIX` + key) is a
+//   `CRED_TYPE_GENERIC`, `CRED_PERSIST_LOCAL_MACHINE` credential whose blob is
+//   the UTF-8 JSON `{"refresh_token","client_id","client_secret"}`. Its target
+//   is built only by `captured_target`, which refuses anything but 64 hex.
+// - The raw Google `sub` never leaves `capture_with` / `auto_capture_with`.
+//   Everything downstream — the target, the registry, the FFI `accountKey`,
+//   the account and history scopes — uses `captured_key(sub)`.
+// - Every error leaving this section is a fixed code or a literal string: no
+//   token, sub, key, email, Win32 error, serde text or Google
+//   `error_description`.
+
+/// Target prefix of the credentials Syrtis writes for captured accounts. The
+/// same string as macOS's keychain service, so support can name one thing.
+const CAPTURED_TARGET_PREFIX: &str = "com.nyanako.tokenbar.antigravity-account:";
+/// Domain separator for `captured_key`, so the key cannot collide with a
+/// SHA-256 of the bare `sub` computed anywhere else.
+const CAPTURED_KEY_DOMAIN: &[u8] = b"antigravity-account\0";
+/// An access token is reused until this long before its expiry.
+const CAPTURED_TOKEN_MARGIN_SECS: i64 = 5 * 60;
+const CAPTURED_FALLBACK_LABEL: &str = "Antigravity account";
+
+// Win32 values (wincred.h), spelled here so the pure builders below and their
+// tests compile off Windows; the Windows build asserts they equal windows-sys.
+const CRED_TYPE_GENERIC: u32 = 1;
+/// This user's sessions on this computer only. Never `CRED_PERSIST_ENTERPRISE`,
+/// which roams with a domain profile and would carry the token elsewhere.
+const CRED_PERSIST_LOCAL_MACHINE: u32 = 2;
+const CRED_MAX_CREDENTIAL_BLOB_SIZE: usize = 5 * 512;
+
+#[cfg(windows)]
+const _: () = {
+    use windows_sys::Win32::Security::Credentials as wincred;
+    assert!(CRED_TYPE_GENERIC == wincred::CRED_TYPE_GENERIC);
+    assert!(CRED_PERSIST_LOCAL_MACHINE == wincred::CRED_PERSIST_LOCAL_MACHINE);
+    assert!(CRED_MAX_CREDENTIAL_BLOB_SIZE == wincred::CRED_MAX_CREDENTIAL_BLOB_SIZE as usize);
+};
+
+const CAPTURED_REFRESH_RETRY: &str = "Antigravity token refresh failed. Retrying automatically.";
+pub(crate) const CAPTURED_ITEM_MISSING: &str =
+    "Antigravity account credential was not found. Capture the account again.";
+const CAPTURED_ITEM_UNREADABLE: &str =
+    "Antigravity account credential could not be read. Capture the account again.";
+const CAPTURED_REFRESH_REJECTED: &str =
+    "Antigravity account sign-in was rejected. Capture the account again.";
+const CAPTURED_AUTH_EXPIRED: &str =
+    "Antigravity account sign-in expired. Capture the account again.";
+const CAPTURED_IDENTITY_UNVERIFIED: &str = "Antigravity account identity could not be verified.";
+const CAPTURED_CLIENT_UNAVAILABLE: &str = "Antigravity usage client could not be created.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CapturedAccount {
+    pub key: String,
+    pub label: String,
+}
+
+// ── registry ──
+
+static CAPTURED_ACCOUNTS: std::sync::LazyLock<std::sync::RwLock<Vec<CapturedAccount>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(Vec::new()));
+
+/// Registered captured accounts, in the order the shell listed them. Empty by
+/// default, so a process that never calls the setter fetches the one
+/// Antigravity card it always has. Holds no secret.
+pub(crate) fn captured_accounts() -> Vec<CapturedAccount> {
+    CAPTURED_ACCOUNTS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// Replace the registry from `[{"key","label"}]`. Full-replace (`[]` clears).
+/// A rejected entry is reported by index and a fixed reason, never echoed.
+pub(crate) fn set_captured_accounts_from_json(raw: &str) -> Result<Value, String> {
+    let input: Value =
+        serde_json::from_str(raw).map_err(|_| "invalid_accounts_json".to_string())?;
+    let entries = input
+        .as_array()
+        .ok_or_else(|| "invalid_accounts_json".to_string())?;
+    let mut registered: Vec<CapturedAccount> = Vec::new();
+    let mut rejected: Vec<Value> = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let key = entry.get("key").and_then(Value::as_str);
+        let label = entry.get("label").and_then(Value::as_str);
+        let reason = match (key, label) {
+            (Some(key), Some(_)) if !valid_captured_key(key) => "invalid key",
+            (Some(key), Some(_)) if registered.iter().any(|a| a.key == key) => "duplicate key",
+            (Some(key), Some(label)) => {
+                registered.push(CapturedAccount {
+                    key: key.to_string(),
+                    label: label.to_string(),
+                });
+                continue;
+            }
+            _ => "invalid entry",
+        };
+        rejected.push(json!({ "index": index, "reason": reason }));
+    }
+    let registered_count = registered.len();
+    *CAPTURED_ACCOUNTS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = registered;
+    Ok(json!({ "registeredCount": registered_count, "rejected": rejected }))
+}
+
+#[cfg(test)]
+pub(crate) static CAPTURED_ACCOUNTS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// ── key, target and Credential Manager calls ──
+
+/// `hex(SHA-256("antigravity-account\0" + sub))`, 64 lowercase hex.
+pub(crate) fn captured_key(sub: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(CAPTURED_KEY_DOMAIN);
+    hasher.update(sub.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// `^[0-9a-f]{64}$`.
+fn valid_captured_key(key: &str) -> bool {
+    key.len() == 64 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The only way a Syrtis target is built: the prefix plus a validated key. So
+/// no captured call can ever name `gemini:*` or anything outside the prefix.
+fn captured_target(key: &str) -> Option<String> {
+    valid_captured_key(key).then(|| format!("{CAPTURED_TARGET_PREFIX}{key}"))
+}
+
+/// A credential blob, zeroed when dropped. No `Debug`, so it cannot be logged.
+pub(crate) struct SecretBytes(Vec<u8>);
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        for byte in self.0.iter_mut() {
+            // SAFETY: `byte` is a valid, exclusive reference into the Vec.
+            unsafe { std::ptr::write_volatile(byte, 0) };
+        }
+    }
+}
+
+impl std::ops::Deref for SecretBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// One Credential Manager operation. Only the builders below create one, and
+/// every captured builder goes through `captured_target`. No `Debug`: a write
+/// carries the secret.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum CredCall {
+    Read {
+        target: String,
+        cred_type: u32,
+    },
+    Write {
+        target: String,
+        cred_type: u32,
+        persist: u32,
+        blob: Vec<u8>,
+    },
+    Delete {
+        target: String,
+        cred_type: u32,
+    },
+}
+
+/// What a `CredCall` returned. `Ok` carries the blob of a read, and is empty
+/// for a write or delete. The Win32 error code is never kept.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub(crate) enum CredOutcome {
+    Ok(SecretBytes),
+    NotFound,
+    Failed,
+}
+
+/// agy's login, read only. There is no write or delete builder for it.
+fn agy_read_call() -> CredCall {
+    CredCall::Read {
+        target: AGY_CREDENTIAL_TARGET.to_string(),
+        cred_type: CRED_TYPE_GENERIC,
+    }
+}
+
+fn read_item_call(key: &str) -> Option<CredCall> {
+    Some(CredCall::Read {
+        target: captured_target(key)?,
+        cred_type: CRED_TYPE_GENERIC,
+    })
+}
+
+/// Refuses an empty blob or one over Credential Manager's 2560-byte limit,
+/// before any call.
+fn write_item_call(key: &str, blob: Vec<u8>) -> Option<CredCall> {
+    if blob.is_empty() || blob.len() > CRED_MAX_CREDENTIAL_BLOB_SIZE {
+        return None;
+    }
+    Some(CredCall::Write {
+        target: captured_target(key)?,
+        cred_type: CRED_TYPE_GENERIC,
+        persist: CRED_PERSIST_LOCAL_MACHINE,
+        blob,
+    })
+}
+
+fn delete_item_call(key: &str) -> Option<CredCall> {
+    Some(CredCall::Delete {
+        target: captured_target(key)?,
+        cred_type: CRED_TYPE_GENERIC,
+    })
+}
+
+// ── stored credential and agy's login ──
+
+/// The blob of a captured credential. The client is pinned at capture so a
+/// poll never rescans application binaries.
+#[derive(Clone, PartialEq, Eq)]
+struct StoredCredential {
+    refresh_token: String,
+    client: OAuthClient,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct OAuthClient {
+    id: String,
+    secret: String,
+}
+
+/// UTF-8 JSON. macOS base64-encodes the same object only because its value
+/// passes through the `security -i` command language; Credential Manager
+/// stores bytes.
+fn encode_stored(credential: &StoredCredential) -> Vec<u8> {
+    json!({
+        "refresh_token": credential.refresh_token,
+        "client_id": credential.client.id,
+        "client_secret": credential.client.secret,
+    })
+    .to_string()
+    .into_bytes()
+}
+
+fn non_empty_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+fn decode_stored(blob: &[u8]) -> Option<StoredCredential> {
+    let value: Value = serde_json::from_slice(blob).ok()?;
+    Some(StoredCredential {
+        refresh_token: non_empty_str(&value, "refresh_token")?.to_string(),
+        client: OAuthClient {
+            id: non_empty_str(&value, "client_id")?.to_string(),
+            secret: non_empty_str(&value, "client_secret")?.to_string(),
+        },
+    })
+}
+
+/// The claims of a JWT, decoded without verification. Callers use them only
+/// as a label, a client selector, or a value compared with another JWT's.
+fn jwt_claims(token: &str) -> Option<Value> {
+    let payload = token.split('.').nth(1)?.trim_end_matches('=');
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+struct AgyLogin {
+    refresh_token: String,
+    sub: String,
+    aud: String,
+    email: Option<String>,
+}
+
+/// agy's Windows credential blob: raw UTF-8 JSON
+/// `{token:{refresh_token,…}, id_token, …}`, no prefix and no base64
+/// (measured on a real device by a structure-only probe). macOS's
+/// `go-keyring-base64:` form is not accepted here.
+fn parse_agy_login(blob: &[u8]) -> Result<AgyLogin, CaptureError> {
+    let login: Value =
+        serde_json::from_slice(blob).map_err(|_| CaptureError::AgyLoginUnreadable)?;
+    let refresh_token = login
+        .get("token")
+        .and_then(|token| non_empty_str(token, "refresh_token"))
+        .ok_or(CaptureError::AgyLoginUnreadable)?
+        .to_string();
+    let claims = non_empty_str(&login, "id_token")
+        .and_then(jwt_claims)
+        .ok_or(CaptureError::AgyLoginMissingIdentity)?;
+    let sub = non_empty_str(&claims, "sub").ok_or(CaptureError::AgyLoginMissingIdentity)?;
+    let aud = non_empty_str(&claims, "aud").ok_or(CaptureError::AgyLoginMissingIdentity)?;
+    Ok(AgyLogin {
+        refresh_token,
+        sub: sub.to_string(),
+        aud: aud.to_string(),
+        email: non_empty_str(&claims, "email").map(str::to_string),
+    })
+}
+
+/// Every client with id `client_id` found in the artifacts, one per secret of
+/// each artifact that contains that id. The id is the token's own `aud`, not
+/// `preferred_client`'s positional pick: macOS measured agy's issuing client
+/// differing from that pick, and a refresh token only refreshes with the
+/// client that issued it.
+fn clients_for_aud<I>(client_id: &str, artifacts: I) -> Vec<OAuthClient>
+where
+    I: IntoIterator<Item = Vec<u8>>,
+{
+    let mut clients: Vec<OAuthClient> = Vec::new();
+    for data in artifacts {
+        if !scan_client_ids(&data).iter().any(|id| id == client_id) {
+            continue;
+        }
+        for secret in scan_client_secrets(&data) {
+            let client = OAuthClient {
+                id: client_id.to_string(),
+                secret,
+            };
+            if !clients.contains(&client) {
+                clients.push(client);
+            }
+        }
+    }
+    clients
+}
+
+/// Every file a captured account's client may be scanned from: the IDE's
+/// binaries plus `agy.exe`, found by path lookup only (never started).
+#[cfg(any(windows, test))]
+fn windows_captured_artifact_candidates(
+    local_app_data: Option<&std::ffi::OsStr>,
+    program_files: Option<&std::ffi::OsStr>,
+    path: Option<&std::ffi::OsStr>,
+    is_file: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
+    let mut paths = windows_client_artifact_candidates(local_app_data, program_files);
+    paths.extend(agy_executable_from(local_app_data, path, is_file));
+    paths
+}
+
+#[cfg(windows)]
+fn captured_artifact_candidates() -> Vec<PathBuf> {
+    windows_captured_artifact_candidates(
+        std::env::var_os("LOCALAPPDATA").as_deref(),
+        std::env::var_os("ProgramFiles").as_deref(),
+        std::env::var_os("PATH").as_deref(),
+        Path::is_file,
+    )
+}
+
+#[cfg(not(windows))]
+fn captured_artifact_candidates() -> Vec<PathBuf> {
+    client_artifact_candidates()
+}
+
+// ── token endpoint ──
+
+enum TokenRejection {
+    /// `invalid_client` / `unauthorized_client`: this secret is not the
+    /// issuing client's; capture tries the next candidate.
+    WrongClient,
+    Other,
+}
+
+/// Only the OAuth `error` code is read from a rejection; `error_description`
+/// is never looked at, so it cannot reach a card or the FFI.
+fn token_response(status: u16, body: &str) -> Result<Value, TokenRejection> {
+    let json: Option<Value> = serde_json::from_str(body).ok();
+    if (200..=299).contains(&status) {
+        return json
+            .filter(|json| non_empty_str(json, "access_token").is_some())
+            .ok_or(TokenRejection::Other);
+    }
+    match json.as_ref().and_then(|json| non_empty_str(json, "error")) {
+        Some("invalid_client" | "unauthorized_client") => Err(TokenRejection::WrongClient),
+        _ => Err(TokenRejection::Other),
+    }
+}
+
+// ── I/O seam ──
+
+/// Everything the captured path does outside this process. Production is
+/// `SystemCapturedIo`; tests substitute every method, so no test touches
+/// Credential Manager, scans an installed binary, or reaches the network.
+/// There is no process method: nothing on this path can start one.
+pub(crate) trait CapturedIo {
+    fn credential(&self, call: CredCall) -> CredOutcome;
+    /// agy's credential `LastWritten` (FILETIME), `Ok(None)` when absent.
+    fn agy_last_written(&self) -> Result<Option<u64>, CredentialUnreadable>;
+    /// The bytes of each Antigravity IDE / agy artifact that may embed a
+    /// client. Called when the user presses Capture, or by an automatic
+    /// capture after a login change.
+    async fn client_artifacts(&self) -> Vec<Vec<u8>>;
+    /// POST a refresh-token grant; `Ok((status, body))` for any HTTP answer
+    /// except 429 / 5xx, which are transient failures like every other
+    /// transport failure.
+    async fn token_post(
+        &self,
+        client: &OAuthClient,
+        refresh_token: &str,
+        binding: Option<ProviderCacheBinding>,
+    ) -> Result<(u16, String), ProviderFetchFailure>;
+    fn scopes(
+        &self,
+        key: &str,
+    ) -> (
+        Result<AccountScope, AccountScopeError>,
+        Result<HistoryScope, AccountScopeError>,
+    );
+    async fn quota(
+        &self,
+        access_token: String,
+        account_scope: AccountScope,
+        history_scope: Result<HistoryScope, AccountScopeError>,
+        now: DateTime<Utc>,
+    ) -> Result<Fetched, ProviderFetchFailure>;
+}
+
+/// A captured account's scopes: `OpaqueId` = its key, under the provider
+/// "antigravity". The key differs per `sub`, and the primary's account scope
+/// is credential-derived and its history scope the per-installation constant,
+/// so neither can coincide with a captured account's.
+fn captured_scopes<Auth, History>(
+    key: &str,
+    resolve_authoritative: Auth,
+    resolve_history: History,
+) -> (
+    Result<AccountScope, AccountScopeError>,
+    Result<HistoryScope, AccountScopeError>,
+)
+where
+    Auth: FnOnce(&str, AuthoritativeIdKind, &str) -> Result<AccountScope, AccountScopeError>,
+    History: FnOnce(
+        &str,
+        Option<(AuthoritativeIdKind, &str)>,
+    ) -> Result<HistoryScope, AccountScopeError>,
+{
+    (
+        resolve_authoritative("antigravity", AuthoritativeIdKind::OpaqueId, key),
+        resolve_history("antigravity", Some((AuthoritativeIdKind::OpaqueId, key))),
+    )
+}
+
+/// `retrieveUserQuotaSummary`: the allowance groups agy's `/usage` prints,
+/// e.g. "Gemini Models" and "Claude and GPT models". Shape measured on macOS
+/// on 2026-10-02: `groups[].{displayName, buckets[].{bucketId, displayName,
+/// remainingFraction, resetTime, window}}`. Labels and card ids follow the
+/// Windows agy route (`parse_agy_usage`), so a captured card reads like the
+/// primary's. `None` on any failure or an empty answer: the caller falls back
+/// to the catalog.
+async fn fetch_quota_summary(
+    context: &RemoteContext,
+    now: DateTime<Utc>,
+) -> Option<Vec<UsageWindow>> {
+    let body = match context.project.as_deref() {
+        Some(project) => json!({ "project": project }),
+        None => json!({}),
+    };
+    let response = code_assist_post(
+        &context.client,
+        "retrieveUserQuotaSummary",
+        &body,
+        &context.access_token,
+        context.cache_binding.clone(),
+        true,
+    )
+    .await
+    .ok()?;
+    let windows = windows_from_quota_summary(&response, now);
+    (!windows.is_empty()).then_some(windows)
+}
+
+/// The bucket's declared `window` ("weekly", "5h") is not read: a declared
+/// duration is a separate change (W7c).
+fn windows_from_quota_summary(body: &str, now: DateTime<Utc>) -> Vec<UsageWindow> {
+    let Ok(response) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    let mut windows = Vec::new();
+    for group in response
+        .get("groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let group_name = non_empty_str(group, "displayName").unwrap_or("Antigravity");
+        for bucket in group
+            .get("buckets")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = non_empty_str(bucket, "bucketId") else {
+                continue;
+            };
+            let Some(fraction) = bucket.get("remainingFraction").and_then(Value::as_f64) else {
+                continue;
+            };
+            let reset = bucket
+                .get("resetTime")
+                .and_then(Value::as_str)
+                .and_then(parse_datetime);
+            let label = format!(
+                "{group_name} · {}",
+                non_empty_str(bucket, "displayName").unwrap_or("Limit")
+            );
+            let card_id = format!("agy.{id}.v1");
+            if let Some(window) =
+                quota_window(label, fraction, reset, now, card_id.clone(), Some(card_id))
+            {
+                windows.push(window);
+            }
+        }
+    }
+    windows
+}
+
+/// Both the token and the Code Assist requests of a captured account go
+/// through this client. No redirects: the default policy would resend a POST
+/// body carrying the refresh token or the bearer to wherever a 307/308 points.
+fn captured_http_client() -> Result<reqwest::Client, ProviderFetchFailure> {
+    provider_http_client_builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| ProviderFetchFailure::terminal(CAPTURED_CLIENT_UNAVAILABLE))
+}
+
+/// The Credential Manager calls. Kept this thin on purpose: every input
+/// (target, type, persist, blob) comes from the pure builders above, which the
+/// tests assert on.
+#[cfg(windows)]
+mod credential_manager {
+    use super::{CredCall, CredOutcome, SecretBytes};
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
+    use windows_sys::Win32::Security::Credentials::{
+        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW,
+    };
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn not_found_or_failed() -> CredOutcome {
+        // SAFETY: reads the calling thread's last-error value only.
+        if unsafe { GetLastError() } == ERROR_NOT_FOUND {
+            CredOutcome::NotFound
+        } else {
+            CredOutcome::Failed
+        }
+    }
+
+    pub(super) fn call(call: CredCall) -> CredOutcome {
+        match call {
+            CredCall::Read { target, cred_type } => read(&target, cred_type),
+            CredCall::Write {
+                target,
+                cred_type,
+                persist,
+                blob,
+            } => {
+                let blob = SecretBytes(blob);
+                write(&target, cred_type, persist, &blob)
+            }
+            CredCall::Delete { target, cred_type } => {
+                let target = wide(&target);
+                // SAFETY: `target` is NUL-terminated and outlives the call.
+                if unsafe { CredDeleteW(target.as_ptr(), cred_type, 0) } != 0 {
+                    CredOutcome::Ok(SecretBytes(Vec::new()))
+                } else {
+                    not_found_or_failed()
+                }
+            }
+        }
+    }
+
+    /// Copies the blob out, then zeroes the OS allocation before `CredFree`.
+    /// No pointer into the `CREDENTIALW` leaves this function.
+    fn read(target: &str, cred_type: u32) -> CredOutcome {
+        let target = wide(target);
+        let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
+        // SAFETY: `target` is NUL-terminated and outlives the call. On success
+        // CredReadW hands back one allocation that is only read here, its blob
+        // spans `CredentialBlobSize` bytes, and it is freed exactly once.
+        unsafe {
+            if CredReadW(target.as_ptr(), cred_type, 0, &mut credential) == 0 {
+                return not_found_or_failed();
+            }
+            if credential.is_null() {
+                return CredOutcome::Failed;
+            }
+            let size = (*credential).CredentialBlobSize as usize;
+            let blob = (*credential).CredentialBlob;
+            let copy = if blob.is_null() || size == 0 {
+                SecretBytes(Vec::new())
+            } else {
+                let copy = SecretBytes(std::slice::from_raw_parts(blob, size).to_vec());
+                for offset in 0..size {
+                    std::ptr::write_volatile(blob.add(offset), 0);
+                }
+                copy
+            };
+            CredFree(credential.cast::<core::ffi::c_void>());
+            CredOutcome::Ok(copy)
+        }
+    }
+
+    fn write(target: &str, cred_type: u32, persist: u32, blob: &[u8]) -> CredOutcome {
+        let Ok(size) = u32::try_from(blob.len()) else {
+            return CredOutcome::Failed;
+        };
+        let mut target = wide(target);
+        let credential = CREDENTIALW {
+            Type: cred_type,
+            TargetName: target.as_mut_ptr(),
+            CredentialBlobSize: size,
+            // CredWriteW only reads the blob; the `*mut` is the struct's type.
+            CredentialBlob: blob.as_ptr().cast_mut(),
+            Persist: persist,
+            ..Default::default()
+        };
+        // SAFETY: every pointer in `credential` is valid for the call: `target`
+        // is NUL-terminated and `blob` spans `size` bytes, both outliving it.
+        if unsafe { CredWriteW(&credential, 0) } != 0 {
+            CredOutcome::Ok(SecretBytes(Vec::new()))
+        } else {
+            CredOutcome::Failed
+        }
+    }
+}
+
+pub(crate) struct SystemCapturedIo;
+
+impl CapturedIo for SystemCapturedIo {
+    #[cfg(windows)]
+    fn credential(&self, call: CredCall) -> CredOutcome {
+        credential_manager::call(call)
+    }
+
+    /// This repository ships Windows only; its non-Windows build exists to run
+    /// the tests, which never use this backend.
+    #[cfg(not(windows))]
+    fn credential(&self, _call: CredCall) -> CredOutcome {
+        CredOutcome::Failed
+    }
+
+    #[cfg(windows)]
+    fn agy_last_written(&self) -> Result<Option<u64>, CredentialUnreadable> {
+        read_agy_credential_last_written()
+    }
+
+    #[cfg(not(windows))]
+    fn agy_last_written(&self) -> Result<Option<u64>, CredentialUnreadable> {
+        Err(CredentialUnreadable)
+    }
+
+    /// Off the async poll: the IDE's `language_server.exe` is ~130 MB.
+    async fn client_artifacts(&self) -> Vec<Vec<u8>> {
+        tokio::task::spawn_blocking(|| {
+            captured_artifact_candidates()
+                .into_iter()
+                .filter_map(|path| std::fs::read(path).ok())
+                .collect()
+        })
+        .await
+        .unwrap_or_default()
+    }
+
+    async fn token_post(
+        &self,
+        client: &OAuthClient,
+        refresh_token: &str,
+        binding: Option<ProviderCacheBinding>,
+    ) -> Result<(u16, String), ProviderFetchFailure> {
+        let http = captured_http_client()?;
+        let form = format!(
+            "client_id={}&client_secret={}&refresh_token={}&grant_type=refresh_token",
+            percent_encode(&client.id),
+            percent_encode(&client.secret),
+            percent_encode(refresh_token),
+        );
+        let response = http
+            .post(GOOGLE_TOKEN_URL)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(form)
+            .send()
+            .await
+            .map_err(|error| {
+                ProviderFetchFailure::from_send_error(
+                    CAPTURED_REFRESH_RETRY,
+                    binding.clone(),
+                    &error,
+                )
+            })?;
+        let status = response.status().as_u16();
+        if status == 429 {
+            return Err(ProviderFetchFailure::transient(
+                CAPTURED_REFRESH_RETRY,
+                binding,
+                SafeTransportDiagnostic::rate_limited(status),
+            ));
+        }
+        if (500..=599).contains(&status) {
+            return Err(ProviderFetchFailure::transient(
+                CAPTURED_REFRESH_RETRY,
+                binding,
+                SafeTransportDiagnostic::server_error(status),
+            ));
+        }
+        let body = response.text().await.map_err(|error| {
+            ProviderFetchFailure::transient(
+                CAPTURED_REFRESH_RETRY,
+                binding,
+                SafeTransportDiagnostic::from_facts(TransportErrorFacts::from_reqwest(
+                    &error,
+                    TransportPhase::ResponseBody,
+                )),
+            )
+        })?;
+        Ok((status, body))
+    }
+
+    fn scopes(
+        &self,
+        key: &str,
+    ) -> (
+        Result<AccountScope, AccountScopeError>,
+        Result<HistoryScope, AccountScopeError>,
+    ) {
+        captured_scopes(
+            key,
+            agent_account_scope::resolve_authoritative,
+            agent_account_scope::resolve_history_scope,
+        )
+    }
+
+    /// loadCodeAssist, then retrieveUserQuotaSummary, then fetchAvailableModels
+    /// with retrieveUserQuota as the fallback, with the same precedence as the
+    /// primary remote route (`fetch_with` with no local route).
+    async fn quota(
+        &self,
+        access_token: String,
+        account_scope: AccountScope,
+        history_scope: Result<HistoryScope, AccountScopeError>,
+        now: DateTime<Utc>,
+    ) -> Result<Fetched, ProviderFetchFailure> {
+        let cache_binding = ProviderCacheBinding::primary(account_scope.clone());
+        let client = captured_http_client()?;
+        let code_assist_body = code_assist_post(
+            &client,
+            "loadCodeAssist",
+            &json!({
+                "metadata": { "ideType": "ANTIGRAVITY", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI" }
+            }),
+            &access_token,
+            Some(cache_binding.clone()),
+            false,
+        )
+        .await
+        .map_err(|failure| match failure {
+            CodeAssistPostFailure::Forbidden => {
+                ProviderFetchFailure::terminal("Antigravity loadCodeAssist permission was denied.")
+            }
+            CodeAssistPostFailure::Failure(failure) => failure,
+        })?;
+        let code_assist: Value = serde_json::from_str(&code_assist_body).map_err(|_| {
+            ProviderFetchFailure::terminal(
+                "Antigravity loadCodeAssist response could not be decoded.",
+            )
+        })?;
+        let context = RemoteContext {
+            client,
+            access_token,
+            project: project_id(&code_assist),
+            plan: resolve_remote_plan(&code_assist),
+            account_scope,
+            cache_binding: Some(cache_binding),
+        };
+        // The same grouped allowances agy's `/usage` prints (and the primary
+        // card shows on the agy route); the per-model catalog is the fallback.
+        if let Some(windows) = fetch_quota_summary(&context, now).await {
+            return Ok(context.finish_with_history(windows, history_scope));
+        }
+        let secondary_history = history_scope.clone();
+        fetch_with(
+            || async { LocalAttempt::RouteMiss },
+            || async move {
+                match fetch_available_models(&context, now).await {
+                    PrimaryQuotaAttempt::Success(windows) => {
+                        PrimaryAttempt::Success(context.finish_with_history(windows, history_scope))
+                    }
+                    PrimaryQuotaAttempt::Forbidden => PrimaryAttempt::Forbidden(context),
+                    PrimaryQuotaAttempt::SchemaContradiction(failure) => {
+                        PrimaryAttempt::SchemaContradiction { context, failure }
+                    }
+                    PrimaryQuotaAttempt::Transient => PrimaryAttempt::Transient(context),
+                    PrimaryQuotaAttempt::Terminal(failure) => PrimaryAttempt::FinalFailure(failure),
+                }
+            },
+            |context: RemoteContext| async move {
+                let windows = fetch_user_quota(&context, now).await?;
+                Ok(context.finish_with_history(windows, secondary_history))
+            },
+        )
+        .await
+    }
+}
+
+// ── access tokens ──
+
+pub(crate) struct CachedToken {
+    access_token: String,
+    expires_at: DateTime<Utc>,
+}
+
+/// Access tokens per key, in memory only. Never persisted.
+pub(crate) type CapturedTokenCache = std::sync::Mutex<HashMap<String, CachedToken>>;
+
+static CAPTURED_TOKENS: std::sync::LazyLock<CapturedTokenCache> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn lock_tokens(
+    cache: &CapturedTokenCache,
+) -> std::sync::MutexGuard<'_, HashMap<String, CachedToken>> {
+    cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A cached access token while it has more than five minutes left; otherwise
+/// read the credential and refresh once. The credential is written only when
+/// Google returns a refresh token different from the stored one.
+///
+/// ponytail: no cross-process lock. Two Syrtis processes refreshing one
+/// captured account both succeed, because Google issues a new access token
+/// without rotating the refresh token (measured on macOS). A lock is added
+/// only if rotation is ever observed, which is a stop condition.
+async fn captured_access_token<I: CapturedIo>(
+    io: &I,
+    cache: &CapturedTokenCache,
+    key: &str,
+    binding: &ProviderCacheBinding,
+    now: DateTime<Utc>,
+) -> Result<String, ProviderFetchFailure> {
+    if let Some(cached) = lock_tokens(cache).get(key).filter(|cached| {
+        cached.expires_at - chrono::Duration::seconds(CAPTURED_TOKEN_MARGIN_SECS) > now
+    }) {
+        return Ok(cached.access_token.clone());
+    }
+    let call = read_item_call(key)
+        .ok_or_else(|| ProviderFetchFailure::terminal(CAPTURED_ITEM_UNREADABLE))?;
+    let stored = match io.credential(call) {
+        CredOutcome::Ok(blob) => decode_stored(&blob),
+        CredOutcome::NotFound => return Err(ProviderFetchFailure::terminal(CAPTURED_ITEM_MISSING)),
+        CredOutcome::Failed => None,
+    }
+    .ok_or_else(|| ProviderFetchFailure::terminal(CAPTURED_ITEM_UNREADABLE))?;
+
+    let (status, body) = io
+        .token_post(&stored.client, &stored.refresh_token, Some(binding.clone()))
+        .await?;
+    let json = token_response(status, &body)
+        .map_err(|_| ProviderFetchFailure::terminal(CAPTURED_REFRESH_REJECTED))?;
+    let access_token = non_empty_str(&json, "access_token")
+        .ok_or_else(|| ProviderFetchFailure::terminal(CAPTURED_REFRESH_REJECTED))?
+        .to_string();
+    if let Some(expires_in) = json.get("expires_in").and_then(Value::as_i64) {
+        lock_tokens(cache).insert(
+            key.to_string(),
+            CachedToken {
+                access_token: access_token.clone(),
+                expires_at: now + chrono::Duration::seconds(expires_in),
+            },
+        );
+    }
+    if let Some(rotated) = non_empty_str(&json, "refresh_token") {
+        if rotated != stored.refresh_token {
+            let updated = StoredCredential {
+                refresh_token: rotated.to_string(),
+                client: stored.client.clone(),
+            };
+            // A failed write keeps the token that was just used; the next cold
+            // refresh then tries the old refresh token and reports rejection.
+            if let Some(call) = write_item_call(key, encode_stored(&updated)) {
+                let _ = io.credential(call);
+            }
+        }
+    }
+    Ok(access_token)
+}
+
+// ── capture, fetch, remove ──
+
+/// Fixed capture/remove outcomes. `code()` is the whole FFI error text, the
+/// same vocabulary as macOS (hence `keychain_*` for Credential Manager).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaptureError {
+    AgyNotSignedIn,
+    AgyLoginUnreadable,
+    AgyLoginMissingIdentity,
+    OAuthClientNotFound,
+    OAuthClientRejected,
+    RefreshRejected,
+    RefreshUnreachable,
+    AccountMismatch,
+    InvalidCredentialFormat,
+    KeychainWriteFailed,
+    InvalidKey,
+    KeychainDeleteFailed,
+    /// Automatic capture only: agy's credential read failed other than "not
+    /// found".
+    Paused,
+    /// Automatic capture only: agy has no credential.
+    NotSignedIn,
+}
+
+impl CaptureError {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::AgyNotSignedIn => "agy_not_signed_in",
+            Self::AgyLoginUnreadable => "agy_login_unreadable",
+            Self::AgyLoginMissingIdentity => "agy_login_missing_identity",
+            Self::OAuthClientNotFound => "oauth_client_not_found",
+            Self::OAuthClientRejected => "oauth_client_rejected",
+            Self::RefreshRejected => "refresh_rejected",
+            Self::RefreshUnreachable => "refresh_unreachable",
+            Self::AccountMismatch => "account_mismatch",
+            Self::InvalidCredentialFormat => "invalid_credential_format",
+            Self::KeychainWriteFailed => "keychain_write_failed",
+            Self::InvalidKey => "invalid_key",
+            Self::KeychainDeleteFailed => "keychain_delete_failed",
+            Self::Paused => "paused",
+            Self::NotSignedIn => "not_signed_in",
+        }
+    }
+}
+
+/// Copy agy's current login into a Syrtis-owned credential and return its key
+/// and label. Nothing is written unless the token refreshed with its own
+/// issuing client and any `id_token` in that response names the same `sub`.
+async fn capture_with<I: CapturedIo>(io: &I) -> Result<CapturedAccount, CaptureError> {
+    let CredOutcome::Ok(agy_blob) = io.credential(agy_read_call()) else {
+        return Err(CaptureError::AgyNotSignedIn);
+    };
+    let login = parse_agy_login(&agy_blob)?;
+    drop(agy_blob);
+
+    let (client, json) = refresh_with_issuing_client(io, &login).await?;
+
+    // The stored id_token is local and untrusted; Google's answer is not.
+    if let Some(id_token) = json.get("id_token") {
+        if response_sub(Some(id_token)).as_deref() != Some(login.sub.as_str()) {
+            return Err(CaptureError::AccountMismatch);
+        }
+    }
+
+    let key = captured_key(&login.sub);
+    write_captured(io, &key, &login, client, &json)?;
+    Ok(CapturedAccount {
+        key,
+        label: login
+            .email
+            .unwrap_or_else(|| CAPTURED_FALLBACK_LABEL.to_string()),
+    })
+}
+
+/// One refresh of `login`'s token with the client named by its `aud`,
+/// trying that client's candidate secrets; `invalid_client` /
+/// `unauthorized_client` falls through to the next, any other answer stops.
+async fn refresh_with_issuing_client<I: CapturedIo>(
+    io: &I,
+    login: &AgyLogin,
+) -> Result<(OAuthClient, Value), CaptureError> {
+    let clients = clients_for_aud(&login.aud, io.client_artifacts().await);
+    if clients.is_empty() {
+        return Err(CaptureError::OAuthClientNotFound);
+    }
+    for client in clients {
+        let (status, body) = io
+            .token_post(&client, &login.refresh_token, None)
+            .await
+            .map_err(|_| CaptureError::RefreshUnreachable)?;
+        match token_response(status, &body) {
+            Ok(json) => return Ok((client, json)),
+            Err(TokenRejection::WrongClient) => continue,
+            Err(TokenRejection::Other) => return Err(CaptureError::RefreshRejected),
+        }
+    }
+    Err(CaptureError::OAuthClientRejected)
+}
+
+/// The `sub` of a token response's `id_token`, when it is a decodable JWT.
+fn response_sub(id_token: Option<&Value>) -> Option<String> {
+    id_token
+        .and_then(Value::as_str)
+        .and_then(jwt_claims)
+        .and_then(|claims| non_empty_str(&claims, "sub").map(str::to_string))
+}
+
+/// Write `{refresh_token, client}` to `key`'s credential. The refresh token is
+/// the response's when Google rotated it, otherwise the login's.
+fn write_captured<I: CapturedIo>(
+    io: &I,
+    key: &str,
+    login: &AgyLogin,
+    client: OAuthClient,
+    json: &Value,
+) -> Result<(), CaptureError> {
+    let credential = StoredCredential {
+        refresh_token: non_empty_str(json, "refresh_token")
+            .unwrap_or(&login.refresh_token)
+            .to_string(),
+        client,
+    };
+    let call = write_item_call(key, encode_stored(&credential))
+        .ok_or(CaptureError::InvalidCredentialFormat)?;
+    match io.credential(call) {
+        CredOutcome::Ok(_) => Ok(()),
+        CredOutcome::NotFound | CredOutcome::Failed => Err(CaptureError::KeychainWriteFailed),
+    }
+}
+
+/// What one automatic capture did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AutoCaptured {
+    /// The login was verified at Google and written to its own credential.
+    Captured(CapturedAccount),
+    /// Its own credential already holds this refresh token: no scan, no
+    /// request, no write.
+    Unchanged(CapturedAccount),
+    /// The user removed this account; nothing was requested or written.
+    SkippedRemoved,
+}
+
+/// The automatic counterpart of `capture_with`, run once per agy login change
+/// while automatic capture is on. Stricter than the manual path, because
+/// nobody pressed a button:
+/// 1. agy's credential: found continues, not found is `NotSignedIn`, any
+///    other read failure is `Paused`, which stops further automatic attempts
+///    until the user acts;
+/// 2. a key in `removed_keys` is skipped before any request;
+/// 3. a refresh token its own credential already holds is `Unchanged`, with
+///    no client scan, no request and no write;
+/// 4. the refresh response MUST carry an `id_token` whose `sub` equals the
+///    stored one, else `AccountMismatch` and no write.
+async fn auto_capture_with<I: CapturedIo>(
+    io: &I,
+    removed_keys: &[String],
+) -> Result<AutoCaptured, CaptureError> {
+    let agy_blob = match io.credential(agy_read_call()) {
+        CredOutcome::Ok(blob) => blob,
+        CredOutcome::NotFound => return Err(CaptureError::NotSignedIn),
+        CredOutcome::Failed => return Err(CaptureError::Paused),
+    };
+    let login = parse_agy_login(&agy_blob)?;
+    drop(agy_blob);
+
+    let key = captured_key(&login.sub);
+    if removed_keys.contains(&key) {
+        return Ok(AutoCaptured::SkippedRemoved);
+    }
+
+    let stored_label = login.email.clone();
+    let own = read_item_call(&key).ok_or(CaptureError::InvalidCredentialFormat)?;
+    let unchanged = match io.credential(own) {
+        CredOutcome::Ok(blob) => {
+            decode_stored(&blob).is_some_and(|stored| stored.refresh_token == login.refresh_token)
+        }
+        CredOutcome::NotFound | CredOutcome::Failed => false,
+    };
+    if unchanged {
+        return Ok(AutoCaptured::Unchanged(CapturedAccount {
+            key,
+            label: stored_label.unwrap_or_else(|| CAPTURED_FALLBACK_LABEL.to_string()),
+        }));
+    }
+
+    let (client, json) = refresh_with_issuing_client(io, &login).await?;
+    let claims = json
+        .get("id_token")
+        .and_then(Value::as_str)
+        .and_then(jwt_claims);
+    if claims
+        .as_ref()
+        .and_then(|claims| non_empty_str(claims, "sub"))
+        != Some(login.sub.as_str())
+    {
+        return Err(CaptureError::AccountMismatch);
+    }
+    let label = claims
+        .as_ref()
+        .and_then(|claims| non_empty_str(claims, "email"))
+        .map(str::to_string)
+        .or(stored_label)
+        .unwrap_or_else(|| CAPTURED_FALLBACK_LABEL.to_string());
+
+    write_captured(io, &key, &login, client, &json)?;
+    Ok(AutoCaptured::Captured(CapturedAccount { key, label }))
+}
+
+/// The one place agy's `LastWritten` becomes a login marker: the FILETIME as a
+/// decimal string, `"absent"` when agy has no credential, `None` when it could
+/// not be read (the caller does nothing that poll). `tb_antigravity_login_marker`
+/// returns it, and the agy snapshot's marker (W7b) must come from here too.
+pub(crate) fn agy_login_marker(
+    last_written: Result<Option<u64>, CredentialUnreadable>,
+) -> Option<String> {
+    match last_written {
+        Ok(Some(filetime)) => Some(filetime.to_string()),
+        Ok(None) => Some("absent".to_string()),
+        Err(CredentialUnreadable) => None,
+    }
+}
+
+fn login_marker_with<I: CapturedIo>(io: &I) -> Option<String> {
+    agy_login_marker(io.agy_last_written())
+}
+
+/// Delete one captured credential and its cached access token. Never revokes:
+/// the refresh token stays valid at Google until the user revokes it there.
+fn remove_with<I: CapturedIo>(
+    io: &I,
+    cache: &CapturedTokenCache,
+    key: &str,
+) -> Result<(), CaptureError> {
+    let call = delete_item_call(key).ok_or(CaptureError::InvalidKey)?;
+    lock_tokens(cache).remove(key);
+    match io.credential(call) {
+        CredOutcome::Ok(_) | CredOutcome::NotFound => Ok(()),
+        CredOutcome::Failed => Err(CaptureError::KeychainDeleteFailed),
+    }
+}
+
+/// One captured account's quota. Every failure is a per-account
+/// `ProviderFetchFailure`; none is provider-wide.
+pub(crate) async fn fetch_captured_with<I: CapturedIo>(
+    io: &I,
+    cache: &CapturedTokenCache,
+    key: &str,
+    label: &str,
+    now: DateTime<Utc>,
+) -> Result<Fetched, ProviderFetchFailure> {
+    if !valid_captured_key(key) {
+        return Err(ProviderFetchFailure::terminal(CAPTURED_ITEM_UNREADABLE));
+    }
+    let (account_scope, history_scope) = io.scopes(key);
+    let account_scope =
+        account_scope.map_err(|_| ProviderFetchFailure::terminal(CAPTURED_IDENTITY_UNVERIFIED))?;
+    let binding = ProviderCacheBinding::primary(account_scope.clone());
+    let access_token = captured_access_token(io, cache, key, &binding, now).await?;
+    let mut fetched = match io
+        .quota(access_token, account_scope, history_scope, now)
+        .await
+    {
+        Ok(fetched) => fetched,
+        Err(failure) => {
+            // A rejected token is not reused for the rest of its lifetime.
+            if matches!(failure, ProviderFetchFailure::Terminal { .. }) {
+                lock_tokens(cache).remove(key);
+            }
+            // The quota calls are shared with the primary, whose 401 text
+            // tells the user to sign in to Antigravity again. That is wrong
+            // advice here: Antigravity is signed in to a different account.
+            return Err(match failure {
+                ProviderFetchFailure::Terminal { ref display }
+                    if display == ANTIGRAVITY_AUTH_EXPIRED =>
+                {
+                    ProviderFetchFailure::terminal(CAPTURED_AUTH_EXPIRED)
+                }
+                failure => failure,
+            });
+        }
+    };
+    fetched.identity = Some(AgentIdentity {
+        email: Some(label.to_string()),
+        plan: fetched.identity.and_then(|identity| identity.plan),
+    });
+    Ok(fetched)
+}
+
+pub(crate) async fn capture() -> Result<CapturedAccount, CaptureError> {
+    capture_with(&SystemCapturedIo).await
+}
+
+pub(crate) async fn auto_capture(removed_keys: &[String]) -> Result<AutoCaptured, CaptureError> {
+    auto_capture_with(&SystemCapturedIo, removed_keys).await
+}
+
+pub(crate) fn login_marker() -> Option<String> {
+    login_marker_with(&SystemCapturedIo)
+}
+
+pub(crate) fn remove(key: &str) -> Result<(), CaptureError> {
+    remove_with(&SystemCapturedIo, &CAPTURED_TOKENS, key)
+}
+
+pub(crate) async fn fetch_captured(
+    key: &str,
+    label: &str,
+    now: DateTime<Utc>,
+) -> Result<Fetched, ProviderFetchFailure> {
+    fetch_captured_with(&SystemCapturedIo, &CAPTURED_TOKENS, key, label, now).await
 }
 
 #[cfg(test)]
@@ -4183,5 +5433,1355 @@ mod tests {
             "empty, `.`, relative entries and .cmd/.bat shims never match"
         );
         assert_eq!(agy_executable_from(None, None, is_file), None);
+    }
+}
+
+/// Fakes for every captured-account boundary: Credential Manager, the
+/// artifacts, the token endpoint, the scope store and the quota calls. Shared
+/// with `agent_usage`'s tests, which compose captured accounts into cards.
+///
+/// The fake checks Credential Manager calls against the Win32 numbers
+/// themselves (`1` = `CRED_TYPE_GENERIC`, `2` = `CRED_PERSIST_LOCAL_MACHINE`)
+/// and the literal target prefix, never against this module's constants, so a
+/// changed constant is caught rather than mirrored.
+#[cfg(test)]
+pub(crate) mod captured_test_support {
+    use super::*;
+    use crate::agent_account_scope::test_support::TestRefreshScope;
+    use std::cell::{Cell, RefCell};
+
+    pub(crate) const AUD: &str = "111111111111-agy.apps.googleusercontent.com";
+    pub(crate) const OTHER: &str = "222222222222-other.apps.googleusercontent.com";
+    pub(crate) const PREFIX: &str = "com.nyanako.tokenbar.antigravity-account:";
+    pub(crate) const WIN32_CRED_TYPE_GENERIC: u32 = 1;
+    pub(crate) const WIN32_CRED_PERSIST_LOCAL_MACHINE: u32 = 2;
+
+    pub(crate) fn secret(fill: char) -> String {
+        format!("GOCSPX-{}", fill.to_string().repeat(28))
+    }
+
+    pub(crate) fn jwt(claims: Value) -> String {
+        format!(
+            "e30.{}.sig",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+        )
+    }
+
+    /// agy's Windows blob: raw UTF-8 JSON, the shape the device probe saw.
+    pub(crate) fn agy_item(refresh_token: &str, claims: Option<Value>) -> Vec<u8> {
+        let mut login = json!({
+            "token": {
+                "access_token": "ya29.stored",
+                "token_type": "Bearer",
+                "refresh_token": refresh_token,
+                "expiry": "2026-10-02T00:00:00Z",
+            },
+            "auth_method": "oauth",
+        });
+        if let Some(claims) = claims {
+            login["id_token"] = Value::String(jwt(claims));
+        }
+        login.to_string().into_bytes()
+    }
+
+    pub(crate) fn stored_value(
+        refresh_token: &str,
+        client_id: &str,
+        client_secret: &str,
+    ) -> Vec<u8> {
+        encode_stored(&StoredCredential {
+            refresh_token: refresh_token.to_string(),
+            client: OAuthClient {
+                id: client_id.to_string(),
+                secret: client_secret.to_string(),
+            },
+        })
+    }
+
+    /// `(refresh_token, client_id, client_secret)` of a stored blob.
+    pub(crate) fn decode_value(value: &[u8]) -> (String, String, String) {
+        let stored = decode_stored(value).expect("a decodable stored value");
+        (stored.refresh_token, stored.client.id, stored.client.secret)
+    }
+
+    pub(crate) fn token_ok(access_token: &str, extra: Value) -> (u16, String) {
+        let mut body =
+            json!({ "access_token": access_token, "expires_in": 3599, "token_type": "Bearer" });
+        if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+            body.extend(extra.clone());
+        }
+        (200, body.to_string())
+    }
+
+    type TokenFn = Box<dyn Fn(&OAuthClient, &str) -> Result<(u16, String), ProviderFetchFailure>>;
+
+    /// One recorded write: `(target, type, persist, blob)`.
+    pub(crate) type Write = (String, u32, u32, Vec<u8>);
+
+    /// How agy's credential read ends when it is not simply found or absent.
+    #[derive(Clone, Copy)]
+    pub(crate) enum AgyRead {
+        NotFound,
+        Failed,
+    }
+
+    pub(crate) struct FakeIo {
+        pub agy_item: Option<Vec<u8>>,
+        /// When set, agy's read ends this way instead of following `agy_item`.
+        pub agy_read: Option<AgyRead>,
+        pub agy_last_written: Result<Option<u64>, ()>,
+        pub artifacts: Vec<Vec<u8>>,
+        /// The fake Credential Manager: key (target minus prefix) → blob.
+        pub items: RefCell<BTreeMap<String, Vec<u8>>>,
+        pub write_fails: bool,
+        pub token: TokenFn,
+        pub cred_calls: RefCell<Vec<CredCall>>,
+        /// Every boundary crossing in order, without secrets: `read <target>`,
+        /// `write <target>`, `delete <target>`, `scan`, `token`, `quota`.
+        pub events: RefCell<Vec<String>>,
+        /// `(client_id, client_secret, refresh_token)` per token request.
+        pub token_calls: RefCell<Vec<(String, String, String)>>,
+        pub artifact_calls: Cell<usize>,
+        pub quota_calls: Cell<usize>,
+        /// When set, `quota` fails terminally with this display text.
+        pub quota_terminal: Option<&'static str>,
+        pub scope: TestRefreshScope,
+    }
+
+    impl FakeIo {
+        pub(crate) fn new(tag: &str) -> Self {
+            Self {
+                agy_item: None,
+                agy_read: None,
+                agy_last_written: Ok(None),
+                artifacts: Vec::new(),
+                items: RefCell::new(BTreeMap::new()),
+                write_fails: false,
+                token: Box::new(|_, _| Ok(token_ok("ya29.fresh", json!({})))),
+                cred_calls: RefCell::new(Vec::new()),
+                events: RefCell::new(Vec::new()),
+                token_calls: RefCell::new(Vec::new()),
+                artifact_calls: Cell::new(0),
+                quota_calls: Cell::new(0),
+                quota_terminal: None,
+                scope: TestRefreshScope::new("antigravity", tag),
+            }
+        }
+
+        pub(crate) fn writes(&self) -> Vec<Write> {
+            self.cred_calls
+                .borrow()
+                .iter()
+                .filter_map(|call| match call {
+                    CredCall::Write {
+                        target,
+                        cred_type,
+                        persist,
+                        blob,
+                    } => Some((target.clone(), *cred_type, *persist, blob.clone())),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        pub(crate) fn reads_of_captured_items(&self) -> usize {
+            self.cred_calls
+                .borrow()
+                .iter()
+                .filter(|call| {
+                    matches!(call, CredCall::Read { target, .. } if target.starts_with(PREFIX))
+                })
+                .count()
+        }
+
+        pub(crate) fn network_calls(&self) -> usize {
+            self.token_calls.borrow().len() + self.quota_calls.get()
+        }
+
+        fn event(&self, event: String) {
+            self.events.borrow_mut().push(event);
+        }
+    }
+
+    impl Drop for FakeIo {
+        fn drop(&mut self) {
+            self.scope.cleanup();
+        }
+    }
+
+    fn ok(blob: Vec<u8>) -> CredOutcome {
+        CredOutcome::Ok(SecretBytes(blob))
+    }
+
+    impl CapturedIo for FakeIo {
+        fn credential(&self, call: CredCall) -> CredOutcome {
+            self.cred_calls.borrow_mut().push(call.clone());
+            match call {
+                CredCall::Read { target, cred_type } => {
+                    assert_eq!(cred_type, WIN32_CRED_TYPE_GENERIC, "read of {target}");
+                    self.event(format!("read {target}"));
+                    if target == "gemini:antigravity" {
+                        return match (self.agy_read, &self.agy_item) {
+                            (Some(AgyRead::NotFound), _) | (None, None) => CredOutcome::NotFound,
+                            (Some(AgyRead::Failed), _) => CredOutcome::Failed,
+                            (None, Some(item)) => ok(item.clone()),
+                        };
+                    }
+                    let key = target
+                        .strip_prefix(PREFIX)
+                        .unwrap_or_else(|| panic!("read outside the prefix: {target}"));
+                    match self.items.borrow().get(key) {
+                        Some(blob) => ok(blob.clone()),
+                        None => CredOutcome::NotFound,
+                    }
+                }
+                CredCall::Write {
+                    target,
+                    cred_type,
+                    persist,
+                    blob,
+                } => {
+                    assert_eq!(cred_type, WIN32_CRED_TYPE_GENERIC, "write of {target}");
+                    assert_eq!(
+                        persist, WIN32_CRED_PERSIST_LOCAL_MACHINE,
+                        "write of {target}"
+                    );
+                    self.event(format!("write {target}"));
+                    let key = target
+                        .strip_prefix(PREFIX)
+                        .unwrap_or_else(|| panic!("write outside the prefix: {target}"));
+                    if self.write_fails {
+                        return CredOutcome::Failed;
+                    }
+                    self.items.borrow_mut().insert(key.to_string(), blob);
+                    ok(Vec::new())
+                }
+                CredCall::Delete { target, cred_type } => {
+                    assert_eq!(cred_type, WIN32_CRED_TYPE_GENERIC, "delete of {target}");
+                    self.event(format!("delete {target}"));
+                    let key = target
+                        .strip_prefix(PREFIX)
+                        .unwrap_or_else(|| panic!("delete outside the prefix: {target}"));
+                    match self.items.borrow_mut().remove(key) {
+                        Some(_) => ok(Vec::new()),
+                        None => CredOutcome::NotFound,
+                    }
+                }
+            }
+        }
+
+        fn agy_last_written(&self) -> Result<Option<u64>, CredentialUnreadable> {
+            self.agy_last_written.map_err(|()| CredentialUnreadable)
+        }
+
+        async fn client_artifacts(&self) -> Vec<Vec<u8>> {
+            self.artifact_calls.set(self.artifact_calls.get() + 1);
+            self.event("scan".to_string());
+            self.artifacts.clone()
+        }
+
+        async fn token_post(
+            &self,
+            client: &OAuthClient,
+            refresh_token: &str,
+            _binding: Option<ProviderCacheBinding>,
+        ) -> Result<(u16, String), ProviderFetchFailure> {
+            self.event("token".to_string());
+            self.token_calls.borrow_mut().push((
+                client.id.clone(),
+                client.secret.clone(),
+                refresh_token.to_string(),
+            ));
+            (self.token)(client, refresh_token)
+        }
+
+        fn scopes(
+            &self,
+            key: &str,
+        ) -> (
+            Result<AccountScope, AccountScopeError>,
+            Result<HistoryScope, AccountScopeError>,
+        ) {
+            captured_scopes(
+                key,
+                |provider, kind, id| self.scope.resolve_authoritative(provider, kind, id),
+                |provider, authoritative| self.scope.resolve_history(provider, authoritative),
+            )
+        }
+
+        async fn quota(
+            &self,
+            _access_token: String,
+            account_scope: AccountScope,
+            history_scope: Result<HistoryScope, AccountScopeError>,
+            now: DateTime<Utc>,
+        ) -> Result<Fetched, ProviderFetchFailure> {
+            self.event("quota".to_string());
+            self.quota_calls.set(self.quota_calls.get() + 1);
+            if let Some(display) = self.quota_terminal {
+                return Err(ProviderFetchFailure::terminal(display));
+            }
+            let window = quota_window(
+                "Gemini".to_string(),
+                0.5,
+                Some(now + chrono::Duration::hours(1)),
+                now,
+                "agy.test.v1".to_string(),
+                Some("agy.test.v1".to_string()),
+            )
+            .expect("a valid window");
+            Ok(Fetched {
+                source: "oauth".to_string(),
+                identity: Some(remote_identity(Some("Paid".to_string()))),
+                account_scope: Ok(account_scope.clone()),
+                history_scope,
+                cache_binding: Some(ProviderCacheBinding::primary(account_scope)),
+                windows: vec![window],
+            })
+        }
+    }
+
+    pub(crate) fn new_token_cache() -> CapturedTokenCache {
+        std::sync::Mutex::new(HashMap::new())
+    }
+
+    pub(crate) fn cached_keys(cache: &CapturedTokenCache) -> Vec<String> {
+        lock_tokens(cache).keys().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod captured_account_tests {
+    use super::captured_test_support::*;
+    use super::*;
+
+    fn claims(sub: &str, aud: &str, email: &str) -> Value {
+        json!({ "sub": sub, "aud": aud, "email": email })
+    }
+
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-10-02T06:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// One artifact naming the token's client and another, with ONE secret:
+    /// `preferred_client` pairs that secret with the LAST id (OTHER), so a
+    /// positional pick would refresh with the wrong client.
+    fn artifacts_where_positional_pick_differs() -> Vec<Vec<u8>> {
+        vec![
+            format!("ide\0{AUD}\0{OTHER}\0{}\0", secret('a')).into_bytes(),
+            format!("agy\0{OTHER}\0{}\0", secret('b')).into_bytes(),
+        ]
+    }
+
+    #[test]
+    fn parses_the_windows_agy_login_and_nothing_else() {
+        let login = parse_agy_login(&agy_item(
+            "1//rt-a",
+            Some(claims("sub-a", AUD, "a@example.com")),
+        ))
+        .unwrap_or_else(|_| panic!("parse"));
+        assert_eq!(login.refresh_token, "1//rt-a");
+        assert_eq!(login.sub, "sub-a");
+        assert_eq!(login.aud, AUD);
+        assert_eq!(login.email.as_deref(), Some("a@example.com"));
+
+        // macOS's go-keyring form is not a Windows blob.
+        let mac_form = format!(
+            "go-keyring-base64:{}",
+            base64::engine::general_purpose::STANDARD.encode(agy_item(
+                "1//rt-a",
+                Some(claims("sub-a", AUD, "a@example.com"))
+            ))
+        );
+        assert_eq!(
+            parse_agy_login(mac_form.as_bytes()).err(),
+            Some(CaptureError::AgyLoginUnreadable)
+        );
+        assert_eq!(
+            parse_agy_login(&agy_item("", Some(claims("s", AUD, "e")))).err(),
+            Some(CaptureError::AgyLoginUnreadable),
+            "without a refresh token"
+        );
+        // UTF-16 (what a wide-string reader would see) is not accepted either.
+        let utf16: Vec<u8> = String::from_utf8(agy_item("1//rt-a", Some(claims("s", AUD, "e"))))
+            .unwrap()
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(
+            parse_agy_login(&utf16).err(),
+            Some(CaptureError::AgyLoginUnreadable)
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_without_sub_or_aud_fails_without_write() {
+        for claims in [
+            Some(json!({ "aud": AUD, "email": "a@example.com" })),
+            Some(json!({ "sub": "sub-a", "email": "a@example.com" })),
+            None,
+        ] {
+            let mut io = FakeIo::new("capture-missing-identity");
+            io.agy_item = Some(agy_item("1//rt-a", claims));
+            io.artifacts = artifacts_where_positional_pick_differs();
+            assert_eq!(
+                capture_with(&io).await.err(),
+                Some(CaptureError::AgyLoginMissingIdentity)
+            );
+            assert_eq!(*io.events.borrow(), ["read gemini:antigravity"]);
+            assert!(io.writes().is_empty());
+            assert_eq!(io.network_calls(), 0);
+        }
+    }
+
+    /// Acceptance 1 and 8: exactly one write, to the prefixed 64-hex target,
+    /// `CRED_TYPE_GENERIC` + `CRED_PERSIST_LOCAL_MACHINE`, the JSON shape, and
+    /// only after the refresh with the `aud`-named client succeeded.
+    #[tokio::test]
+    async fn capture_writes_one_generic_local_machine_credential_after_an_aud_matched_refresh() {
+        let ids = scan_client_ids(&artifacts_where_positional_pick_differs()[0]);
+        let secrets = scan_client_secrets(&artifacts_where_positional_pick_differs()[0]);
+        assert_eq!(
+            preferred_client(&ids, &secrets)
+                .map(|client| client.0)
+                .as_deref(),
+            Some(OTHER),
+            "the fixture must make the positional pick differ from aud"
+        );
+
+        let mut io = FakeIo::new("capture-by-aud");
+        io.agy_item = Some(agy_item(
+            "1//rt-a",
+            Some(claims("sub-a", AUD, "a@example.com")),
+        ));
+        io.artifacts = artifacts_where_positional_pick_differs();
+        let issuing = secret('a');
+        io.token = Box::new(move |client, _| {
+            if client.id == AUD && client.secret == issuing {
+                Ok(token_ok(
+                    "ya29.a",
+                    json!({ "id_token": jwt(json!({ "sub": "sub-a" })) }),
+                ))
+            } else {
+                Ok((401, r#"{"error":"invalid_client"}"#.to_string()))
+            }
+        });
+        let account = capture_with(&io).await.unwrap();
+        assert_eq!(account.key, captured_key("sub-a"));
+        assert!(account.key.len() == 64 && account.key.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(account.label, "a@example.com");
+        assert_eq!(
+            *io.token_calls.borrow(),
+            vec![(AUD.to_string(), secret('a'), "1//rt-a".to_string())]
+        );
+
+        let target = format!("{PREFIX}{}", account.key);
+        assert_eq!(
+            *io.events.borrow(),
+            [
+                "read gemini:antigravity".to_string(),
+                "scan".to_string(),
+                "token".to_string(),
+                format!("write {target}"),
+            ],
+            "the write comes only after the refresh succeeded"
+        );
+        let writes = io.writes();
+        assert_eq!(writes.len(), 1);
+        let (written_target, cred_type, persist, blob) = &writes[0];
+        assert_eq!(written_target, &target);
+        assert_eq!(*cred_type, WIN32_CRED_TYPE_GENERIC);
+        assert_eq!(*persist, WIN32_CRED_PERSIST_LOCAL_MACHINE);
+        let value: Value = serde_json::from_slice(blob).expect("UTF-8 JSON blob");
+        assert_eq!(
+            value,
+            json!({ "refresh_token": "1//rt-a", "client_id": AUD, "client_secret": secret('a') })
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_tries_the_next_secret_only_for_a_wrong_client() {
+        let artifact = format!("ide\0{AUD}\0{}\0{}\0", secret('a'), secret('b')).into_bytes();
+
+        let mut io = FakeIo::new("capture-fallthrough");
+        io.agy_item = Some(agy_item(
+            "1//rt-a",
+            Some(claims("sub-a", AUD, "a@example.com")),
+        ));
+        io.artifacts = vec![artifact.clone()];
+        let second = secret('b');
+        io.token = Box::new(move |client, _| {
+            if client.secret == second {
+                Ok(token_ok("ya29.a", json!({})))
+            } else {
+                Ok((401, r#"{"error":"unauthorized_client"}"#.to_string()))
+            }
+        });
+        let account = capture_with(&io).await.unwrap();
+        assert_eq!(io.token_calls.borrow().len(), 2);
+        assert_eq!(
+            decode_value(&io.items.borrow()[&account.key]).2,
+            secret('b')
+        );
+
+        let mut io = FakeIo::new("capture-wrong-client-fallthrough");
+        io.agy_item = Some(agy_item(
+            "1//rt-a",
+            Some(claims("sub-a", AUD, "a@example.com")),
+        ));
+        io.artifacts = vec![artifact.clone()];
+        let second = secret('b');
+        io.token = Box::new(move |client, _| {
+            if client.secret == second {
+                Ok(token_ok("ya29.a", json!({})))
+            } else {
+                Ok((401, r#"{"error":"invalid_client"}"#.to_string()))
+            }
+        });
+        capture_with(&io).await.unwrap();
+        assert_eq!(
+            io.token_calls.borrow().len(),
+            2,
+            "invalid_client falls through"
+        );
+
+        let mut io = FakeIo::new("capture-stops");
+        io.agy_item = Some(agy_item(
+            "1//rt-a",
+            Some(claims("sub-a", AUD, "a@example.com")),
+        ));
+        io.artifacts = vec![artifact];
+        io.token = Box::new(|_, _| Ok((400, r#"{"error":"invalid_grant"}"#.to_string())));
+        assert_eq!(
+            capture_with(&io).await.err(),
+            Some(CaptureError::RefreshRejected)
+        );
+        assert_eq!(io.token_calls.borrow().len(), 1, "any other error stops");
+        assert!(io.writes().is_empty());
+    }
+
+    /// Acceptance 8: `agy.exe` is a candidate (path lookup only), and the
+    /// `aud` match finds a client that only agy.exe carries.
+    #[tokio::test]
+    async fn the_aud_client_is_found_in_agy_exe_among_the_artifacts() {
+        let root = std::env::temp_dir().join("captured-artifacts-fixture");
+        let local = root.join("LocalAppData");
+        let program_files = root.join("ProgramFiles");
+        let agy = local.join("agy").join("bin").join("agy.exe");
+        let is_file = |candidate: &Path| candidate == agy;
+        let candidates = windows_captured_artifact_candidates(
+            Some(local.as_os_str()),
+            Some(program_files.as_os_str()),
+            None,
+            is_file,
+        );
+        assert_eq!(
+            candidates,
+            [
+                local
+                    .join("Programs")
+                    .join("Antigravity")
+                    .join("resources/bin/language_server.exe"),
+                program_files
+                    .join("Antigravity")
+                    .join("resources/bin/language_server.exe"),
+                agy.clone(),
+            ]
+        );
+
+        // The IDE binary carries another client only; agy.exe carries aud's.
+        let mut io = FakeIo::new("capture-agy-exe");
+        io.agy_item = Some(agy_item(
+            "1//rt-a",
+            Some(claims("sub-a", AUD, "a@example.com")),
+        ));
+        io.artifacts = vec![
+            format!("ide\0{OTHER}\0{}\0", secret('o')).into_bytes(),
+            format!("agy.exe\0{AUD}\0{}\0", secret('g')).into_bytes(),
+        ];
+        let account = capture_with(&io).await.unwrap();
+        assert_eq!(
+            *io.token_calls.borrow(),
+            vec![(AUD.to_string(), secret('g'), "1//rt-a".to_string())]
+        );
+        assert_eq!(decode_value(&io.items.borrow()[&account.key]).1, AUD);
+    }
+
+    #[tokio::test]
+    async fn capture_rejects_a_refresh_for_another_account() {
+        for id_token in [
+            Value::String(jwt(json!({ "sub": "sub-b" }))),
+            Value::String("not-a-jwt".to_string()),
+            Value::Null,
+        ] {
+            let mut io = FakeIo::new("capture-mismatch");
+            io.agy_item = Some(agy_item(
+                "1//rt-a",
+                Some(claims("sub-a", AUD, "a@example.com")),
+            ));
+            io.artifacts = artifacts_where_positional_pick_differs();
+            let id_token = id_token.clone();
+            io.token = Box::new(move |_, _| {
+                Ok(token_ok("ya29.a", json!({ "id_token": id_token.clone() })))
+            });
+            assert_eq!(
+                capture_with(&io).await.err(),
+                Some(CaptureError::AccountMismatch)
+            );
+            assert!(io.writes().is_empty());
+            assert!(io.items.borrow().is_empty());
+        }
+    }
+
+    /// Acceptance 3: every captured builder refuses a non-hex key before any
+    /// call, every target it builds is under the Syrtis prefix, and the only
+    /// call ever naming agy's credential is a read.
+    #[test]
+    fn credential_calls_name_only_the_syrtis_prefix_and_agy_only_for_a_read() {
+        let key = captured_key("sub-a");
+        let value = stored_value("1//rt-a", AUD, &secret('a'));
+        let bad_keys = [
+            String::new(),
+            format!("{} ", &key[..63]),
+            format!("{}\0", &key[..63]),
+            key.to_uppercase(),
+            key[..63].to_string(),
+            format!("{key}0"),
+            "gemini:antigravity".to_string(),
+            format!("../{}", &key[..61]),
+        ];
+        for bad in &bad_keys {
+            assert!(write_item_call(bad, value.clone()).is_none(), "{bad:?}");
+            assert!(read_item_call(bad).is_none(), "{bad:?}");
+            assert!(delete_item_call(bad).is_none(), "{bad:?}");
+        }
+        assert!(write_item_call(&key, Vec::new()).is_none(), "empty blob");
+        assert!(
+            write_item_call(&key, vec![b'x'; 2561]).is_none(),
+            "over 2560 bytes"
+        );
+        assert!(write_item_call(&key, vec![b'x'; 2560]).is_some());
+
+        let target = format!("{PREFIX}{key}");
+        let calls = [
+            read_item_call(&key).unwrap(),
+            write_item_call(&key, value.clone()).unwrap(),
+            delete_item_call(&key).unwrap(),
+        ];
+        for call in &calls {
+            let (CredCall::Read {
+                target: t,
+                cred_type,
+            }
+            | CredCall::Write {
+                target: t,
+                cred_type,
+                ..
+            }
+            | CredCall::Delete {
+                target: t,
+                cred_type,
+            }) = call;
+            assert_eq!(t, &target);
+            assert_eq!(*cred_type, WIN32_CRED_TYPE_GENERIC);
+        }
+        assert!(matches!(
+            &calls[1],
+            CredCall::Write { persist, .. } if *persist == WIN32_CRED_PERSIST_LOCAL_MACHINE
+        ));
+        assert!(matches!(
+            agy_read_call(),
+            CredCall::Read { ref target, cred_type }
+                if target == "gemini:antigravity" && cred_type == WIN32_CRED_TYPE_GENERIC
+        ));
+    }
+
+    /// Acceptance 3: a malformed key reaches no Credential Manager call and no
+    /// network, from remove or from a poll.
+    #[tokio::test]
+    async fn malformed_key_reaches_no_credential_call() {
+        let io = FakeIo::new("malformed-key");
+        let cache = new_token_cache();
+        for bad in ["a b", "a\"b", "a\nb", "ZZ", "gemini:antigravity", ""] {
+            assert_eq!(
+                remove_with(&io, &cache, bad).err(),
+                Some(CaptureError::InvalidKey)
+            );
+            assert!(fetch_captured_with(&io, &cache, bad, "label", now())
+                .await
+                .is_err());
+        }
+        assert!(io.cred_calls.borrow().is_empty());
+        assert_eq!(io.network_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn polls_within_a_token_lifetime_refresh_once_and_never_write() {
+        let mut io = FakeIo::new("polls");
+        let key = captured_key("sub-a");
+        io.items
+            .borrow_mut()
+            .insert(key.clone(), stored_value("1//rt-a", AUD, &secret('a')));
+        // Google echoing the same refresh token is not a rotation.
+        io.token = Box::new(|_, _| Ok(token_ok("ya29.a", json!({ "refresh_token": "1//rt-a" }))));
+        let cache = new_token_cache();
+        for minutes in [0, 10, 20, 30, 40, 54] {
+            let fetched = fetch_captured_with(
+                &io,
+                &cache,
+                &key,
+                "a@example.com",
+                now() + chrono::Duration::minutes(minutes),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                fetched.identity.as_ref().and_then(|id| id.email.as_deref()),
+                Some("a@example.com")
+            );
+        }
+        assert_eq!(io.token_calls.borrow().len(), 1);
+        assert_eq!(io.reads_of_captured_items(), 1);
+        assert!(io.writes().is_empty());
+        assert_eq!(io.quota_calls.get(), 6);
+
+        // Inside the five-minute margin the token is refreshed again.
+        fetch_captured_with(
+            &io,
+            &cache,
+            &key,
+            "a",
+            now() + chrono::Duration::minutes(56),
+        )
+        .await
+        .unwrap();
+        assert_eq!(io.token_calls.borrow().len(), 2);
+        assert!(io.writes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rotated_refresh_token_is_written_once_to_its_own_credential() {
+        let mut io = FakeIo::new("rotation");
+        let key_a = captured_key("sub-a");
+        let key_b = captured_key("sub-b");
+        let stored_b = stored_value("1//rt-b", AUD, &secret('b'));
+        io.items
+            .borrow_mut()
+            .insert(key_a.clone(), stored_value("1//rt-a", AUD, &secret('a')));
+        io.items
+            .borrow_mut()
+            .insert(key_b.clone(), stored_b.clone());
+        io.token = Box::new(|_, refresh_token| {
+            if refresh_token == "1//rt-a" {
+                Ok(token_ok("ya29.a", json!({ "refresh_token": "1//rt-a2" })))
+            } else {
+                Ok(token_ok("ya29.other", json!({})))
+            }
+        });
+        let cache = new_token_cache();
+        fetch_captured_with(&io, &cache, &key_a, "a", now())
+            .await
+            .unwrap();
+        fetch_captured_with(&io, &cache, &key_b, "b", now())
+            .await
+            .unwrap();
+
+        let writes = io.writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, format!("{PREFIX}{key_a}"));
+        let items = io.items.borrow();
+        assert_eq!(
+            decode_value(&items[&key_a]),
+            ("1//rt-a2".to_string(), AUD.to_string(), secret('a'))
+        );
+        assert_eq!(
+            items[&key_b], stored_b,
+            "the other account's credential is untouched"
+        );
+    }
+
+    /// Acceptance 7: the scopes come from the temp store only.
+    #[test]
+    fn captured_accounts_get_their_own_scopes() {
+        let io = FakeIo::new("scopes");
+        assert!(io.scope.root().starts_with(std::env::temp_dir()));
+        let key_a = captured_key("sub-a");
+        let key_b = captured_key("sub-b");
+        assert_ne!(key_a, key_b);
+        assert!(valid_captured_key(&key_a) && !key_a.contains("sub"));
+
+        let (account_a, history_a) = io.scopes(&key_a);
+        let (account_b, history_b) = io.scopes(&key_b);
+        let (account_a, history_a) = (account_a.unwrap(), history_a.unwrap());
+        let (account_b, history_b) = (account_b.unwrap(), history_b.unwrap());
+        assert_ne!(account_a, account_b);
+        assert_ne!(history_a, history_b);
+
+        let primary_history = io.scope.resolve_history("antigravity", None).unwrap();
+        let primary_account = io
+            .scope
+            .resolve_current(
+                "google-oauth-creds",
+                "/x/.gemini/oauth_creds.json\0refresh_token",
+                b"1//rt-a",
+            )
+            .unwrap();
+        for history in [&history_a, &history_b] {
+            assert_ne!(*history, primary_history);
+        }
+        for account in [&account_a, &account_b] {
+            assert_ne!(*account, primary_account);
+        }
+
+        // Stable across polls: the same key resolves to the same scopes.
+        let (again_account, again_history) = io.scopes(&key_a);
+        assert_eq!(again_account.unwrap(), account_a);
+        assert_eq!(again_history.unwrap(), history_a);
+    }
+
+    /// Acceptance 3: remove deletes exactly its own target, makes no network
+    /// call, and drops the cached access token.
+    #[tokio::test]
+    async fn remove_deletes_only_its_own_target_and_drops_the_cached_token() {
+        let io = FakeIo::new("remove");
+        let key = captured_key("sub-a");
+        let other = captured_key("sub-b");
+        io.items
+            .borrow_mut()
+            .insert(key.clone(), stored_value("1//rt-a", AUD, &secret('a')));
+        io.items
+            .borrow_mut()
+            .insert(other.clone(), stored_value("1//rt-b", AUD, &secret('b')));
+        let cache = new_token_cache();
+        fetch_captured_with(&io, &cache, &key, "a", now())
+            .await
+            .unwrap();
+        assert_eq!(cached_keys(&cache), vec![key.clone()]);
+        let network_before = io.network_calls();
+        io.events.borrow_mut().clear();
+
+        remove_with(&io, &cache, &key).unwrap();
+        assert_eq!(*io.events.borrow(), [format!("delete {PREFIX}{key}")]);
+        assert_eq!(
+            io.network_calls(),
+            network_before,
+            "remove makes no network call"
+        );
+        assert_eq!(io.artifact_calls.get(), 0);
+        assert_eq!(
+            io.items.borrow().keys().cloned().collect::<Vec<_>>(),
+            vec![other],
+            "only that credential is gone"
+        );
+        assert!(cached_keys(&cache).is_empty());
+        // Already gone counts as removed.
+        remove_with(&io, &cache, &key).unwrap();
+
+        // A later poll no longer has a token for the removed account.
+        let failure = fetch_captured_with(&io, &cache, &key, "a", now())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            failure,
+            ProviderFetchFailure::Terminal { ref display } if display == CAPTURED_ITEM_MISSING
+        ));
+    }
+
+    /// A Code Assist 401 on a captured account asks for a new capture, not
+    /// for an Antigravity re-login, which would sign in the wrong account.
+    /// Other terminal failures pass through unchanged.
+    #[tokio::test]
+    async fn a_captured_401_asks_for_a_new_capture() {
+        let key = captured_key("sub-a");
+        for (from, to) in [
+            (ANTIGRAVITY_AUTH_EXPIRED, CAPTURED_AUTH_EXPIRED),
+            ("some other failure", "some other failure"),
+        ] {
+            let mut io = FakeIo::new("captured-401");
+            io.items
+                .borrow_mut()
+                .insert(key.clone(), stored_value("1//rt-a", AUD, &secret('a')));
+            io.quota_terminal = Some(from);
+            let failure = fetch_captured_with(&io, &new_token_cache(), &key, "a", now())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(failure, ProviderFetchFailure::Terminal { ref display } if display == to),
+                "{from} -> {to}"
+            );
+        }
+    }
+
+    /// Acceptance 5: every capture failure is a fixed code: seeded with
+    /// sentinel token, sub, email and error_description values, none of them
+    /// reaches the FFI JSON.
+    #[tokio::test]
+    async fn capture_failures_carry_no_secret_or_identity() {
+        const SENTINELS: [&str; 5] = [
+            "SENTINELTOKEN",
+            "SENTINELSUB",
+            "SENTINELMAIL",
+            "SENTINELDESC",
+            "SENTINELOTHERSUB",
+        ];
+        let login = || {
+            agy_item(
+                "1//SENTINELTOKEN",
+                Some(claims("SENTINELSUB", AUD, "SENTINELMAIL@example.com")),
+            )
+        };
+        let mut cases: Vec<FakeIo> = Vec::new();
+
+        cases.push(FakeIo::new("sentinel-absent"));
+        let mut io = FakeIo::new("sentinel-unreadable");
+        io.agy_item = Some(b"{\"token\":\"SENTINELTOKEN\"".to_vec());
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-identity");
+        io.agy_item = Some(agy_item(
+            "1//SENTINELTOKEN",
+            Some(json!({ "sub": "SENTINELSUB", "email": "SENTINELMAIL@example.com" })),
+        ));
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-client");
+        io.agy_item = Some(login());
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-rejected");
+        io.agy_item = Some(login());
+        io.artifacts = artifacts_where_positional_pick_differs();
+        io.token = Box::new(|_, _| {
+            Ok((
+                400,
+                r#"{"error":"invalid_grant","error_description":"SENTINELDESC 1//SENTINELTOKEN"}"#
+                    .to_string(),
+            ))
+        });
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-wrong-client");
+        io.agy_item = Some(login());
+        io.artifacts = artifacts_where_positional_pick_differs();
+        io.token = Box::new(|_, _| {
+            Ok((
+                401,
+                r#"{"error":"invalid_client","error_description":"SENTINELDESC"}"#.to_string(),
+            ))
+        });
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-transient");
+        io.agy_item = Some(login());
+        io.artifacts = artifacts_where_positional_pick_differs();
+        io.token = Box::new(|_, _| {
+            Err(ProviderFetchFailure::transient(
+                "SENTINELDESC",
+                None,
+                SafeTransportDiagnostic::server_error(503),
+            ))
+        });
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-mismatch");
+        io.agy_item = Some(login());
+        io.artifacts = artifacts_where_positional_pick_differs();
+        io.token = Box::new(|_, _| {
+            Ok(token_ok(
+                "ya29.SENTINELTOKEN",
+                json!({ "id_token": jwt(json!({ "sub": "SENTINELOTHERSUB" })) }),
+            ))
+        });
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel-write");
+        io.agy_item = Some(login());
+        io.artifacts = artifacts_where_positional_pick_differs();
+        io.write_fails = true;
+        cases.push(io);
+
+        let mut codes = Vec::new();
+        for io in &cases {
+            let error = capture_with(io).await.expect_err("every case fails");
+            let ffi = json!({ "ok": false, "err": error.code() }).to_string();
+            let debug = format!("{error:?}");
+            for sentinel in SENTINELS {
+                assert!(
+                    !ffi.contains(sentinel) && !debug.contains(sentinel),
+                    "{ffi}"
+                );
+            }
+            codes.push(error.code());
+        }
+        assert_eq!(
+            codes,
+            vec![
+                "agy_not_signed_in",
+                "agy_login_unreadable",
+                "agy_login_missing_identity",
+                "oauth_client_not_found",
+                "refresh_rejected",
+                "oauth_client_rejected",
+                "refresh_unreachable",
+                "account_mismatch",
+                "keychain_write_failed",
+            ]
+        );
+
+        // The automatic path's own codes carry nothing either, and neither
+        // does a successful outcome's FFI shape beyond the key and label.
+        let mut io = FakeIo::new("sentinel-auto-mismatch");
+        io.agy_item = Some(login());
+        io.artifacts = artifacts_where_positional_pick_differs();
+        let error = auto_capture_with(&io, &[]).await.unwrap_err();
+        assert_eq!(error.code(), "account_mismatch");
+        for sentinel in SENTINELS {
+            assert!(!format!("{error:?}").contains(sentinel));
+        }
+    }
+
+    #[test]
+    fn registry_accepts_only_hex_keys_and_reports_by_index() {
+        let _guard = CAPTURED_ACCOUNTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key_a = captured_key("sub-a");
+        let key_b = captured_key("sub-b");
+        let raw = json!([
+            { "key": key_a, "label": "a@example.com" },
+            { "key": "sub-raw value", "label": "x" },
+            { "key": key_a, "label": "dup" },
+            { "label": "no key" },
+            "not an object",
+            { "key": key_b, "label": "b@example.com" },
+        ])
+        .to_string();
+        let result = set_captured_accounts_from_json(&raw).unwrap();
+        assert_eq!(result["registeredCount"], 2);
+        assert_eq!(
+            result["rejected"],
+            json!([
+                { "index": 1, "reason": "invalid key" },
+                { "index": 2, "reason": "duplicate key" },
+                { "index": 3, "reason": "invalid entry" },
+                { "index": 4, "reason": "invalid entry" },
+            ])
+        );
+        assert!(
+            !result.to_string().contains("sub-raw"),
+            "a rejected key is never echoed"
+        );
+        assert_eq!(
+            captured_accounts(),
+            vec![
+                CapturedAccount {
+                    key: key_a.clone(),
+                    label: "a@example.com".to_string()
+                },
+                CapturedAccount {
+                    key: key_b,
+                    label: "b@example.com".to_string()
+                },
+            ]
+        );
+
+        assert_eq!(
+            set_captured_accounts_from_json("{not json SENTINEL").unwrap_err(),
+            "invalid_accounts_json"
+        );
+        assert_eq!(
+            captured_accounts().len(),
+            2,
+            "malformed JSON changes nothing"
+        );
+        set_captured_accounts_from_json("[]").unwrap();
+        assert!(captured_accounts().is_empty());
+    }
+
+    // ── automatic capture ──
+
+    fn auto_io(tag: &str) -> FakeIo {
+        let mut io = FakeIo::new(tag);
+        io.agy_item = Some(agy_item(
+            "1//rt-a",
+            Some(claims("sub-a", AUD, "stored@example.com")),
+        ));
+        io.artifacts = artifacts_where_positional_pick_differs();
+        io.token = Box::new(|_, _| {
+            Ok(token_ok(
+                "ya29.a",
+                json!({ "id_token": jwt(json!({ "sub": "sub-a", "email": "fresh@example.com" })) }),
+            ))
+        });
+        io
+    }
+
+    #[tokio::test]
+    async fn auto_capture_writes_once_after_the_refresh() {
+        let io = auto_io("auto-captured");
+        let key = captured_key("sub-a");
+        assert_eq!(
+            auto_capture_with(&io, &[]).await,
+            Ok(AutoCaptured::Captured(CapturedAccount {
+                key: key.clone(),
+                label: "fresh@example.com".to_string(),
+            })),
+            "the label is Google's answer, not the stored id_token"
+        );
+        let writes = io.writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, format!("{PREFIX}{key}"));
+        assert_eq!(writes[0].1, WIN32_CRED_TYPE_GENERIC);
+        assert_eq!(writes[0].2, WIN32_CRED_PERSIST_LOCAL_MACHINE);
+        assert_eq!(io.token_calls.borrow().len(), 1);
+        assert_eq!(
+            io.events.borrow().last().unwrap(),
+            &format!("write {PREFIX}{key}")
+        );
+        assert_eq!(decode_value(&io.items.borrow()[&key]).0, "1//rt-a");
+    }
+
+    /// Acceptance 2: a removed key makes no request and no write.
+    #[tokio::test]
+    async fn auto_capture_skips_a_removed_key_before_any_request() {
+        let key = captured_key("sub-a");
+        let other = captured_key("sub-b");
+        let io = auto_io("auto-removed");
+        assert_eq!(
+            auto_capture_with(&io, &[other.clone(), key.clone()]).await,
+            Ok(AutoCaptured::SkippedRemoved)
+        );
+        assert_eq!(io.network_calls(), 0);
+        assert_eq!(io.artifact_calls.get(), 0);
+        assert!(io.writes().is_empty());
+        assert_eq!(io.reads_of_captured_items(), 0);
+
+        // Control: another account's removal does not skip this one.
+        let io = auto_io("auto-removed-control");
+        assert!(matches!(
+            auto_capture_with(&io, &[other]).await,
+            Ok(AutoCaptured::Captured(_))
+        ));
+        assert_eq!(io.writes().len(), 1);
+    }
+
+    /// Acceptance 2: an identical stored refresh token is `Unchanged` with no
+    /// scan, request or write.
+    #[tokio::test]
+    async fn auto_capture_of_a_stored_token_does_nothing() {
+        let key = captured_key("sub-a");
+        let io = auto_io("auto-unchanged");
+        io.items
+            .borrow_mut()
+            .insert(key.clone(), stored_value("1//rt-a", AUD, &secret('a')));
+        assert_eq!(
+            auto_capture_with(&io, &[]).await,
+            Ok(AutoCaptured::Unchanged(CapturedAccount {
+                key: key.clone(),
+                label: "stored@example.com".to_string(),
+            }))
+        );
+        assert_eq!(io.artifact_calls.get(), 0, "no client scan");
+        assert_eq!(io.network_calls(), 0, "no request");
+        assert!(io.writes().is_empty(), "no write");
+
+        // Control: a different stored token is a new login and is captured.
+        let io = auto_io("auto-unchanged-control");
+        io.items
+            .borrow_mut()
+            .insert(key.clone(), stored_value("1//rt-old", AUD, &secret('a')));
+        assert!(matches!(
+            auto_capture_with(&io, &[]).await,
+            Ok(AutoCaptured::Captured(_))
+        ));
+        assert_eq!(io.writes().len(), 1);
+        assert_eq!(decode_value(&io.items.borrow()[&key]).0, "1//rt-a");
+    }
+
+    /// Acceptance 1: the automatic path requires Google's `id_token` with the
+    /// same `sub`; missing or different writes nothing. The manual path still
+    /// accepts a response without one (macOS parity).
+    #[tokio::test]
+    async fn auto_capture_requires_googles_id_token_for_the_same_sub() {
+        for (tag, extra) in [
+            ("auto-no-id-token", json!({})),
+            (
+                "auto-other-sub",
+                json!({ "id_token": jwt(json!({ "sub": "sub-b" })) }),
+            ),
+            ("auto-bad-id-token", json!({ "id_token": "not-a-jwt" })),
+        ] {
+            let mut io = auto_io(tag);
+            let extra = extra.clone();
+            io.token = Box::new(move |_, _| Ok(token_ok("ya29.a", extra.clone())));
+            assert_eq!(
+                auto_capture_with(&io, &[]).await,
+                Err(CaptureError::AccountMismatch),
+                "{tag}"
+            );
+            assert!(io.writes().is_empty(), "{tag}");
+            assert!(io.items.borrow().is_empty(), "{tag}");
+        }
+        let mut io = auto_io("manual-no-id-token");
+        io.token = Box::new(|_, _| Ok(token_ok("ya29.a", json!({}))));
+        assert!(capture_with(&io).await.is_ok());
+    }
+
+    /// Acceptance 2: agy not found is `not_signed_in`, any other read failure
+    /// is `paused`; neither reaches the network or a write.
+    #[tokio::test]
+    async fn auto_capture_pauses_on_any_agy_read_but_success_or_not_found() {
+        let mut io = auto_io("auto-paused");
+        io.agy_read = Some(AgyRead::Failed);
+        assert_eq!(auto_capture_with(&io, &[]).await, Err(CaptureError::Paused));
+        assert_eq!(io.network_calls(), 0);
+        assert!(io.writes().is_empty());
+
+        let mut io = auto_io("auto-not-signed-in");
+        io.agy_read = Some(AgyRead::NotFound);
+        assert_eq!(
+            auto_capture_with(&io, &[]).await,
+            Err(CaptureError::NotSignedIn)
+        );
+        assert_eq!(io.cred_calls.borrow().len(), 1);
+        assert_eq!(io.network_calls(), 0);
+        assert_eq!(
+            [
+                CaptureError::Paused.code(),
+                CaptureError::NotSignedIn.code()
+            ],
+            ["paused", "not_signed_in"]
+        );
+
+        // The manual path reports either as not signed in.
+        for read in [AgyRead::Failed, AgyRead::NotFound] {
+            let mut io = auto_io("manual-agy-read");
+            io.agy_read = Some(read);
+            assert_eq!(
+                capture_with(&io).await.err(),
+                Some(CaptureError::AgyNotSignedIn)
+            );
+        }
+    }
+
+    /// Acceptance 9. The FFI marker (`login_marker_with`, which
+    /// `tb_antigravity_login_marker` calls through `SystemCapturedIo`) and
+    /// `agy_login_marker` are one function. W7b: add the agy snapshot's
+    /// stamped marker to the same byte-equality assertion here.
+    #[test]
+    fn agy_login_marker_is_one_function_for_every_path() {
+        const FILETIME: u64 = 134_037_498_000_000_000;
+        let mut io = FakeIo::new("marker");
+        io.agy_last_written = Ok(Some(FILETIME));
+        let ffi_path = login_marker_with(&io);
+        let function = agy_login_marker(Ok(Some(FILETIME)));
+        assert_eq!(
+            ffi_path.as_deref().map(str::as_bytes),
+            Some(b"134037498000000000".as_slice())
+        );
+        assert_eq!(ffi_path, function);
+
+        io.agy_last_written = Ok(None);
+        assert_eq!(login_marker_with(&io).as_deref(), Some("absent"));
+        io.agy_last_written = Err(());
+        assert_eq!(login_marker_with(&io), None);
+        assert!(
+            io.cred_calls.borrow().is_empty(),
+            "the marker reads no blob"
+        );
+        assert_eq!(io.network_calls(), 0);
+    }
+
+    #[test]
+    fn quota_summary_maps_like_the_agy_route() {
+        let now = DateTime::parse_from_rfc3339("2026-10-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let body = json!({
+            "groups": [
+                { "displayName": "Gemini Models", "buckets": [
+                    { "bucketId": "gemini-weekly", "displayName": "Weekly Limit Remaining",
+                      "remainingFraction": 0.968718, "resetTime": "2026-10-08T18:46:28Z", "window": "weekly" },
+                    { "bucketId": "gemini-5h", "displayName": "Five Hour Limit Remaining",
+                      "remainingFraction": 0.8799, "resetTime": "2026-10-02T11:20:43Z", "window": "5h" }
+                ]},
+                { "displayName": "Claude and GPT models", "buckets": [
+                    { "bucketId": "3p-weekly", "displayName": "Weekly Limit Remaining",
+                      "remainingFraction": 1, "resetTime": "2026-10-09T07:58:14Z", "window": "weekly" },
+                    { "displayName": "No id is skipped", "remainingFraction": 1 },
+                    { "bucketId": "3p-5h", "displayName": "Five Hour Limit Remaining", "window": "5h" }
+                ]}
+            ]
+        });
+        let windows = windows_from_quota_summary(&body.to_string(), now);
+        // The same buckets as agy's `/usage` JSON on Windows.
+        let agy = json!({ "status": "SUCCESS", "command": { "name": "usage", "data": { "groups": [
+            { "name": "Gemini Models", "buckets": [
+                { "id": "gemini-weekly", "name": "Weekly Limit Remaining",
+                  "remaining_fraction": 0.968718, "reset_time": "2026-10-08T18:46:28Z" },
+                { "id": "gemini-5h", "name": "Five Hour Limit Remaining",
+                  "remaining_fraction": 0.8799, "reset_time": "2026-10-02T11:20:43Z" } ] },
+            { "name": "Claude and GPT models", "buckets": [
+                { "id": "3p-weekly", "name": "Weekly Limit Remaining",
+                  "remaining_fraction": 1.0, "reset_time": "2026-10-09T07:58:14Z" } ] }
+        ] } } });
+        let agy_windows = parse_agy_usage(agy.to_string().as_bytes(), now)
+            .unwrap()
+            .windows;
+        assert_eq!(
+            serde_json::to_value(&windows).unwrap(),
+            serde_json::to_value(&agy_windows).unwrap(),
+            "a captured card reads exactly like the agy route's"
+        );
+        assert_eq!(
+            windows[0].label_for_test(),
+            "Gemini Models · Weekly Limit Remaining"
+        );
+        assert_eq!(
+            windows[1].pace_window_key_for_test(),
+            Some("agy.gemini-5h.v1")
+        );
+        assert!(windows_from_quota_summary("not json", now).is_empty());
+        assert!(windows_from_quota_summary("{}", now).is_empty());
+    }
+
+    /// The captured client never follows a redirect, which would resend the
+    /// POST body (refresh token) or the bearer to the redirect target. Local
+    /// listeners only.
+    #[tokio::test]
+    async fn the_captured_client_does_not_follow_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_url = format!("http://{}/stolen", target.local_addr().unwrap());
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_url = format!("http://{}/token", origin.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = origin.accept().await.unwrap();
+            let mut buf = [0_u8; 4096];
+            let _ = stream.read(&mut buf).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nlocation: {target_url}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            // Answer a followed redirect too, so a regression fails on the
+            // assertions below rather than on a dropped connection.
+            let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(std::time::Duration::from_millis(300), target.accept()).await
+            else {
+                return false;
+            };
+            let _ = stream.read(&mut buf).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+            true
+        });
+        let response = captured_http_client()
+            .unwrap()
+            .post(&origin_url)
+            .body("refresh_token=SENTINEL")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 307);
+        assert!(
+            !server.await.unwrap(),
+            "the redirect target was never contacted"
+        );
     }
 }
