@@ -200,7 +200,17 @@ public sealed partial class DashboardView : UserControl
             new Microsoft.UI.Xaml.Input.KeyEventHandler((_, _) => UpdateHints(CtrlHeldAlone())),
             handledEventsToo: true);
 
-        ActualThemeChanged += (_, _) => UpdateGraph3DData(_snapshot);
+        ActualThemeChanged += (_, _) =>
+        {
+            UpdateGraph3DData(_snapshot);
+            // The heatmap's empty-day fill is chosen for the theme when it is
+            // built; without a rebuild those cells stay the other theme's
+            // colour and nearly vanish until the next snapshot.
+            if (_chartView == ChartView.Heatmap && _snapshot is not null)
+            {
+                RenderContent(animated: false);
+            }
+        };
     }
 
     /// <summary>The flyout owns hiding (Esc/Ctrl+W land here).</summary>
