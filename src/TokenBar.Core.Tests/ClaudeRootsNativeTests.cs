@@ -74,29 +74,30 @@ public class ClaudeRootsNativeTests
         }
     }
 
-    /// <summary>The picker's shape rules against the real config-dir setter:
-    /// for each input the UI's reason code must be the one native normalize
-    /// returns, and a path the UI lets through must be accepted. Drift between
-    /// the hand-mirrored C# rules and Rust fails here instead of shipping
-    /// (the profile rules are left out: native reads the real home).</summary>
+    /// <summary>The picker's path-shape rules: the one list of cases, each
+    /// checked against the expected reason code in UiRejection AND in the
+    /// real tb_set_claude_config_dirs (null = accepted). A sample of shapes,
+    /// not every native rule (components and reserved names stay native-only;
+    /// the profile rules are left out because native reads the real home).
+    /// Runs on every OS: the config setter's normalize touches no
+    /// filesystem.</summary>
     [Theory]
-    [InlineData("")]
-    [InlineData(@"E:\")]
-    [InlineData(@"c:/")]
-    [InlineData(@"C:\\\")]
-    [InlineData(@"C:")]
-    [InlineData(@"C:work")]
-    [InlineData(@"\")]
-    [InlineData(@"\Users\x")]
-    [InlineData(@"\\server\share\.claude")]
-    [InlineData(@"//wsl.localhost/Ubuntu/home/me/.claude")]
-    [InlineData(@"D:\parity\.claude-work")]
-    public void UiRulesAgreeWithTheNativeSetter(string path)
+    [InlineData(@"E:\", "rootDirectory")]
+    [InlineData(@"c:/", "rootDirectory")]
+    [InlineData(@"C:\\\", "rootDirectory")]
+    [InlineData(@"C:", "unsupportedPath")]
+    [InlineData(@"C:work", "unsupportedPath")]
+    [InlineData(@"\", "unsupportedPath")]
+    [InlineData(@"\Users\x", "unsupportedPath")]
+    [InlineData(@"\\server\share\.claude", "unsupportedPath")]
+    [InlineData(@"//wsl.localhost/Ubuntu/home/me/.claude", "unsupportedPath")]
+    [InlineData(@"D:\parity\.claude-work", null)]
+    public void UiRulesAgreeWithTheNativeSetter(string path, string? expected)
     {
         try
         {
-            var native = TbCore.SetClaudeConfigDirs([path]).Rejected.SingleOrDefault()?.Reason;
-            Assert.Equal(native, ClaudeExtraRoots.UiRejection(path, [], userProfile: null));
+            Assert.Equal(expected, ClaudeExtraRoots.UiRejection(path, [], userProfile: null));
+            Assert.Equal(expected, TbCore.SetClaudeConfigDirs([path]).Rejected.SingleOrDefault()?.Reason);
         }
         finally
         {
