@@ -74,6 +74,8 @@ public sealed class TrayService : IDisposable
         _animator = new TrayAnimator(_dispatcher, () => _feed.TokensPerMin, ApplyCachedIcon);
         OpenSettings = ShowSettings;
         OpenAttributionSettings = ShowAttributionSettings;
+        OpenDashboardSettings = ShowDashboardSettings;
+        OpenDiscordSettings = ShowDiscordSettings;
         // Discord presence (opt-in, default off). The only production client
         // factory: the constant local pipe, reached only after
         // DiscordPresence.MayConnect has said yes for these arguments.
@@ -169,6 +171,11 @@ public sealed class TrayService : IDisposable
     /// <c>showFromPopover(scrollingTo: .usageAttribution)</c>).</summary>
     public static Action? OpenAttributionSettings { get; private set; }
 
+    /// <summary>The setup cards' "Choose tabs…" and "Set up in Settings…".</summary>
+    internal static Action? OpenDashboardSettings { get; private set; }
+
+    internal static Action? OpenDiscordSettings { get; private set; }
+
     /// <summary>Settings' manual "Check now" reaches the update flow through
     /// here. Unlike the two neighbours this is set by App, which owns the
     /// flow — the tray only already owns the update surface (PublishUpdate),
@@ -181,8 +188,11 @@ public sealed class TrayService : IDisposable
     internal void ShowAttributionSettings() => SettingsWindow.Present(
         () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showAttribution: true);
 
-    /// <summary>The Discord intro's "Open Settings": navigation to the
-    /// Discord section, never a write.</summary>
+    internal void ShowDashboardSettings() => SettingsWindow.Present(
+        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showDashboard: true);
+
+    /// <summary>The Discord setup card's "Set up in Settings…": navigation to
+    /// the Discord section, never a write.</summary>
     internal void ShowDiscordSettings() => SettingsWindow.Present(
         () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showDiscord: true);
 

@@ -65,6 +65,10 @@
          test project. -->
     <Compile Include="..\TokenBar.App\AttributionReportGate.cs" Link="AttributionReportGate.cs" />
     <Compile Include="..\TokenBar.App\AttributionOnboardingCard.cs" Link="AttributionOnboardingCard.cs" />
+    <!-- First-run setup cards (M9): every show rule, the answer/skip/remaining
+         bookkeeping and the Overview-only placement. DashboardView.Setup.cs
+         compiles under no test project, so none of it lives there. -->
+    <Compile Include="..\TokenBar.App\OnboardingSetup.cs" Link="OnboardingSetup.cs" />
     <!-- The 每日・依訂閱 card's four-state branch and its copy, for the same
          reason: DashboardView.Quota.cs is compiled by no test project, and the
          state choice is the defect this card can actually ship (a range with

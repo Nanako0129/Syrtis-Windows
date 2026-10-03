@@ -80,6 +80,9 @@ public sealed class SettingsWindow : Window
     private readonly Dictionary<string, StackPanel> _pages = new(StringComparer.Ordinal);
     private string _selectedTag = "menubar";
 
+    /// <param name="showDashboard">Open on the Dashboard page, where the tab
+    /// row's visibility lives — the setup card's "Choose tabs…" (macOS
+    /// <c>show(scrollingTo: .dashboard)</c>). Navigation only.</param>
     /// <param name="showDiscord">Open on the General page scrolled to the
     /// Discord section — the Discord intro's "Open Settings" (macOS
     /// <c>show(scrollingTo: .discord)</c>). Navigation only; it writes
@@ -87,9 +90,15 @@ public sealed class SettingsWindow : Window
     public static void Present(
         Func<AgentUsagePayload?> quota, Func<UsagePayload?> graph,
         Func<IReadOnlyList<TraceBucket>> trace, bool showDiscord = false,
-        bool showAttribution = false)
+        bool showAttribution = false, bool showDashboard = false)
     {
         _shared ??= new SettingsWindow(quota, graph, trace);
+        if (showDashboard)
+        {
+            _shared._selectedTag = "dashboard";
+            _shared._nav.SelectedItem = _shared._dashboardItem;
+        }
+
         if (showAttribution)
         {
             _shared._selectedTag = "attribution";
