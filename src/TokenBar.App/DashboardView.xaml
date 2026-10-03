@@ -63,7 +63,17 @@
                     <TextBlock x:Name="TotalCaption" Opacity="0.65" FontSize="11" Text="total" />
                 </StackPanel>
                 <StackPanel>
-                    <TextBlock x:Name="RateValue" FontSize="20" FontWeight="SemiBold" Text="—" />
+                    <!-- The live rate's network LED (macOS activityLED): 6×6 as
+                     its frame, 4 apart as its HStack(spacing: 4)
+                     (PopoverView.swift:653). -->
+                    <StackPanel Orientation="Horizontal" Spacing="4">
+                        <Ellipse
+                            x:Name="RateLed"
+                            Width="6"
+                            Height="6"
+                            VerticalAlignment="Center" />
+                        <TextBlock x:Name="RateValue" FontSize="20" FontWeight="SemiBold" Text="—" />
+                    </StackPanel>
                     <TextBlock x:Name="RateCaption" Opacity="0.65" FontSize="11" Text="tok/min" />
                 </StackPanel>
             </StackPanel>
