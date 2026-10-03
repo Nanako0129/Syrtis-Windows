@@ -92,7 +92,109 @@ public sealed partial class DashboardView
         AppSettings.Store.GetString(SubscriptionTrendText.MetricKey) == "tokens"
             ? ChartMetric.Tokens : ChartMetric.Cost;
 
+    /// <summary>The attribution onboarding card sits above whichever Quota
+    /// lens is showing, on every tab (macOS PopoverView.swift:765-770).</summary>
     private UIElement BuildQuota(DashboardModel.Snapshot snapshot)
+    {
+        var lens = BuildQuotaLens(snapshot);
+        if (BuildAttributionOnboardingCard(snapshot) is not { } card)
+        {
+            return lens;
+        }
+
+        var stack = new StackPanel { Spacing = 10 };
+        stack.Children.Add(card);
+        stack.Children.Add(lens);
+        return stack;
+    }
+
+    /// <summary>The apply failure the card last showed; cleared on success.</summary>
+    private string? _attributionOnboardingFailure;
+
+    private FrameworkElement? BuildAttributionOnboardingCard(DashboardModel.Snapshot snapshot)
+    {
+        var store = AppSettings.Store;
+        if (AttributionOnboardingCard.Shown(
+            store, snapshot.Models, snapshot.Quota, Environment.GetCommandLineArgs())
+            is not { } summary)
+        {
+            return null;
+        }
+
+        var body = new StackPanel { Spacing = 8 };
+        body.Children.Add(Ui.Dim(AttributionOnboardingCard.Copy.Subtitle.Localized(), 11));
+        if (_attributionOnboardingFailure is { } failure)
+        {
+            var line = Ui.Dim(failure, 11);
+            line.Opacity = 1;
+            line.Foreground = (Brush)Application.Current.Resources["SystemFillColorCriticalBrush"];
+            body.Children.Add(line);
+        }
+
+        var lines = new StackPanel { Spacing = 3 };
+        foreach (var text in AttributionOnboardingCard.VisibleLines(summary))
+        {
+            lines.Children.Add(Ui.Text(text, 11));
+        }
+
+        if (AttributionOnboardingCard.MoreLine(summary) is { } more)
+        {
+            lines.Children.Add(Ui.Dim(more, 11));
+        }
+
+        if (AttributionOnboardingCard.UnsuggestedLine(summary) is { } unsuggested)
+        {
+            lines.Children.Add(Ui.Dim(unsuggested, 11));
+        }
+
+        body.Children.Add(lines);
+
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        var notNow = new Button
+        {
+            Content = AttributionOnboardingCard.Copy.NotNow.Localized(),
+            FontSize = 12,
+        };
+        notNow.Click += (_, _) =>
+        {
+            AttributionOnboardingCard.MarkDismissed(store);
+            RenderContent(animated: false);
+        };
+        buttons.Children.Add(notNow);
+        var manual = new Button
+        {
+            Content = AttributionOnboardingCard.Copy.SetUpManually.Localized(),
+            FontSize = 12,
+        };
+        manual.Click += (_, _) => TrayService.OpenAttributionSettings?.Invoke();
+        buttons.Children.Add(manual);
+        if (summary.Records.Count > 0)
+        {
+            var apply = new Button
+            {
+                Content = AttributionOnboardingCard.Copy.ApplySuggestions.Localized(),
+                Style = (Style)Application.Current.Resources["AccentButtonStyle"],
+                FontSize = 12,
+            };
+            apply.Click += (_, _) =>
+            {
+                _attributionOnboardingFailure = AttributionOnboardingCard.Apply(store, summary);
+                RenderContent(animated: false);
+            };
+            buttons.Children.Add(apply);
+        }
+
+        body.Children.Add(buttons);
+
+        var card = Ui.Card(AttributionOnboardingCard.Copy.Title.Localized(), body);
+        var accent = AccentColor();
+        card.Background = new SolidColorBrush(Tint(accent, AttributionOnboardingCard.AccentFill));
+        card.BorderBrush = new SolidColorBrush(Tint(accent, AttributionOnboardingCard.AccentStroke));
+        card.BorderThickness = new Thickness(1);
+        return card;
+    }
+
+    private UIElement BuildQuotaLens(DashboardModel.Snapshot snapshot)
     {
         // The one snapshot-to-parameters unpack this view still does: three
         // reads (Confirmed, _model?.Year, the fields named below), no

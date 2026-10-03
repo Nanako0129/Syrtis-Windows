@@ -86,9 +86,16 @@ public sealed class SettingsWindow : Window
     /// nothing.</param>
     public static void Present(
         Func<AgentUsagePayload?> quota, Func<UsagePayload?> graph,
-        Func<IReadOnlyList<TraceBucket>> trace, bool showDiscord = false)
+        Func<IReadOnlyList<TraceBucket>> trace, bool showDiscord = false,
+        bool showAttribution = false)
     {
         _shared ??= new SettingsWindow(quota, graph, trace);
+        if (showAttribution)
+        {
+            _shared._selectedTag = "attribution";
+            _shared._nav.SelectedItem = _shared._attributionItem;
+        }
+
         if (showDiscord)
         {
             _shared._selectedTag = "general";

@@ -113,7 +113,8 @@ public sealed partial class DashboardView : UserControl
             }
             else if (key.StartsWith("tokenbar.limits.", StringComparison.Ordinal)
                 || key == "tokenbar.trace.detailed"
-                || key == OverviewCards.HiddenKey)
+                || key == OverviewCards.HiddenKey
+                || key.StartsWith("tokenbar.usage.attribution.", StringComparison.Ordinal))
             {
                 _ = DispatcherQueue.TryEnqueue(() => RenderContent(animated: false));
             }

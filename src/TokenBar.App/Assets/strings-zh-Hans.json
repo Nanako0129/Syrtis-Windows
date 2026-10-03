@@ -433,5 +433,12 @@
   "Trace": "实时追踪",
   "Choose which cards Overview shows. The usage chart always stays.": "选择概览要显示哪些卡片。用量图表始终保留。",
   "Show Agent limits card": "显示 Agent 额度卡片",
-  "Off hides the quota card on Overview and on every client tab.": "关闭后，概览和各客户端标签页都不显示额度卡片。"
+  "Off hides the quota card on Overview and on every client tab.": "关闭后，概览和各客户端标签页都不显示额度卡片。",
+  "Attribute usage to subscriptions": "将用量归属到订阅",
+  "Quota history shows no tokens or API-equivalent value until usage is attributed.": "用量归属之前，额度历史不会显示 token 数或 API 等值金额。",
+  "{0} · {1} → {2}": "{0} · {1} → {2}",
+  "and {0} more": "以及另外 {0} 项",
+  "Without a suggestion: {0} — set them in Settings.": "没有建议的来源：{0} 个，请到“设置”手动指定。",
+  "Set up manually…": "手动设置…",
+  "Apply suggestions": "应用建议"
 }
