@@ -65,6 +65,16 @@ public class ClaudeExtraRootsTests
         Assert.Null(ClaudeExtraRoots.UiRejection(@"D:\b", eight[..^1], null));
     }
 
+    [Theory]
+    [InlineData(@"\\wsl.localhost\Ubuntu\home\me\.claude", false)]
+    [InlineData(@"//WSL$/Ubuntu/home/me/.claude", false)]
+    [InlineData(@"\\server\share", false)]
+    [InlineData(@"D:\work\.claude", true)]
+    public void SettingsNeverStatsAUncPath(string dir, bool mayCheck)
+    {
+        Assert.Equal(mayCheck, ClaudeExtraRoots.MayCheckExists(dir));
+    }
+
     [Fact]
     public void EachDirectoryScansProjectsAndTranscripts()
     {

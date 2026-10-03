@@ -89,6 +89,15 @@ public static class ClaudeExtraRoots
         return existing.Count >= MaxDirs ? "limitExceeded" : null;
     }
 
+    /// <summary>Whether Settings may check that <paramref name="dir"/>
+    /// exists. Never for a UNC path: the registries refuse it anyway, and on a
+    /// Windows 11 machine without WSL, touching <c>\\wsl.localhost</c>
+    /// starts a WSL download and install that ends in a reboot (observed on
+    /// the 188 test host through Explorer's picker; whether a plain stat does
+    /// the same is unverified, so no UNC path is touched at all).</summary>
+    public static bool MayCheckExists(string dir) =>
+        !Fold(dir).StartsWith("\\\\", StringComparison.Ordinal);
+
     /// <summary>The transcript roots of each directory, as macOS
     /// <c>ClaudeExtraRoots.expand</c>: <c>projects</c> and <c>transcripts</c>.
     /// Backslash-joined: the registry takes Windows drive paths only.</summary>
