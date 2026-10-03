@@ -63,9 +63,10 @@
                     <TextBlock x:Name="TotalCaption" Opacity="0.65" FontSize="11" Text="total" />
                 </StackPanel>
                 <StackPanel>
-                    <!-- The live rate's network LED (macOS activityLED); its
-                     6×6 size and the 6 gap are macOS's frame and spacing. -->
-                    <StackPanel Orientation="Horizontal" Spacing="6">
+                    <!-- The live rate's network LED (macOS activityLED): 6×6 as
+                     its frame, 4 apart as its HStack(spacing: 4)
+                     (PopoverView.swift:653). -->
+                    <StackPanel Orientation="Horizontal" Spacing="4">
                         <Ellipse
                             x:Name="RateLed"
                             Width="6"
