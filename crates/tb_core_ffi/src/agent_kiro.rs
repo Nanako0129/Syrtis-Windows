@@ -3,9 +3,9 @@
 //! Kiro (the AWS CodeWhisperer agent) exposes a per-account subscription quota
 //! at `/getUsageLimits`, reporting a single monthly allowance as an absolute
 //! used amount against a limit, plus the next reset time. We authenticate with
-//! the Bearer token Kiro already stored — either the kiro-cli SQLite store or
-//! the Kiro IDE token file (`kiro_integrations.rs`) — so the card appears
-//! whenever Kiro is signed in. The one allowance maps to one `UsageWindow`.
+//! the Bearer token Kiro already stored — the kiro-cli SQLite store (macOS and
+//! Linux only) or the Kiro IDE token file (`kiro_integrations.rs`; the only
+//! source on Windows) — so the card appears whenever Kiro is signed in. The one allowance maps to one `UsageWindow`.
 //!
 //! Two contracts this file honors, both stricter than mana.bar's original:
 //!
@@ -76,6 +76,10 @@ struct UsageBreakdown {
     usage_limit_with_precision: Option<f64>,
 }
 
+/// The account-scope resolver `fetch` binds the credential with.
+pub(crate) type ResolveCredential =
+    dyn Fn(&str, &str, &str, &[u8]) -> Result<AccountScope, AccountScopeError>;
+
 /// Takes no `now`: it reads the clock after the response arrives, because the
 /// reset validation below is a comparison against the present.
 ///
@@ -98,9 +102,6 @@ struct UsageBreakdown {
 /// (`agent_usage::KiroDeps`), whose only non-test value is `USAGE_URL` and
 /// `agent_account_scope::resolve_credential`; a test points them at a loopback
 /// mock and a temporary account-scope root.
-pub(crate) type ResolveCredential =
-    dyn Fn(&str, &str, &str, &[u8]) -> Result<AccountScope, AccountScopeError>;
-
 pub(crate) async fn fetch(
     credential: KiroCredential,
     usage_url: &str,

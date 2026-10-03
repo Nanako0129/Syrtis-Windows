@@ -185,7 +185,7 @@ public static class WindowCardText
     /// Antigravity local IDE key history on an authoritative owner ID (the
     /// ChatGPT account ID; the signed-in email), so two accounts there keep
     /// two series and the previous account's series stays out of the new
-    /// one's tab. Claude, Copilot, Grok and Antigravity's remote OAuth route
+    /// one's tab. Claude, Copilot, Grok, Kiro and Antigravity's remote OAuth route
     /// have no owner ID in anything fetched, so their history scope is one
     /// constant per installation and provider: every account signed in on
     /// this installation records into, and is shown, the same series. That

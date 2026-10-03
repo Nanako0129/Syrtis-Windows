@@ -79,7 +79,7 @@ before you go looking for a missing card:
 | Codex | OAuth via `~/.codex/auth.json` (`$CODEX_HOME` honored) |
 | GitHub Copilot | OAuth via **opencode's** `auth.json` — signing into the GitHub Copilot CLI alone is not enough, and the card is omitted rather than shown as an error |
 | Grok | OAuth via `~/.grok/auth.json` |
-| Kiro | Bearer token from the Kiro IDE sign-in, `~/.aws/sso/cache/kiro-auth-token.json` (read-only, never refreshed or copied; sent only to `codewhisperer.us-east-1.amazonaws.com`). Kiro CLI's own store is not read on Windows |
+| Kiro | Bearer token from the Kiro IDE sign-in, expected at `~/.aws/sso/cache/kiro-auth-token.json` (not yet observed on a Windows device; read-only, never refreshed or copied; sent only to `codewhisperer.us-east-1.amazonaws.com`). Kiro CLI's own store is not read on Windows |
 | Antigravity | OAuth or local IDE credentials, whichever the installed client itself uses |
 
 ## Architecture
