@@ -504,7 +504,17 @@ public sealed partial class DashboardView : UserControl
 
     /// <summary>The model powers lazy lens loading, told which lens is
     /// active by <see cref="SwitchTo"/>.</summary>
-    public void Bind(DashboardModel model) => _model = model;
+    /// <summary>Tells the model which lens is open from the start. SwitchTo
+    /// returns early for the lens already showing, and Overview is that lens
+    /// at launch, so without this the model never learns Overview's lazy
+    /// lanes (its quota history) until the user leaves and comes back. Cheap
+    /// before the first selection: the lazy fetch returns until one exists,
+    /// and the selection and every graph publication request it again.</summary>
+    public void Bind(DashboardModel model)
+    {
+        _model = model;
+        model.SetActiveView(_view);
+    }
 
     /// <summary>Persist a requested client tab. The next selection pass validates
     /// it against the visible clients before any usage surface renders.</summary>
