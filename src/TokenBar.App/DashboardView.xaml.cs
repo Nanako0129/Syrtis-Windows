@@ -1023,7 +1023,6 @@ public sealed partial class DashboardView : UserControl
         // itself, a client id on that client's own tab. See OverviewScope's
         // own doc comment for why that changes what below renders.
         var singleClient = OverviewScope.SingleClient(_activeClientTab);
-        var limitsClientId = OverviewScope.LimitsClientId(singleClient);
         var limitsClients = OverviewScope.LimitsClients(singleClient);
 
         // First-run setup cards, at the top of the global Overview lens only
@@ -1053,11 +1052,15 @@ public sealed partial class DashboardView : UserControl
                     && LimitsCardFilter.HidesClientCard(
                         snapshot.Quota?.Agents ?? [],
                         limitsClients,
-                        ClientRegistry.HiddenLimitsClients(AppSettings.Store))
+                        ClientRegistry.HiddenLimitsClients(AppSettings.Store),
+                        snapshot.QuotaOutcome)
                     ? null
                     : Ui.Card(
-                        limitsClientId is { } cid
-                            ? "{0} limits".Localized(ClientRegistry.TabLabel(cid))
+                        // macOS "%@ limits" over tabDisplayName(singleClient)
+                        // (OverviewView.swift:86, QuotaView.swift:72); the
+                        // grouped tab keeps its label ("Grok Build & Bot").
+                        singleClient is { } tab
+                            ? "{0} limits".Localized(ClientRegistry.TabDisplayName(tab))
                             : "Agent limits".Localized(),
                         BuildLimits(snapshot, limitsClients)),
                 // Absent when there is no live session, or when this tab is

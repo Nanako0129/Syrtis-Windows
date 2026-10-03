@@ -39,12 +39,37 @@ public static class LimitsCardFilter
     /// :502-510; per-member row filtering <c>baseClients</c> :402-413, :445-447;
     /// Settings toggles each id on its own, SettingsPanel.swift :477-503). One
     /// visible member keeps the card, which then lists just that member's
-    /// rows.</summary>
+    /// rows.    /// <para>An empty <paramref name="clientIds"/> hides nothing
+    /// (<c>guard restrict, !clients.isEmpty else { return false }</c>,
+    /// AgentLimitsCard.swift:502-504); a vacuous <c>All</c> would hide it.</para></summary>
     public static bool HidesClientCard(
         IReadOnlyList<AgentUsageSnapshot> agents,
         IReadOnlyList<string> clientIds,
         IReadOnlySet<string> limitsHidden) =>
-        clientIds.All(clientId =>
+        clientIds.Count > 0
+        && clientIds.All(clientId =>
             limitsHidden.Contains(clientId)
             && !agents.Any(agent => agent.ClientId == clientId && agent.Account.AccountKey is not null));
+
+    /// <summary>Whether a client tab draws no Agent-limits card: either
+    /// <see cref="HidesClientCard"/>, or macOS's second empty branch,
+    /// <c>restrict, visibleClients.isEmpty, usageAttempted → EmptyView</c>
+    /// (AgentLimitsCard.swift:529): nothing is left to list once the per-member
+    /// toggle is applied and the fetch has been answered. That is the
+    /// Antigravity tab with antigravity hidden (antigravity-cli has no snapshot
+    /// and can never be hidden, so the first rule never fires) and a Grok user
+    /// with no Grok Bot snapshot who hides grok. Before the first answer
+    /// (<see cref="WindowEquivalence.FetchOutcome.NotAttempted"/>) an empty
+    /// list is "still loading" and keeps its card. Not for the Overview card
+    /// (<paramref name="clientIds"/> null), which says "No supported agents
+    /// yet".</summary>
+    public static bool HidesClientCard(
+        IReadOnlyList<AgentUsageSnapshot> agents,
+        IReadOnlyList<string> clientIds,
+        IReadOnlySet<string> limitsHidden,
+        WindowEquivalence.FetchOutcome outcome) =>
+        HidesClientCard(agents, clientIds, limitsHidden)
+        || (clientIds.Count > 0
+            && outcome != WindowEquivalence.FetchOutcome.NotAttempted
+            && Visible(agents, clientIds, new HashSet<string>(), limitsHidden).Count == 0);
 }

@@ -533,15 +533,20 @@ public sealed partial class DashboardView
         // Off by the master switch: a client tab drops the card too (macOS QuotaView.swift:116).
         // Switched off for this client (and no extra account): no card, not a
         // card claiming the data is still loading (LimitsCardFilter.HidesClientCard).
-        var members = ClientRegistry.TabSlice(client.Owner);
+        // Same client set as the Overview lens (OverviewScope.LimitsClients):
+        // client.Owner can be grok-bot, whose TabSlice lacks grok.
+        var singleClient = OverviewScope.SingleClient(_activeClientTab)!;
+        var members = OverviewScope.LimitsClients(singleClient)!;
         if (OverviewCards.ShowsLimitsCard(OverviewCards.LimitsEnabled(AppSettings.Store))
             && !LimitsCardFilter.HidesClientCard(
                 snapshot.Quota?.Agents ?? [],
                 members,
-                ClientRegistry.HiddenLimitsClients(AppSettings.Store)))
+                ClientRegistry.HiddenLimitsClients(AppSettings.Store),
+                snapshot.QuotaOutcome))
         {
             stack.Children.Add(Ui.Card(
-                "Agent limits".Localized(),
+                // macOS QuotaView.swift:72: tabDisplayName(singleClient).
+                "{0} limits".Localized(ClientRegistry.TabDisplayName(singleClient)),
                 BuildLimits(snapshot, members)));
         }
 

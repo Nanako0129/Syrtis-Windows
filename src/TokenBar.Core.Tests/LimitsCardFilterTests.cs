@@ -108,4 +108,42 @@ public sealed class LimitsCardFilterTests
         IReadOnlyList<AgentUsageSnapshot> agents = [Card("grok"), Card("grok-bot", "acct")];
         Assert.False(LimitsCardFilter.HidesClientCard(agents, Grok, new HashSet<string> { "grok", "grok-bot" }));
     }
+
+    private const WindowEquivalence.FetchOutcome Done = WindowEquivalence.FetchOutcome.Succeeded;
+
+    private static readonly string[] Antigravity = ["antigravity", "antigravity-cli"];
+
+    /// <summary>macOS's second empty branch (AgentLimitsCard.swift:529): the
+    /// Antigravity tab with antigravity hidden has no visible row left
+    /// (antigravity-cli has no snapshot), so the card is not drawn.</summary>
+    [Fact]
+    public void AntigravityTabWithAntigravityHiddenAndNoCliSnapshotDrawsNoCard()
+    {
+        IReadOnlyList<AgentUsageSnapshot> agents = [Card("antigravity"), Card("codex")];
+        var hidden = new HashSet<string> { "antigravity" };
+        Assert.False(LimitsCardFilter.HidesClientCard(agents, Antigravity, hidden)); // first rule alone misses it
+        Assert.True(LimitsCardFilter.HidesClientCard(agents, Antigravity, hidden, Done));
+        // Not yet answered: still loading, keeps the card.
+        Assert.False(LimitsCardFilter.HidesClientCard(
+            [], Antigravity, hidden, WindowEquivalence.FetchOutcome.NotAttempted));
+        // Control: nothing hidden and a snapshot present draws the card.
+        Assert.False(LimitsCardFilter.HidesClientCard(agents, Antigravity, None, Done));
+    }
+
+    [Fact]
+    public void GrokTabWithGrokHiddenDrawsNoCardWithoutABotSnapshotButDoesWithOne()
+    {
+        var grokHidden = new HashSet<string> { "grok" };
+        Assert.True(LimitsCardFilter.HidesClientCard([Card("grok")], Grok, grokHidden, Done));
+        var withBot = new[] { Card("grok"), Card("grok-bot") };
+        Assert.False(LimitsCardFilter.HidesClientCard(withBot, Grok, grokHidden, Done));
+        Assert.Equal(["grok-bot"], Ids(LimitsCardFilter.Visible(withBot, Grok, None, grokHidden)));
+    }
+
+    [Fact]
+    public void EmptyClientListHidesNothing()
+    {
+        Assert.False(LimitsCardFilter.HidesClientCard(Agents, [], None));
+        Assert.False(LimitsCardFilter.HidesClientCard([], [], new HashSet<string> { "codex" }, Done));
+    }
 }
