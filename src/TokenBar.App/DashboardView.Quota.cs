@@ -131,7 +131,12 @@ public sealed partial class DashboardView
         // "where does the allowance stand right now" while the two above answer
         // "where has it gone", and a second implementation of the first
         // question would be free to disagree with the first one.
-        stack.Children.Add(Ui.Card("Agent limits".Localized(), BuildLimits(snapshot)));
+        // Off by the master switch: not drawn here either (macOS QuotaView.swift:57).
+        if (OverviewCards.ShowsLimitsCard(OverviewCards.LimitsEnabled(AppSettings.Store)))
+        {
+            stack.Children.Add(Ui.Card("Agent limits".Localized(), BuildLimits(snapshot)));
+        }
+
         return stack;
     }
 
@@ -413,7 +418,12 @@ public sealed partial class DashboardView
         // The same builder the Overview and the all-clients lens use, filtered
         // to this client. A second implementation of "where does the allowance
         // stand right now" would be free to disagree with the first.
-        stack.Children.Add(Ui.Card("Agent limits".Localized(), BuildLimits(snapshot, client.Owner)));
+        // Off by the master switch: a client tab drops the card too (macOS QuotaView.swift:116).
+        if (OverviewCards.ShowsLimitsCard(OverviewCards.LimitsEnabled(AppSettings.Store)))
+        {
+            stack.Children.Add(Ui.Card("Agent limits".Localized(), BuildLimits(snapshot, client.Owner)));
+        }
+
         // Every subscription-facing lookup, including the history card's
         // disclaimer (WindowHistoryText.Disclaimer), reads client.Owner —
         // the confirmed attribution target these rows were folded against

@@ -426,5 +426,12 @@
   "Occasional use, or a plan like Claude Pro": "偶尔使用，或像 Claude Pro 这类方案",
   "A few agents at once, or a plan like Claude Max 5x": "几个 agent 同时跑，或像 Claude Max 5x 这类方案",
   "Lots of agents at once, such as Claude Code's ultracode, or a plan like Claude Max 20x": "超多 agent 同时跑（例如 Claude Code 的 ultracode），或像 Claude Max 20x 这类方案",
-  "The cat and parrot speed up as the live token rate climbs. The pace sets how much traffic reaches the top: Light at 600K tokens/min, Moderate at 3M, Heavy at 10M.": "实时 token 速率越高，猫和鹦鹉跑得越快。动画速度决定多大的流量会到顶：轻度是每分钟 60 万 token、中度 300 万、重度 1,000 万。"
+  "The cat and parrot speed up as the live token rate climbs. The pace sets how much traffic reaches the top: Light at 600K tokens/min, Moderate at 3M, Heavy at 10M.": "实时 token 速率越高，猫和鹦鹉跑得越快。动画速度决定多大的流量会到顶：轻度是每分钟 60 万 token、中度 300 万、重度 1,000 万。",
+  "Overview cards": "概览卡片",
+  "Quota Summary": "额度摘要",
+  "Limits": "Agent 额度",
+  "Trace": "实时追踪",
+  "Choose which cards Overview shows. The usage chart always stays.": "选择概览要显示哪些卡片。用量图表始终保留。",
+  "Show Agent limits card": "显示 Agent 额度卡片",
+  "Off hides the quota card on Overview and on every client tab.": "关闭后，概览和各客户端标签页都不显示额度卡片。"
 }

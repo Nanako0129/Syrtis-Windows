@@ -101,3 +101,128 @@ public class OverviewScopeTests
         Assert.Null(OverviewScope.LimitsClientId(null));
     }
 }
+
+// Hiding Overview cards and the Agent-limits master switch (macOS
+// OverviewCard.swift toggleable/visible; OverviewView.swift:69-90;
+// QuotaView.swift:57,:116). Pure decisions only: the WinUI call sites just
+// hand these a store.
+public class OverviewCardVisibilityTests
+{
+    private static readonly OverviewCard[] AllInOrder =
+    [
+        OverviewCard.QuotaSummary, OverviewCard.Chart, OverviewCard.Limits,
+        OverviewCard.Trace, OverviewCard.Models, OverviewCard.Streaks,
+    ];
+
+    [Fact]
+    public void KeyNamesAndIdsMatchMacOS()
+    {
+        Assert.Equal("tokenbar.overview.hidden", OverviewCards.HiddenKey);
+        Assert.Equal("tokenbar.limits.enabled", OverviewCards.LimitsEnabledKey);
+        Assert.Equal(
+            ["quotaSummary", "chart", "limits", "trace", "models", "streaks"],
+            AllInOrder.Select(OverviewCards.Id));
+    }
+
+    [Fact]
+    public void LabelsAreTitleCasedIds()
+    {
+        Assert.Equal("Quota Summary", OverviewCards.Label(OverviewCard.QuotaSummary));
+        Assert.Equal("Streaks", OverviewCards.Label(OverviewCard.Streaks));
+    }
+
+    // The chart is the fixed anchor: Overview is what every hidden lens falls
+    // back to, and it must never be emptied.
+    [Fact]
+    public void EveryCardButTheChartIsToggleable() =>
+        Assert.Equal(
+            [OverviewCard.QuotaSummary, OverviewCard.Limits, OverviewCard.Trace,
+                OverviewCard.Models, OverviewCard.Streaks],
+            OverviewCards.Toggleable);
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(",,")]
+    public void NothingHiddenShowsEverythingInRenderOrder(string raw) =>
+        Assert.Equal(AllInOrder, OverviewCards.Visible(raw));
+
+    [Fact]
+    public void HiddenCardsAreDroppedAndOrderIsKept() =>
+        Assert.Equal(
+            [OverviewCard.Chart, OverviewCard.Limits, OverviewCard.Streaks],
+            OverviewCards.Visible("quotaSummary,trace,models"));
+
+    [Fact]
+    public void ATamperedRawStringCannotHideTheChart() =>
+        Assert.Equal([OverviewCard.Chart], OverviewCards.Visible(
+            "chart,quotaSummary,limits,trace,models,streaks"));
+
+    [Fact]
+    public void UnknownIdsAreIgnored() =>
+        Assert.Equal(AllInOrder, OverviewCards.Visible("nonsense,Chart,QUOTASUMMARY"));
+
+    // Off drops BOTH the summary line and the card (OverviewView.swift:69-90),
+    // and only those two.
+    [Fact]
+    public void LimitsOffDropsTheSummaryAndTheLimitsCardTogether() =>
+        Assert.Equal(
+            [OverviewCard.Chart, OverviewCard.Trace, OverviewCard.Models, OverviewCard.Streaks],
+            OverviewCards.Visible("", limitsEnabled: false));
+
+    [Fact]
+    public void LimitsGateIsTheOneAnswerEverySurfaceReads()
+    {
+        Assert.True(OverviewCards.ShowsLimitsCard(true));
+        Assert.False(OverviewCards.ShowsLimitsCard(false));
+    }
+
+    private static SettingsStore StoreWith(string json)
+    {
+        var path = Path.Combine(Path.GetTempPath(), "tb-ov-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, json);
+        return new SettingsStore(path);
+    }
+
+    [Fact]
+    public void AbsentLimitsKeyMeansEnabled()
+    {
+        var store = StoreWith("{}");
+        Assert.True(OverviewCards.LimitsEnabled(store));
+        Assert.Equal(AllInOrder, OverviewCards.Visible(store));
+    }
+
+    [Fact]
+    public void StoreOverloadReadsBothPersistedKeys()
+    {
+        var store = StoreWith("""{"tokenbar.limits.enabled": false, "tokenbar.overview.hidden": "models"}""");
+        Assert.False(OverviewCards.LimitsEnabled(store));
+        Assert.Equal(
+            [OverviewCard.Chart, OverviewCard.Trace, OverviewCard.Streaks],
+            OverviewCards.Visible(store));
+    }
+
+    // The Settings section's strings go through Localized(); a key missing
+    // from the shipped tables renders English in zh. Against the shipped files,
+    // not a fixture (same reason as UsageAttributionPageTests).
+    [Fact]
+    public void SettingsStringsHaveBothTranslations()
+    {
+        string[] keys =
+        [
+            "Overview cards",
+            "Choose which cards Overview shows. The usage chart always stays.",
+            "Show Agent limits card",
+            "Off hides the quota card on Overview and on every client tab.",
+            .. OverviewCards.Toggleable.Select(OverviewCards.Label),
+        ];
+        foreach (var file in new[] { "strings-zh-Hant.json", "strings-zh-Hans.json" })
+        {
+            var table = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(
+                File.ReadAllText(Path.Combine(AppContext.BaseDirectory, file)))!;
+            foreach (var key in keys)
+            {
+                Assert.True(table.ContainsKey(key), $"{file}: {key}");
+            }
+        }
+    }
+}
