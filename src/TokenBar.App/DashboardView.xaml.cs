@@ -105,11 +105,7 @@ public sealed partial class DashboardView : UserControl
         YearButton.Content = "All".Localized();
         QuitButton.Content = "Quit".Localized();
 
-        RefreshButton.Click += (_, _) =>
-        {
-            _model?.RefreshForce();
-            UpdateRefreshControl();
-        };
+        RefreshButton.Click += (_, _) => TryRefresh();
         HoverTip.Attach(RefreshButton, () => RefreshTip.Text(_model?.Current?.RestoredAt, DateTimeOffset.Now));
 
         SettingsButton.Click += (_, _) => TrayService.OpenSettings?.Invoke();
@@ -165,12 +161,10 @@ public sealed partial class DashboardView : UserControl
         KeyboardAccelerators.Add(escape);
         AddAccel(Windows.System.VirtualKey.W, Windows.System.VirtualKeyModifiers.Control,
             () => HideRequested?.Invoke());
+        // Same busy condition as the visible control: the shortcut cannot
+        // start a refresh the disabled button would refuse (macOS ⌘R guard).
         AddAccel(Windows.System.VirtualKey.R, Windows.System.VirtualKeyModifiers.Control,
-            () =>
-            {
-                _model?.RefreshForce();
-                UpdateRefreshControl();
-            });
+            TryRefresh);
         AddAccel(Windows.System.VirtualKey.G, Windows.System.VirtualKeyModifiers.Control,
             ToggleChartView);
         AddAccel(Windows.System.VirtualKey.Q, Windows.System.VirtualKeyModifiers.Control,
@@ -480,15 +474,49 @@ public sealed partial class DashboardView : UserControl
         SwitchTo(_view);
     }
 
-    /// <summary>One control, two states (macOS refreshButton): the glyph
-    /// while idle, a spinner while a forced re-read or the initial load runs.</summary>
+    private bool _refreshLoading;
+
+    private void TryRefresh()
+    {
+        if (_model is null
+            || RefreshTip.Busy(_refreshLoading, _model.Refreshing, _model.GraphInFlight))
+        {
+            return;
+        }
+
+        _model.RefreshForce();
+        UpdateRefreshControl(_refreshLoading);
+    }
+
+    /// <summary>One control (macOS refreshButton): a spinner, disabled, while
+    /// any graph request or the initial load runs; otherwise the glyph,
+    /// tinted when restored data is on screen and its refresh failed.</summary>
     private void UpdateRefreshControl(bool loading = false)
     {
-        var spinning = loading || _model?.Refreshing == true;
+        _refreshLoading = loading;
+        var spinning = RefreshTip.Busy(
+            loading, _model?.Refreshing == true, _model?.GraphInFlight == true);
         RefreshButton.Visibility = spinning ? Visibility.Collapsed : Visibility.Visible;
+        RefreshButton.IsEnabled = !spinning;
         RefreshSpinner.Visibility = spinning ? Visibility.Visible : Visibility.Collapsed;
         RefreshSpinner.IsActive = spinning;
+        var current = _model?.Current;
+        if (RefreshTip.ShowsStaleRestore(current?.RestoredAt, current?.RestoreFailed == true))
+        {
+            RefreshGlyph.Foreground = StaleRestoreBrush;
+        }
+        else
+        {
+            // Back to the inherited button foreground, as before this state
+            // existed (and correct across a theme switch).
+            RefreshGlyph.ClearValue(IconElement.ForegroundProperty);
+        }
     }
+
+    /// <summary>macOS tints the glyph orange in this state; one brush, made
+    /// once.</summary>
+    private static readonly SolidColorBrush StaleRestoreBrush =
+        new(Microsoft.UI.Colors.Orange);
 
     /// <summary>The model powers lazy lens loading, told which lens is
     /// active by <see cref="SwitchTo"/>.</summary>

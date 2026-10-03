@@ -33,6 +33,20 @@ public static class RefreshTip
                 Format.RelativeTime((ulong)Math.Max(0, at.ToUnixTimeSeconds()), now))
             : "Refresh usage data".Localized();
 
+    /// <summary>The Refresh button is busy (spinning, disabled, Ctrl+R
+    /// ignored) while a manual refresh or any graph request runs, or while
+    /// the first load has nothing to show (macOS <c>refreshDisabled</c>: one
+    /// condition for the control and the shortcut).</summary>
+    public static bool Busy(bool loading, bool manualRefresh, bool graphInFlight) =>
+        loading || manualRefresh || graphInFlight;
+
+    /// <summary>The glyph is tinted only when restored data is on screen and
+    /// its live refresh failed: the one state where data is stale and nothing
+    /// is running to fix it (macOS <c>showingStaleRestore</c>). Restored data
+    /// with a refresh still running is not tinted.</summary>
+    public static bool ShowsStaleRestore(DateTimeOffset? restoredAt, bool restoreFailed) =>
+        restoredAt is not null && restoreFailed;
+
     /// <summary>The footer's "updated …". A restored snapshot can be up to 90
     /// days old, so it reads as an age ("updated 1d ago") rather than a bare
     /// time of day that would pass for today; live data keeps the clock

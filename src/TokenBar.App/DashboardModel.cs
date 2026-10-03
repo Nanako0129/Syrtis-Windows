@@ -209,6 +209,12 @@ public sealed class DashboardModel
 
     public bool Refreshing => _refreshing;
 
+    /// <summary>A graph request is running, whoever started it (initial
+    /// load, the 60 s poll, a year switch, a manual refresh). The header
+    /// control spins and is disabled for all of them (macOS
+    /// <c>backgroundRefresh</c>).</summary>
+    public bool GraphInFlight => Volatile.Read(ref _slowInFlight) == 1;
+
     /// <summary>Manual refresh (the header button; macOS refresh()): forces
     /// a full log re-read. No-op while one is already running.</summary>
     public void RefreshForce()
@@ -285,6 +291,12 @@ public sealed class DashboardModel
         /// came from; null once a live pass has published (macOS
         /// <c>restoredSnapshot</c>).</summary>
         public DateTimeOffset? RestoredAt { get; init; }
+
+        /// <summary>The live pass for the restored graph on screen settled
+        /// without replacing it, so nothing is running to fix stale data
+        /// (macOS <c>restoredSnapshot.failed</c>). Cleared with
+        /// <see cref="RestoredAt"/> by the next graph publication.</summary>
+        public bool RestoreFailed { get; init; }
 
         // Lazily-loaded lenses (macOS ensureData parity): fetched on first
         // visit, then refreshed by the slow lane like everything else.
@@ -930,6 +942,7 @@ public sealed class DashboardModel
                 CostAuthoritative = _graphState.CostAuthoritative,
                 FetchedAt = DateTimeOffset.Now,
                 RestoredAt = publication.RestoredFrom,
+                RestoreFailed = false,
             };
             _lastSnapshot = Current;
             Updated?.Invoke();
@@ -1005,8 +1018,25 @@ public sealed class DashboardModel
         else if (decision.ClearRefreshing)
         {
             _refreshing = false;
-            _ = _dispatcher.TryEnqueue(() => Updated?.Invoke());
         }
+
+        // Always repaint on a settled request: the header spinner follows
+        // GraphInFlight, and a live pass that ended without replacing a
+        // restored graph marks it failed (macOS restoredSnapshot.failed).
+        // Queued behind the request's own publications, so Current already
+        // reflects any live graph it published.
+        var requestId = completion.RequestId;
+        _ = _dispatcher.TryEnqueue(() =>
+        {
+            if (_graphState.IsCurrent(requestId)
+                && Current is { RestoredAt: not null, RestoreFailed: false } restored)
+            {
+                Current = restored with { RestoreFailed = true };
+                _lastSnapshot = Current;
+            }
+
+            Updated?.Invoke();
+        });
     }
 
     private void RememberYears(UsagePayload graph)
