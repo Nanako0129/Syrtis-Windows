@@ -4,11 +4,13 @@ using System.Runtime.InteropServices;
 namespace TokenBar.App;
 
 /// <summary>
-/// Windows 11 tags tray-resident processes as Efficiency Mode (EcoQoS) and
-/// throttles their execution speed, which is why the cold parse crawled even
-/// after the rayon pool grew. The boost is scoped: heavy FFI work opts the
-/// process out of throttling, and the last scope to close hands the decision
-/// back to Windows so the idle tray process stays power-friendly.
+/// Windows may power-throttle a background process (system-managed
+/// EcoQoS). The boost is scoped: heavy FFI work opts the process out of
+/// throttling, and the last scope to close hands the decision back to Windows
+/// so the idle tray process stays power-friendly. (The cold-parse slowdown
+/// this was written for was measured while H.NotifyIcon's ForceCreate default
+/// had put the process in Efficiency Mode, now turned off in TrayService;
+/// how much system-managed throttling alone costs has not been measured.)
 /// </summary>
 internal static class ProcessPower
 {
