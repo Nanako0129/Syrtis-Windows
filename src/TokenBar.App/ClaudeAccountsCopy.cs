@@ -42,7 +42,7 @@ internal static class ClaudeAccountsCopy
     {
         "checkFailed" => "Syrtis couldn't check this folder. Try again, or restart Syrtis.",
         "homeDirectory" => "That's your user folder. Pick the Claude config folder inside it.",
-        "nestedConfigDir" => "That folder is inside, or contains, a folder you already added.",
+        "overlappingRoot" => "That folder's transcripts overlap those of a folder you already added.",
         "defaultConfigDir" => "That folder overlaps your main Claude account's folder, which is already shown.",
         "duplicate" => "Already added.",
         "unsupportedPath" => "Only a full folder path that starts with a drive letter, like D:\\folder, can be added. Network paths can't, and WSL paths can't yet.",
@@ -55,7 +55,7 @@ internal static class ClaudeAccountsCopy
 
     internal static readonly string[] ReasonCodes =
     [
-        "checkFailed", "homeDirectory", "nestedConfigDir", "defaultConfigDir", "duplicate", "unsupportedPath", "rootDirectory",
+        "checkFailed", "homeDirectory", "overlappingRoot", "defaultConfigDir", "duplicate", "unsupportedPath", "rootDirectory",
         "invalidComponent", "limitExceeded", "notDirectory", "empty",
     ];
 

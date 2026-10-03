@@ -109,7 +109,15 @@ pub(crate) fn duplicate_key(dir: &str) -> String {
 /// account would show the primary twice and, once its roots are excluded from
 /// the primary window, hide the primary's own usage (security review R2).
 fn default_config_dir_key(home: &std::path::Path) -> String {
-    duplicate_key(&home.join(".claude").to_string_lossy())
+    format!("{}\\.claude", home_key(home))
+}
+
+/// The home folder folded like [`duplicate_key`], without a trailing
+/// separator, so `HOME=C:\Users\me\` matches as `C:\Users\me` does.
+fn home_key(home: &std::path::Path) -> String {
+    duplicate_key(&home.to_string_lossy())
+        .trim_end_matches('\\')
+        .to_string()
 }
 
 /// Whether `dir` (already normalized) is the primary's `<home>\.claude` or an
@@ -180,9 +188,9 @@ pub(crate) fn set_from_json(raw: &str) -> Result<(serde_json::Value, Vec<String>
 /// check gives the setter's answer for the config registry. Besides the path
 /// rule: the home folder itself (`homeDirectory`) and the primary's `.claude`
 /// or any folder above it (`defaultConfigDir`, security review R2); a folded
-/// duplicate; a directory inside, or containing, one already registered
-/// (`nestedConfigDir`: its transcripts would be scanned under two accounts);
-/// more than eight.
+/// duplicate; more than eight. A directory nested in another is allowed:
+/// their `projects`/`transcripts` roots are disjoint unless one sits inside
+/// the other's roots, which the scan registry refuses (`overlappingRoot`).
 fn register(
     input: &[String],
     home: Option<&std::path::Path>,
@@ -200,9 +208,6 @@ fn register(
             {
                 "duplicate"
             }
-            Ok(dir) if registered.iter().any(|existing| nested(existing, &dir)) => {
-                "nestedConfigDir"
-            }
             Ok(_) if registered.len() >= MAX_CLAUDE_CONFIG_DIRS => "limitExceeded",
             Ok(dir) => {
                 registered.push(dir);
@@ -215,25 +220,23 @@ fn register(
     (registered, rejected)
 }
 
-/// The home folder itself, folded like [`duplicate_key`]; a trailing
-/// separator on `home` (e.g. `HOME=C:\Users\me\`) does not matter.
+/// The home folder itself ([`home_key`]).
 fn is_home(dir: &str, home: Option<&std::path::Path>) -> bool {
-    home.is_some_and(|home| {
-        duplicate_key(dir) == duplicate_key(&home.to_string_lossy()).trim_end_matches('\\')
-    })
+    home.is_some_and(|home| duplicate_key(dir) == home_key(home))
 }
 
-/// Whether one directory is inside the other (folded, by whole components).
-fn nested(a: &str, b: &str) -> bool {
-    let (a, b) = (duplicate_key(a), duplicate_key(b));
-    a.starts_with(&format!("{b}\\")) || b.starts_with(&format!("{a}\\"))
+/// An account's two scan roots, as the pusher registers them.
+fn scan_roots(dir: &str) -> [String; 2] {
+    ["projects", "transcripts"].map(|root| format!("{dir}\\{root}"))
 }
 
 /// Why appending `candidate` to the saved list `existing` would not give a
 /// working extra account, or `None` if it would: the config registry's own
-/// answer for that position ([`register`]), then the scan registry's rule for
-/// the account's two roots, `<dir>\projects` and `<dir>\transcripts`
-/// ([`crate::extra_scan_paths::path_rule`]), so a directory the pusher would
+/// answer for that position ([`register`]), then the scan registry's rules
+/// for the account's two roots, `<dir>\projects` and `<dir>\transcripts`:
+/// [`crate::extra_scan_paths::path_rule`], and `overlappingRoot` when one of
+/// them is at, under or above a root of an account the saved list registers
+/// ([`crate::extra_scan_paths::overlaps`]). So a directory the pusher would
 /// drop from both registries is refused before it is saved. Touches no
 /// filesystem (no stat, so a `\\wsl.localhost` path cannot wake WSL) and
 /// changes no registry. Returns a fixed reason code, never the input.
@@ -244,14 +247,31 @@ pub(crate) fn validate(
 ) -> Option<&'static str> {
     let mut all = existing.to_vec();
     all.push(candidate.to_string());
-    let (_, rejected) = register(&all, home);
+    let (registered, rejected) = register(&all, home);
     if let Some((_, reason)) = rejected.iter().find(|(index, _)| *index == existing.len()) {
         return Some(reason);
     }
-    let dir = normalize(candidate).ok()?;
-    ["projects", "transcripts"]
-        .into_iter()
-        .find_map(|root| crate::extra_scan_paths::path_rule(&format!("{dir}\\{root}"), home).err())
+    // Accepted, so the candidate is the last registered directory.
+    let (dir, others) = registered.split_last()?;
+    let roots = scan_roots(dir);
+    if let Some(reason) = roots
+        .iter()
+        .find_map(|root| crate::extra_scan_paths::path_rule(root, home).err())
+    {
+        return Some(reason);
+    }
+    let taken: Vec<String> = others
+        .iter()
+        .flat_map(|other| scan_roots(other))
+        .map(|root| duplicate_key(&root))
+        .collect();
+    roots
+        .iter()
+        .any(|root| {
+            let key = duplicate_key(root);
+            taken.iter().any(|other| crate::extra_scan_paths::overlaps(other, &key))
+        })
+        .then_some("overlappingRoot")
 }
 
 /// One process-wide mutex for every test that writes the static, so parallel
@@ -284,19 +304,27 @@ pub(crate) fn reset_for_test() {
 mod tests {
     use super::*;
 
-    /// The setter itself refuses the home folder and a nested directory, so the
-    /// pushed registries never hold what the pre-save check would refuse.
+    /// The setter refuses the home folder itself and the primary's .claude
+    /// even when HOME ends in a separator, and keeps a nested account (its
+    /// roots are disjoint from the outer one's; window_usage and macOS
+    /// support it).
     #[test]
-    fn register_refuses_home_and_nested_directories() {
+    fn register_refuses_home_and_keeps_nested_accounts() {
         let home = std::path::Path::new(r"C:\Users\Me\");
-        let input = [r"D:\a", r"D:\a\projects", r"D:\ab", r"c:/users/me", r"D:\"]
-            .map(String::from)
-            .to_vec();
+        let input = [
+            r"D:\claude",
+            r"D:\claude\alt",
+            r"c:/users/me",
+            r"C:\Users\Me\.claude",
+            r"D:\",
+        ]
+        .map(String::from)
+        .to_vec();
         let (registered, rejected) = register(&input, Some(home));
-        assert_eq!(registered, [r"D:\a", r"D:\ab"]);
+        assert_eq!(registered, [r"D:\claude", r"D:\claude\alt"]);
         assert_eq!(
             rejected,
-            [(1, "nestedConfigDir"), (3, "homeDirectory"), (4, "rootDirectory")]
+            [(2, "homeDirectory"), (3, "defaultConfigDir"), (4, "rootDirectory")]
         );
     }
 
@@ -335,10 +363,13 @@ mod tests {
                 empty.clone(),
                 Some("defaultConfigDir"),
             ),
-            (r"D:\a\projects", some(&[r"D:\a"]), Some("nestedConfigDir")),
-            (r"D:\", some(&[r"D:\a"]), Some("rootDirectory")),
-            (r"D:\x", some(&[r"D:\x\y"]), Some("nestedConfigDir")),
+            // A nested account keeps disjoint roots; one inside the other's
+            // roots (or holding them) would scan files twice.
+            (r"D:\claude\alt", some(&[r"D:\claude"]), None),
+            (r"D:\a\projects", some(&[r"D:\a"]), Some("overlappingRoot")),
+            (r"D:\x", some(&[r"D:\x\transcripts"]), Some("overlappingRoot")),
             (r"D:\ab", some(&[r"D:\a"]), None),
+            (r"D:\", some(&[r"D:\a"]), Some("rootDirectory")),
             (
                 r"d:/WORK/.claude/",
                 some(&[r"D:\work\.claude"]),

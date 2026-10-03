@@ -108,7 +108,9 @@ public class ClaudeRootsNativeTests
         Assert.Equal("limitExceeded", ClaudeExtraRoots.UiRejection(@"D:\b", eight));
         // A refused saved entry takes no slot.
         Assert.Null(ClaudeExtraRoots.UiRejection(@"D:\b", [.. eight.Take(7), @"\\server\share"]));
-        Assert.Equal("nestedConfigDir", ClaudeExtraRoots.UiRejection(@"D:\work\.claude\sub", [@"D:\work\.claude"]));
+        // A nested account is fine; one inside the other's transcript roots is not.
+        Assert.Null(ClaudeExtraRoots.UiRejection(@"D:\work\.claude\alt", [@"D:\work\.claude"]));
+        Assert.Equal("overlappingRoot", ClaudeExtraRoots.UiRejection(@"D:\work\.claude\projects", [@"D:\work\.claude"]));
     }
 
     /// <summary>Security review R2 against the real profile: the primary's

@@ -842,7 +842,8 @@ fn invalidate_scan_caches() {
 /// reason is a fixed code (`nullPayload`, `invalidUtf8`, `invalidJson`,
 /// `sourceContextUnavailable`; `unsupportedClient`, `empty`, `unsupportedPath`,
 /// `rootDirectory`, `invalidComponent`, `defaultConfigDir`, `duplicate`,
-/// `limitExceeded`, `notDirectory`); the input is never echoed. On an error
+/// `overlappingRoot`, `limitExceeded`, `notDirectory`); the input is never
+/// echoed. On an error
 /// envelope nothing changed.
 ///
 /// # Safety
@@ -929,8 +930,8 @@ pub(crate) fn apply_scan_roots_for_test(
 /// Every error and reason is a fixed code (`nullPayload`, `invalidUtf8`,
 /// `invalidJson`; `empty`, `unsupportedPath`, `rootDirectory`,
 /// `invalidComponent`, `homeDirectory`, `defaultConfigDir`, `duplicate`,
-/// `nestedConfigDir`, `limitExceeded`); the input is never echoed. On an
-/// error envelope the registry is unchanged.
+/// `limitExceeded`); the input is never echoed. On an error envelope the
+/// registry is unchanged.
 ///
 /// # Safety
 /// `json` must be NULL or a valid NUL-terminated string.
@@ -999,9 +1000,10 @@ pub(crate) fn apply_config_dirs_for_test(dirs: Vec<String>) {
 /// list before the candidate) would add a working extra Claude account:
 /// success data `{"reason": null}` or `{"reason": "<code>"}`: the config
 /// setter's code for that position (any of `tb_set_claude_config_dirs`'s
-/// reasons), else `defaultConfigDir` when the account's `projects` or
-/// `transcripts` would fall under the primary's `<home>\.claude`, which the
-/// scan setter refuses (`claude_config_dirs::validate`).
+/// reasons), else the scan setter's for the account's `projects` and
+/// `transcripts`: `defaultConfigDir` (under the primary's `<home>\.claude`)
+/// or `overlappingRoot` (at, under or above a root of an account already in
+/// the list) (`claude_config_dirs::validate`).
 /// Lets Settings refuse a path before saving it without re-implementing the
 /// rule. Changes no registry and touches no filesystem; errors are fixed
 /// codes (`nullPayload`, `invalidUtf8`, `invalidJson`); the input is never
