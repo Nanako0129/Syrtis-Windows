@@ -736,8 +736,9 @@ public sealed class TrayService : IDisposable
                 // remained (observed on a Windows 11 host: Idle from about one
                 // second after launch, throttling 0x0). Power is
                 // ProcessPower's job, so the library must not touch it. The
-                // shipping argument cannot be observed in a unit test; it is
-                // checked on a Windows host by polling the process priority.
+                // shipping argument cannot be observed in a unit test. Checked
+                // on a Windows 11 host (2026-10-03): priority polled every 1 s
+                // for 120 s stayed Normal (the default build: Idle).
                 _icon.ForceCreate(enablesEfficiencyMode: false);
                 return _icon.IsCreated;
             });
