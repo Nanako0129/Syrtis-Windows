@@ -440,5 +440,7 @@
   "and {0} more": "以及另外 {0} 筆",
   "Without a suggestion: {0} — set them in Settings.": "沒有建議的來源：{0} 個，請到「設定」手動指定。",
   "Set up manually…": "手動設定…",
-  "Apply suggestions": "套用建議"
+  "Apply suggestions": "套用建議",
+  "Bars": "長條圖",
+  "Heatmap": "熱點圖"
 }

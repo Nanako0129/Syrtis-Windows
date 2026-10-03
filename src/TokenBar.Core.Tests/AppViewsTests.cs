@@ -15,11 +15,9 @@ public class AppViewsTests
         Assert.Contains(AppView.Agents, AppViews.Toggleable);
     }
 
-    // Declaration order is tab order, and it is also the numeric accelerator
-    // order (Ctrl+1..N for N values, eight today):
-    // DashboardView binds one accelerator per value of the enum at
-    // construction, so the two can only agree while this holds. Pinned for the
-    // same reason OverviewCards.RenderOrder is.
+    // Declaration order is the lens row's order. Pinned for the same reason
+    // OverviewCards.RenderOrder is. (Ctrl+1..9 no longer select lenses: they
+    // select the client tab row, as on macOS — see TabShortcuts.)
     [Fact]
     public void QuotaIsTheSecondLens()
     {

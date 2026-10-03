@@ -35,6 +35,12 @@
     <Compile Include="..\TokenBar.App\CostSurfaceProjection.cs" Link="CostSurfaceProjection.cs" />
     <Compile Include="..\TokenBar.App\AppViews.cs" Link="AppViews.cs" />
     <Compile Include="..\TokenBar.App\OverviewCard.cs" Link="OverviewCard.cs" />
+    <!-- Tab-row keyboard rules (Ctrl+1..9, Ctrl+[ ], the Ctrl-held hints), the
+         three-state chart view and the flat heatmap's layout math: DashboardView
+         compiles under no test project, so each decision lives in its own pure file. -->
+    <Compile Include="..\TokenBar.App\TabShortcuts.cs" Link="TabShortcuts.cs" />
+    <Compile Include="..\TokenBar.App\ChartView.cs" Link="ChartView.cs" />
+    <Compile Include="..\TokenBar.App\HeatmapMath.cs" Link="HeatmapMath.cs" />
     <Compile Include="..\TokenBar.App\AppLanguage.cs" Link="AppLanguage.cs" />
     <Compile Include="..\TokenBar.App\DrillDownSummary.cs" Link="DrillDownSummary.cs" />
     <Compile Include="..\TokenBar.App\QuotaSummaryText.cs" Link="QuotaSummaryText.cs" />

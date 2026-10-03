@@ -440,5 +440,7 @@
   "and {0} more": "以及另外 {0} 项",
   "Without a suggestion: {0} — set them in Settings.": "没有建议的来源：{0} 个，请到“设置”手动指定。",
   "Set up manually…": "手动设置…",
-  "Apply suggestions": "应用建议"
+  "Apply suggestions": "应用建议",
+  "Bars": "条形图",
+  "Heatmap": "热力图"
 }
