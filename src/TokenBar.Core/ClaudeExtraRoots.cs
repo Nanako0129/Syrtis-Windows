@@ -60,8 +60,12 @@ public static class ClaudeExtraRoots
     /// (components, reserved names).</summary>
     public static string? UiRejection(string path, IReadOnlyList<string> existing, string? userProfile)
     {
-        // The same shape test as the native normalize, on the raw string.
-        if (path.Length < 3 || !char.IsAsciiLetter(path[0]) || path[1] != ':' || path[2] is not ('\\' or '/'))
+        if (path.Length == 0)
+        {
+            return "empty";
+        }
+
+        if (!IsDrivePath(path))
         {
             return "unsupportedPath";
         }
@@ -97,14 +101,23 @@ public static class ClaudeExtraRoots
         return existing.Count >= MaxDirs ? "limitExceeded" : null;
     }
 
+    /// <summary>The native normalize's shape test on the raw string: a drive
+    /// letter, a colon and a separator (<c>X:\</c> or <c>X:/</c>). Everything
+    /// else (UNC, WSL, rooted, drive-relative) is refused by both registries.
+    /// <c>ClaudeRootsNativeTests.UiRulesAgreeWithTheNativeSetter</c> holds
+    /// the two sides to the same answers.</summary>
+    public static bool IsDrivePath(string path) =>
+        path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] is '\\' or '/';
+
     /// <summary>Whether Settings may check that <paramref name="dir"/>
-    /// exists. Never for a UNC path: the registries refuse it anyway, and on a
-    /// Windows 11 machine without WSL, touching <c>\\wsl.localhost</c>
-    /// starts a WSL download and install that ends in a reboot (observed on
-    /// the 188 test host through Explorer's picker; whether a plain stat does
-    /// the same is unverified, so no UNC path is touched at all).</summary>
-    public static bool MayCheckExists(string dir) =>
-        !Fold(dir).StartsWith("\\\\", StringComparison.Ordinal);
+    /// exists: only an absolute drive path. Anything else is refused by the
+    /// registries anyway and already shows its reason; a drive-relative path
+    /// would resolve against the app's working directory; and on a Windows 11
+    /// machine without WSL, touching <c>\\wsl.localhost</c> starts a WSL
+    /// download and install that ends in a reboot (observed on the 188 test
+    /// host through Explorer's picker; whether a plain stat does the same is
+    /// unverified, so no such path is touched at all).</summary>
+    public static bool MayCheckExists(string dir) => IsDrivePath(dir);
 
     /// <summary>The transcript roots of each directory, as macOS
     /// <c>ClaudeExtraRoots.expand</c>: <c>projects</c> and <c>transcripts</c>.

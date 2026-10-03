@@ -74,6 +74,36 @@ public class ClaudeRootsNativeTests
         }
     }
 
+    /// <summary>The picker's shape rules against the real config-dir setter:
+    /// for each input the UI's reason code must be the one native normalize
+    /// returns, and a path the UI lets through must be accepted. Drift between
+    /// the hand-mirrored C# rules and Rust fails here instead of shipping
+    /// (the profile rules are left out: native reads the real home).</summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData(@"E:\")]
+    [InlineData(@"c:/")]
+    [InlineData(@"C:\\\")]
+    [InlineData(@"C:")]
+    [InlineData(@"C:work")]
+    [InlineData(@"\")]
+    [InlineData(@"\Users\x")]
+    [InlineData(@"\\server\share\.claude")]
+    [InlineData(@"//wsl.localhost/Ubuntu/home/me/.claude")]
+    [InlineData(@"D:\parity\.claude-work")]
+    public void UiRulesAgreeWithTheNativeSetter(string path)
+    {
+        try
+        {
+            var native = TbCore.SetClaudeConfigDirs([path]).Rejected.SingleOrDefault()?.Reason;
+            Assert.Equal(native, ClaudeExtraRoots.UiRejection(path, [], userProfile: null));
+        }
+        finally
+        {
+            TbCore.SetClaudeConfigDirs([]);
+        }
+    }
+
     /// <summary>
     /// Security review R1 through the production entry: the app's pusher over
     /// the real setters, then <c>tb_graph</c>. Adding a directory raises the
