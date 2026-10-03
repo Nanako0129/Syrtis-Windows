@@ -71,11 +71,6 @@ public partial class App : Application
             _tray = new TrayService(_flyout, _graphCoordinator);
             DevLog.Write("launch: tray up");
 
-            if (Environment.GetCommandLineArgs().Contains("--dump-tray-icons"))
-            {
-                TrayIconGallery.Dump();
-            }
-
             // Debug flag, macOS --settings parity.
             if (Environment.GetCommandLineArgs().Contains("--settings"))
             {
