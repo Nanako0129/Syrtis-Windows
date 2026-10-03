@@ -306,7 +306,12 @@ async fn fetch_with_credentials(
 
     // Taken here, after the body is in hand, so the expiry comparison below
     // judges the reading against the instant it was actually read.
-    let mut data = map_response(&body, Utc::now()).map_err(ProviderFetchFailure::terminal)?;
+    let app = match credentials {
+        GrokBotCredentials::Desktop { .. } => "Grok Bot",
+        GrokBotCredentials::Cursor(..) => "Cursor",
+    };
+    let mut data =
+        map_response_as(&body, Utc::now(), app).map_err(ProviderFetchFailure::terminal)?;
     data.account_scope = Ok(scope);
     data.cache_binding = binding;
     data.history_scope = match credentials.history_owner() {
@@ -388,7 +393,13 @@ fn usage_request(
 /// Pure response mapping, split out so the endpoint contract is unit-testable
 /// without network or credentials. Accepts the dashboard's camelCase and
 /// snake_case shapes (both observed in the wild).
-pub(crate) fn map_response(body: &str, now: DateTime<Utc>) -> Result<GrokBotData, String> {
+/// `app` names the sign-in the request used ("Grok Bot" or "Cursor"), so a
+/// failure points the user at the app that can fix it.
+pub(crate) fn map_response_as(
+    body: &str,
+    now: DateTime<Utc>,
+    app: &str,
+) -> Result<GrokBotData, String> {
     let payload: Value = serde_json::from_str(body)
         .map_err(|_| "Grok Bot usage response could not be decoded.".to_string())?;
     let obj = payload
@@ -401,7 +412,7 @@ pub(crate) fn map_response(body: &str, now: DateTime<Utc>) -> Result<GrokBotData
         .filter(|s| !s.is_empty())
         .is_some()
     {
-        return Err("Grok Bot usage is unavailable. Open Cursor, then refresh.".to_string());
+        return Err(format!("Grok Bot usage is unavailable. Open {app}, then refresh."));
     }
     // Both spellings, like every other field below. Reading only camelCase
     // publishes a pooled team allowance as an individual weekly quota.
@@ -443,10 +454,9 @@ pub(crate) fn map_response(body: &str, now: DateTime<Utc>) -> Result<GrokBotData
     // because `weekly.v1` exists, so a stale reading would overwrite the
     // last-good entry rather than be discarded.
     if reset <= now {
-        return Err(
-            "Grok Bot reported a quota reset that has already passed. Open Cursor, then refresh."
-                .to_string(),
-        );
+        return Err(format!(
+            "Grok Bot reported a quota reset that has already passed. Open {app}, then refresh."
+        ));
     }
     let start = first_timestamp(obj, &["currentPeriodStart", "current_period_start"]);
     // A start at or after the reset cannot describe the window that reset ends;
@@ -806,6 +816,12 @@ fn extract_user_id(text: &str) -> Option<String> {
     (len >= 20).then(|| format!("user_{}", &rest[..len]))
 }
 
+/// The Cursor route's wording, which the decoding tests exercise.
+#[cfg(test)]
+pub(crate) fn map_response(body: &str, now: DateTime<Utc>) -> Result<GrokBotData, String> {
+    map_response_as(body, now, "Cursor")
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     //! Ported from macOS 451b4329 `agent_grokbot.rs` tests. The response
@@ -816,6 +832,18 @@ pub(crate) mod tests {
     //! Differences from macOS, all deliberate: consent also gates
     //! `plaintext:v1:` values (Q6-4), and the gate precedes the key loader.
     use super::*;
+
+    #[test]
+    fn response_errors_name_the_app_the_route_signed_in_with() {
+        let expired = r#"{"usagePercent": 10.0, "nextResetTimestampUtc": "2020-01-01T00:00:00Z", "hasNonZeroIncludedLimit": true}"#;
+        let unavailable = r#"{"error": "x"}"#;
+        for body in [expired, unavailable] {
+            let desktop = map_response_as(body, now(), "Grok Bot").unwrap_err();
+            assert!(desktop.ends_with("Open Grok Bot, then refresh."), "{desktop}");
+            let cursor = map_response_as(body, now(), "Cursor").unwrap_err();
+            assert!(cursor.ends_with("Open Cursor, then refresh."), "{cursor}");
+        }
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
