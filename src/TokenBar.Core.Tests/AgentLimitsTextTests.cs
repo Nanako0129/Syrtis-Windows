@@ -68,6 +68,114 @@ public class AgentLimitsTextTests
         Assert.Equal(new HashSet<string> { "claude", "antigravity" }, live);
     }
 
+    // ---- Detail line ------------------------------------------------------
+
+    private const string Email = "someone@example.com";
+
+    private static AgentUsageSnapshot Who(
+        string clientId = "claude", string? accountKey = null, string? error = null,
+        string? email = Email, string? plan = "Max") =>
+        new(clientId, "oauth", "2026-10-04T00:00:00Z",
+            [new UsageWindow("Session", 20, 80, CardId: "session.v1")],
+            Identity: new AgentIdentity(email, plan), Error: error, AccountKey: accountKey);
+
+    [Fact]
+    public void TheDetailLineIsEmailThenPlanAndAnErrorReplacesItInRed()
+    {
+        Assert.Equal(new LimitsDetail($"{Email} · Max", false), AgentLimitsText.Detail(Who()));
+        Assert.Equal(new LimitsDetail("Max", false), AgentLimitsText.Detail(Who(email: null)));
+        Assert.Equal(new LimitsDetail(Email, false), AgentLimitsText.Detail(Who(plan: null)));
+        Assert.Null(AgentLimitsText.Detail(Who(email: null, plan: null)));
+        Assert.Equal(new LimitsDetail("HTTP 500", true), AgentLimitsText.Detail(Who(error: "HTTP 500")));
+    }
+
+    // The email is shown on the card's detail line and nowhere else: not in
+    // any account label (tray menu, pickers, summary lines) and not in the tray
+    // tooltip, which anyone near the taskbar can read.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("claude-desktop")]
+    [InlineData(@"C:\Users\me\.claude-work")]
+    public void NeitherTheAccountLabelNorTheTrayLineCarriesTheEmail(string? accountKey)
+    {
+        var agent = Who(accountKey: accountKey);
+        var payload = new AgentUsagePayload("2026-10-04T00:00:00Z", [agent]);
+        Assert.DoesNotContain(Email, AccountLabel.Of(agent, payload));
+        Assert.DoesNotContain(Email, AccountLabel.Of(agent, payload, full: true));
+        var line = new QuotaPick(agent, agent.Windows[0]).TooltipLine(payload);
+        Assert.DoesNotContain(Email, line);
+        Assert.Contains("80% left", line);
+    }
+
+    // ---- Card order -------------------------------------------------------
+
+    private static IReadOnlyList<string> Rows(IReadOnlyList<AgentUsageSnapshot> agents) =>
+        [.. agents.Select(a => a.Account.AccountKey is null ? a.ClientId : $"{a.ClientId}#{a.Account.AccountKey}")];
+
+    [Fact]
+    public void CardsFollowTheSavedTabOrderWithExtrasAfterTheirPrimary()
+    {
+        var agents = new[]
+        {
+            Who("claude"), Who("codex"), Who("claude", accountKey: "claude-desktop"), Who("gemini"),
+        };
+        Assert.Equal(["codex", "claude", "claude#claude-desktop", "gemini"],
+            Rows(LimitsCardOrder.Apply(agents, "codex,antigravity,claude")));
+        // No saved order: payload order, extras still beside their primary.
+        Assert.Equal(["claude", "claude#claude-desktop", "codex", "gemini"],
+            Rows(LimitsCardOrder.Apply(agents, "")));
+    }
+
+    [Fact]
+    public void AnExtraWhosePrimaryIsHiddenKeepsItsCardAtTheEnd()
+    {
+        var agents = new[] { Who("claude", accountKey: "claude-desktop"), Who("codex") };
+        Assert.Equal(["codex", "claude#claude-desktop"], Rows(LimitsCardOrder.Apply(agents, "claude,codex")));
+    }
+
+    [Fact]
+    public void ADropRewritesOnlyTheVisibleSlotsOfTheSharedOrder()
+    {
+        // grok has a tab but no quota card; it must keep its slot.
+        Assert.Equal("gemini,grok,claude,codex",
+            LimitsCardOrder.Dropped("claude,grok,codex,gemini", ["claude", "codex", "gemini"], "gemini", "claude"));
+        Assert.Equal("codex,grok,claude,gemini",
+            LimitsCardOrder.Dropped("claude,grok,codex,gemini", ["claude", "codex", "gemini"], "claude", "codex"));
+    }
+
+    // Three groups 100 tall with 10px gaps: A 0-100, B 110-210, C 220-320.
+    private static readonly LimitsCardOrder.Span[] Spans =
+    [
+        new("C", 220, 320), new("A", 0, 100), new("B", 110, 210),
+    ];
+
+    [Theory]
+    // Dragging A down: the gap under B shows B's bottom line, so it is B's.
+    [InlineData("A", 50, "A")]
+    [InlineData("A", 105, "A")]
+    [InlineData("A", 150, "B")]
+    [InlineData("A", 215, "B")]
+    [InlineData("A", 400, "C")]
+    // Dragging C up: the gap above B shows B's top line, so it is B's.
+    [InlineData("C", 250, "C")]
+    [InlineData("C", 215, "C")]
+    [InlineData("C", 205, "B")]
+    [InlineData("C", 105, "B")]
+    [InlineData("C", 50, "A")]
+    [InlineData("C", -40, "A")]
+    public void EveryPointerPositionDropsOntoTheGroupWhoseLineItShows(string dragged, double y, string expected)
+    {
+        Assert.Equal(expected, LimitsCardOrder.DropTarget(Spans, dragged, y));
+    }
+
+    [Fact]
+    public void TheDropLineSitsBelowWhenDraggingDown()
+    {
+        string[] visible = ["claude", "codex", "gemini"];
+        Assert.True(LimitsCardOrder.DropsBelow(visible, "claude", "gemini"));
+        Assert.False(LimitsCardOrder.DropsBelow(visible, "gemini", "claude"));
+    }
+
     // ---- Trend indicator -------------------------------------------------
 
     [Fact]

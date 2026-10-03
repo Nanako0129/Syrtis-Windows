@@ -571,11 +571,7 @@ public sealed class TrayService : IDisposable
         if (QuotaSelectionPolicy.Resolve(_feed.Quota, persistedSelection, hidden)
             is { } pick)
         {
-            var left = Math.Clamp(pick.Window.RemainingPercent, 0, 100);
-            lines.Add("{0} {1} {2}% left".Localized(
-                AccountLabel.Of(AccountIdentity.Of(pick.ClientId, pick.AccountKey), _feed.Quota),
-                pick.Window.Label.Localized(),
-                left.ToString("F0", System.Globalization.CultureInfo.CurrentCulture)));
+            lines.Add(pick.TooltipLine(_feed.Quota));
         }
 
         return string.Join("\n", lines);

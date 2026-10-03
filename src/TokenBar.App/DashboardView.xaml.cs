@@ -19,6 +19,11 @@ namespace TokenBar.App;
 public sealed partial class DashboardView : UserControl
 {
     private DashboardModel.Snapshot? _snapshot;
+
+    /// <summary>A content rebuild was asked for while a limits card was being
+    /// dragged (<see cref="LimitsDrag.InProgress"/>); it runs when the drag
+    /// ends.</summary>
+    private bool _renderHeldForDrag;
     private DashboardModel? _model;
     private AppView _view = AppView.Overview;
     private readonly Dictionary<AppView, Button> _tabs = [];
@@ -114,6 +119,18 @@ public sealed partial class DashboardView : UserControl
 
         // Limits/trace settings re-render the open flyout live (the macOS
         // panel's right-column preview equivalent is the flyout itself).
+        LimitsDrag.Finished += () =>
+        {
+            // Queued, not inline: Finished fires inside the grip's own pointer
+            // handler, and rebuilding the panel there would detach the
+            // element whose handler is still running.
+            if (_renderHeldForDrag)
+            {
+                _renderHeldForDrag = false;
+                _ = DispatcherQueue.TryEnqueue(() => RenderContent(animated: false));
+            }
+        };
+
         AppSettings.Store.Changed += key =>
         {
             if (key is ClientRegistry.TabHiddenKey or ClientRegistry.TabOrderKey)
@@ -254,6 +271,7 @@ public sealed partial class DashboardView : UserControl
     public void OnFlyoutHidden()
     {
         _flyoutVisible = false;
+        LimitsDrag.CancelActive();
         _graph3d?.Release();
         UpdateHints(false); // a Ctrl release while hidden is never seen
     }
@@ -535,6 +553,8 @@ public sealed partial class DashboardView : UserControl
 
     private void RenderLoadingState()
     {
+        // Clears the content directly, past RenderContent's drag hold.
+        LimitsDrag.CancelActive();
         TodayValue.Text = "—";
         TotalValue.Text = "—";
         RateValue.Text = "—";
@@ -921,6 +941,12 @@ public sealed partial class DashboardView : UserControl
     {
         if (_snapshot is null)
         {
+            return;
+        }
+
+        if (LimitsDrag.InProgress)
+        {
+            _renderHeldForDrag = true;
             return;
         }
 
@@ -1634,10 +1660,24 @@ public sealed partial class DashboardView : UserControl
 
         var now = DateTimeOffset.Now;
         var liveClients = AgentLimitsText.LiveClients(snapshot.Trace);
+        // Only the multi-client card reorders, as on macOS (`reorderable`).
+        var reorderable = clientId is null;
+        if (reorderable)
+        {
+            agents = LimitsCardOrder.Apply(
+                agents, AppSettings.Store.GetString(ClientRegistry.TabOrderKey) ?? "");
+        }
+
+        var drag = reorderable ? new LimitsDrag(panel, agents) : null;
         foreach (var agent in agents)
         {
             var section = new StackPanel { Spacing = 5 };
             var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+            if (drag is not null && agent.Account.AccountKey is null)
+            {
+                header.Children.Add(drag.Grip(agent.ClientId));
+            }
+
             header.Children.Add(AgentIcon.Create(agent.ClientId, 14));
             var title = Ui.Text(AccountLabel.Of(agent, snapshot.Quota), 12, bold: true);
             if (AccountLabel.Detail(agent.Account) is { } fullPath)
@@ -1646,17 +1686,37 @@ public sealed partial class DashboardView : UserControl
             }
 
             header.Children.Add(title);
-            if (agent.Identity?.Plan is { } plan)
-            {
-                header.Children.Add(Ui.Dim(plan, 10));
-            }
-
             var badge = AgentLimitsText.StatusBadge(agent, liveClients.Contains(agent.ClientId));
             section.Children.Add(Ui.Row(header, ToneText(badge.Text, 10, badge.Tone)));
-            if (agent.Error is { } error)
+            // Added before the section is filled; null when the card joined
+            // its primary's drag group.
+            if ((drag is null ? section : drag.Host(agent, section)) is { } host)
             {
-                section.Children.Add(Ui.Dim(error, 11));
-                panel.Children.Add(section);
+                panel.Children.Add(host);
+            }
+
+            if (agent.IsSetupPlaceholder)
+            {
+                // ponytail: placeholder copy stays the raw error until G3b's setup prompt.
+                if (!string.IsNullOrEmpty(agent.Error))
+                {
+                    section.Children.Add(Ui.Dim(agent.Error, 11));
+                }
+
+                continue;
+            }
+
+            if (AgentLimitsText.Detail(agent) is { } detail)
+            {
+                var line = ToneText(detail.Text, 10, detail.IsError ? LimitsTone.Red : LimitsTone.Secondary);
+                line.TextWrapping = TextWrapping.Wrap;
+                line.MaxLines = 2;
+                HoverTip.Attach(line, () => detail.Text);
+                section.Children.Add(line);
+            }
+
+            if (agent.Error is not null)
+            {
                 continue;
             }
 
@@ -1687,8 +1747,6 @@ public sealed partial class DashboardView : UserControl
                     window, row, classic, metric,
                     layout == LimitsLayout.Chart ? samples : null, trend));
             }
-
-            panel.Children.Add(section);
         }
 
         return panel;
