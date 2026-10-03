@@ -1810,6 +1810,7 @@ async fn fetch_opencode_go_with(deps: &OpenCodeGoDeps<'_>) -> Option<AgentUsageS
                     snapshot: AgentUsageSnapshot {
                         account_key: None,
                         merge_scope: None,
+                        agy_login_marker: None,
                         // The Go subscription quota attaches to the existing
                         // `opencode` client tab, mirroring how the Copilot quota
                         // (also fetched via opencode auth) feeds the `copilot`
