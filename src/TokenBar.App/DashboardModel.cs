@@ -247,14 +247,26 @@ public sealed class DashboardModel
     /// <summary>The native setters already dropped every scan cache and the
     /// removed accounts' state; ask again so an added account's card and usage
     /// appear, and a removed one's disappear, without waiting for the next
-    /// 60 s tick.</summary>
-    private void OnClaudeRootsPushed(ClaudeRootsPush _) =>
+    /// 60 s tick. Forced: a graph request already in flight was scanned with
+    /// the old roots and must not absorb this one, and a new generation also
+    /// stops that scan's snapshot write. With the flyout closed the force
+    /// waits for <see cref="Start"/>. The launch push is skipped: every reader
+    /// it affects already waited for it.</summary>
+    private void OnClaudeRootsPushed(ClaudeRootsPush push)
+    {
+        if (ClaudeExtraRoots.IsLaunchPush(push))
+        {
+            return;
+        }
+
         _dispatcher.TryEnqueue(() =>
         {
+            Volatile.Write(ref _forceRequested, 1);
             RefreshSlow();
             RefreshQuota();
             RequestLazyRefresh();
         });
+    }
 
     public Snapshot? Current { get; private set; }
 
@@ -599,6 +611,8 @@ public sealed class DashboardModel
     /// (<see cref="ClaudeExtraRoots.AttributableAccountKeys"/>). A failed scan
     /// keeps that account's prior rows; an account no longer on the cards is
     /// dropped.</summary>
+    // ponytail: one account after another, at most MaxDirs (8) scans; run them
+    // in parallel or only for the shown card if a many-account setup is slow.
     private IReadOnlyDictionary<string, Interop.WindowUsage> FetchAccountWindows(
         long fromMs, long untilMs, IReadOnlyDictionary<string, Interop.WindowUsage>? prior)
     {
@@ -691,6 +705,13 @@ public sealed class DashboardModel
         _slowTimer.Start();
         _fastTimer!.Start();
         AttachGraph(_year);
+        // Extra Claude roots changed while the flyout was closed: the
+        // retained graph predates them.
+        if (Volatile.Read(ref _forceRequested) == 1)
+        {
+            RefreshSlow();
+        }
+
         RefreshQuota();
         RefreshFast();
     }

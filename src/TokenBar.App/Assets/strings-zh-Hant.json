@@ -481,7 +481,7 @@
   "A folder on a network drive is read over the network on every refresh. Network paths (\\\\server\\share) and folders inside WSL can't be added yet.": "網路磁碟上的資料夾，每次更新都會透過網路讀取。網路路徑（\\\\server\\share）和 WSL 裡的資料夾目前還不能加入。",
   "Remove only stops Syrtis reading the folder. The folder and its sign-in stay as they are, nothing is revoked at Anthropic, and the card's history is kept: adding the same folder again continues it.": "移除只會讓 Syrtis 停止讀取這個資料夾。資料夾和裡面的登入資訊都不會變動，也不會在 Anthropic 那邊撤銷任何授權；卡片的歷史紀錄會保留，之後再加入同一個資料夾就會接續下去。",
   "That's your user folder. Pick the Claude config folder inside it.": "這是你的使用者資料夾，請選它裡面的 Claude 設定資料夾。",
-  "That's your main Claude account's folder, which is already shown.": "這是主要 Claude 帳號的資料夾，已經有顯示了。",
+  "That folder overlaps your main Claude account's folder, which is already shown.": "這個資料夾和主要 Claude 帳號的資料夾重疊，而主要帳號已經有顯示了。",
   "Already added.": "已經加入過了。",
   "Only folders on a drive letter can be added, not network or WSL paths.": "只能加入磁碟機代號底下的資料夾，網路路徑和 WSL 路徑不行。",
   "A drive's root can't be added.": "不能加入磁碟機的根目錄。",

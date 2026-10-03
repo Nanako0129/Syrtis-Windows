@@ -47,13 +47,23 @@ public static class ClaudeExtraRoots
     public static string Fold(string path) =>
         path.TrimEnd('\\', '/').Replace('/', '\\').ToLowerInvariant();
 
+    /// <summary>Most directories Rust's registries take (the same cap).</summary>
+    public const int MaxDirs = 8;
+
     /// <summary>Why the picker refuses <paramref name="path"/> before saving,
-    /// or null. The profile folder itself would scan the whole profile; its
-    /// <c>.claude</c> is the primary account (security review R2), which Rust
-    /// refuses too. Both compared on the folded form.</summary>
+    /// or null, so a path the registries would refuse anyway never reaches the
+    /// list. Mirrors the native rules on the folded form: a network/UNC path;
+    /// the profile folder itself; the primary's <c>.claude</c>, anything under
+    /// it or any folder above it (security review R2); a duplicate; a ninth
+    /// folder. Rust stays authoritative for everything else.</summary>
     public static string? UiRejection(string path, IReadOnlyList<string> existing, string? userProfile)
     {
         var key = Fold(path);
+        if (key.StartsWith("\\\\", StringComparison.Ordinal))
+        {
+            return "unsupportedPath";
+        }
+
         if (!string.IsNullOrEmpty(userProfile))
         {
             var home = Fold(userProfile);
@@ -62,13 +72,21 @@ public static class ClaudeExtraRoots
                 return "homeDirectory";
             }
 
-            if (key == home + "\\.claude")
+            var primary = home + "\\.claude";
+            if (key == primary
+                || key.StartsWith(primary + "\\", StringComparison.Ordinal)
+                || primary.StartsWith(key + "\\", StringComparison.Ordinal))
             {
                 return "defaultConfigDir";
             }
         }
 
-        return existing.Any(dir => Fold(dir) == key) ? "duplicate" : null;
+        if (existing.Any(dir => Fold(dir) == key))
+        {
+            return "duplicate";
+        }
+
+        return existing.Count >= MaxDirs ? "limitExceeded" : null;
     }
 
     /// <summary>The transcript roots of each directory, as macOS
@@ -103,8 +121,38 @@ public static class ClaudeExtraRoots
 
     /// <summary>The launch push, or a completed task when nothing was saved
     /// (a fresh process's registries are already empty, so it pushes nothing
-    /// and its scans are exactly what they were before this feature).</summary>
-    public static Task LaunchPush { get; set; } = Task.CompletedTask;
+    /// and its scans are exactly what they were before this feature). Never
+    /// faults: see <see cref="Observe"/>.</summary>
+    public static Task LaunchPush { get; private set; } = Task.CompletedTask;
+
+    /// <summary>Queue the launch push. Its push is the pusher's first
+    /// (<see cref="ClaudeRootsPush.Sequence"/> 1), which the dashboard skips:
+    /// its readers already waited for it.</summary>
+    public static void StartLaunch(ClaudeRootsPusher pusher)
+    {
+        LaunchRequested = true;
+        LaunchPush = Observe(pusher.Request(), Log);
+    }
+
+    public static bool LaunchRequested { get; private set; }
+
+    public static bool IsLaunchPush(ClaudeRootsPush push) => LaunchRequested && push.Sequence == 1;
+
+    /// <summary><paramref name="push"/>, logged once if it failed (type only)
+    /// and never faulting, so every later reader waits on a finished task and
+    /// writes nothing.</summary>
+    public static Task Observe(Task push, Action<string> log) =>
+        push.ContinueWith(
+            done =>
+            {
+                if (done.IsFaulted)
+                {
+                    log($"claudeRoots launch push failed; using the current context: {done.Exception?.InnerException?.GetType().Name}");
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
 
     /// <summary>How long a background reader waits for the launch push.
     /// ponytail: a fixed guess, not measured; the push is two setters and one
@@ -112,23 +160,18 @@ public static class ClaudeExtraRoots
     /// that was current, and the push's own refresh corrects it.</summary>
     public static readonly TimeSpan LaunchWait = TimeSpan.FromSeconds(10);
 
-    /// <summary>Block a background reader (graph, snapshot, quota) until the
-    /// launch push has landed, so the first scan, the first quota fetch and the
-    /// snapshot's source id (security review R4) all see the saved roots. On a
-    /// timeout or a failed push it returns and the reader carries on with the
-    /// current context. Never call on the UI thread.</summary>
+    /// <summary>Block a background reader until the launch push has landed.
+    /// Called by the graph coordinator's scans, the snapshot's source id
+    /// (security review R4) and the shared quota fetch; the hourly, agents,
+    /// window and live-trace lanes do not wait (they run after a graph
+    /// publication or are a trailing live rate). On a timeout it returns and
+    /// the reader carries on with the current context. Never call on the UI
+    /// thread.</summary>
     public static void AwaitLaunch(Task launch, TimeSpan timeout, Action<string> log)
     {
-        try
+        if (!launch.Wait(timeout))
         {
-            if (!launch.Wait(timeout))
-            {
-                log("claudeRoots launch push timed out; using the current context");
-            }
-        }
-        catch (AggregateException ex)
-        {
-            log($"claudeRoots launch push failed; using the current context: {ex.InnerException?.GetType().Name}");
+            log("claudeRoots launch push timed out; using the current context");
         }
     }
 
@@ -143,7 +186,8 @@ public static class ClaudeExtraRoots
 /// code for each directory the registries refused (by list index).</summary>
 public sealed record ClaudeRootsPush(
     IReadOnlyList<string> Dirs,
-    IReadOnlyDictionary<int, string> Rejected);
+    IReadOnlyDictionary<int, string> Rejected,
+    int Sequence);
 
 /// <summary>
 /// One serialized worker for both full-replace setters (security review R7):
@@ -151,7 +195,10 @@ public sealed record ClaudeRootsPush(
 /// persisted list when it RUNS, not when it was requested — so the last saved
 /// list always wins, however the setters' completions would have interleaved.
 /// Order inside a push: config directories, then the scan roots of the
-/// directories that registry accepted.
+/// directories that registry accepted. The two registries always end on the
+/// same directories: one whose scan roots are refused is taken out of the
+/// config registry too (no card without its usage), and a scan setter that
+/// throws puts the config registry back to the last list both accepted.
 /// </summary>
 public sealed class ClaudeRootsPusher(
     Func<IReadOnlyList<string>> load,
@@ -162,6 +209,9 @@ public sealed class ClaudeRootsPusher(
     private readonly object _gate = new();
     private bool _running;
     private TaskCompletionSource? _next;
+    // Touched only by the worker loop. A fresh process's registries are empty.
+    private IReadOnlyList<string> _applied = [];
+    private int _sequence;
 
     /// <summary>Raised after every push that reached both setters.</summary>
     public event Action<ClaudeRootsPush>? Pushed;
@@ -229,7 +279,27 @@ public sealed class ClaudeRootsPusher(
         }
 
         var accepted = Enumerable.Range(0, dirs.Count).Where(i => !rejected.ContainsKey(i)).ToList();
-        var scan = setScanRoots(ClaudeExtraRoots.ScanRoots(accepted.Select(i => dirs[i])));
+        RootsResult scan;
+        try
+        {
+            scan = setScanRoots(ClaudeExtraRoots.ScanRoots(accepted.Select(i => dirs[i])));
+        }
+        catch
+        {
+            // On error the scan registry is unchanged; match it. Best effort:
+            // the original failure is the one reported.
+            try
+            {
+                setConfigDirs(_applied);
+            }
+            catch (Exception ex)
+            {
+                log($"claudeRoots rollback failed: {ex.GetType().Name}");
+            }
+
+            throw;
+        }
+
         foreach (var rejection in scan.Rejected)
         {
             // Two roots per accepted directory, in order.
@@ -237,7 +307,14 @@ public sealed class ClaudeRootsPusher(
             rejected.TryAdd(dir, rejection.Reason);
         }
 
-        var push = new ClaudeRootsPush(dirs, rejected);
+        List<string> both = [.. Enumerable.Range(0, dirs.Count).Where(i => !rejected.ContainsKey(i)).Select(i => dirs[i])];
+        if (both.Count != accepted.Count)
+        {
+            setConfigDirs(both);
+        }
+
+        _applied = both;
+        var push = new ClaudeRootsPush(dirs, rejected, ++_sequence);
         Last = push;
         Pushed?.Invoke(push);
     }
