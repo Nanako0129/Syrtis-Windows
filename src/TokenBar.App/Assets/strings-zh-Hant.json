@@ -419,5 +419,12 @@
   "Show cost as a figure instead of a range": "以金額而非級距顯示花費",
   "A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend.": "級距讓你和同一區間裡的其他人混在一起。金額會取整到整數美元、不含分位，但仍然每天多透露一些。若上方指定了單一用戶端，它就等於那個工具的每日花費。",
   "Whichever client you used most": "用量最高的用戶端",
-  "Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones Syrtis does not recognise. The cost becomes that one tool's daily spend rather than the whole day's.": "指定單一用戶端後只會發布它的用量，因此數字可能與選單列不同——選單列會計入所有用戶端，包含 Syrtis 未收錄的。花費也會變成那一個工具的當日金額，而非整天的總額。"
+  "Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones Syrtis does not recognise. The cost becomes that one tool's daily spend rather than the whole day's.": "指定單一用戶端後只會發布它的用量，因此數字可能與選單列不同——選單列會計入所有用戶端，包含 Syrtis 未收錄的。花費也會變成那一個工具的當日金額，而非整天的總額。",
+  "Light pace": "輕度",
+  "Moderate pace": "中度",
+  "Heavy pace": "重度",
+  "Occasional use, or a plan like Claude Pro": "偶爾使用，或像 Claude Pro 這類方案",
+  "A few agents at once, or a plan like Claude Max 5x": "幾個 agent 同時跑，或像 Claude Max 5x 這類方案",
+  "Lots of agents at once, such as Claude Code's ultracode, or a plan like Claude Max 20x": "超多 agent 同時跑（例如 Claude Code 的 ultracode），或像 Claude Max 20x 這類方案",
+  "The cat and parrot speed up as the live token rate climbs. The pace sets how much traffic reaches the top: Light at 600K tokens/min, Moderate at 3M, Heavy at 10M.": "即時 token 速率越高，貓和鸚鵡跑得越快。動畫速度決定多大的流量會到頂：輕度是每分鐘 60 萬 token、中度 300 萬、重度 1,000 萬。"
 }

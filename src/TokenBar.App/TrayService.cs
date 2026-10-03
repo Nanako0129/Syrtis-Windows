@@ -617,9 +617,11 @@ public sealed class TrayService : IDisposable
         using var bmp = mode != TrayMode.Hidden && title.Length > 0
             ? TrayIconRenderer.RenderTitle(
                 TrayModes.IconTitle(title),
-                TrayIconRenderer.ResolveInk(
-                    AppSettings.Store, automaticColor,
-                    mode == TrayMode.QuotaLeft ? remaining : null),
+                TrayGlyph.TitleIsStale(mode, remaining, stale)
+                    ? TrayIconRenderer.StaleInk(dark)
+                    : TrayIconRenderer.ResolveInk(
+                        AppSettings.Store, automaticColor,
+                        mode == TrayMode.QuotaLeft ? remaining : null),
                 dark)
             : TrayIconRenderer.RenderGauge(
                 TrayIconRenderer.ParseGaugeStyle(styleRaw) ?? QuotaIconStyle.Bars,

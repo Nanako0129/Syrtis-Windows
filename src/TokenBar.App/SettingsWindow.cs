@@ -215,12 +215,13 @@ public sealed class SettingsWindow : Window
 
             // Changed fires on the writing thread — and a vanished-year clear
             // runs Store.Remove on a background parse lane — so hop to the UI
-            // thread BEFORE touching AppWindow or any XAML. Only the two keys
-            // that change which sub-controls exist rebuild the whole panel (a
+            // thread BEFORE touching AppWindow or any XAML. Only the keys that
+            // change which sub-controls exist rebuild the whole panel (a
             // full rebuild drops keyboard focus and scroll position, breaking
             // arrow-key radio navigation); everything else refreshes the
             // preview column in place.
             var rebuildAll = key is "tokenbar.tray.animationStyle"
+                or "tokenbar.tray.animate"
                 or "tokenbar.limits.layout"
                 or MenuBarTextColor.StorageKey
                 or ClientRegistry.TabHiddenKey
@@ -373,6 +374,29 @@ public sealed class SettingsWindow : Window
             icon.Children.Add(Hint(
                 ("Idle purrs at 2 fps; a heavy session sprints. Shown only in "
                     + "the icon-only tray mode.").Localized()));
+            // macOS SettingsPanel.swift:309-316: the pace applies only while
+            // the animation follows the rate, so it is offered only then.
+            if (animate.IsOn)
+            {
+                // The detail follows the pick in place: a full rebuild per
+                // pick would drop the radio group's keyboard focus.
+                var pace = AnimationPaces.Current(store);
+                var detail = Hint(pace.Detail());
+                icon.Children.Add(RadioGroup(
+                    "tray.animationPace",
+                    AnimationPaces.All.Select(p => (p.RawValue(), p.Label())),
+                    pace.RawValue(),
+                    raw =>
+                    {
+                        store.SetString(AnimationPaces.StorageKey, raw);
+                        detail.Text = AnimationPaces.Parse(raw).Detail();
+                    }));
+                icon.Children.Add(detail);
+                icon.Children.Add(Hint(
+                    ("The cat and parrot speed up as the live token rate climbs. The pace "
+                        + "sets how much traffic reaches the top: Light at 600K tokens/min, "
+                        + "Moderate at 3M, Heavy at 10M.").Localized()));
+            }
         }
         else
         {
@@ -1395,11 +1419,10 @@ public sealed class SettingsWindow : Window
             payload, persistedSelection, hidden, lastSelection,
             double.IsFinite(lastRemaining) ? lastRemaining : null);
         double? remaining = reading.Remaining;
-        // Stale only applies to a real reading (macOS SettingsWindowView.swift:
-        // 453-461 passes the nullable remaining straight through). `remaining`
-        // here is that real, possibly-null value — the `?? 57` demo fallback
-        // used for DRAWING below must not also feed the no-reading guard, or
-        // it'd defeat RenderGauge's own `stale && remaining is not null` check.
+        // Stale only applies to a real reading, and the gauge gets the real,
+        // possibly-null value too: macOS SettingsWindowView.swift:482-494
+        // passes it straight to TrayIcons.image, so a preview with no reading
+        // shows the no-reading glyph, as the tray does.
         var stamp = QuotaStaleness.PersistedResolvedAt(store);
         var stale = remaining is not null && QuotaStaleness.ReadingIsStale(
             payload, selection, hidden, stamp, DateTimeOffset.UtcNow);
@@ -1407,18 +1430,23 @@ public sealed class SettingsWindow : Window
 
         System.Drawing.Color? automaticColor = mode == TrayMode.QuotaLeft
             ? TrayIconRenderer.GaugeColor(remaining ?? 57) : null;
-        var titleColor = TrayIconRenderer.ResolveInk(
+        var resolvedTitleColor = TrayIconRenderer.ResolveInk(
             store, automaticColor, mode == TrayMode.QuotaLeft ? remaining ?? 57 : null);
         var gaugeStyle = TrayIconRenderer.ParseGaugeStyle(styleRaw);
         foreach (var dark in new[] { true, false })
         {
             // Hidden + cat/parrot really shows the animator, so the preview
             // uses the animation's first frame, not a gauge stand-in.
+            // Same stale title rule as the tray (macOS
+            // SettingsWindowView.swift:426-439, #420).
+            var titleColor = TrayGlyph.TitleIsStale(mode, remaining, stale)
+                ? TrayIconRenderer.StaleInk(dark)
+                : resolvedTitleColor;
             using var bmp = mode != TrayMode.Hidden && title.Length > 0
                 ? TrayIconRenderer.RenderTitle(
                     TrayModes.IconTitle(title), titleColor, dark)
                 : gaugeStyle is { } style
-                    ? TrayIconRenderer.RenderGauge(style, remaining ?? 57, dark, coloring, stale)
+                    ? TrayIconRenderer.RenderGauge(style, remaining, dark, coloring, stale)
                     : AnimationFrame(styleRaw, dark);
             var strip = new Border
             {

@@ -4,14 +4,11 @@ using TokenBar.Interop;
 namespace TokenBar.Core.Tests;
 
 /// <summary>Port of the macOS #418 staleness assertions (TrayAnimator.swift
-/// readingIsStale / applyQuotaRemaining). The renderer half (grey fill,
-/// no-reading ignores the flag) lives in TrayIconRenderer.RenderGauge, which
+/// readingIsStale / applyQuotaRemaining). Which glyph the renderer draws
+/// (live, stale grey, or no reading whatever the stamp) is TrayGlyph.Gauge,
+/// covered by TrayGlyphTests. The pixels live in TrayIconRenderer, which
 /// compiles only under the WinUI (net10.0-windows) target and is not linked
-/// into this cross-platform project. It has no automated test — CI runs only
-/// TokenBar.Core.Tests, which cannot see this file at all — and is checked
-/// visually on x64 instead. See TrayIconRenderer.cs's
-/// StaleFillDark/StaleFillLight and the `stale && remaining is not null`
-/// guard for that logic.</summary>
+/// into this cross-platform project, so they are checked visually on x64.</summary>
 public class QuotaStalenessTests
 {
     private static readonly HashSet<string> NoneHidden = [];
