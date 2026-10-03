@@ -27,10 +27,10 @@ internal static class ClaudeAccountsCopy
         "For each folder, Syrtis reads the sign-in in .credentials.json and the transcripts under projects and transcripts. It never refreshes or rewrites that sign-in and keeps no copy of the token, only a one-way fingerprint to tell accounts apart. The folder path is saved in Syrtis's settings file.";
 
     internal const string Transport =
-        "The token is sent only to api.anthropic.com, in requests that identify as Claude Code, for that account's usage and profile. If the sign-in can't read its usage, Syrtis sends one real request to Claude Haiku instead (a fixed one-word prompt, 1 output token, counted against that account), at most about once every 5 minutes. With any folder added, your main account's profile is also looked up.";
+        "The token is sent only to api.anthropic.com, in requests that identify as Claude Code, for that account's usage and profile. If the sign-in can't read its usage, Syrtis sends one real request to Claude Haiku instead (a fixed one-word prompt, 1 output token, counted against that account), usually no more than once every 5 minutes. With any folder added, your main account's profile is also looked up.";
 
     internal const string Locations =
-        "A folder on a network drive is read over the network on every refresh. Network paths (\\\\server\\share) and folders inside WSL can't be added yet.";
+        "A folder on a network drive is read over the network on every refresh. Network paths (\\\\server\\share) can't be added, and folders inside WSL can't be added yet.";
 
     internal const string RemoveMeans =
         "Remove only stops Syrtis reading the folder. The folder and its sign-in stay as they are, nothing is revoked at Anthropic, and the card's history is kept: adding the same folder again continues it.";
