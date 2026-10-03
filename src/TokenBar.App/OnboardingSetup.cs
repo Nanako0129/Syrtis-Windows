@@ -159,7 +159,7 @@ internal static class OnboardingSetup
     /// is animating, before the card was answered, in a user runtime.</summary>
     internal static bool PaceCardShows(
         string styleRaw, bool animate, bool answered, IEnumerable<string> arguments) =>
-        styleRaw is "cat" or "parrot" && animate && !answered && IsUserRuntime(arguments);
+        SandShoal.IsAnimated(styleRaw) && animate && !answered && IsUserRuntime(arguments);
 
     internal static bool PaceCardShows(SettingsStore store, IEnumerable<string> arguments) =>
         PaceCardShows(

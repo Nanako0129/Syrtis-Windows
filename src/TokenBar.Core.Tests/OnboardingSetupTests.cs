@@ -217,6 +217,7 @@ public class OnboardingSetupTests : IDisposable
     [Theory]
     [InlineData("cat", true, false, true)]
     [InlineData("parrot", true, false, true)]
+    [InlineData("sand", true, false, true)] // macOS animatedStyles includes the sand
     [InlineData("bars", true, false, false)]
     [InlineData("ring", true, false, false)]
     [InlineData("cat", false, false, false)]
