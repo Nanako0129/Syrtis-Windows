@@ -25,6 +25,7 @@ mod agent_storage_windows;
 mod agent_usage;
 mod agents_report;
 mod claude_config_dirs;
+mod extra_scan_paths;
 mod filter_parity_probe;
 mod hourly_report;
 mod model_report;
@@ -34,10 +35,13 @@ mod usage_tail;
 #[cfg(target_os = "windows")]
 mod win_safe_storage;
 mod window_usage;
+#[cfg(test)]
+mod roots_acceptance;
 
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -62,6 +66,10 @@ pub(crate) fn user_home_dir() -> Option<PathBuf> {
 #[derive(Debug, Clone)]
 pub(crate) struct LocalSourceContext {
     resolved: Arc<tokscale_core::ResolvedLocalSourceContext>,
+    /// The root generation this context was captured at. Travels with the
+    /// context so a publisher can tell whether the roots it scanned are still
+    /// the current ones; see [`ROOT_GENERATION`].
+    generation: u64,
 }
 
 impl LocalSourceContext {
@@ -77,16 +85,61 @@ impl LocalSourceContext {
             scanner_settings,
         )
         .map(Arc::new)
-        .map(|resolved| Self { resolved })
+        .map(|resolved| Self {
+            resolved,
+            generation: ROOT_GENERATION.load(Ordering::SeqCst),
+        })
     }
 
+    /// The process context. Captured lazily on first use from the current
+    /// scan-root registry (empty unless `tb_set_extra_scan_paths` ran), and
+    /// replaced by that setter. The cell lock is held only to read or fill the
+    /// pair; the generation stored beside the context is the one it was
+    /// captured at (W4b lock-order and lazy-fill rules).
     pub(crate) fn process() -> Result<Self, tokscale_core::SourceContextUnavailable> {
-        PROCESS_SOURCE_CONTEXT
-            .as_ref()
-            .map(|resolved| Self {
+        let mut cell = lock_context_cell();
+        if let Some((generation, resolved)) = cell.as_ref() {
+            return Ok(Self {
                 resolved: Arc::clone(resolved),
-            })
-            .map_err(|error| *error)
+                generation: *generation,
+            });
+        }
+        // Lazy fill: the generation read under the cell lock is the one the
+        // context is stored with, so a setter that ran before the first read
+        // (W4's launch push) does not leave the cell permanently behind the
+        // atomic, which would make every gated publisher drop its result.
+        let generation = ROOT_GENERATION.load(Ordering::SeqCst);
+        let resolved = Arc::new(capture_process_context(extra_scan_paths::snapshot())?);
+        *cell = Some((generation, Arc::clone(&resolved)));
+        Ok(Self {
+            resolved,
+            generation,
+        })
+    }
+
+    /// Whether the roots this context was captured with are still current.
+    /// Publishers check this inside their own publish lock and drop the result
+    /// otherwise (macOS `root_generation` gate).
+    pub(crate) fn is_current(&self) -> bool {
+        self.generation == ROOT_GENERATION.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// A context scoped from the process context (per-account window usage),
+    /// carrying the process context's generation so the same gate applies.
+    pub(crate) fn derived(resolved: tokscale_core::ResolvedLocalSourceContext, generation: u64) -> Self {
+        Self {
+            resolved: Arc::new(resolved),
+            generation,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn same_resolved(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.resolved, &other.resolved)
     }
 
     pub(crate) fn resolved(&self) -> &tokscale_core::ResolvedLocalSourceContext {
@@ -118,16 +171,41 @@ impl LocalSourceContext {
     }
 }
 
-static PROCESS_SOURCE_CONTEXT: LazyLock<
-    Result<Arc<tokscale_core::ResolvedLocalSourceContext>, tokscale_core::SourceContextUnavailable>,
-> = LazyLock::new(|| {
+/// Moves on every successful root change (scan roots or Claude config dirs).
+/// Written only by the setters, under the cell lock; read lock-free by
+/// publishers, so no cache, memo, tail or `COMPUTE` lock ever waits on the
+/// cell lock.
+static ROOT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// `(generation, context)`, or `None` before the first `process()`.
+/// Lock order: `ROOTS_SETTER` → (config-dir path: `CLAUDE_ACCOUNT_STATE_LOCK`)
+/// → this cell → the scan-root registry. Never taken while holding a cache,
+/// memo, tail or `COMPUTE` lock, and never held while taking one.
+static PROCESS_SOURCE_CONTEXT: Mutex<Option<(u64, Arc<tokscale_core::ResolvedLocalSourceContext>)>> =
+    Mutex::new(None);
+
+/// Serializes the two root setters, so a capture and its commit are one step.
+static ROOTS_SETTER: Mutex<()> = Mutex::new(());
+
+fn lock_context_cell(
+) -> std::sync::MutexGuard<'static, Option<(u64, Arc<tokscale_core::ResolvedLocalSourceContext>)>> {
+    PROCESS_SOURCE_CONTEXT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn capture_process_context(
+    extra_scan_paths: std::collections::BTreeMap<String, Vec<PathBuf>>,
+) -> Result<tokscale_core::ResolvedLocalSourceContext, tokscale_core::SourceContextUnavailable> {
     tokscale_core::ResolvedLocalSourceContext::capture(
         user_home_dir(),
         true,
-        tokscale_core::ScannerSettings::default(),
+        tokscale_core::ScannerSettings {
+            extra_scan_paths,
+            ..Default::default()
+        },
     )
-    .map(Arc::new)
-});
+}
 
 /// Serve `tb_graph` from cache when the last computation is at most this old;
 /// `tb_refresh_graph` always recomputes. Mirrors the Tauri app's oneshot cache.
@@ -347,10 +425,14 @@ fn graph_compute(context: &LocalSourceContext, year: &str) -> Result<serde_json:
     )
     .unwrap_or(0);
     let data = usage_graph::run(context, year)?;
-    GRAPH_CACHE
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(year.to_string(), (Instant::now(), token, data.clone()));
+    let mut cache = GRAPH_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    // A root change since this context was taken means `data` describes the
+    // old roots: answer this caller, but never let it answer the next one.
+    // The read paths (`graph_cached`) are deliberately not gated: the setter
+    // clears this cache right after it moves the generation.
+    if context.is_current() {
+        cache.insert(year.to_string(), (Instant::now(), token, data.clone()));
+    }
     Ok(data)
 }
 
@@ -397,7 +479,13 @@ fn tail_tick_if_stale(context: &LocalSourceContext) {
     if claimed {
         let _guard = TickGuard; // clears in_flight on drop (success or panic)
         TAILER.tick(context);
-        lock_tick().last = Some(Instant::now()); // success only — panic skips this
+        let mut st = lock_tick();
+        // Success only — panic skips this. A tick that read the old roots does
+        // not stamp, so the next poll re-ticks under the new ones instead of
+        // waiting out `TAIL_TICK_SECS` (macOS `stamp_tick_if_current`).
+        if context.is_current() {
+            st.last = Some(Instant::now());
+        }
     }
 }
 
@@ -566,7 +654,8 @@ fn source_context_id_envelope(
     }
 }
 
-/// Return the process-stable, configuration-only source-context identity.
+/// Return the configuration-only source-context identity. Stable while the
+/// scan roots are; `tb_set_extra_scan_paths` changes it.
 /// Failures are fixed and redacted so paths and panic payloads never cross the
 /// ABI. Identity capture and formatting stay wholly inside the unwind boundary.
 #[no_mangle]
@@ -699,15 +788,120 @@ pub extern "C" fn tb_quota_history() -> *mut c_char {
 /// `window_usage` module doc). A poll-every-60s caller gets a cache hit on
 /// every call after the first through a source-change-token probe. See
 /// `window_usage::cached` for the full cache shape.
+///
+/// `account_key` is NULL for the primary Claude account, or an extra account's
+/// config directory exactly as registered (its card's `accountKey`). The
+/// primary's window excludes every registered extra account's roots; an extra
+/// account's window reads only its own registered roots.
+///
+/// # Safety
+/// `account_key` must be NULL or a valid NUL-terminated UTF-8 string.
 #[no_mangle]
-pub extern "C" fn tb_window_usage(from_ms: i64, until_ms: i64) -> *mut c_char {
+pub unsafe extern "C" fn tb_window_usage(
+    account_key: *const c_char,
+    from_ms: i64,
+    until_ms: i64,
+) -> *mut c_char {
     guarded("tb_window_usage", || {
+        let account = if account_key.is_null() {
+            None
+        } else {
+            match unsafe { CStr::from_ptr(account_key) }.to_str() {
+                Ok(key) => Some(key.to_string()),
+                Err(_) => return envelope(Err::<serde_json::Value, String>("invalidUtf8".to_string())),
+            }
+        };
         envelope(
             LocalSourceContext::process()
                 .map_err(|error| error.to_string())
-                .and_then(|context| window_usage::cached(&context, from_ms, until_ms)),
+                .and_then(|context| window_usage::cached(&context, &account, from_ms, until_ms)),
         )
     })
+}
+
+/// Drop everything that could answer a scan question from before a root
+/// change. Called by the setters after they moved `ROOT_GENERATION`, with the
+/// cell lock released. A scan already running when this runs carries the old
+/// generation and drops its own result at publish.
+fn invalidate_scan_caches() {
+    GRAPH_CACHE.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    window_usage::clear_all();
+    lock_tick().last = None;
+}
+
+/// Replace the registry of extra scan roots with `{"<client-id>": ["<path>", ...]}`
+/// (only `claude`; absolute drive paths, e.g. an extra account's
+/// `<dir>\projects` and `<dir>\transcripts`). Full-replace: `{}` clears every
+/// root. The next report scans the new roots.
+///
+/// Success data is `{"registeredCount":N,"rejected":[{"client","index","reason"}],
+/// "unreadable":[{"client","index","reason":"unreadable"}]}`. Every error and
+/// reason is a fixed code (`nullPayload`, `invalidUtf8`, `invalidJson`,
+/// `sourceContextUnavailable`; `unsupportedClient`, `empty`, `unsupportedPath`,
+/// `rootDirectory`, `invalidComponent`, `defaultConfigDir`, `duplicate`,
+/// `limitExceeded`, `notDirectory`); the input is never echoed. On an error
+/// envelope nothing changed.
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_set_extra_scan_paths(json: *const c_char) -> *mut c_char {
+    guarded("tb_set_extra_scan_paths", || {
+        envelope(unsafe { set_extra_scan_paths_from_c(json) })
+    })
+}
+
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+unsafe fn set_extra_scan_paths_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
+    if json.is_null() {
+        return Err("nullPayload".to_string());
+    }
+    let raw = unsafe { CStr::from_ptr(json) }
+        .to_str()
+        .map_err(|_| "invalidUtf8".to_string())?;
+    set_extra_scan_paths(raw)
+}
+
+/// The scan-root setter (security review R1). Validates into a candidate,
+/// captures a context from it, and commits registry, context and generation
+/// together only if the capture succeeded; a failure changes nothing.
+fn set_extra_scan_paths(raw: &str) -> Result<serde_json::Value, String> {
+    let _setter = ROOTS_SETTER.lock().unwrap_or_else(|p| p.into_inner());
+    let candidate =
+        extra_scan_paths::parse(raw, user_home_dir().as_deref()).map_err(str::to_string)?;
+    apply_scan_roots(candidate.registry)?;
+    Ok(candidate.report)
+}
+
+/// Capture a context from `registry`, then commit registry, context and the
+/// next generation together, then clear every scan cache. Caller holds
+/// `ROOTS_SETTER`. A capture failure commits nothing.
+fn apply_scan_roots(
+    registry: std::collections::BTreeMap<String, Vec<PathBuf>>,
+) -> Result<(), String> {
+    let resolved = capture_process_context(registry.clone())
+        .map_err(|_| "sourceContextUnavailable".to_string())?;
+    {
+        let mut cell = lock_context_cell();
+        extra_scan_paths::commit(registry);
+        let next = ROOT_GENERATION.load(Ordering::SeqCst).wrapping_add(1);
+        *cell = Some((next, Arc::new(resolved)));
+        ROOT_GENERATION.store(next, Ordering::SeqCst);
+    }
+    invalidate_scan_caches();
+    Ok(())
+}
+
+/// Test seam: install already-validated roots through the setter's commit
+/// path, so a POSIX fixture (which the drive-path rule refuses) can exercise
+/// the same capture, commit, generation and cache clears on macOS.
+#[cfg(test)]
+pub(crate) fn apply_scan_roots_for_test(
+    registry: std::collections::BTreeMap<String, Vec<PathBuf>>,
+) -> Result<(), String> {
+    let _setter = ROOTS_SETTER.lock().unwrap_or_else(|p| p.into_inner());
+    apply_scan_roots(registry)
 }
 
 /// Replace the registry of extra Claude config directories
@@ -742,9 +936,41 @@ unsafe fn set_claude_config_dirs_from_c(json: *const c_char) -> Result<serde_jso
     let raw = unsafe { CStr::from_ptr(json) }
         .to_str()
         .map_err(|_| "invalidUtf8".to_string())?;
-    agent_usage::replace_claude_config_dirs(|| claude_config_dirs::set_from_json(raw))
-        .map_err(str::to_string)
+    set_claude_config_dirs(raw)
 }
+
+/// The config-dir setter. The registry commit and the in-memory purge are
+/// `replace_claude_config_dirs`, unchanged; only after it succeeds does the
+/// root generation move, because the primary window's exclusions depend on
+/// these directories. The process context is not re-captured (config dirs do
+/// not change the process scan); an empty cell stays empty and only the
+/// atomic moves (W4b lazy-fill rule). An `Err` moves nothing.
+fn set_claude_config_dirs(raw: &str) -> Result<serde_json::Value, String> {
+    let _setter = ROOTS_SETTER.lock().unwrap_or_else(|p| p.into_inner());
+    let result = agent_usage::replace_claude_config_dirs(|| claude_config_dirs::set_from_json(raw))
+        .map_err(str::to_string)?;
+    #[cfg(test)]
+    GENERATION_AT_CONFIG_DIR_COMMIT.store(ROOT_GENERATION.load(Ordering::SeqCst), Ordering::SeqCst);
+    {
+        let mut cell = lock_context_cell();
+        let next = ROOT_GENERATION.load(Ordering::SeqCst).wrapping_add(1);
+        if let Some((generation, _)) = cell.as_mut() {
+            *generation = next;
+        }
+        ROOT_GENERATION.store(next, Ordering::SeqCst);
+    }
+    // Every gated cache, not only the window: the bump also gates the graph
+    // and the tail, and a refresh in flight across it is dropped, so a stale
+    // pre-refresh graph must not stay cached and keep being served.
+    invalidate_scan_caches();
+    Ok(result)
+}
+
+/// Test seam: the generation observed right after the config-dir registry
+/// commit and before the bump. Equal to the pre-call generation iff the bump
+/// comes after the commit (W4b ordering rule).
+#[cfg(test)]
+pub(crate) static GENERATION_AT_CONFIG_DIR_COMMIT: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Release a string returned by any tb_* entry point.
 ///
