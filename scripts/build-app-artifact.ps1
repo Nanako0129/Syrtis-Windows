@@ -564,12 +564,15 @@ $zipBytes = [int64](Get-Item -LiteralPath $zipPath).Length
 # Mode+RID publish-zip budgets (bytes). Measured baselines + ~5% headroom.
 # A budget increase requires an explicit source edit and explanation.
 $publishZipBudgetByModeRid = @{
-    # Full: post-strip (#29) measured baselines + ~5%
-    "Full|win-x64"   = [int64]78691000   # measured 74943809 (2026-08-05 clean Full) + ~5%
-    "Full|win-arm64" = [int64]74928327   # measured 71360311 (fork hosted Full arm64-cross 2026-08-05) + ~5%
-    # Lite: hosted measures (#30) + ~5%
-    "Lite|win-x64"   = [int64]45759677   # measured 43580644 + ~5%
-    "Lite|win-arm64" = [int64]43506642   # measured 41434897 + ~5%
+    # Re-baselined 2026-10-03 when the Sand shoal frames (1,152 PNG, 1.6 MB on
+    # disk) were added: measured on that PR's CI run + ~5%. With the frames,
+    # Full/win-x64 measured 1.652 MiB over the 2026-08 budget below.
+    # Previous: Full x64 78691000, Full arm64 74928327, Lite x64 45759677,
+    # Lite arm64 43506642 (2026-08 baselines + ~5%).
+    "Full|win-x64"   = [int64]84444771   # measured 80423591 + ~5%
+    "Full|win-arm64" = [int64]80388965   # measured 76560919 + ~5%
+    "Lite|win-x64"   = [int64]48780726   # measured 46457834 + ~5%
+    "Lite|win-arm64" = [int64]46397643   # measured 44188231 + ~5%
 }
 $budgetKey = "{0}|{1}" -f $DeploymentMode, $Rid
 if (-not $publishZipBudgetByModeRid.ContainsKey($budgetKey)) {
