@@ -112,7 +112,9 @@ public sealed partial class DashboardView : UserControl
                 _ = DispatcherQueue.TryEnqueue(ApplyLensVisibility);
             }
             else if (key.StartsWith("tokenbar.limits.", StringComparison.Ordinal)
-                || key == "tokenbar.trace.detailed")
+                || key == "tokenbar.trace.detailed"
+                || key == OverviewCards.HiddenKey
+                || key.StartsWith("tokenbar.usage.attribution.", StringComparison.Ordinal))
             {
                 _ = DispatcherQueue.TryEnqueue(() => RenderContent(animated: false));
             }
@@ -835,7 +837,7 @@ public sealed partial class DashboardView : UserControl
         // once and its pinned order is what caught it; this arrived at the same
         // mistake independently, with the quota summary built directly above
         // the limits card and the chart therefore ahead of it.
-        foreach (var card in OverviewCards.RenderOrder)
+        foreach (var card in OverviewCards.Visible(AppSettings.Store))
         {
             var element = card switch
             {

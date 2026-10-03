@@ -20,10 +20,11 @@ namespace TokenBar.App;
 /// usage chart ahead of it. Repeating a mistake another platform has already
 /// paid for and already guarded against is the avoidable kind.</para>
 ///
-/// <para>Hiding individual cards is a separate macOS capability
-/// (<c>tokenbar.overview.hidden</c>) that Windows does not have yet. This enum
-/// is deliberately only an order, not a visibility model — the seat is here
-/// when that slice arrives, but nothing speculative is built into it now.</para>
+/// <para>Hiding is a visibility model layered on top of this order, not part
+/// of the enum: <see cref="OverviewCards.Visible"/> filters
+/// <see cref="OverviewCards.RenderOrder"/> by the persisted
+/// <c>tokenbar.overview.hidden</c> set (macOS <c>OverviewCard.visible</c>,
+/// OverviewCard.swift) and by the Agent-limits master switch.</para>
 /// </summary>
 internal enum OverviewCard
 {
@@ -82,6 +83,14 @@ internal static class OverviewScope
 
 internal static class OverviewCards
 {
+    /// <summary>Same key name as macOS (OverviewCard.swift <c>hiddenKey</c>).</summary>
+    internal const string HiddenKey = "tokenbar.overview.hidden";
+
+    /// <summary>Same key name as macOS's <c>limitsEnabled</c> default
+    /// (SettingsPanel.swift:458-467). Default true: an absent key must not
+    /// hide the card for a user who never touched the switch.</summary>
+    internal const string LimitsEnabledKey = "tokenbar.limits.enabled";
+
     /// <summary>Render order, read by <c>DashboardView.BuildOverview</c> and
     /// asserted by <c>OverviewCardTests</c>. Enum declaration order is the
     /// source; this exists so the order can be enumerated and compared rather
@@ -96,4 +105,48 @@ internal static class OverviewCards
         OverviewCard.Models,
         OverviewCard.Streaks,
     ];
+
+    /// <summary>Every card but the chart (OverviewCard.swift <c>toggleable</c>).
+    /// The chart is the fixed anchor: Overview is the fallback every hidden
+    /// lens returns to, and a fallback that can be emptied leaves the user
+    /// nowhere to land.</summary>
+    internal static readonly IReadOnlyList<OverviewCard> Toggleable =
+        [.. RenderOrder.Where(c => c != OverviewCard.Chart)];
+
+    /// <summary>The persisted id: the macOS rawValue (camelCase), so the same
+    /// preference name carries the same values on both platforms.</summary>
+    internal static string Id(OverviewCard card) =>
+        char.ToLowerInvariant(card.ToString()[0]) + card.ToString()[1..];
+
+    /// <summary>Sentence-cased label (OverviewCard.swift <c>label</c>, as of
+    /// Syrtis #464): a space and a lower-case letter for each interior capital
+    /// of the id, first letter upper-cased — "Quota summary", matching macOS's
+    /// English text and the key its string catalogs carry.</summary>
+    internal static string Label(OverviewCard card) =>
+        System.Text.RegularExpressions.Regex.Replace(
+            card.ToString(), "(?<!^)([A-Z])", m => " " + char.ToLowerInvariant(m.Value[0]));
+
+    /// <summary>Master gate for the Agent-limits card (macOS
+    /// OverviewView.swift:69-90, QuotaView.swift:57 and :116). Every place
+    /// that can draw the card asks here, so Overview, the Quota lens and a
+    /// client's Quota tab cannot disagree.</summary>
+    internal static bool ShowsLimitsCard(bool limitsEnabled) => limitsEnabled;
+
+    /// <summary>Cards to draw, in render order. Anchors survive a tampered
+    /// <paramref name="hiddenRaw"/> (OverviewCard.swift <c>visible</c>). With
+    /// the limits switch off, BOTH the quota summary line and the limits card
+    /// go (OverviewView.swift:69-90): the summary is the one-line answer to
+    /// the same question the card answers.</summary>
+    internal static List<OverviewCard> Visible(string hiddenRaw, bool limitsEnabled = true)
+    {
+        var hidden = ClientRegistry.ParseIdSet(hiddenRaw);
+        return [.. RenderOrder.Where(c =>
+            (!Toggleable.Contains(c) || !hidden.Contains(Id(c)))
+            && (ShowsLimitsCard(limitsEnabled) || c is not (OverviewCard.QuotaSummary or OverviewCard.Limits)))];
+    }
+
+    internal static bool LimitsEnabled(SettingsStore store) => store.GetBool(LimitsEnabledKey, true);
+
+    internal static List<OverviewCard> Visible(SettingsStore store) =>
+        Visible(store.GetString(HiddenKey) ?? string.Empty, LimitsEnabled(store));
 }

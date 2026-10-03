@@ -86,9 +86,16 @@ public sealed class SettingsWindow : Window
     /// nothing.</param>
     public static void Present(
         Func<AgentUsagePayload?> quota, Func<UsagePayload?> graph,
-        Func<IReadOnlyList<TraceBucket>> trace, bool showDiscord = false)
+        Func<IReadOnlyList<TraceBucket>> trace, bool showDiscord = false,
+        bool showAttribution = false)
     {
         _shared ??= new SettingsWindow(quota, graph, trace);
+        if (showAttribution)
+        {
+            _shared._selectedTag = "attribution";
+            _shared._nav.SelectedItem = _shared._attributionItem;
+        }
+
         if (showDiscord)
         {
             _shared._selectedTag = "general";
@@ -223,6 +230,7 @@ public sealed class SettingsWindow : Window
             var rebuildAll = key is "tokenbar.tray.animationStyle"
                 or "tokenbar.tray.animate"
                 or "tokenbar.limits.layout"
+                or OverviewCards.LimitsEnabledKey
                 or MenuBarTextColor.StorageKey
                 or ClientRegistry.TabHiddenKey
                 or ClientRegistry.TabOrderKey;
@@ -241,9 +249,28 @@ public sealed class SettingsWindow : Window
                 {
                     RebuildPreview();
                 }
+
+                // The Quota lens's onboarding card is a second writer of the
+                // attribution tables. This page only redrew after its own
+                // writes (ApplyAttributionWrite), so an open Settings kept
+                // showing rows as unassigned after "Apply suggestions". Rebuild
+                // just this page, the way ApplyAttributionWrite does, rather
+                // than the whole panel, which would rebuild every other page
+                // and drop keyboard focus. Like ApplyAttributionWrite, ShowPage
+                // returns the page to the top.
+                if (key.StartsWith(UsageAttributionKeyPrefix, StringComparison.Ordinal))
+                {
+                    _pages["attribution"] = BuildAttributionPage(AppSettings.Store);
+                    if (_selectedTag == "attribution")
+                    {
+                        ShowPage(_selectedTag);
+                    }
+                }
             });
         };
     }
+
+    private const string UsageAttributionKeyPrefix = "tokenbar.usage.attribution.";
 
     private void ApplySize()
     {
@@ -454,6 +481,21 @@ public sealed class SettingsWindow : Window
 
         // ── Agent limits ───────────────────────────────────────────────
         var limits = new StackPanel { Spacing = 8 };
+        // Master switch (macOS SettingsPanel.swift:458-467). The sub-options
+        // below only exist while it is on, as there.
+        var limitsOn = OverviewCards.LimitsEnabled(store);
+        var limitsEnabled = new ToggleSwitch
+        {
+            IsOn = limitsOn,
+            OnContent = null,
+            OffContent = null,
+        };
+        limitsEnabled.Toggled += (_, _) =>
+            store.SetBool(OverviewCards.LimitsEnabledKey, limitsEnabled.IsOn);
+        limits.Children.Add(ToggleRow("Show Agent limits card".Localized(), limitsEnabled));
+        limits.Children.Add(Hint(
+            "Off hides the quota card on Overview and on every client tab.".Localized()));
+        var limitOptions = new StackPanel { Spacing = 8 };
         var asUsed = new ToggleSwitch
         {
             IsOn = store.GetBool("tokenbar.limits.asUsed", false),
@@ -461,10 +503,10 @@ public sealed class SettingsWindow : Window
             OffContent = null,
         };
         asUsed.Toggled += (_, _) => store.SetBool("tokenbar.limits.asUsed", asUsed.IsOn);
-        limits.Children.Add(ToggleRow("Show as used".Localized(), asUsed));
-        limits.Children.Add(Hint("Bars count up (used) instead of down (left).".Localized()));
+        limitOptions.Children.Add(ToggleRow("Show as used".Localized(), asUsed));
+        limitOptions.Children.Add(Hint("Bars count up (used) instead of down (left).".Localized()));
         var layoutRaw = store.GetString("tokenbar.limits.layout", "full") ?? "full";
-        limits.Children.Add(RadioGroup(
+        limitOptions.Children.Add(RadioGroup(
             "limits.layout",
             [
                 ("full", "Layout: Full".Localized()),
@@ -473,7 +515,7 @@ public sealed class SettingsWindow : Window
             ],
             layoutRaw,
             raw => store.SetString("tokenbar.limits.layout", raw)));
-        limits.Children.Add(Hint(
+        limitOptions.Children.Add(Hint(
             ("Full is the wide card with the pace bar; Classic is the original "
                 + "compact layout without pace; Chart draws each window's quota over "
                 + "time, with the pace estimate as a second line. Chart needs recorded "
@@ -481,7 +523,7 @@ public sealed class SettingsWindow : Window
             .Localized()));
         if (layoutRaw != "classic")
         {
-            limits.Children.Add(RadioGroup(
+            limitOptions.Children.Add(RadioGroup(
                 "limits.paceMode",
                 [
                     ("historical", "Historical pace".Localized()),
@@ -490,13 +532,20 @@ public sealed class SettingsWindow : Window
                 ],
                 store.GetString("tokenbar.limits.paceMode", "historical") ?? "historical",
                 raw => store.SetString("tokenbar.limits.paceMode", raw)));
-            limits.Children.Add(Hint(
+            limitOptions.Children.Add(Hint(
                 ("The deficit/reserve marker. Historical learns your weekly "
                     + "usage curve; Linear paces evenly by the clock; Off hides it.")
                 .Localized()));
         }
+        if (limitsOn)
+        {
+            limits.Children.Add(limitOptions);
+        }
 
         panel.Children.Add(Section("Agent limits".Localized(), limits));
+
+        // ── Overview cards ─────────────────────────────────────────────
+        panel.Children.Add(Section("Overview cards".Localized(), BuildOverviewCards(store)));
 
         // ── View tabs ──────────────────────────────────────────────────
         panel.Children.Add(Section("View tabs".Localized(), BuildViewTabs(store)));
@@ -1191,6 +1240,46 @@ public sealed class SettingsWindow : Window
         return link;
     }
 
+    /// <summary>One switch per hideable Overview card (macOS SettingsPanel.swift
+    /// :521-547). The chart is absent by construction: it is the fixed anchor.
+    /// Writes the hidden set as the sorted, comma-joined ids.</summary>
+    private static StackPanel BuildOverviewCards(SettingsStore store)
+    {
+        var panel = new StackPanel { Spacing = 2 };
+        foreach (var card in OverviewCards.Toggleable)
+        {
+            var id = OverviewCards.Id(card);
+            var toggle = new ToggleSwitch
+            {
+                IsOn = !ClientRegistry.ParseIdSet(
+                    store.GetString(OverviewCards.HiddenKey) ?? string.Empty).Contains(id),
+                OnContent = null,
+                OffContent = null,
+            };
+            toggle.Toggled += (_, _) =>
+            {
+                var next = new SortedSet<string>(ClientRegistry.ParseIdSet(
+                    store.GetString(OverviewCards.HiddenKey) ?? string.Empty),
+                    StringComparer.Ordinal);
+                if (toggle.IsOn)
+                {
+                    next.Remove(id);
+                }
+                else
+                {
+                    next.Add(id);
+                }
+
+                store.SetString(OverviewCards.HiddenKey, string.Join(',', next));
+            };
+            panel.Children.Add(ToggleRow(OverviewCards.Label(card).Localized(), toggle));
+        }
+
+        panel.Children.Add(Hint(
+            "Choose which cards Overview shows. The usage chart always stays.".Localized()));
+        return panel;
+    }
+
     /// <summary>One switch per hideable lens (macOS SettingsPanel's
     /// "View tabs"). Overview and Models are absent by construction — Overview
     /// is the fallback every hidden lens returns to, so offering to hide it
@@ -1476,7 +1565,14 @@ public sealed class SettingsWindow : Window
 
         // Agent limits preview: mock windows through the real bar pipeline,
         // so asUsed/layout/paceMode picks show their effect immediately.
-        _preview.Children.Add(Ui.Text("AGENT LIMITS".Localized(), 10, 0.55, bold: true));
+        // The master switch hides this preview too (macOS
+        // SettingsWindowView.swift:344), through the same gate every other
+        // surface that draws the limits card asks.
+        var showLimitsPreview = OverviewCards.ShowsLimitsCard(OverviewCards.LimitsEnabled(store));
+        if (showLimitsPreview)
+        {
+            _preview.Children.Add(Ui.Text("AGENT LIMITS".Localized(), 10, 0.55, bold: true));
+        }
         var asUsed = store.GetBool("tokenbar.limits.asUsed", false);
         var classic = store.GetString("tokenbar.limits.layout", "full") == "classic";
         var paceMode = store.GetString("tokenbar.limits.paceMode", "historical") switch
@@ -1556,7 +1652,10 @@ public sealed class SettingsWindow : Window
             card.Children.Add(DashboardView.QuotaRow(window, row, classic));
         }
 
-        _preview.Children.Add(card);
+        if (showLimitsPreview)
+        {
+            _preview.Children.Add(card);
+        }
 
         // Live session (macOS UsageTraceCard, the preview column's third
         // block). Rendered through the same Ui.TraceRows the Overview lens

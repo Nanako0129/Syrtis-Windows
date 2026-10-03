@@ -196,23 +196,10 @@ public static class UsageAttributionPage
     public static UsageAttributionSettings.WriteFailure? AcceptAll(
         SettingsStore store, IReadOnlyList<UsageAttributionSettings.Row> rows)
     {
-        var records = UsageAttributionSettings.AcceptanceRecords(rows);
-        if (records.Count == 0)
-        {
-            return null;
-        }
-
-        if (UsageAttributionSettings.WriteRecords(store, UsageAttribution.ConfirmedKey, records)
-            is { } failure)
-        {
-            return failure;
-        }
-
-        var removals = records
-            .Select(record => record with { State = UsageAttribution.State.Unassigned })
-            .ToList();
-        return UsageAttributionSettings.WriteRecords(
-            store, UsageAttribution.SuggestionsKey, removals);
+        // The one shared write path (UsageAttributionSettings.Accept), also used
+        // by the Quota-lens onboarding card, so the two cannot drift.
+        return UsageAttributionSettings.Accept(
+            store, UsageAttributionSettings.AcceptanceRecords(rows));
     }
 
     /// <summary>Every target this row can legitimately hold has to be

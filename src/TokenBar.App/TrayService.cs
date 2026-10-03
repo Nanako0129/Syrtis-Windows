@@ -73,6 +73,7 @@ public sealed class TrayService : IDisposable
         _feed = new TrayFeed(_dispatcher, graphCoordinator);
         _animator = new TrayAnimator(_dispatcher, () => _feed.TokensPerMin, ApplyCachedIcon);
         OpenSettings = ShowSettings;
+        OpenAttributionSettings = ShowAttributionSettings;
         // Discord presence (opt-in, default off). The only production client
         // factory: the constant local pipe, reached only after
         // DiscordPresence.MayConnect has said yes for these arguments.
@@ -163,6 +164,11 @@ public sealed class TrayService : IDisposable
     /// the view layer never sees the tray feed.</summary>
     public static Action? OpenSettings { get; private set; }
 
+    /// <summary>The attribution onboarding card's "Set up manually…": settings
+    /// opened on the Usage attribution page (macOS
+    /// <c>showFromPopover(scrollingTo: .usageAttribution)</c>).</summary>
+    public static Action? OpenAttributionSettings { get; private set; }
+
     /// <summary>Settings' manual "Check now" reaches the update flow through
     /// here. Unlike the two neighbours this is set by App, which owns the
     /// flow — the tray only already owns the update surface (PublishUpdate),
@@ -171,6 +177,9 @@ public sealed class TrayService : IDisposable
 
     public void ShowSettings() => SettingsWindow.Present(
         () => _feed.Quota, () => _feed.Graph, () => _feed.Trace);
+
+    internal void ShowAttributionSettings() => SettingsWindow.Present(
+        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showAttribution: true);
 
     /// <summary>The Discord intro's "Open Settings": navigation to the
     /// Discord section, never a write.</summary>
