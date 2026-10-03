@@ -91,9 +91,10 @@
                         FontSize="11"
                         Padding="9,3,9,4"
                         Content="All" />
-                    <!-- Manual refresh; swaps to a spinner while a forced
-                         re-read (or the initial load) runs — one control,
-                         macOS refreshButton parity. -->
+                    <!-- Manual refresh; swaps to a disabled spinner while any
+                         graph request runs (initial load, poll, year switch,
+                         manual) and tints orange over a restored graph whose
+                         refresh failed — one control, macOS refreshButton. -->
                     <Grid VerticalAlignment="Center" Width="26" Height="26">
                         <Button
                             x:Name="RefreshButton"
@@ -102,7 +103,7 @@
                             Height="26"
                             Background="Transparent"
                             BorderThickness="0">
-                            <FontIcon Glyph="&#xE72C;" FontSize="11" Opacity="0.75" />
+                            <FontIcon x:Name="RefreshGlyph" Glyph="&#xE72C;" FontSize="11" Opacity="0.75" />
                         </Button>
                         <ProgressRing
                             x:Name="RefreshSpinner"
