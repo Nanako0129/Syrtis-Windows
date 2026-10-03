@@ -470,5 +470,10 @@
   "Set up in Settings…": "到「設定」設定…",
   "How busy are your agents?": "你的 agent 平常有多忙？",
   "The menu-bar animation follows your live token rate. Pick the range that fits how you work; you can change it later in Settings.": "選單列動畫會跟著即時的 token 速率變化。選一個符合你使用習慣的範圍，之後可以在「設定」裡修改。",
-  "Most people: Moderate": "大多數人適合「中度」"
+  "Most people: Moderate": "大多數人適合「中度」",
+  "No activity in this window": "這個時間窗內沒有活動",
+  "last {0}m · {1}/m total": "最近 {0} 分鐘 · 合計 {1}/分",
+  "No local usage records in this range.": "此期間沒有本機用量紀錄。",
+  "The tokens and amounts below stay at 0 until usage is attributed to this subscription.": "用量歸屬到這個訂閱之前，下面每一列的 token 與金額都會是 0。",
+  "Set up usage attribution…": "設定用量歸屬…"
 }
