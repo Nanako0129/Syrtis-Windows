@@ -129,11 +129,24 @@ public sealed class LimitsCardFilterTests
     [Theory]
     [InlineData("claude")]
     [InlineData("codex")]
-    public void SingleClientTabWithNoSnapshotKeepsItsCard(string client)
+    public void SingleClientTabWithNoSnapshotHidesOnlyWhenSwitchedOff(string client)
     {
         Assert.False(LimitsCardFilter.HidesClientCard([Card("gemini")], [client], None));
         Assert.False(LimitsCardFilter.HidesClientCard([], [client], None));
         Assert.True(LimitsCardFilter.HidesClientCard([], [client], new HashSet<string> { client }));
+    }
+
+    /// <summary>No member has a snapshot yet: every member is considered
+    /// (macOS allRestrictedClientsHidden over all clients, :502-510), so a
+    /// grouped tab with one member hidden keeps its loading card, and hides
+    /// only when every member is switched off.</summary>
+    [Fact]
+    public void GroupedTabWithNoSnapshotConsidersEveryMember()
+    {
+        Assert.False(LimitsCardFilter.HidesClientCard([], Grok, new HashSet<string> { "grok" }));
+        Assert.False(LimitsCardFilter.HidesClientCard([], Grok, new HashSet<string> { "grok-bot" }));
+        Assert.True(LimitsCardFilter.HidesClientCard([], Grok, new HashSet<string> { "grok", "grok-bot" }));
+        Assert.False(LimitsCardFilter.HidesClientCard([], ["antigravity", "antigravity-cli"], new HashSet<string> { "antigravity" }));
     }
 
     [Fact]
