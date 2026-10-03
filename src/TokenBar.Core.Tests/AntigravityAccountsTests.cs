@@ -304,7 +304,7 @@ public class AntigravityAccountsTests
     // ---- 6. pre-fetch ---------------------------------------------------------
 
     [Fact]
-    public void WhenOnEveryFetchRunsThePreFetchStepFirstAndNeverWaitsForTheCapture()
+    public async Task WhenOnEveryFetchRunsThePreFetchStepFirstAndNeverWaitsForTheCapture()
     {
         var store = TempStore();
         store.SetBool(AntigravityAutoCapture.EnabledKey, true);
@@ -315,21 +315,21 @@ public class AntigravityAccountsTests
         var run = Task.Run(() => AntigravityFetch.Run(
             () => { io.Calls.Enqueue("fetch"); return Payload(Primary(), Captured()); }, null, capture));
 
-        Assert.True(run.Wait(TimeSpan.FromSeconds(5)), "the fetch waited for the capture attempt");
+        Assert.Same(run, await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(5))));
         var calls = io.Calls.ToList();
         Assert.True(calls.IndexOf("marker") >= 0 && calls.IndexOf("marker") < calls.IndexOf("fetch"));
         gate.Set();
     }
 
     [Fact]
-    public void TheFetchStepAppliesDedupToWhatItReturns()
+    public async Task TheFetchStepAppliesDedupToWhatItReturns()
     {
         var store = TempStore();
         var io = new FakeIo();
         io.Markers.Enqueue("M1");
         io.Markers.Enqueue("M1");
         var capture = new AntigravityAutoCapture(io.Io, store);
-        capture.ManualCapture().GetAwaiter().GetResult();
+        await capture.ManualCapture();
 
         var payload = AntigravityFetch.Run(() => Payload(Primary(), Captured()), null, capture);
 
