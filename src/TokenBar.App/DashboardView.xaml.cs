@@ -636,9 +636,6 @@ public sealed partial class DashboardView : UserControl
         RateValue.Text = Format.CompactTokens((long)rate);
         CostLine.Text = CostSurfaceProjection.HeaderCostLine(
             today?.Cost ?? 0, stats, snapshot.CostAuthoritative);
-        FooterText.Text = "updated {0}".Localized(
-            snapshot.FetchedAt.ToString(
-                "HH:mm:ss", System.Globalization.CultureInfo.CurrentCulture));
     }
 
     private string _yearPickerSignature = "";
@@ -927,6 +924,10 @@ public sealed partial class DashboardView : UserControl
 
         DetachGraph3DContentHost();
         _heatmapScroll = null;
+        // The footer names the lens on screen, as macOS's footer shows
+        // effectiveView.label. Data freshness is the refresh button's job
+        // (its tooltip), not the footer's.
+        FooterText.Text = AppViews.Label(AppViews.Effective(_view, AppSettings.Store));
         UIElement content = _view switch
         {
             AppView.Quota => BuildQuota(_snapshot),
