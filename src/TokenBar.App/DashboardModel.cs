@@ -933,6 +933,12 @@ public sealed class DashboardModel
         }
     }
 
+    /// <summary>Quota lane only, now — after an answer that changes what the
+    /// core may read (the Grok Bot consent card). A fetch already in flight is
+    /// not restarted; its payload predates the answer and the next tick
+    /// corrects it.</summary>
+    public void RefreshQuotaNow() => RefreshQuota();
+
     /// <summary>The OAuth quota lane, macOS pollAgentUsage parity: fully
     /// independent of the parse lane so a slow provider (the fetch can hang
     /// for ~30s per agent) never delays the first paint, never holds the

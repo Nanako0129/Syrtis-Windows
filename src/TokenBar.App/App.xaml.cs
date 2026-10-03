@@ -60,6 +60,12 @@ public partial class App : Application
 
         ProcessPower.EnsureNormalPriority();
 
+        // The core's consent registry is in-memory and empty at launch; a
+        // stored "yes" for reading the Grok Bot sign-in is re-installed before
+        // the first agent-usage fetch, whichever surface starts it.
+        global::TokenBar.Core.AgentUsageFetchCoordinator.Shared.RunBeforeFirstFetch(
+            AppSettings.GrokBotConsent.ApplyIfGranted);
+
         try
         {
             DevLog.Write("launch: creating graph coordinator");

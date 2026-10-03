@@ -557,6 +557,38 @@ public sealed class SettingsWindow : Window
             limits.Children.Add(limitOptions);
         }
 
+        // Grok Bot sign-in consent (Q6-2). Outside the master switch: hiding the
+        // card must not hide the way to stop the read behind it. Off withdraws
+        // in the core at once; the read stops from the next refresh.
+        var grokBot = new ToggleSwitch
+        {
+            IsOn = AppSettings.GrokBotConsent.Stored == true,
+            OnContent = null,
+            OffContent = null,
+        };
+        grokBot.Toggled += (_, _) =>
+        {
+            try
+            {
+                if (grokBot.IsOn)
+                {
+                    AppSettings.GrokBotConsent.Answer(true);
+                }
+                else
+                {
+                    AppSettings.GrokBotConsent.Withdraw();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Nothing was stored; show the state the core is actually in.
+                DevLog.Write($"grok-bot consent: settings toggle failed: {ex.GetType().Name}");
+                grokBot.IsOn = AppSettings.GrokBotConsent.Stored == true;
+            }
+        };
+        limits.Children.Add(ToggleRow(GrokBotConsent.Copy.SettingsToggle.Localized(), grokBot));
+        limits.Children.Add(Hint(GrokBotConsent.Copy.SettingsHint.Localized()));
+
         panel.Children.Add(Section("Agent limits".Localized(), limits));
 
         // ── Overview cards ─────────────────────────────────────────────

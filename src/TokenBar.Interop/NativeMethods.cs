@@ -57,6 +57,9 @@ internal static partial class NativeMethods
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial nint tb_window_usage(string? accountKey, long fromMs, long untilMs);
 
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_set_keychain_consent(string json);
+
     [LibraryImport(Lib)]
     internal static partial void tb_free(nint ptr);
 }
