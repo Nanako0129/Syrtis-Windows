@@ -85,9 +85,17 @@ public static class AgentLimitsText
 
     /// <summary>The recent-trend fold resolved against the window's own
     /// bounds; null for no duration, no parseable reset, or too few samples —
-    /// never a fabricated zero.</summary>
+    /// never a fabricated zero.
+    /// <para>Only while the window is running (start ≤ now &lt; reset), as
+    /// macOS <c>WindowResolver.resolve</c> with no first-usage anchor: a reset
+    /// already passed is <c>.idle</c> there, and here the fold would instead
+    /// project over zero remaining time and draw a bare arrow for a window
+    /// that has ended. Like macOS, there is no duration fallback: a window
+    /// without <c>DurationSeconds</c> has no trend on either side.</para></summary>
     public static QuotaTrend? Trend(UsageWindow window, IReadOnlyList<QuotaSample>? samples, long nowMs) =>
-        samples is { Count: > 0 } && UsagePace.WindowBoundsMs(window) is { } bounds
+        samples is { Count: > 0 }
+            && UsagePace.WindowBoundsMs(window) is { } bounds
+            && nowMs < bounds.EndMs
             ? QuotaTrendFold.Trend(window.UsedPercent, bounds.StartMs, bounds.EndMs, nowMs, samples)
             : null;
 

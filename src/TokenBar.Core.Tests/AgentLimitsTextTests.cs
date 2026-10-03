@@ -119,9 +119,10 @@ public class AgentLimitsTextTests
 
     // ---- Trend resolution against the window's own bounds -----------------
 
-    private static UsageWindow HourWindow(double used, long? durationSeconds = 3_600) =>
+    private static UsageWindow HourWindow(
+        double used, long? durationSeconds = 3_600, double untilReset = 1_800) =>
         new("Session", used, 100 - used,
-            ResetsAt: Now.AddSeconds(1_800).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+            ResetsAt: Now.AddSeconds(untilReset).ToString("yyyy-MM-ddTHH:mm:ssZ"),
             CardId: "session.v3",
             PaceStatus: new PaceStatus(
                 State: durationSeconds is null ? UsagePaceState.LearningDuration : UsagePaceState.LearningHistory,
@@ -155,5 +156,15 @@ public class AgentLimitsTextTests
         var samples = new[] { new QuotaSample(nowMs - 600_000, 20), new QuotaSample(nowMs, 30) };
         Assert.Null(AgentLimitsText.Trend(HourWindow(30, durationSeconds: null), samples, nowMs));
         Assert.Null(AgentLimitsText.Trend(HourWindow(30), null, nowMs));
+    }
+
+    // A stale payload whose reset has passed: macOS resolves it to idle and
+    // draws nothing; the fold alone would return a zero-delta arrow.
+    [Fact]
+    public void AWindowWhoseResetHasPassedHasNoTrend()
+    {
+        var nowMs = Now.ToUnixTimeMilliseconds();
+        var samples = new[] { new QuotaSample(nowMs - 1_200_000, 20), new QuotaSample(nowMs - 660_000, 30) };
+        Assert.Null(AgentLimitsText.Trend(HourWindow(30, untilReset: -600), samples, nowMs));
     }
 }
