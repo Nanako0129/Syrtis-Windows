@@ -480,5 +480,7 @@
   "{0} used": "已用 {0}",
   "{0} less left": "剩餘少 {0}",
   "{0} more left": "剩餘多 {0}",
-  "Drag to reorder": "拖曳可調整順序"
+  "Drag to reorder": "拖曳可調整順序",
+  "Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from its environment. Save the token as a user environment variable with this PowerShell command, then quit Syrtis and reopen it from the Start menu. The token is stored unencrypted in your Windows user environment.": "使用 Claude 的 `setup-token`？Syrtis 會讀取環境變數 `CLAUDE_CODE_OAUTH_TOKEN`。請用下面的 PowerShell 指令把 token 存成使用者環境變數，再結束 Syrtis，從開始選單重新開啟。token 會以未加密的形式存在你的 Windows 使用者環境變數裡。",
+  "Copy command": "複製指令"
 }

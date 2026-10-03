@@ -68,6 +68,45 @@ public class AgentLimitsTextTests
         Assert.Equal(new HashSet<string> { "claude", "antigravity" }, live);
     }
 
+    // ---- Setup prompt -----------------------------------------------------
+
+    [Fact]
+    public void AnUnconfiguredClaudeCardOffersTheWindowsSetupTokenCommand()
+    {
+        var prompt = AgentLimitsText.Setup(new AgentUsageSnapshot(
+            "claude", "unconfigured", "2026-10-04T00:00:00Z", [], Error: "credentials not found"));
+        Assert.NotNull(prompt);
+        Assert.Contains("CLAUDE_CODE_OAUTH_TOKEN", prompt!.Text);
+        Assert.Contains("Start menu", prompt.Text);
+        Assert.DoesNotContain("Keychain", prompt.Text);
+        Assert.Equal(AgentLimitsText.ClaudeSetupCommand, prompt.Command);
+        // The token is typed at a prompt, never passed on the command line.
+        Assert.Contains("Read-Host", prompt.Command);
+        Assert.Contains("'User'", prompt.Command);
+    }
+
+    // Claude's instructions name Claude's variable; another provider keeps
+    // its own one-line instruction (macOS setupInstructions, #345).
+    [Fact]
+    public void OtherProvidersShowTheirOwnInstructionAndNothingWhenSilent()
+    {
+        Assert.Equal(new LimitsSetupPrompt("Run `codex` to log in", null),
+            AgentLimitsText.Setup(new AgentUsageSnapshot(
+                "codex", "unconfigured", "2026-10-04T00:00:00Z", [], Error: "Run `codex` to log in")));
+        Assert.Null(AgentLimitsText.Setup(new AgentUsageSnapshot(
+            "codex", "unconfigured", "2026-10-04T00:00:00Z", [])));
+    }
+
+    [Theory]
+    [InlineData("oauth")]
+    [InlineData("keychain-consent")]
+    [InlineData("keychain-denied")]
+    public void OnlyAnUnconfiguredCardHasASetupPrompt(string source)
+    {
+        Assert.Null(AgentLimitsText.Setup(new AgentUsageSnapshot(
+            "claude", source, "2026-10-04T00:00:00Z", [], Error: "x")));
+    }
+
     // ---- Detail line ------------------------------------------------------
 
     private const string Email = "someone@example.com";

@@ -23,6 +23,10 @@ public sealed record LimitsTrendLabel(QuotaTrendDirection Direction, string? Tex
 /// <summary>The line under a limits-card header.</summary>
 public sealed record LimitsDetail(string Text, bool IsError);
 
+/// <summary>What an unconfigured card asks the user to do, plus a command to
+/// copy when there is one.</summary>
+public sealed record LimitsSetupPrompt(string Text, string? Command);
+
 /// <summary>Card order on the multi-client Agent-limits card (macOS
 /// <c>AgentLimitsCard.visibleClients</c> :471-491 and the drag's
 /// <c>onEnded</c> :693-706). The order lives in
@@ -136,6 +140,39 @@ public static class AgentLimitsText
         return isLive
             ? new("Live".Localized(), LimitsTone.Green)
             : new("No quota".Localized(), LimitsTone.Secondary);
+    }
+
+    /// <summary>Saves a Claude setup-token as a user environment variable,
+    /// which is where Windows reads it (CLAUDE_CODE_OAUTH_TOKEN from the
+    /// process environment; the macOS Keychain item has no Windows
+    /// counterpart). <c>Read-Host</c> prompts for the token, so it never lands
+    /// on a command line or in shell history — the reason macOS ends its
+    /// <c>security</c> command with a bare <c>-w</c>.</summary>
+    public const string ClaudeSetupCommand =
+        "[Environment]::SetEnvironmentVariable('CLAUDE_CODE_OAUTH_TOKEN', (Read-Host 'Claude setup-token'), 'User')";
+
+    /// <summary>What an unconfigured card shows (macOS
+    /// <c>AgentUsageSnapshot.setupInstructions</c>): Claude's setup-token
+    /// instructions for Claude only — they name Claude's own variable — and
+    /// every other provider's own one-line instruction from its error ("Run
+    /// `codex` to log in"). Null for any other card, or an unconfigured one
+    /// with nothing to say. Copy approved by the user, 2026-10-04.</summary>
+    public static LimitsSetupPrompt? Setup(AgentUsageSnapshot snapshot)
+    {
+        if (snapshot.Source != "unconfigured")
+        {
+            return null;
+        }
+
+        if (snapshot.ClientId == "claude")
+        {
+            return new(
+                "Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from its environment. Save the token as a user environment variable with this PowerShell command, then quit Syrtis and reopen it from the Start menu. The token is stored unencrypted in your Windows user environment."
+                    .Localized(),
+                ClaudeSetupCommand);
+        }
+
+        return string.IsNullOrEmpty(snapshot.Error) ? null : new(snapshot.Error, null);
     }
 
     /// <summary>The line under a client header (macOS <c>detailText</c>

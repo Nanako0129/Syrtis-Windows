@@ -1697,9 +1697,13 @@ public sealed partial class DashboardView : UserControl
 
             if (agent.IsSetupPlaceholder)
             {
-                // ponytail: placeholder copy stays the raw error until G3b's setup prompt.
-                if (!string.IsNullOrEmpty(agent.Error))
+                if (AgentLimitsText.Setup(agent) is { } prompt)
                 {
+                    section.Children.Add(SetupPrompt(prompt));
+                }
+                else if (agent.Source != "unconfigured" && !string.IsNullOrEmpty(agent.Error))
+                {
+                    // ponytail: keychain-consent cards keep their raw error; their own prompt is W6a's.
                     section.Children.Add(Ui.Dim(agent.Error, 11));
                 }
 
@@ -2744,6 +2748,64 @@ public sealed partial class DashboardView : UserControl
     }
 
     internal const string PaceOrange = "#ff9500"; // macOS Color.orange
+
+    /// <summary>Corner and fill of the command box: the macOS prompt's
+    /// 6pt-radius, 6%-primary background, which reads as a code block without
+    /// competing with the card.</summary>
+    private const double SetupCommandCorner = 6;
+    private const byte SetupCommandFillAlpha = 15;
+
+    /// <summary>An unconfigured card's instructions (macOS
+    /// <c>claudeSetupPrompt</c> / <c>providerMessage</c>): the text, and when
+    /// there is a command, a selectable monospace box with a copy
+    /// button.</summary>
+    private static FrameworkElement SetupPrompt(LimitsSetupPrompt prompt)
+    {
+        var text = Ui.Dim(prompt.Text, 10);
+        if (prompt.Command is not { } command)
+        {
+            return text;
+        }
+
+        var stack = new StackPanel { Spacing = 6 };
+        stack.Children.Add(text);
+        var code = new Border
+        {
+            Padding = new Thickness(6),
+            CornerRadius = new CornerRadius(SetupCommandCorner),
+            Background = new SolidColorBrush(Color.FromArgb(SetupCommandFillAlpha, 128, 128, 128)),
+            Child = new TextBlock
+            {
+                Text = command,
+                FontFamily = new FontFamily("Consolas, Cascadia Mono, monospace"),
+                FontSize = 10,
+                TextWrapping = TextWrapping.Wrap,
+                IsTextSelectionEnabled = true,
+            },
+        };
+        var copy = new Button
+        {
+            Content = new FontIcon { Glyph = "\uE8C8", FontSize = 11 }, // Copy (Segoe Fluent Icons / MDL2)
+            Padding = new Thickness(6, 4, 6, 4),
+            VerticalAlignment = VerticalAlignment.Top,
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(copy, "Copy command".Localized());
+        HoverTip.Attach(copy, () => "Copy command".Localized());
+        copy.Click += (_, _) =>
+        {
+            var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+            package.SetText(command);
+            Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(package);
+        };
+        var row = new Grid { ColumnSpacing = 6 };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.Children.Add(code);
+        Grid.SetColumn(copy, 1);
+        row.Children.Add(copy);
+        stack.Children.Add(row);
+        return stack;
+    }
 
     /// <summary>A limits-card label in Core's <see cref="LimitsTone"/>. Red and
     /// green are the gauge's own hexes.</summary>
