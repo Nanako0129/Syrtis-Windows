@@ -368,7 +368,7 @@
   "{0} limits": "{0} 额度",
   "{0} messages": "{0} 则消息",
   "{0} models": "{0} 模型",
-  "{0} models · {1}": "{0} 个模型 · {1}",
+  "{0} models · {1} · {2}": "{0} 个模型 · {1} · {2}",
   "{0} msgs": "{0} 条消息",
   "{0} of {1} other windows are below {2}%": "另外 {1} 个窗口中，有 {0} 个低于 {2}%",
   "{0} of {1} windows recorded — the estimate needs that many": "已记录 {0} 个窗口；至少需要 {1} 个才能估算",
