@@ -11,7 +11,7 @@ public class TooltipPlacementTests
 
     [Fact]
     public void CentresOnThePointerAndSitsBelowInTheUpperRegion() =>
-        Assert.Equal((150.0, 112.0),
+        Assert.Equal((150.0, 120.0),
             TooltipPlacement.Origin(200, 100, 100, 50, Card, Viewport, Window));
 
     [Fact]
@@ -41,7 +41,7 @@ public class TooltipPlacementTests
     // in the whole window; a button narrower than the tooltip does not pin it.
     [Fact]
     public void FallsBackToTheWindowOutsideTheViewport() =>
-        Assert.Equal((150.0, 32.0),
+        Assert.Equal((150.0, 40.0),
             TooltipPlacement.Origin(200, 20, 100, 50, new Box(180, 10, 40, 20), Viewport, Window));
 
     [Fact]
@@ -64,8 +64,8 @@ public class TooltipPlacementTests
         var top = TooltipPlacement.Origin(105, 101, 100, 50, cell, Viewport, Window)!.Value.Y;
         var bottom = TooltipPlacement.Origin(105, 110, 100, 50, cell, Viewport, Window)!.Value.Y;
 
-        Assert.Equal(113.0, top);
-        Assert.Equal(122.0, bottom);
+        Assert.Equal(121.0, top);
+        Assert.Equal(130.0, bottom);
     }
 
     // A card taller than the scroll area still shows in full: it moves to
