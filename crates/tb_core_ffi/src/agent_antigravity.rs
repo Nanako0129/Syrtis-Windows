@@ -170,27 +170,41 @@ async fn agy_leg(
 const AGY_PAUSED_MESSAGE: &str =
     "Antigravity CLI quota check paused after a failed attempt. Restart Syrtis, or sign in to agy again, to retry.";
 
+/// The pause after a run that did not finish in time. Measured on a Windows
+/// host (agy 1.2.16, 2026-10-03): with a stale credential `agy --print /usage`
+/// printed "Authentication required. Please visit the URL to log in:" on
+/// stderr and kept waiting past its own `--print-timeout 30s`, so a timeout is
+/// most likely agy waiting for a browser sign-in.
+#[cfg(any(windows, test))]
+const AGY_TIMED_OUT_MESSAGE: &str =
+    "Antigravity CLI quota check timed out; agy was probably waiting for a sign-in. Sign in to agy again, or restart Syrtis, to retry.";
+
 #[cfg(windows)]
 const AGY_CREDENTIAL_TARGET: &str = "gemini:antigravity";
 
 #[cfg(windows)]
 const AGY_STDOUT_CAP: u64 = 1 << 20;
 
-/// Why the `agy` leg produced no windows. Only `Paused` is ever shown; every
-/// other reason surfaces the earlier routes' failure instead.
+/// Why the `agy` leg produced no windows. Only the two pauses are ever shown;
+/// every other reason surfaces the earlier routes' failure instead.
 #[cfg(any(windows, test))]
 #[derive(Debug, PartialEq, Eq)]
 enum AgyFailure {
     Paused,
+    /// Latched after a run that timed out (see `AGY_TIMED_OUT_MESSAGE`).
+    TimedOut,
     Unavailable,
 }
 
-/// A run's outcome as far as the latch cares: whether a process was created.
+/// A run's outcome as far as the latch cares: whether a process was created,
+/// and for a created one whether it timed out (the latch records that so the
+/// card can name the timeout).
 #[cfg(any(windows, test))]
 #[derive(Debug)]
 enum AgyRunFailure {
     NotStarted,
     Failed,
+    TimedOut,
 }
 
 #[cfg(any(windows, test))]
@@ -211,7 +225,7 @@ struct CredentialUnreadable;
 /// `with_publication_gate` (lib.rs) is held across `agent_usage::run`, and the
 /// C# `AgentUsageFetchCoordinator` shares one fetch across callers.
 #[cfg(any(windows, test))]
-struct AgyLatch(std::sync::Mutex<Option<u64>>);
+struct AgyLatch(std::sync::Mutex<Option<(u64, bool)>>);
 
 #[cfg(any(windows, test))]
 impl AgyLatch {
@@ -219,17 +233,21 @@ impl AgyLatch {
         Self(std::sync::Mutex::new(None))
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, Option<u64>> {
+    fn state(&self) -> std::sync::MutexGuard<'_, Option<(u64, bool)>> {
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn blocks(&self, last_written: u64) -> bool {
-        *self.state() == Some(last_written)
+    /// `Some(timed_out)` while latched on this credential write.
+    fn blocks(&self, last_written: u64) -> Option<bool> {
+        self.state()
+            .filter(|(latched, _)| *latched == last_written)
+            .map(|(_, timed_out)| timed_out)
     }
 
-    fn set(&self, latched: Option<u64>) {
+    /// `(LastWritten, whether the failed run timed out)`, or `None` to clear.
+    fn set(&self, latched: Option<(u64, bool)>) {
         *self.state() = latched;
     }
 }
@@ -255,6 +273,7 @@ where
         Err(primary_failure) if should_try_agy_fallback(&primary_failure) => match agy().await {
             Ok(fetched) => Ok(fetched),
             Err(AgyFailure::Paused) => Err(ProviderFetchFailure::terminal(AGY_PAUSED_MESSAGE)),
+            Err(AgyFailure::TimedOut) => Err(ProviderFetchFailure::terminal(AGY_TIMED_OUT_MESSAGE)),
             Err(AgyFailure::Unavailable) => Err(primary_failure),
         },
         Err(primary_failure) => Err(primary_failure),
@@ -322,8 +341,8 @@ where
     let Ok(Some(before)) = credential_last_written() else {
         return Err(AgyFailure::Unavailable);
     };
-    if latch.blocks(before) {
-        return Err(AgyFailure::Paused);
+    if let Some(timed_out) = latch.blocks(before) {
+        return Err(if timed_out { AgyFailure::TimedOut } else { AgyFailure::Paused });
     }
     // #329 (macOS): with an unresolvable token endpoint `agy --print` escalates
     // to interactive OAuth, and a post-spawn timeout cannot stop it across a
@@ -331,11 +350,12 @@ where
     if !endpoint_resolves().await {
         return Err(AgyFailure::Unavailable);
     }
-    let parsed = match run(executable).await {
+    let (parsed, timed_out) = match run(executable).await {
         Err(AgyRunFailure::NotStarted) => return Err(AgyFailure::Unavailable),
-        Err(AgyRunFailure::Failed) => None,
+        Err(AgyRunFailure::Failed) => (None, false),
+        Err(AgyRunFailure::TimedOut) => (None, true),
         // The raw output and the parse error are dropped here on purpose.
-        Ok(stdout) => parse_agy_usage(&stdout, now).ok(),
+        Ok(stdout) => (parse_agy_usage(&stdout, now).ok(), false),
     };
     match parsed {
         Some(fetched) => {
@@ -350,11 +370,13 @@ where
                 Ok(Some(after)) => after,
                 Ok(None) | Err(_) => before,
             };
-            latch.set(Some(after));
+            latch.set(Some((after, timed_out)));
             // Paused from this poll on, not the next: returning Unavailable
             // here would show the primary "not logged in" for the one poll
-            // in which agy was in fact found, signed in and run.
-            Err(AgyFailure::Paused)
+            // in which agy was in fact found, signed in and run. A timeout is
+            // latched like any other failure (no timed re-arm: it is most
+            // likely the sign-in wait), only named differently.
+            Err(if timed_out { AgyFailure::TimedOut } else { AgyFailure::Paused })
         }
     }
 }
@@ -486,7 +508,7 @@ async fn run_agy_cli(executable: PathBuf) -> Result<Vec<u8>, AgyRunFailure> {
     };
     tokio::time::timeout(std::time::Duration::from_secs(35), run)
         .await
-        .map_err(|_| AgyRunFailure::Failed)?
+        .map_err(|_| AgyRunFailure::TimedOut)?
 }
 
 // ── Local IDE API ───────────────────────────────────────────────────────────
@@ -4022,7 +4044,7 @@ mod tests {
 
         let fakes = AgyFakes::signed_in(1);
         let latch = AgyLatch::new();
-        latch.set(Some(1));
+        latch.set(Some((1, false)));
         let paused = with_agy_fallback(primary(), || fakes.poll_with(&latch, agy_success)).await;
         assert_eq!(
             display(paused),
@@ -4050,6 +4072,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fetched.source, "agy");
+    }
+
+    /// A run that timed out (agy waiting for a browser sign-in, measured on a
+    /// Windows host) latches like any failure, but says so: the card names the
+    /// timeout and the likely sign-in wait instead of a generic failure. No
+    /// timed re-arm: later polls on the same credential still do not spawn.
+    /// A re-login (new `LastWritten`) re-arms. Control: a non-timeout failure
+    /// keeps the generic paused message.
+    #[tokio::test]
+    async fn a_timed_out_agy_run_latches_and_names_the_timeout() {
+        let display = |result: Result<Fetched, ProviderFetchFailure>| match result {
+            Err(ProviderFetchFailure::Terminal { display }) => display,
+            other => panic!("expected a terminal failure, got {other:?}"),
+        };
+        let primary = || Err(ProviderFetchFailure::terminal("primary terminal"));
+        let fakes = AgyFakes::signed_in(7);
+        let latch = AgyLatch::new();
+
+        let first = fakes.poll_with(&latch, || Err(AgyRunFailure::TimedOut)).await;
+        assert_eq!(first.unwrap_err(), AgyFailure::TimedOut);
+        assert_eq!(fakes.runs.get(), 1);
+
+        let shown = with_agy_fallback(primary(), || fakes.poll_with(&latch, agy_success)).await;
+        assert_eq!(display(shown), AGY_TIMED_OUT_MESSAGE);
+        assert_eq!(fakes.runs.get(), 1, "the same credential is not respawned after a timeout");
+
+        // A re-login rewrites the credential and re-arms the route.
+        fakes.last_written.set(Some(8));
+        assert!(fakes.poll_with(&latch, agy_success).await.is_ok());
+        assert_eq!(fakes.runs.get(), 2);
+
+        // Control: a non-timeout failure keeps the generic pause.
+        let failed = with_agy_fallback(primary(), || {
+            fakes.poll_with(&latch, || Err(AgyRunFailure::Failed))
+        })
+        .await;
+        assert_eq!(display(failed), AGY_PAUSED_MESSAGE);
+        let still = with_agy_fallback(primary(), || fakes.poll_with(&latch, agy_success)).await;
+        assert_eq!(display(still), AGY_PAUSED_MESSAGE);
     }
 
     #[test]
