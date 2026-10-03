@@ -629,6 +629,18 @@ pub struct UsageWindow {
     contract_duration: Option<DurationEvidence>,
     pace_status: PaceStatusPayload,
     historical_pace: Option<HistoricalPacePayload>,
+    /// The model this window's allowance is scoped to, as the provider's own
+    /// display-name slug — `fable` for a "Fable only" weekly limit.
+    ///
+    /// Set ONLY where the provider declares a scope (`limits[].scope.model`),
+    /// never inferred from a label. "Designs" and "Daily Routines" are windows
+    /// with a narrow scope that is not a MODEL, and a flat `seven_day_opus`
+    /// field says nothing about scope at all — guessing from those is how a
+    /// filter starts excluding usage the allowance actually counts.
+    ///
+    /// The display name rather than `scope.model.id` for the reason the card id
+    /// uses it: the live payload reports `id: null` while the field exists.
+    model_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -654,6 +666,8 @@ struct UsageWindowWire<'a> {
     pace_status: &'a PaceStatusPayload,
     #[serde(skip_serializing_if = "Option::is_none")]
     historical_pace: Option<&'a HistoricalPacePayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_scope: Option<&'a str>,
 }
 
 impl Serialize for UsageWindow {
@@ -672,6 +686,7 @@ impl Serialize for UsageWindow {
             window_minutes: self.duration_seconds.map(|seconds| seconds / 60),
             pace_status: &self.pace_status,
             historical_pace: self.historical_pace.as_ref(),
+            model_scope: self.model_scope.as_deref(),
         }
         .serialize(serializer)
     }
@@ -733,6 +748,10 @@ impl UsageWindow {
                 reason: Some("windowIdentity".to_string()),
             },
             historical_pace: None,
+            // Absent by default and attached only by the adapter that has a
+            // provider-declared scope. A window nobody scoped must read as
+            // "not scoped", never as "scoped to nothing".
+            model_scope: None,
         };
         window.refresh_initial_pace_status();
         window
@@ -780,6 +799,18 @@ impl UsageWindow {
     ) -> Option<Self> {
         (remaining_fraction.is_finite() && (0.0..=1.0).contains(&remaining_fraction))
             .then(|| Self::from_provider_fraction(label, remaining_fraction, resets_at, now))
+    }
+
+    /// Attach the provider-declared model scope. Separate from `with_identity`
+    /// because identity is emitted for every window and scope only for the few
+    /// the provider narrows — folding it in would make every call site state a
+    /// scope it does not have.
+    pub(crate) fn with_model_scope(mut self, slug: impl Into<String>) -> Self {
+        let slug = slug.into();
+        if !slug.is_empty() {
+            self.model_scope = Some(slug);
+        }
+        self
     }
 
     /// Attach provider-semantic presentation and history identity plus the
@@ -1234,6 +1265,8 @@ struct ClaudeUsageResponse {
     seven_day_cowork: Option<ClaudeWindow>,
     #[serde(default, deserialize_with = "deserialize_optional_raw")]
     cowork: Option<ClaudeWindow>,
+    #[serde(default, deserialize_with = "deserialize_optional_claude_limits")]
+    limits: Option<Vec<ClaudeLimitEntry>>,
     #[serde(default, deserialize_with = "deserialize_optional_raw")]
     extra_usage: Option<ClaudeExtraUsage>,
 }
@@ -1251,6 +1284,34 @@ impl ClaudeWindow {
         self.utilization
             .is_some_and(|used| used.is_finite() && (0.0..=100.0).contains(&used))
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeLimitEntry {
+    #[serde(default, deserialize_with = "deserialize_optional_non_empty_string")]
+    kind: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_empty_string")]
+    group: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_f64")]
+    percent: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_empty_string")]
+    resets_at: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_raw")]
+    scope: Option<ClaudeLimitScope>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeLimitScope {
+    #[serde(default, deserialize_with = "deserialize_optional_raw")]
+    model: Option<ClaudeLimitModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeLimitModel {
+    #[serde(default, deserialize_with = "deserialize_optional_non_empty_string")]
+    id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_empty_string")]
+    display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5488,6 +5549,7 @@ fn claude_windows(usage: &ClaudeUsageResponse, now: DateTime<Utc>) -> Vec<UsageW
         usage.routines_window(),
         now,
     );
+    append_claude_scoped_windows(&mut windows, usage.limits.as_deref(), now);
     if let Some(extra) = claude_extra_usage_window(usage.extra_usage.as_ref()) {
         windows.push(extra);
     }
@@ -5560,6 +5622,149 @@ fn map_claude_window(
             )
         },
     )
+}
+
+fn append_claude_scoped_windows(
+    windows: &mut Vec<UsageWindow>,
+    limits: Option<&[ClaudeLimitEntry]>,
+    now: DateTime<Utc>,
+) {
+    // Flat labels are the provider's human model names; compare them with the
+    // scoped display name rather than the id slug, which may include a
+    // namespace or version.
+    let flat_model_slugs = windows
+        .iter()
+        .map(|window| claude_slug(&window.label))
+        .collect::<HashSet<_>>();
+    let mut emitted_slugs = HashSet::new();
+    for entry in limits.unwrap_or(&[]) {
+        // Do not filter on `is_active`: live enforceable limits can report false.
+        if entry.group.as_deref() != Some("weekly")
+            || entry.kind.as_deref() != Some("weekly_scoped")
+        {
+            continue;
+        }
+        let Some(percent) = entry
+            .percent
+            .filter(|percent| percent.is_finite() && (0.0..=100.0).contains(percent))
+        else {
+            continue;
+        };
+        let Some(model) = entry.scope.as_ref().and_then(|scope| scope.model.as_ref()) else {
+            continue;
+        };
+        let Some(display_name) = model
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|display_name| !display_name.is_empty())
+        else {
+            continue;
+        };
+        let display_name_slug = claude_slug(display_name);
+        let model_id_slug = model
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(claude_slug);
+        if model_id_slug
+            .as_deref()
+            .is_some_and(claude_is_all_models_slug)
+            || claude_is_all_models_slug(&display_name_slug)
+        {
+            continue;
+        }
+        if flat_model_slugs.contains(&display_name_slug) {
+            continue;
+        }
+        // Identity comes from the display name, never the model id, even though
+        // the id looks like the more stable choice. The live payload reports
+        // `scope.model.id: null` while the field exists, so Anthropic populating
+        // it later would silently move this window's `card_id` and window key —
+        // dropping the user's persisted gauge selection (Swift matches
+        // `clientId|cardId` exactly) and restarting its quota-history series —
+        // with no visible change to the label. A display-name rename is the only
+        // way identity moves now, and that one is at least visible to the user.
+        if display_name_slug.is_empty() {
+            continue;
+        }
+        let slug = display_name_slug;
+        if !emitted_slugs.insert(slug.clone()) {
+            continue;
+        }
+        // A scoped entry that succeeds a legacy flat field inherits that
+        // field's semantic key and label. Anthropic moving a quota out of
+        // `seven_day_*` and into `limits[]` is the migration this mapper exists
+        // to support, and minting a new identity for it would cost the user the
+        // same persisted selection and history the flat lane already owns —
+        // for an otherwise unchanged quota. The flat-window guard above means
+        // this branch only runs once the flat field is actually gone.
+        let (window_key, label) = CLAUDE_SCOPED_FLAT_SUCCESSORS
+            .iter()
+            .find(|(model_slug, _, _)| *model_slug == slug)
+            .map_or_else(
+                || {
+                    (
+                        format!("weekly_scoped.{slug}.v1"),
+                        format!("{display_name} only"),
+                    )
+                },
+                |(_, key, label)| ((*key).to_string(), (*label).to_string()),
+            );
+        let resets_at = entry.resets_at.as_deref().and_then(parse_datetime);
+        if let Some(window) = UsageWindow::try_from_provider_used_percent(
+            label, percent, resets_at, now,
+        )
+        .map(|window| {
+            window
+                .with_identity(
+                    window_key.clone(),
+                    Some(window_key),
+                    None,
+                    Some(DurationEvidence::contract(7 * 24 * 60 * 60)),
+                )
+                // The same slug the identity is derived from, so a consumer
+                // filtering usage by scope and a consumer keying history by
+                // window cannot disagree about which model this is.
+                .with_model_scope(slug.clone())
+        }) {
+            windows.push(window);
+        }
+    }
+}
+
+/// Model-name slugs that already have a flat-field lane, paired with the
+/// semantic key and label that lane owns. Keeping these frozen is what lets a
+/// quota move from `seven_day_*` into `limits[]` without the user losing a
+/// pinned gauge or its learned pace. Entries here must match the identities
+/// emitted by `claude_windows()` for the corresponding flat fields.
+const CLAUDE_SCOPED_FLAT_SUCCESSORS: &[(&str, &str, &str)] = &[
+    ("sonnet", "sonnet.weekly.v1", "Sonnet"),
+    ("opus", "opus.weekly.v1", "Opus"),
+    ("designs", "design.weekly.v1", "Designs"),
+    ("daily-routines", "routines.weekly.v1", "Daily Routines"),
+];
+
+fn claude_is_all_models_slug(slug: &str) -> bool {
+    slug == "all-models" || slug.ends_with("-all-models")
+}
+
+fn claude_slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_separator = false;
+    for character in value.chars() {
+        if character.is_alphanumeric() {
+            if pending_separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.extend(character.to_lowercase());
+            pending_separator = false;
+        } else if !slug.is_empty() {
+            pending_separator = true;
+        }
+    }
+    slug
 }
 
 /// Parse the `anthropic-ratelimit-unified-{5h,7d}-{utilization,reset}` response
@@ -6059,6 +6264,23 @@ where
         Some(Value::String(s)) => s.parse::<f64>().ok(),
         _ => None,
     })
+}
+
+fn deserialize_optional_claude_limits<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<ClaudeLimitEntry>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| {
+        value.as_array().map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
+                .collect()
+        })
+    }))
 }
 
 #[cfg(test)]
@@ -10659,6 +10881,388 @@ mod tests {
     }
 
     #[test]
+    fn maps_claude_fable_scoped_weekly_limit() {
+        let raw = r#"{
+            "limits": [{
+                "kind": "weekly_scoped",
+                "group": "weekly",
+                "percent": 12.5,
+                "resets_at": "2026-08-10T00:00:00Z",
+                "scope": {"model": {
+                    "id": "claude/fable.5:promo",
+                    "display_name": "Fable"
+                }}
+            }]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Fable only");
+        assert_eq!(windows[0].card_id, "weekly_scoped.fable.v1");
+        assert_eq!(windows[0].used_percent, 12.5);
+        assert_eq!(
+            windows[0].resets_at.as_deref(),
+            Some("2026-08-10T00:00:00.000Z")
+        );
+        // The scope reaches the consumer, and it is the DISPLAY-NAME slug.
+        // `scope.model.id` here is "claude/fable.5:promo" — deliberately
+        // unlike the slug, so an implementation that switched to the id
+        // would fail rather than coincide. The live payload reports that id
+        // as null anyway, which is why identity comes from the display name.
+        assert_eq!(windows[0].model_scope.as_deref(), Some("fable"));
+        let wire = serde_json::to_value(&windows[0]).expect("serialize window");
+        assert_eq!(wire["modelScope"], "fable");
+    }
+
+    /// A window nobody scoped must say so by ABSENCE, not by an empty string.
+    ///
+    /// "Designs" and "Daily Routines" are narrow windows whose scope is not a
+    /// model, and the flat `seven_day_*` fields declare no scope at all. A
+    /// consumer filtering usage by scope has to be able to tell "not scoped"
+    /// from "scoped to something", and the key is omitted rather than emitted
+    /// null so the distinction survives the wire.
+    #[test]
+    fn an_unscoped_claude_window_carries_no_model_scope() {
+        let usage = ClaudeUsageResponse {
+            seven_day: Some(ClaudeWindow {
+                utilization: Some(23.0),
+                resets_at: None,
+            }),
+            seven_day_design: Some(ClaudeWindow {
+                utilization: Some(0.0),
+                resets_at: None,
+            }),
+            ..Default::default()
+        };
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        assert!(!windows.is_empty());
+        for window in &windows {
+            assert_eq!(window.model_scope, None, "{}", window.label);
+            let wire = serde_json::to_value(window).expect("serialize window");
+            assert!(
+                wire.get("modelScope").is_none(),
+                "{} emitted a modelScope key",
+                window.label
+            );
+        }
+    }
+
+    #[test]
+    fn maps_claude_scoped_limit_even_when_inactive() {
+        let raw = r#"{
+            "limits": [{
+                "kind": "weekly_scoped",
+                "group": "weekly",
+                "percent": 12.5,
+                "resets_at": "2026-08-10T00:00:00Z",
+                "is_active": false,
+                "scope": {"model": {
+                    "id": "claude/fable.5:promo",
+                    "display_name": "Fable"
+                }}
+            }]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        assert_eq!(claude_windows(&usage, now).len(), 1);
+    }
+
+    #[test]
+    fn skips_claude_scoped_all_models_limit() {
+        let raw = r#"{
+            "limits": [{
+                "kind": "weekly_scoped",
+                "group": "weekly",
+                "percent": 12.5,
+                "scope": {"model": {
+                    "id": "claude/all-models",
+                    "display_name": "All Models"
+                }}
+            }]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        assert!(claude_windows(&usage, now).is_empty());
+    }
+
+    #[test]
+    fn deduplicates_claude_scoped_opus_against_flat_window() {
+        let raw = r#"{
+            "seven_day_opus": {"utilization": 25},
+            "limits": [{
+                "kind": "weekly_scoped",
+                "group": "weekly",
+                "percent": 80,
+                "scope": {"model": {
+                    "id": "claude/opus.5",
+                    "display_name": "Opus"
+                }}
+            }]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Opus");
+        assert!(!windows[0].label.ends_with(" only"));
+        assert_eq!(windows[0].used_percent, 25.0);
+    }
+
+    /// The migration case: once Anthropic drops a flat field, the scoped entry
+    /// must take over rather than leaving the model with no window at all — and
+    /// it must inherit the flat lane's identity, or the handover costs the user
+    /// their pinned gauge and the window's learned pace for a quota that never
+    /// actually changed.
+    #[test]
+    fn maps_claude_scoped_opus_when_flat_window_absent() {
+        let raw = r#"{
+            "limits": [{
+                "kind": "weekly_scoped",
+                "group": "weekly",
+                "percent": 80,
+                "scope": {"model": {
+                    "id": "claude/opus.5",
+                    "display_name": "Opus"
+                }}
+            }]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        assert_eq!(windows.len(), 1);
+        // Identical to what the flat `seven_day_opus` lane emits, so a pinned
+        // gauge and its history survive the handover untouched.
+        assert_eq!(windows[0].label, "Opus");
+        assert_eq!(windows[0].card_id, "opus.weekly.v1");
+        assert_eq!(windows[0].window_key.as_deref(), Some("opus.weekly.v1"));
+        assert_eq!(windows[0].used_percent, 80.0);
+    }
+
+    /// `CLAUDE_SCOPED_FLAT_SUCCESSORS` is hand-written, so it can drift from the
+    /// identities `claude_windows()` actually emits for the flat fields. Drive
+    /// both lanes with the same quota and require the identity to be identical:
+    /// if either side is renamed or re-keyed without the other, this fails.
+    #[test]
+    fn claude_scoped_successors_match_their_flat_lane_identities() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let cases = [
+            ("seven_day_sonnet", "Sonnet"),
+            ("seven_day_opus", "Opus"),
+            ("seven_day_design", "Designs"),
+            ("seven_day_routines", "Daily Routines"),
+        ];
+
+        for (flat_field, display_name) in cases {
+            let flat = claude_windows(
+                &serde_json::from_str::<ClaudeUsageResponse>(&format!(
+                    r#"{{"{flat_field}": {{"utilization": 40}}}}"#
+                ))
+                .unwrap(),
+                now,
+            );
+            let scoped = claude_windows(
+                &serde_json::from_str::<ClaudeUsageResponse>(&format!(
+                    r#"{{"limits": [{{"kind": "weekly_scoped", "group": "weekly",
+                         "percent": 40,
+                         "scope": {{"model": {{"id": null,
+                                               "display_name": "{display_name}"}}}}}}]}}"#
+                ))
+                .unwrap(),
+                now,
+            );
+
+            assert_eq!(flat.len(), 1, "flat lane for {flat_field}");
+            assert_eq!(scoped.len(), 1, "scoped lane for {display_name}");
+            assert_eq!(
+                scoped[0].card_id, flat[0].card_id,
+                "card id drifted for {display_name}"
+            );
+            assert_eq!(
+                scoped[0].window_key, flat[0].window_key,
+                "window key drifted for {display_name}"
+            );
+            assert_eq!(
+                scoped[0].label, flat[0].label,
+                "label drifted for {display_name}"
+            );
+        }
+    }
+
+    /// End-to-end shape check against a real `oauth/usage` response captured
+    /// 2026-08-04 (percentages and timestamps replaced with neutral test
+    /// values; every field, including the ones we do not parse, kept verbatim).
+    ///
+    /// This pins three things the synthetic fixtures above cannot, because the
+    /// live payload differs from what the reference implementations led us to
+    /// expect:
+    ///   - the account-wide weekly entry is `kind: "weekly_all"` with a null
+    ///     scope, not an all-models scope, so `kind` is what actually keeps it
+    ///     out of the scoped lane;
+    ///   - the real Fable entry carries `scope.model.id: null`, so identity
+    ///     falls back to the display name;
+    ///   - the real Fable entry carries `resets_at: null` and must still
+    ///     produce a window.
+    #[test]
+    fn maps_live_claude_usage_payload_shape() {
+        let raw = r#"{
+            "five_hour": {"utilization": 55.0, "resets_at": "2026-08-10T20:40:00.197695+00:00",
+                          "limit_dollars": null, "used_dollars": null, "remaining_dollars": null},
+            "seven_day": {"utilization": 33.0, "resets_at": "2026-08-12T10:00:00.197716+00:00",
+                          "limit_dollars": null, "used_dollars": null, "remaining_dollars": null},
+            "seven_day_oauth_apps": null, "seven_day_opus": null, "seven_day_sonnet": null,
+            "seven_day_cowork": null, "seven_day_omelette": null, "tangelo": null,
+            "iguana_necktie": null, "omelette_promotional": null, "nimbus_quill": null,
+            "cinder_cove": null, "amber_ladder": null,
+            "extra_usage": {"is_enabled": false, "monthly_limit": null, "used_credits": null,
+                            "utilization": null, "currency": null, "decimal_places": null,
+                            "disabled_reason": null, "user_disabled": true,
+                            "spend_limit_reached": false, "credits_ever_enabled": true,
+                            "daily": null, "weekly": null},
+            "limits": [
+                {"kind": "session", "group": "session", "percent": 55, "severity": "normal",
+                 "resets_at": "2026-08-10T20:40:00.197695+00:00", "scope": null, "is_active": true},
+                {"kind": "weekly_all", "group": "weekly", "percent": 33, "severity": "normal",
+                 "resets_at": "2026-08-12T10:00:00.197716+00:00", "scope": null, "is_active": false},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 0, "severity": "normal",
+                 "resets_at": null,
+                 "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null},
+                 "is_active": false}
+            ],
+            "spend": {"used": {"amount_minor": 0, "currency": "USD", "exponent": 2},
+                      "limit": null, "percent": 0, "severity": "normal", "enabled": false,
+                      "disabled_reason": null, "cap": null, "balance": null, "auto_reload": null,
+                      "disclaimer": "Usage credits cover you when you hit your plan limits.",
+                      "can_purchase_credits": false, "can_toggle": false},
+            "member_dashboard_available": false
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+
+        // Session and Weekly come from the flat fields; the `session` and
+        // `weekly_all` entries in `limits[]` describe the same two quotas and
+        // must not add duplicates.
+        assert_eq!(
+            windows
+                .iter()
+                .map(|window| window.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Session", "Weekly", "Fable only"]
+        );
+        assert_eq!(windows[0].used_percent, 55.0);
+        assert_eq!(windows[1].used_percent, 33.0);
+
+        let fable = &windows[2];
+        assert_eq!(fable.card_id, "weekly_scoped.fable.v1");
+        assert_eq!(fable.used_percent, 0.0);
+        assert_eq!(fable.remaining_percent, 100.0);
+        assert_eq!(fable.resets_at, None);
+    }
+
+    /// Per-entry tolerance: one unusable element must not discard its valid
+    /// siblings, which is what separates element-wise parsing from decoding the
+    /// array as a whole.
+    #[test]
+    fn keeps_valid_claude_scoped_limit_beside_malformed_sibling() {
+        let raw = r#"{
+            "limits": [
+                42,
+                {"kind": "weekly_scoped", "group": "weekly", "percent": "oops",
+                 "scope": {"model": {"display_name": "Broken"}}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 12.5,
+                 "scope": {"model": {
+                    "id": "claude/fable.5:promo", "display_name": "Fable"
+                 }}}
+            ]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Fable only");
+        assert_eq!(windows[0].used_percent, 12.5);
+    }
+
+    #[test]
+    fn ignores_malformed_claude_scoped_limits() {
+        let raw = r#"{
+            "limits": [
+                42,
+                {"kind": "session", "group": "weekly", "percent": 10,
+                 "scope": {"model": {"display_name": "Session"}}},
+                {"kind": "weekly_scoped", "group": "monthly", "percent": 10,
+                 "scope": {"model": {"display_name": "Monthly"}}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": "NaN",
+                 "scope": {"model": {"display_name": "Infinite"}}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 10,
+                 "scope": {"model": {"display_name": "   "}}}
+            ]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        assert!(claude_windows(&usage, now).is_empty());
+    }
+
+    #[test]
+    fn deduplicates_duplicate_claude_scoped_limit_slugs_first_wins() {
+        let raw = r#"{
+            "limits": [
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 12,
+                 "scope": {"model": {
+                    "id": "claude/fable.5:promo", "display_name": "Fable"
+                 }}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 99,
+                 "scope": {"model": {
+                    "id": "claude/fable.5:promo-v2", "display_name": "Fable"
+                 }}}
+            ]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].used_percent, 12.0);
+        assert_eq!(windows[0].label, "Fable only");
+    }
+
+    /// Regression: `scope.model.id` is null in the live payload but the field
+    /// exists, so Anthropic populating it later must not move the window's
+    /// identity. A moved `card_id` silently drops the user's persisted gauge
+    /// selection (Swift matches `clientId|cardId` exactly) and restarts the
+    /// quota-history series, with no visible change to the label.
+    #[test]
+    fn claude_scoped_identity_survives_model_id_appearing() {
+        let with_null_id = r#"{
+            "limits": [{"kind": "weekly_scoped", "group": "weekly", "percent": 7,
+                        "scope": {"model": {"id": null, "display_name": "Fable"}}}]
+        }"#;
+        let with_populated_id = r#"{
+            "limits": [{"kind": "weekly_scoped", "group": "weekly", "percent": 7,
+                        "scope": {"model": {
+                            "id": "claude/fable.5:promo", "display_name": "Fable"
+                        }}}]
+        }"#;
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+
+        let before = claude_windows(
+            &serde_json::from_str::<ClaudeUsageResponse>(with_null_id).unwrap(),
+            now,
+        );
+        let after = claude_windows(
+            &serde_json::from_str::<ClaudeUsageResponse>(with_populated_id).unwrap(),
+            now,
+        );
+
+        assert_eq!(before.len(), 1);
+        assert_eq!(after.len(), 1);
+        assert_eq!(before[0].card_id, "weekly_scoped.fable.v1");
+        assert_eq!(after[0].card_id, before[0].card_id);
+        assert_eq!(after[0].window_key, before[0].window_key);
+    }
+
+    #[test]
     fn stage4_claude_json_and_headers_share_canonical_duration_contracts() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
         let reset = Some("2026-07-24T00:00:00Z".to_string());
@@ -13412,6 +14016,7 @@ mod tests {
                     reason: reason.map(|value| value.to_string()),
                 },
                 historical_pace,
+                model_scope: None,
             }
         }
 
