@@ -10,11 +10,14 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
     private Action? _beforeFirstFetch;
 
     // Waits for the launch push so the first fetch already carries the extra
-    // Claude accounts' cards.
+    // Claude accounts' cards; AntigravityFetch installs the captured
+    // Antigravity accounts first, runs automatic capture's pre-fetch step and
+    // dedups the result, for both quota consumers.
     public static AgentUsageFetchCoordinator Shared { get; } = new(() =>
     {
         ClaudeExtraRoots.AwaitLaunch();
-        return TbCore.AgentUsage();
+        return AntigravityFetch.Run(
+            TbCore.AgentUsage, AntigravityAccounts.Installer, AntigravityAutoCapture.Shared);
     });
 
     /// <summary>Run <paramref name="action"/> once, on the fetch thread, before

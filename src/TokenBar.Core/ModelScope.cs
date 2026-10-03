@@ -115,7 +115,7 @@ public static class ModelScope
         var agents = payload.Agents.Where(agent => agent.ClientId == clientId).ToList();
         var owned = accountScope is null
             ? []
-            : agents.Where(agent => agent.HistoryScope?.Scope == accountScope).ToList();
+            : agents.Where(agent => agent.HistoryReadScope?.Scope == accountScope).ToList();
         var candidates = owned.Count > 0 ? owned : agents.Take(1).ToList();
         return candidates
             .SelectMany(agent => agent.RawCardWindows)

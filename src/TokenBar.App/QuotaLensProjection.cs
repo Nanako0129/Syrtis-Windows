@@ -251,7 +251,7 @@ public static class QuotaLensProjection
     {
         var cards = (quota?.Agents ?? []).Where(a => a.ClientId == series.ProviderId).ToList();
         return cards.All(a => a.Account.AccountKey is null)
-            || cards.Any(a => a.Account.AccountKey is null && a.HistoryScope?.Scope == series.AccountScope);
+            || cards.Any(a => a.Account.AccountKey is null && a.HistoryReadScope?.Scope == series.AccountScope);
     }
 
     /// <summary>
