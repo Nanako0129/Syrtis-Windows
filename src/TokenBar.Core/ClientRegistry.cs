@@ -77,7 +77,10 @@ public static class ClientRegistry
         ["muse"] = ("Muse Code", "#0064e0"),
         ["reasonix"] = ("Reasonix", "#808000"),
         ["kimchi"] = ("Kimchi", "#7f1d1d"),
-        ["senpi"] = ("Senpi (OmO Native)", "#2f6f63"),
+        // Upstream labels it "Senpi (OmO Native)"; Syrtis names the client
+        // only, since the engine reads the base client and not OmO's children
+        // (macOS ClientRegistry.swift:76-78).
+        ["senpi"] = ("Senpi", "#2f6f63"),
         ["omp"] = ("Oh My Pi", "#d946ef"),
     };
 

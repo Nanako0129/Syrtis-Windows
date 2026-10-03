@@ -102,7 +102,7 @@ public class ClientRegistryTests : IDisposable
     [InlineData("muse", "Muse Code", "#0064e0")]
     [InlineData("reasonix", "Reasonix", "#808000")]
     [InlineData("kimchi", "Kimchi", "#7f1d1d")]
-    [InlineData("senpi", "Senpi (OmO Native)", "#2f6f63")]
+    [InlineData("senpi", "Senpi", "#2f6f63")]
     [InlineData("omp", "Oh My Pi", "#d946ef")]
     public void EngineSyncClientsAreRegisteredWithUpstreamStyle(string id, string name, string color)
     {

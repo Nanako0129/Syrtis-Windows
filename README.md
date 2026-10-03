@@ -195,7 +195,10 @@ Claude.
 Shared parsing engine from [tokscale-core](https://github.com/Nanako0129/tokscale-core),
 originally derived from [tokscale](https://github.com/junhoyeo/tokscale) by
 junhoyeo. Original menu-bar concept by
-[handlecusion's tokcat](https://github.com/handlecusion/tokcat).
+[handlecusion's tokcat](https://github.com/handlecusion/tokcat). The spinning
+cat traces back to [RunCat](https://kyome.io/runcat/) by Takuto Nakamura, and
+the quota-pace cards reference [CodexBar](https://github.com/steipete/CodexBar)
+by Peter Steinberger.
 
 ## License
 
