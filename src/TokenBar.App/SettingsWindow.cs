@@ -421,7 +421,8 @@ public sealed class SettingsWindow : Window
                     }));
                 icon.Children.Add(detail);
                 icon.Children.Add(Hint(
-                    ("The cat and parrot speed up as the live token rate climbs. The pace "
+                    ("The cat and parrot speed up and the sand gets busier as the live token "
+                        + "rate climbs. The pace "
                         + "sets how much traffic reaches the top: Light at 600K tokens/min, "
                         + "Moderate at 3M, Heavy at 10M.").Localized()));
             }

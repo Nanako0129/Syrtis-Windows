@@ -427,7 +427,7 @@
   "Occasional use, or a plan like Claude Pro": "偶爾使用，或像 Claude Pro 這類方案",
   "A few agents at once, or a plan like Claude Max 5x": "幾個 agent 同時跑，或像 Claude Max 5x 這類方案",
   "Lots of agents at once, such as Claude Code's ultracode, or a plan like Claude Max 20x": "超多 agent 同時跑（例如 Claude Code 的 ultracode），或像 Claude Max 20x 這類方案",
-  "The cat and parrot speed up as the live token rate climbs. The pace sets how much traffic reaches the top: Light at 600K tokens/min, Moderate at 3M, Heavy at 10M.": "即時 token 速率越高，貓和鸚鵡跑得越快。動畫速度決定多大的流量會到頂：輕度是每分鐘 60 萬 token、中度 300 萬、重度 1,000 萬。",
+  "The cat and parrot speed up and the sand gets busier as the live token rate climbs. The pace sets how much traffic reaches the top: Light at 600K tokens/min, Moderate at 3M, Heavy at 10M.": "即時 token 速率越高，貓和鸚鵡跑得越快、流沙也越熱鬧。動畫速度決定多大的流量會到頂：輕度是每分鐘 60 萬 token、中度 300 萬、重度 1,000 萬。",
   "Overview cards": "總覽卡片",
   "Quota summary": "額度摘要",
   "Limits": "Agent 額度",
