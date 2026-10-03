@@ -48,6 +48,17 @@ public class ClaudeExtraRootsTests
     [InlineData(@"d:/WORK/.claude", "duplicate")]
     [InlineData(@"C:\Users\Me\.claude\work", "defaultConfigDir")]
     [InlineData(@"C:\Users", "defaultConfigDir")]
+    [InlineData(@"C:\Users\Me\.claude-work", null)]
+    [InlineData(@"C:\Users\Mee\.claude", null)]
+    public void UiRulesFoldCaseAndSeparators(string path, string? expected)
+    {
+        Assert.Equal(expected, ClaudeExtraRoots.UiRejection(path, [@"D:\work\.claude"], @"C:\Users\Me"));
+    }
+
+    /// <summary>Everything but an absolute drive path, before any profile
+    /// rule. Parity with the native setter: ClaudeRootsNativeTests.</summary>
+    [Theory]
+    [InlineData("", "empty")]
     [InlineData(@"E:\", "rootDirectory")]
     [InlineData(@"c:/", "rootDirectory")]
     [InlineData(@"C:\\\", "rootDirectory")]
@@ -57,11 +68,9 @@ public class ClaudeExtraRootsTests
     [InlineData(@"\Users\x", "unsupportedPath")]
     [InlineData(@"\\server\share\.claude", "unsupportedPath")]
     [InlineData(@"//wsl.localhost/Ubuntu/home/me/.claude", "unsupportedPath")]
-    [InlineData(@"C:\Users\Me\.claude-work", null)]
-    [InlineData(@"C:\Users\Mee\.claude", null)]
-    public void UiRulesFoldCaseAndSeparators(string path, string? expected)
+    public void UiRefusesEverythingButAnAbsoluteDrivePath(string path, string expected)
     {
-        Assert.Equal(expected, ClaudeExtraRoots.UiRejection(path, [@"D:\work\.claude"], @"C:\Users\Me"));
+        Assert.Equal(expected, ClaudeExtraRoots.UiRejection(path, [], @"C:\Users\Me"));
     }
 
     [Fact]
@@ -76,6 +85,8 @@ public class ClaudeExtraRootsTests
     [InlineData(@"\\wsl.localhost\Ubuntu\home\me\.claude", false)]
     [InlineData(@"//WSL$/Ubuntu/home/me/.claude", false)]
     [InlineData(@"\\server\share", false)]
+    [InlineData(@"C:work", false)]
+    [InlineData(@"\Users\x", false)]
     [InlineData(@"D:\work\.claude", true)]
     public void SettingsNeverStatsAUncPath(string dir, bool mayCheck)
     {

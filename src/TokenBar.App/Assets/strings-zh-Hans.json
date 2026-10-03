@@ -479,7 +479,7 @@
   "That's your user folder. Pick the Claude config folder inside it.": "这是你的用户目录，请选择其中的 Claude 配置目录。",
   "That folder overlaps your main Claude account's folder, which is already shown.": "这个目录与主 Claude 账户的目录重叠，而主账户已经显示了。",
   "Already added.": "已经添加过了。",
-  "Only folders on a drive letter can be added, not network or WSL paths.": "只能添加驱动器盘符下的目录，网络路径和 WSL 路径不行。",
+  "Only a full folder path that starts with a drive letter, like D:\\folder, can be added. Network and WSL paths can't.": "只能添加以驱动器盘符开头的完整目录路径，例如 D:\\folder。网络路径和 WSL 路径不行。",
   "A drive's root can't be added.": "不能添加驱动器的根目录。",
   "Windows can't open this path as written.": "Windows 无法按这个写法打开该路径。",
   "Up to 8 folders can be added.": "最多只能添加 8 个目录。",
