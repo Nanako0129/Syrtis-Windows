@@ -218,7 +218,10 @@ public sealed partial class DashboardView
             new QuotaLensProjection.Selection(
                 _activeClientTab, _windowCardTab, _historyShownWindow, _historyShownCount,
                 AppSettings.Store.GetString(
-                    WindowCardText.AccountKeyPrefix + ClientRegistry.QuotaOwner(_activeClientTab))));
+                    WindowCardText.AccountKeyPrefix + ClientRegistry.QuotaOwner(_activeClientTab)),
+                // Year-independent: the card's scan covers quota history,
+                // not the selected year (LocalRecordClients).
+                LocalRecordClients.Union(AppSettings.Store, snapshot.Graph.Summary.Clients)));
 
         // A client tab asks about one subscription, so it gets that
         // subscription's own three cards rather than the all-clients four.
@@ -637,11 +640,18 @@ public sealed partial class DashboardView
             WindowMetricToggle());
     }
 
+    /// <summary>Pills keep their old 2px gap, and wrap onto further lines when
+    /// the row is wider than the card: Antigravity's window labels are long,
+    /// and horizontal scrolling is unusable in the focusless popover.</summary>
+    private static WrapRow PillRow() => new() { SpacingX = PillGap, SpacingY = PillGap };
+
+    private const double PillGap = 2;
+
     /// <summary>One pill per account with live windows; the choice is stored
     /// per client and never touches the window-tab key.</summary>
     private FrameworkElement AccountTabs(QuotaLensProjection.Client client)
     {
-        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
+        var row = PillRow();
         foreach (var account in client.Accounts)
         {
             var pill = LensPill(account.Label, account.Key == client.SelectedAccount);
@@ -663,7 +673,7 @@ public sealed partial class DashboardView
     private FrameworkElement WindowTabs(
         IReadOnlyList<WindowCardTab> tabs, WindowCardTab? selected)
     {
-        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
+        var row = PillRow();
         foreach (var tab in tabs)
         {
             var pill = LensPill(WindowCardText.TabLabel(tab), tab == selected);

@@ -362,7 +362,9 @@ public class AccountIdentityTests
         Assert.Equal(Desktop, WindowCardText.WindowCardAccount(desktopOnly, "claude", ""));
     }
 
-    private static QuotaLensProjection.Client ClientFor(string? stored, string? storedTab = null)
+    private static QuotaLensProjection.Client ClientFor(
+        string? stored, string? storedTab = null, IReadOnlyCollection<string>? localClients = null,
+        IReadOnlyList<UsageAttribution.Record>? records = null)
     {
         var messages = new[] { new WindowMessage(97 * Hour * 1000 + 1, "claude", "anthropic", "m", 10, 0, 0, 0, 0, 1.0, true) };
         var history = new[]
@@ -378,10 +380,45 @@ public class AccountIdentityTests
             history, TwoAccounts(), graph, new WindowUsage(messages, 3, 0),
             WindowEquivalence.FetchOutcome.Succeeded, WindowEquivalence.FetchOutcome.Succeeded,
             new UsageAttribution.Table(
-                [new UsageAttribution.Record("claude", "anthropic", UsageAttribution.State.Assigned("claude"))],
+                records ?? [new UsageAttribution.Record("claude", "anthropic", UsageAttribution.State.Assigned("claude"))],
                 IsWritable: true),
             year: null,
-            new QuotaLensProjection.Selection("claude", storedTab ?? "", WindowCardAccount: stored)).Client!;
+            new QuotaLensProjection.Selection("claude", storedTab ?? "", WindowCardAccount: stored, LocalUsageClients: localClients)).Client!;
+    }
+
+    /// <summary>A subscription used only through another client still has
+    /// local records: OpenCode is the only present client and a confirmed
+    /// opencode·openai → codex record makes the Codex tab scanned (macOS #468
+    /// WCP2-attr). Controls: no record, an Excluded record, a record assigned
+    /// to another owner, and a record for an absent client leave it
+    /// quota-only.</summary>
+    [Fact]
+    public void ConfirmedAttributionFromAPresentClientCountsAsLocalRecords()
+    {
+        UsageAttribution.Record R(string client, UsageAttribution.State state) => new(client, "openai", state);
+        string[] present = ["opencode"];
+        Assert.False(QuotaLensProjection.TabHasNoLocalRecords(
+            "codex", present, [R("opencode", UsageAttribution.State.Assigned("codex"))]));
+        Assert.True(QuotaLensProjection.TabHasNoLocalRecords("codex", present, []));
+        Assert.True(QuotaLensProjection.TabHasNoLocalRecords(
+            "codex", present, [R("opencode", UsageAttribution.State.Excluded)]));
+        Assert.True(QuotaLensProjection.TabHasNoLocalRecords(
+            "codex", present, [R("opencode", UsageAttribution.State.Assigned("claude"))]));
+        Assert.True(QuotaLensProjection.TabHasNoLocalRecords(
+            "codex", present, [R("kimi", UsageAttribution.State.Assigned("codex"))]));
+        // The client is matched raw, as Resolve/Mine match it: an alias the
+        // messages never carry does not open the gate.
+        Assert.True(QuotaLensProjection.TabHasNoLocalRecords(
+            "gemini", ["codex"], [R("codex-cli", UsageAttribution.State.Assigned("gemini"))]));
+        Assert.True(QuotaLensProjection.TabHasNoLocalRecords(
+            "codex", ["opencode"], [R("OpenCode", UsageAttribution.State.Assigned("codex"))]));
+
+        // Through the projection: the primary Claude card with only OpenCode
+        // present is unattributed unless OpenCode usage is confirmed as Claude's.
+        Assert.True(ClientFor(null, localClients: ["opencode"]).LocalUsageUnattributed);
+        var viaOpenCode = ClientFor(null, localClients: ["opencode"], records:
+            [new UsageAttribution.Record("opencode", "anthropic", UsageAttribution.State.Assigned("claude"))]);
+        Assert.False(viaOpenCode.LocalUsageUnattributed);
     }
 
     [Fact]
@@ -404,6 +441,47 @@ public class AccountIdentityTests
         Assert.Null(desktop.LiveEquivalence);
         Assert.Equal(0, desktop.UndatedCount);
         Assert.Equal("Local usage can't be attributed to this account yet.", WindowCardText.LocalUsageUnattributed());
+    }
+
+    [Fact]
+    public void QuotaOnlyTabTreatsEvenThePrimaryAsUnattributed()
+    {
+        var primary = ClientFor(null, localClients: ["codex"]);
+        Assert.True(primary.LocalUsageUnattributed);
+        Assert.Empty(primary.Mine);
+        Assert.Empty(primary.Messages);
+        Assert.Null(primary.LiveEquivalence);
+        Assert.Equal(0, primary.UndatedCount);
+        Assert.Equal(WindowCardText.LocalUsageUnattributed(), WindowCardText.ZoneUsage([], unattributed: primary.LocalUsageUnattributed).Empty);
+    }
+
+    [Fact]
+    public void TabWithRecordsOrUnknownPresenceKeepsThePrimaryScanned()
+    {
+        foreach (var known in new[] { new[] { "claude" }, ["claude-code"] })
+        {
+            var withRecords = ClientFor(null, localClients: known);
+            Assert.False(withRecords.LocalUsageUnattributed);
+            Assert.NotEmpty(withRecords.Mine);
+        }
+
+        var unknown = ClientFor(null, localClients: null);
+        Assert.False(unknown.LocalUsageUnattributed);
+        Assert.NotEmpty(unknown.Mine);
+        // Non-primary stays unattributed whatever the presence says.
+        Assert.True(ClientFor(Desktop, localClients: ["claude"]).LocalUsageUnattributed);
+    }
+
+    [Fact]
+    public void GroupedTabCountsAnyMemberAsHavingRecords()
+    {
+        // Antigravity tab = antigravity + antigravity-cli; the CLI carries the usage.
+        Assert.False(QuotaLensProjection.TabHasNoLocalRecords("antigravity", ["antigravity-cli"], []));
+        Assert.False(QuotaLensProjection.TabHasNoLocalRecords("antigravity-cli", ["antigravity-cli"], []));
+        Assert.False(QuotaLensProjection.TabHasNoLocalRecords("antigravity", ["antigravity"], []));
+        Assert.True(QuotaLensProjection.TabHasNoLocalRecords("antigravity", ["claude"], []));
+        Assert.True(QuotaLensProjection.TabHasNoLocalRecords("antigravity-cli", [], []));
+        Assert.False(QuotaLensProjection.TabHasNoLocalRecords("antigravity", null, []));
     }
 
     [Fact]
