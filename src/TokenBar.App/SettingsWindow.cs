@@ -1464,19 +1464,13 @@ public sealed class SettingsWindow : Window
     private static void MoveClientTab(
         SettingsStore store, IReadOnlyList<string> present, string from, string to)
     {
-        // `present` is already TAB ids (TabClients folds group members). The
-        // saved order can still hold a legacy member id (e.g.
-        // `antigravity-cli`) from before the fold existed, so `TabOrder`
-        // folds it to its tab id and dedupes before this reorder runs — a
-        // raw compare would leave that legacy entry unmatched by `visible`
-        // and let it drift to the end of `full` on every move.
+        // `present` is already TAB ids and Settings lists every one of them,
+        // so the visible subset is the whole present set in saved order.
         var orderRaw = store.GetString(ClientRegistry.TabOrderKey) ?? "";
-        var order = ClientRegistry.TabOrder(orderRaw);
-        var visible = ClientRegistry.OrderedClients(present, order);
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        var full = order.Concat(visible).Where(seen.Add).ToList();
-        var merged = ClientRegistry.MergeReorder(full, visible, from, to);
-        store.SetString(ClientRegistry.TabOrderKey, string.Join(',', merged));
+        var visible = ClientRegistry.OrderedClients(present, ClientRegistry.TabOrder(orderRaw));
+        store.SetString(
+            ClientRegistry.TabOrderKey,
+            ClientRegistry.MoveTab(orderRaw, present, visible, from, to));
     }
 
     private static void SetClientTabVisible(SettingsStore store, string id, bool visible)
