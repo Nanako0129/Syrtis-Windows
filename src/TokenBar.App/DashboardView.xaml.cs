@@ -30,8 +30,9 @@ public sealed partial class DashboardView : UserControl
     private string _clientTabsSignature = "";
     private string? _expandedDay; // Daily drill-down state
     private string? _expandedMonth; // Monthly drill-down state
-    private bool _hourlyProfileMode;
-    private int _hourlyWindow = 48; // Timeline rows shown; +48 per "Show more"
+    private HourlyMode _hourlyMode =
+        HourlyLens.ParseMode(AppSettings.Store.GetString(HourlyLens.ModeKey));
+    private int _hourlyWindow = HourlyLens.TimelineInitial; // Timeline rows shown
     private bool _modelsExpanded; // Overview Models card; not persisted (macOS @State)
     // Chart toggles, persisted with the macOS rawValue strings.
     private StackBy _chartStackBy =
@@ -59,7 +60,8 @@ public sealed partial class DashboardView : UserControl
     public DashboardView()
     {
         InitializeComponent();
-        ProductTitle.Text = ProductIdentity.Name;
+        // The wordmark reads Σύρτις; a screen reader names the product.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ProductTitle, ProductIdentity.Name);
         SetLiveRate(0);
         // WinUI otherwise synthesizes a tooltip containing "Esc" for the
         // dashboard-wide Escape accelerator whenever the pointer rests over
@@ -103,12 +105,8 @@ public sealed partial class DashboardView : UserControl
         YearButton.Content = "All".Localized();
         QuitButton.Content = "Quit".Localized();
 
-        RefreshButton.Click += (_, _) =>
-        {
-            _model?.RefreshForce();
-            UpdateRefreshControl();
-        };
-        HoverTip.Attach(RefreshButton, () => "Refresh usage data".Localized());
+        RefreshButton.Click += (_, _) => TryRefresh();
+        HoverTip.Attach(RefreshButton, () => RefreshTip.Text(_model?.Current?.RestoredAt, DateTimeOffset.Now));
 
         SettingsButton.Click += (_, _) => TrayService.OpenSettings?.Invoke();
         HoverTip.Attach(SettingsButton, () => "Settings".Localized());
@@ -163,12 +161,10 @@ public sealed partial class DashboardView : UserControl
         KeyboardAccelerators.Add(escape);
         AddAccel(Windows.System.VirtualKey.W, Windows.System.VirtualKeyModifiers.Control,
             () => HideRequested?.Invoke());
+        // Same busy condition as the visible control: the shortcut cannot
+        // start a refresh the disabled button would refuse (macOS ⌘R guard).
         AddAccel(Windows.System.VirtualKey.R, Windows.System.VirtualKeyModifiers.Control,
-            () =>
-            {
-                _model?.RefreshForce();
-                UpdateRefreshControl();
-            });
+            TryRefresh);
         AddAccel(Windows.System.VirtualKey.G, Windows.System.VirtualKeyModifiers.Control,
             ToggleChartView);
         AddAccel(Windows.System.VirtualKey.Q, Windows.System.VirtualKeyModifiers.Control,
@@ -478,15 +474,50 @@ public sealed partial class DashboardView : UserControl
         SwitchTo(_view);
     }
 
-    /// <summary>One control, two states (macOS refreshButton): the glyph
-    /// while idle, a spinner while a forced re-read or the initial load runs.</summary>
+    /// <summary>Button and Ctrl+R. Refused while a request runs, but not
+    /// for "nothing loaded yet": when a first load failed with no snapshot,
+    /// a manual retry must stay possible (macOS refreshDisabled has no
+    /// loading term either).</summary>
+    private void TryRefresh()
+    {
+        if (_model is null
+            || RefreshTip.Busy(loading: false, _model.Refreshing, _model.GraphInFlight))
+        {
+            return;
+        }
+
+        _model.RefreshForce();
+        UpdateRefreshControl(loading: _model.Current is null);
+    }
+
+    /// <summary>One control (macOS refreshButton): a spinner, disabled, while
+    /// any graph request or the initial load runs; otherwise the glyph,
+    /// tinted when restored data is on screen and its refresh failed.</summary>
     private void UpdateRefreshControl(bool loading = false)
     {
-        var spinning = loading || _model?.Refreshing == true;
+        var spinning = RefreshTip.Busy(
+            loading, _model?.Refreshing == true, _model?.GraphInFlight == true);
         RefreshButton.Visibility = spinning ? Visibility.Collapsed : Visibility.Visible;
+        RefreshButton.IsEnabled = !spinning;
         RefreshSpinner.Visibility = spinning ? Visibility.Visible : Visibility.Collapsed;
         RefreshSpinner.IsActive = spinning;
+        var current = _model?.Current;
+        if (RefreshTip.ShowsStaleRestore(current?.RestoredAt, current?.RestoreFailed == true))
+        {
+            RefreshGlyph.Foreground = StaleRestoreBrush;
+        }
+        else
+        {
+            // Back to the inherited button foreground, as before this state
+            // existed (and correct across a theme switch).
+            RefreshGlyph.ClearValue(IconElement.ForegroundProperty);
+        }
     }
+
+    /// <summary>macOS tints the glyph orange in this state; one brush, made
+    /// once.</summary>
+    private static readonly SolidColorBrush StaleRestoreBrush =
+        new(Microsoft.UI.Colors.Orange);
 
     /// <summary>The model powers lazy lens loading, told which lens is
     /// active by <see cref="SwitchTo"/>.</summary>
@@ -641,9 +672,9 @@ public sealed partial class DashboardView : UserControl
         SetLiveRate(rate);
         CostLine.Text = CostSurfaceProjection.HeaderCostLine(
             today?.Cost ?? 0, stats, snapshot.CostAuthoritative);
-        FooterText.Text = "updated {0}".Localized(
-            snapshot.FetchedAt.ToString(
-                "HH:mm:ss", System.Globalization.CultureInfo.CurrentCulture));
+        // A restored snapshot reads as its age: FetchedAt is re-stamped by
+        // every quota / trace / model publish long before the live graph lands.
+        FooterText.Text = RefreshTip.Footer(snapshot.RestoredAt, snapshot.FetchedAt, DateTimeOffset.Now);
     }
 
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _ledTimer;
@@ -1047,7 +1078,15 @@ public sealed partial class DashboardView : UserControl
                 OverviewCard.QuotaSummary => OverviewScope.ShowsQuotaSummary(singleClient)
                     ? BuildQuotaSummary(snapshot)
                     : null,
-                OverviewCard.Chart => BuildUsageChartCard(snapshot),
+                // A client tab whose client has no local records gets a line
+                // saying so, not an empty chart (OverviewView.swift:101-107).
+                OverviewCard.Chart => OverviewScope.HasNoLocalUsage(
+                        singleClient, _selectedClients, (_selectedStats
+                            ?? new UsageStats(snapshot.Graph, _selectedSet)).PresentClients)
+                    ? Ui.Card(
+                        "Token Usage".Localized(),
+                        Ui.Dim("No local usage records in this range.".Localized()))
+                    : BuildUsageChartCard(snapshot),
                 OverviewCard.Limits => limitsClients is not null
                     && LimitsCardFilter.HidesClientCard(
                         snapshot.Quota?.Agents ?? [],
@@ -1062,12 +1101,15 @@ public sealed partial class DashboardView : UserControl
                             ? "{0} limits".Localized(ClientRegistry.TabDisplayName(tab))
                             : "Agent limits".Localized(),
                         BuildLimits(snapshot, limitsClients)),
-                // Absent when there is no live session, or when this tab is
-                // scoped to one client — the trace answers "across everything
-                // right now", which a single-client tab did not ask.
+                // Absent when this tab is scoped to one client — the trace
+                // answers "across everything right now", which a single-client
+                // tab did not ask. With nothing running it stays and says so
+                // (macOS OverviewView.swift:111-114).
                 OverviewCard.Trace => OverviewScope.ShowsTrace(singleClient)
-                    && BuildTrace(snapshot) is { } trace
-                    ? Ui.Card("Live session".Localized(), trace)
+                    ? Ui.Card(
+                        "Live session".Localized(),
+                        BuildTrace(snapshot),
+                        TraceCollapse.Header(snapshot.Trace, _selectedSet))
                     : null,
                 OverviewCard.Models => Ui.Card(
                     OverviewScope.ModelsTitle(singleClient), BuildModelRows(snapshot, collapsible: true)),
@@ -1758,7 +1800,7 @@ public sealed partial class DashboardView : UserControl
         return panel;
     }
 
-    private FrameworkElement? BuildTrace(DashboardModel.Snapshot snapshot) =>
+    private FrameworkElement BuildTrace(DashboardModel.Snapshot snapshot) =>
         Ui.TraceRows(
             snapshot.Trace,
             _selectedSet,
@@ -2041,7 +2083,8 @@ public sealed partial class DashboardView : UserControl
     // ── Daily lens ───────────────────────────────────────────────────────
 
     /// <summary>One model stripe inside an expanded Daily or Monthly card:
-    /// provider-tinted disc, model and client name, tokens and cost, with the
+    /// provider-tinted disc, model (merged across clients by
+    /// <see cref="DailyRows.ByModel"/>), tokens and cost, with the
     /// disc and the row outline lighting together on hover so the rich tooltip
     /// points at an unambiguous row. Shared so the two lenses cannot drift —
     /// the hover/glow/tooltip wiring is the fiddly part, and a copy of it is
@@ -2058,8 +2101,7 @@ public sealed partial class DashboardView : UserControl
         var (subDiscHost, subDiscGlow) =
             GlowingDisc(colors.Color(client.ProviderId, client.ModelId), 6);
         name.Children.Add(subDiscHost);
-        name.Children.Add(Ui.Text(
-            $"{client.ModelId} · {ClientRegistry.ShortName(client.Client)}", 10, 0.85));
+        name.Children.Add(Ui.Text(client.ModelId, 10, 0.85));
         // Token-aware, like the Models row: this sub-row's hover card is the
         // same ModelTip (attached below), which reads "—" for an unpriced model,
         // and a row must not say "$0.00" while its own tooltip says "—".
@@ -2110,7 +2152,7 @@ public sealed partial class DashboardView : UserControl
         var days = DailyRows.Build(snapshot.Graph, _selectedClients);
         if (days.Count == 0)
         {
-            panel.Children.Add(Ui.Dim("No active days.".Localized()));
+            panel.Children.Add(Ui.Dim("No usage in this range.".Localized()));
         }
         else if (DrillDownSummary.ScopeLine(DailyRows.TurnScope(_selectedClients)) is { } scope)
         {
@@ -2129,18 +2171,20 @@ public sealed partial class DashboardView : UserControl
             if (_expandedDay == selectedDay.Date)
             {
                 foreach (var client in CostSurfaceProjection.OrderContributionClients(
-                    selectedDay.Clients, snapshot.CostAuthoritative))
+                    DailyRows.ByModel(selectedDay.Clients), snapshot.CostAuthoritative))
                 {
                     block.Children.Add(ModelStripeRow(
                         client, colors, snapshot.CostAuthoritative));
                 }
             }
 
+            // A row inside the lens card, as macOS lists them inside one
+            // DashCard: no card fill of its own, and a transparent (not
+            // null) background so the whole row still takes the tap.
             var card = new Border
             {
-                Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
-                CornerRadius = new CornerRadius(6),
-                Padding = new Thickness(10, 8, 10, 8),
+                Background = new SolidColorBrush(Colors.Transparent),
+                Padding = new Thickness(0, 4, 0, 4),
                 Child = block,
             };
             var date = selectedDay.Date;
@@ -2153,7 +2197,8 @@ public sealed partial class DashboardView : UserControl
             panel.Children.Add(card);
         }
 
-        return panel;
+        return Ui.Card(
+            "Daily".Localized(), panel, DrillDownSummary.ActiveDays(days.Count));
     }
 
     // ── Monthly lens ─────────────────────────────────────────────────────
@@ -2188,18 +2233,20 @@ public sealed partial class DashboardView : UserControl
             if (_expandedMonth == month.Month)
             {
                 foreach (var client in CostSurfaceProjection.OrderContributionClients(
-                    month.Clients, snapshot.CostAuthoritative))
+                    DailyRows.ByModel(month.Clients), snapshot.CostAuthoritative))
                 {
                     block.Children.Add(ModelStripeRow(
                         client, colors, snapshot.CostAuthoritative));
                 }
             }
 
+            // A row inside the lens card, as macOS lists them inside one
+            // DashCard: no card fill of its own, and a transparent (not
+            // null) background so the whole row still takes the tap.
             var card = new Border
             {
-                Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
-                CornerRadius = new CornerRadius(6),
-                Padding = new Thickness(10, 8, 10, 8),
+                Background = new SolidColorBrush(Colors.Transparent),
+                Padding = new Thickness(0, 4, 0, 4),
                 Child = block,
             };
             var key = month.Month;
@@ -2212,7 +2259,8 @@ public sealed partial class DashboardView : UserControl
             panel.Children.Add(card);
         }
 
-        return panel;
+        return Ui.Card(
+            "Monthly".Localized(), panel, DrillDownSummary.ActiveMonths(months.Count));
     }
 
     // ── Hourly lens ──────────────────────────────────────────────────────
@@ -2233,90 +2281,117 @@ public sealed partial class DashboardView : UserControl
             return stack;
         }
 
-        var toggle = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-        var timelineBtn = LensPill("Timeline".Localized(), !_hourlyProfileMode);
-        var profileBtn = LensPill("Profile".Localized(), _hourlyProfileMode);
-        timelineBtn.Click += (_, _) => { _hourlyProfileMode = false; RenderContent(false); };
-        profileBtn.Click += (_, _) => { _hourlyProfileMode = true; RenderContent(false); };
-        toggle.Children.Add(timelineBtn);
-        toggle.Children.Add(profileBtn);
-        stack.Children.Add(toggle);
-
-        if (_hourlyProfileMode)
+        var toggle = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        foreach (var mode in new[] { HourlyMode.Timeline, HourlyMode.Profile })
         {
-            // 24-hour rhythm profile.
-            var byHour = new long[24];
-            foreach (var entry in hourly.Entries)
+            var pill = LensPill(
+                (mode == HourlyMode.Profile ? "Profile" : "Timeline").Localized(),
+                _hourlyMode == mode);
+            pill.Click += (_, _) =>
             {
-                // "YYYY-MM-DD HH:00" local slots.
-                if (entry.Hour.Length >= 13 &&
-                    int.TryParse(entry.Hour.AsSpan(11, 2), out var h) && h is >= 0 and < 24)
-                {
-                    byHour[h] += entry.Total;
-                }
-            }
+                _hourlyMode = mode;
+                AppSettings.Store.SetString(HourlyLens.ModeKey, HourlyLens.RawValue(mode));
+                // macOS resets the window on a mode switch, so a long timeline
+                // is not kept mounted (HourlyView.swift:134-138).
+                _hourlyWindow = HourlyLens.TimelineInitial;
+                RenderContent(false);
+            };
+            toggle.Children.Add(pill);
+        }
 
-            var max = Math.Max(1, byHour.Max());
-            var panel = new StackPanel { Spacing = 3 };
+        var timeline = HourlyLens.Timeline(hourly.Entries);
+        var profile = HourlyLens.Profile(hourly.Entries);
+        var authoritative = snapshot.CostAuthoritative;
+        var panel = new StackPanel { Spacing = 3 };
+        if (!HourlyLens.HasData(_hourlyMode, timeline, profile))
+        {
+            panel.Children.Add(Ui.Dim("No usage in this range.".Localized()));
+        }
+        else if (_hourlyMode == HourlyMode.Profile)
+        {
+            var max = Math.Max(1, profile.Max(b => b.Tokens));
             for (var h = 0; h < 24; h++)
             {
-                var row = new Grid { ColumnSpacing = 8 };
-                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(34) });
-                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-                row.Children.Add(Ui.Text($"{h:D2}:00", 10, 0.7));
-                var bar = Ui.ShareBar(byHour[h] / (double)max, h == DateTime.Now.Hour ? "#22c55e" : "#3b82f6");
-                bar.VerticalAlignment = VerticalAlignment.Center;
-                Grid.SetColumn(bar, 1);
-                row.Children.Add(bar);
-                var count = Ui.Text(Format.CompactTokens(byHour[h]), 10, 0.7);
-                Grid.SetColumn(count, 2);
-                row.Children.Add(count);
-                panel.Children.Add(row);
+                // No live highlight: an hour of day folds every date, so it is
+                // not the live slot (macOS passes isCurrent: false here).
+                panel.Children.Add(HourRow(
+                    $"{h:D2}:00", 38, profile[h].Tokens, profile[h].Cost, max,
+                    isCurrent: false, authoritative));
             }
-
-            stack.Children.Add(Ui.Card("24h profile".Localized(), panel));
         }
         else
         {
-            var entries = hourly.Entries.AsEnumerable().Reverse().ToList(); // newest first
             // Invariant: the engine's entry.Hour keys are Gregorian "yyyy-MM-dd
             // HH:00"; a non-Gregorian ambient calendar (th-TH Buddhist, etc.)
             // would render a different year here and the current-hour highlight
             // would never match.
             var currentSlot = DateTime.Now.ToString(
                 "yyyy-MM-dd HH:00", System.Globalization.CultureInfo.InvariantCulture);
-            var panel = new StackPanel { Spacing = 5 };
-            foreach (var entry in entries.Take(_hourlyWindow))
+            var max = Math.Max(1, timeline.Max(e => e.Total));
+            foreach (var entry in timeline.Take(_hourlyWindow))
             {
-                var label = Ui.Text(entry.Hour, 11, entry.Hour == currentSlot ? 1.0 : 0.8);
-                if (entry.Hour == currentSlot)
-                {
-                    label.Foreground = Ui.BrushFromHex("#22c55e");
-                }
-
-                panel.Children.Add(Ui.Row(
-                    label,
-                    Ui.Text(
-                        $"{Format.CompactTokens(entry.Total)} · "
-                            + CostSurfaceProjection.HourlyCost(
-                                entry.Total, entry.Cost, snapshot.CostAuthoritative),
-                        11,
-                        0.75)));
+                // "YYYY-MM-DD HH:00" → "MM-DD HH:00", as macOS labels the row.
+                panel.Children.Add(HourRow(
+                    entry.Hour.Length > 5 ? entry.Hour[5..] : entry.Hour, 74,
+                    entry.Total, entry.Cost, max, entry.Hour == currentSlot, authoritative));
             }
 
-            if (entries.Count > _hourlyWindow)
+            if (HourlyLens.ShowMore(_hourlyWindow, timeline.Count) is { } label)
             {
-                var more = LensPill("Show more ({0} left)".Localized(entries.Count - _hourlyWindow), false);
+                var more = LensPill(label, false);
                 more.HorizontalAlignment = HorizontalAlignment.Center;
-                more.Click += (_, _) => { _hourlyWindow += 48; RenderContent(false); };
+                more.Click += (_, _) =>
+                {
+                    _hourlyWindow = Math.Min(_hourlyWindow + HourlyLens.TimelineStep, timeline.Count);
+                    RenderContent(false);
+                };
                 panel.Children.Add(more);
             }
-
-            stack.Children.Add(Ui.Card("Timeline".Localized(), panel, "{0} slots".Localized(hourly.Entries.Count)));
         }
 
+        var card = Ui.Card(
+            HourlyLens.Title(_hourlyMode),
+            panel,
+            HourlyLens.Subtitle(_hourlyMode, timeline, profile, authoritative),
+            toggle);
+        stack.Children.Add(card);
         return stack;
+    }
+
+    /// <summary>One Hourly row, both modes (HourlyView.swift hourRow): label,
+    /// token bar (green on the live hour), tokens, then cost. Zero tokens leave
+    /// both columns blank so an idle hour reads as idle.</summary>
+    private static Grid HourRow(
+        string label, double labelWidth, long tokens, double cost, long max,
+        bool isCurrent, bool authoritative)
+    {
+        var row = new Grid { ColumnSpacing = 8 };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(labelWidth) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(44) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(52) });
+        var text = Ui.Text(label, 10, isCurrent ? 1.0 : 0.7);
+        if (isCurrent)
+        {
+            text.Foreground = Ui.BrushFromHex("#22c55e");
+        }
+
+        row.Children.Add(text);
+        var bar = Ui.ShareBar(tokens / (double)max, isCurrent ? "#22c55e" : "#3b82f6");
+        bar.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(bar, 1);
+        row.Children.Add(bar);
+        var count = Ui.Text(tokens > 0 ? Format.CompactTokens(tokens) : "", 10, 0.7);
+        count.HorizontalAlignment = HorizontalAlignment.Right;
+        Grid.SetColumn(count, 2);
+        row.Children.Add(count);
+        var money = Ui.Text(
+            tokens > 0 || cost > 0 ? CostSurfaceProjection.HourlyCost(tokens, cost, authoritative) : "",
+            10);
+        money.HorizontalAlignment = HorizontalAlignment.Right;
+        Grid.SetColumn(money, 3);
+        row.Children.Add(money);
+        return row;
     }
 
     // ── Stats lens ───────────────────────────────────────────────────────
@@ -2327,50 +2402,107 @@ public sealed partial class DashboardView : UserControl
         stack.Children.Add(BuildUsageChartCard(snapshot));
 
         var stats = _selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet);
-        var grid = new Grid { ColumnSpacing = 16, RowSpacing = 12 };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.RowDefinitions.Add(new RowDefinition());
-        grid.RowDefinitions.Add(new RowDefinition());
-        var favorite = CostSurfaceProjection.FavoriteModel(
-            SelectedModelEntries(snapshot), snapshot.CostAuthoritative);
-        (string Value, string Label)[] metrics =
-        [
-            (CostSurfaceProjection.CostText(
-                stats.TotalCost, snapshot.CostAuthoritative), "total spend".Localized()),
-            (Format.CompactTokens(stats.TotalTokens), "tokens".Localized()),
-            ($"{stats.ActiveDays}", "active days".Localized()),
-            (CostSurfaceProjection.CostText(
-                stats.AveragePerDay, snapshot.CostAuthoritative), "avg/day".Localized()),
-            (CostSurfaceProjection.BestDayText(
-                stats.BestDay, snapshot.CostAuthoritative), "best day".Localized()),
-        ];
-        for (var i = 0; i < metrics.Length; i++)
+        var authoritative = snapshot.CostAuthoritative;
+        var summary = new StackPanel { Spacing = 12 };
+        var sentence = new TextBlock { FontSize = 14, TextWrapping = TextWrapping.Wrap };
+        sentence.Inlines.Add(new Microsoft.UI.Xaml.Documents.Run { Text = "Your total spending is ".Localized() });
+        var amount = new Microsoft.UI.Xaml.Documents.Run
         {
-            var cell = Metric(metrics[i].Value, metrics[i].Label);
+            Text = StatsSummary.Spending(stats, authoritative),
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+        };
+        if (authoritative)
+        {
+            amount.Foreground = Ui.BrushFromHex(StatsAccentGreen);
+        }
+
+        sentence.Inlines.Add(amount);
+        summary.Children.Add(sentence);
+
+        var grid = new Grid { ColumnSpacing = 16, RowSpacing = 10 };
+        for (var c = 0; c < 3; c++)
+        {
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        }
+
+        var cells = StatsSummary.Cells(stats, authoritative);
+        for (var i = 0; i < cells.Count; i++)
+        {
+            if (i % 3 == 0)
+            {
+                grid.RowDefinitions.Add(new RowDefinition());
+            }
+
+            var cell = Metric(cells[i].Value, cells[i].Label);
+            if (cells[i].Accent)
+            {
+                ((TextBlock)cell.Children[0]).Foreground = Ui.BrushFromHex(StatsAccentGreen);
+            }
+
             Grid.SetColumn(cell, i % 3);
             Grid.SetRow(cell, i / 3);
             grid.Children.Add(cell);
         }
 
-        // Favorite model gets a full-width row — long model ids don't fit a
-        // third of the card.
-        grid.RowDefinitions.Add(new RowDefinition());
-        var favoriteCell = Metric(favorite?.Model ?? "—", "favorite model".Localized());
-        Grid.SetRow(favoriteCell, 2);
-        Grid.SetColumnSpan(favoriteCell, 3);
-        grid.Children.Add(favoriteCell);
+        summary.Children.Add(grid);
 
-        stack.Children.Add(Ui.Card("Stats".Localized(), grid));
-        // macOS places the attribution card directly after the Stats summary
-        // (StatsView.swift:34-45); Windows has no equivalent summary card
-        // there — Stats grid is it — and Streaks has no macOS counterpart, so
-        // it stays last.
+        var lines = new StackPanel { Spacing = 5 };
+        if (CostSurfaceProjection.FavoriteModel(SelectedModelEntries(snapshot), authoritative)
+            is { } favorite)
+        {
+            // Label, then the dot and a name that trims rather than pushing
+            // the label out: a model id can outrun the card (macOS truncates
+            // it in the middle). The name's star column takes what the label
+            // leaves, so it trims at any card width.
+            var row = new Grid { ColumnSpacing = 8 };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.Children.Add(Ui.Dim("Favorite model".Localized(), 11));
+            var name = new Grid { ColumnSpacing = 5, HorizontalAlignment = HorizontalAlignment.Right };
+            name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            name.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var disc = Ui.Disc(
+                new ModelColorMap(snapshot.Models, authoritative).Color(favorite.Provider, favorite.Model), 7);
+            disc.VerticalAlignment = VerticalAlignment.Center;
+            name.Children.Add(disc);
+            var text = Ui.Text(favorite.Model, 11);
+            text.TextTrimming = TextTrimming.CharacterEllipsis;
+            text.TextWrapping = TextWrapping.NoWrap;
+            Grid.SetColumn(text, 1);
+            name.Children.Add(text);
+            Grid.SetColumn(name, 1);
+            row.Children.Add(name);
+            lines.Children.Add(row);
+        }
+
+        if (StatsSummary.BestDay(stats, authoritative) is { } bestDay)
+        {
+            lines.Children.Add(Ui.Row(Ui.Dim("Best day".Localized(), 11), Ui.Text(bestDay, 11)));
+        }
+
+        if (lines.Children.Count > 0)
+        {
+            summary.Children.Add(lines);
+        }
+
+        // The macOS summary card has no title (StatsView.swift:47-106), so it
+        // is the Ui.Card body without the header row.
+        stack.Children.Add(new Border
+        {
+            Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(12),
+            Child = summary,
+        });
+        // macOS places the attribution card directly after the summary
+        // (StatsView.swift:34-45). Streaks are two of the summary's cells, so
+        // Stats has no Streaks card.
         stack.Children.Add(BuildAttributionCard(snapshot));
-        stack.Children.Add(Ui.Card("Streaks".Localized(), BuildStreaks(snapshot)));
         return stack;
     }
+
+    /// <summary>The Stats spend accent, macOS StatsView.swift's #22c55e.</summary>
+    private const string StatsAccentGreen = "#22c55e";
 
     // ── usage-attribution breakdown card (UsageAttributionBreakdownCard.swift) ──
 
@@ -2417,8 +2549,11 @@ public sealed partial class DashboardView : UserControl
             var panel = new StackPanel { Spacing = 6 };
             if (confirmed.Count == 0)
             {
-                panel.Children.Add(Ui.Dim(
-                    "Nothing is classified yet. Classify sources in Settings → Usage attribution.".Localized()));
+                // A link, as macOS makes it a button into Settings → Usage
+                // attribution (UsageAttributionBreakdownCard.swift:95-104).
+                panel.Children.Add(SettingsLink(
+                    "Nothing is classified yet. Classify sources in Settings → Usage attribution.".Localized(),
+                    () => TrayService.OpenAttributionSettings?.Invoke()));
             }
 
             foreach (var row in rows)
@@ -2526,9 +2661,21 @@ public sealed partial class DashboardView : UserControl
             entries, snapshot.CostAuthoritative);
         foreach (var entry in entries)
         {
+            // macOS AgentsView row: name and share, the bar, then the source
+            // clients beside messages · tokens · cost.
             var block = new StackPanel { Spacing = 3 };
             block.Children.Add(Ui.Row(
                 Ui.Text(CostSurfaceProjection.AgentLabel(entry.Agent), 11, bold: true),
+                Ui.Text(
+                    CostSurfaceProjection.AgentShare(entry, entries, snapshot.CostAuthoritative),
+                    10,
+                    0.6)));
+            block.Children.Add(Ui.ShareBar(
+                CostSurfaceProjection.AgentBarValue(
+                    entry, snapshot.CostAuthoritative) / maxCost,
+                "#3b82f6"));
+            block.Children.Add(Ui.Row(
+                Ui.Dim(string.Join(" · ", entry.Clients.Select(ClientRegistry.ShortName)), 9),
                 Ui.Text(
                     "{0} msgs".Localized(entry.Messages)
                         + $" · {Format.CompactTokens(entry.Total)} · "
@@ -2536,12 +2683,6 @@ public sealed partial class DashboardView : UserControl
                             entry.Total, entry.Cost, snapshot.CostAuthoritative),
                     10,
                     0.75)));
-            block.Children.Add(Ui.ShareBar(
-                CostSurfaceProjection.AgentBarValue(
-                    entry, snapshot.CostAuthoritative) / maxCost,
-                "#3b82f6"));
-            block.Children.Add(Ui.Dim(string.Join(", ",
-                entry.Clients.Select(ClientRegistry.ShortName)), 9));
             panel.Children.Add(block);
         }
 
@@ -2553,11 +2694,32 @@ public sealed partial class DashboardView : UserControl
         stack.Children.Add(Ui.Card(
             CostSurfaceProjection.AgentsTitle(snapshot.CostAuthoritative),
             panel,
-            "{0} messages".Localized(agents.TotalMessages)));
+            CostSurfaceProjection.AgentsHeader(entries, snapshot.CostAuthoritative)));
         return stack;
     }
 
     // ── shared pieces ────────────────────────────────────────────────────
+
+    /// <summary>Secondary-colored underlined text that opens a Settings page:
+    /// the macOS plain-style underlined button. A HyperlinkButton for the hand
+    /// cursor and keyboard focus.</summary>
+    private static HyperlinkButton SettingsLink(string text, Action open)
+    {
+        var link = new HyperlinkButton
+        {
+            Content = new TextBlock
+            {
+                Text = text,
+                FontSize = 11,
+                TextWrapping = TextWrapping.Wrap,
+                TextDecorations = Windows.UI.Text.TextDecorations.Underline,
+            },
+            Padding = new Thickness(0),
+            Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+        };
+        link.Click += (_, _) => open();
+        return link;
+    }
 
     private static StackPanel Metric(string value, string label)
     {
@@ -2739,8 +2901,14 @@ public sealed partial class DashboardView : UserControl
         head.Children.Add(Ui.Disc(colors.Color(entry.Provider, entry.Model), 7));
         head.Children.Add(TipText(entry.Model, 12, bold: true));
         panel.Children.Add(head);
+        // A Daily/Monthly drill-down row is merged across clients
+        // (DailyRows.ByModel) and has no client to name.
         panel.Children.Add(TipText(
-            $"{ClientRegistry.ShortName(entry.Client)} · {entry.Provider}", 10, 0.6));
+            entry.Client.Length == 0
+                ? entry.Provider
+                : $"{ClientRegistry.ShortName(entry.Client)} · {entry.Provider}",
+            10,
+            0.6));
         panel.Children.Add(TipRow(
             TipText("{0} tokens".Localized(Format.CompactTokens(entry.Total)), 11, 0.9),
             CostSurfaceProjection.ModelTipCost(

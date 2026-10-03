@@ -284,7 +284,8 @@ public class RetainedGraphStartupTests
                 (Environment.SpecialFolder?)GraphRequestCoordinator.SnapshotProfileRoot,
                 requested);
             Assert.Equal(Path.Combine(root, "TokenBar"), Assert.Single(created));
-            Assert.Equal(1, idCalls);
+            // Read per access, not at construction (security review R4).
+            Assert.Equal(0, idCalls);
             Assert.NotNull(coordinator.Snapshot);
             Assert.Equal(
                 GraphSnapshotWriteStatus.Written,
@@ -293,6 +294,7 @@ public class RetainedGraphStartupTests
                     DateTimeOffset.UtcNow,
                     SnapshotPayload("2026-01-01"),
                     null));
+            Assert.Equal(1, idCalls);
             Assert.True(File.Exists(Path.Combine(
                 root, "TokenBar", "graph-snapshot.json")));
 
@@ -324,13 +326,17 @@ public class RetainedGraphStartupTests
             Assert.Null(mkdirFailure.Snapshot);
             Assert.Equal(1, mkdirCalls);
 
+            // An id that cannot be read misses and skips that access only.
             var idFailure = GraphRequestCoordinator.CreateForApp(
                 getFolderPath: _ => root,
                 createDirectory: _ => { },
                 sourceContextId: () => throw new InvalidOperationException(),
                 localFirst: _ => Payload(),
                 graph: _ => Payload());
-            Assert.Null(idFailure.Snapshot);
+            Assert.Equal(GraphSnapshotReadStatus.Missing, idFailure.Snapshot!.Read("2026").Status);
+            Assert.Equal(
+                GraphSnapshotWriteStatus.Skipped,
+                idFailure.Snapshot.Write("2026", DateTimeOffset.UtcNow, SnapshotPayload("2026-01-01"), null));
         }
         finally
         {
@@ -341,7 +347,7 @@ public class RetainedGraphStartupTests
         }
     }
 
-    private static UsagePayload SnapshotPayload(string date) => new(
+    internal static UsagePayload SnapshotPayload(string date) => new(
         new UsageMeta(
             "generated",
             "test",

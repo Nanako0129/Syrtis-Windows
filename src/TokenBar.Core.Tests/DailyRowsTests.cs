@@ -21,6 +21,38 @@ public class DailyRowsTests
             new UsageMeta("g", "v", new DateRange("2026-06-01", "2026-06-30"), PricingMode.BestEffort, CostCoverage.Complete),
             new UsageSummary(0, 0, 0, 0, 0, 0, [], []), [], days);
 
+    // macOS keys the Daily/Monthly drill-down "model|provider" (DailyView.swift
+    // models(for:)): two clients on one model are one row, while the same model
+    // under another provider stays its own row.
+    [Fact]
+    public void DrillDownMergesClientsOntoOneRowPerModelAndProvider()
+    {
+        ContributionClient Stripe(string client, string model, string provider, long tokens, double cost) =>
+            new(client, model, provider, new TokenBreakdown(tokens, 0, 0, 0, 0), cost, 1);
+
+        var rows = DailyRows.ByModel(
+            [Stripe("claude", "claude-opus-4-8", "anthropic", 100, 2.0),
+             Stripe("opencode", "claude-opus-4-8", "anthropic", 30, 1.0),
+             Stripe("opencode", "claude-opus-4-8", "openrouter", 5, 0.5)]);
+
+        Assert.Equal(2, rows.Count);
+        var anthropic = Assert.Single(rows, r => r.ProviderId == "anthropic");
+        Assert.Equal(130, anthropic.Tokens.Total);
+        Assert.Equal(3.0, anthropic.Cost, 6);
+        Assert.Equal(2, anthropic.Messages);
+        Assert.All(rows, r => Assert.Equal("", r.Client));
+    }
+
+    [Fact]
+    public void DrillDownNamesAnEmptyModelUnknownAndSkipsInactiveStripes()
+    {
+        var rows = DailyRows.ByModel(
+            [new ContributionClient("codex", "", "openai", new TokenBreakdown(7, 0, 0, 0, 0), 0, 0),
+             new ContributionClient("codex", "gpt-6", "openai", new TokenBreakdown(0, 0, 0, 0, 0), 0, 0)]);
+
+        Assert.Equal("unknown", Assert.Single(rows).ModelId);
+    }
+
     // Grok Build keys turn usage by grok-<version>-build while the session
     // names grok-<version>: one client's two stripes are one display model,
     // while another client's stripe of the same model stays its own row.
