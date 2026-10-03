@@ -38,9 +38,12 @@ public sealed partial class MiddleTrimmedText : Panel
     {
         var width = availableSize.Width;
         // Refit on a new width, or when the cached cut no longer fits at the
-        // same width (text scale or a font fallback changed the metrics).
+        // same width (text scale or a font fallback changed the metrics) —
+        // unless it is already the bare "…": nothing shorter exists, and
+        // refitting it on every measure would never settle.
         _text.Measure(Unbounded);
-        if (width != _fittedWidth || _text.DesiredSize.Width > width)
+        if (width != _fittedWidth
+            || (_text.DesiredSize.Width > width && _text.Text != MiddleEllipsis.Ellipsis))
         {
             _fittedWidth = width;
             _text.Text = double.IsInfinity(width)
