@@ -2215,9 +2215,11 @@ public sealed partial class DashboardView : UserControl
             var max = Math.Max(1, profile.Max(b => b.Tokens));
             for (var h = 0; h < 24; h++)
             {
+                // No live highlight: an hour of day folds every date, so it is
+                // not the live slot (macOS passes isCurrent: false here).
                 panel.Children.Add(HourRow(
                     $"{h:D2}:00", 38, profile[h].Tokens, profile[h].Cost, max,
-                    h == DateTime.Now.Hour, authoritative));
+                    isCurrent: false, authoritative));
             }
         }
         else
