@@ -124,6 +124,22 @@ public sealed partial class DashboardView : UserControl
             {
                 _ = DispatcherQueue.TryEnqueue(ApplyLensVisibility);
             }
+            else if (key == GrokBotConsent.StorageKey)
+            {
+                // The card's buttons and the Settings switch both land here.
+                // A yes asks for a quota refresh; one already in flight makes
+                // that a no-op, and the answer is then honoured by the next
+                // poll. Either answer re-renders the card.
+                _ = DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (AppSettings.GrokBotConsent.Stored == true)
+                    {
+                        _model?.RefreshQuotaNow();
+                    }
+
+                    RenderContent(animated: false);
+                });
+            }
             else if (key.StartsWith("tokenbar.limits.", StringComparison.Ordinal)
                 || key == "tokenbar.trace.detailed"
                 || key == OverviewCards.HiddenKey
@@ -1596,7 +1612,7 @@ public sealed partial class DashboardView : UserControl
     /// per-client Quota lens (5e). A parameter rather than a second builder:
     /// this card answers "where does the allowance stand right now", and a copy
     /// of it would be free to disagree with the original on the same window.</summary>
-    private static FrameworkElement BuildLimits(
+    private FrameworkElement BuildLimits(
         DashboardModel.Snapshot snapshot, IReadOnlyList<string>? clientIds = null)
     {
         var panel = new StackPanel { Spacing = 10 };
@@ -1651,6 +1667,14 @@ public sealed partial class DashboardView : UserControl
             }
 
             section.Children.Add(header);
+            var consent = GrokBotConsent.CardFor(agent, AppSettings.GrokBotConsent.Stored);
+            if (consent != GrokBotConsent.Card.None)
+            {
+                section.Children.Add(BuildGrokBotConsent(consent));
+                panel.Children.Add(section);
+                continue;
+            }
+
             if (agent.Error is { } error)
             {
                 section.Children.Add(Ui.Dim(error, 11));
@@ -1685,6 +1709,71 @@ public sealed partial class DashboardView : UserControl
         }
 
         return panel;
+    }
+
+    /// <summary>The Grok Bot consent prompt (source "keychain-consent"). On
+    /// Windows this is the only question before Syrtis decrypts Grok Bot's
+    /// sign-in — DPAPI never asks — so it states what is read, where it goes
+    /// and how to stop. After "Not now" it collapses to one line and keeps
+    /// Allow: a decline has to be reversible where it was made.</summary>
+    private FrameworkElement BuildGrokBotConsent(GrokBotConsent.Card state)
+    {
+        var body = new StackPanel { Spacing = 6 };
+        var text = Ui.Dim(
+            (state == GrokBotConsent.Card.Declined
+                ? GrokBotConsent.Copy.Declined
+                : GrokBotConsent.Copy.Explanation).Localized(),
+            11);
+        body.Children.Add(text);
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        var allow = new Button
+        {
+            Content = GrokBotConsent.Copy.Allow.Localized(),
+            Style = (Style)Application.Current.Resources["AccentButtonStyle"],
+            FontSize = 12,
+        };
+        var notNow = new Button { Content = GrokBotConsent.Copy.NotNow.Localized(), FontSize = 12 };
+        allow.Click += (_, _) =>
+        {
+            // A changed answer reaches the store's Changed handler, which asks
+            // for a refresh and re-renders this card. Allowing again over a
+            // stored yes (one the core never received) changes nothing in the
+            // store: it re-sends the grant to the core, and the next poll
+            // honours it.
+            TryAnswerGrokBotConsent(true);
+        };
+        notNow.Click += (_, _) =>
+        {
+            if (!TryAnswerGrokBotConsent(false))
+            {
+                return;
+            }
+
+            text.Text = GrokBotConsent.Copy.Declined.Localized();
+            notNow.Visibility = Visibility.Collapsed;
+        };
+        buttons.Children.Add(allow);
+        if (state != GrokBotConsent.Card.Declined)
+        {
+            buttons.Children.Add(notNow);
+        }
+
+        body.Children.Add(buttons);
+        return body;
+    }
+
+    private static bool TryAnswerGrokBotConsent(bool granted)
+    {
+        try
+        {
+            AppSettings.GrokBotConsent.Answer(granted);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DevLog.Write($"grok-bot consent: answer failed: {ex.GetType().Name}");
+            return false;
+        }
     }
 
     private FrameworkElement? BuildTrace(DashboardModel.Snapshot snapshot) =>

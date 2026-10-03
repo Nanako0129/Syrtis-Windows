@@ -156,6 +156,12 @@ public static class TbCore
     public static WindowUsage WindowUsage(long fromMs, long untilMs) =>
         Unwrap<WindowUsage>(NativeMethods.tb_window_usage(null, fromMs, untilMs));
 
+    /// <summary>Replace the core's in-memory consent registry with
+    /// <c>{"grok-bot":true}</c> or <c>{}</c> (see ctb.h). Local and cheap, no
+    /// I/O. Throws <see cref="TbCoreException"/> on an error envelope.</summary>
+    public static void SetKeychainConsent(string json) =>
+        Unwrap<JsonElement>(NativeMethods.tb_set_keychain_consent(json));
+
     /// <summary>
     /// Decodes the standard FFI envelope, returning the payload or throwing
     /// the embedded error. Pure logic, split out (like TBCore.decodeEnvelope)

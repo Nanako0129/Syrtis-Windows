@@ -30,6 +30,7 @@ mod claude_config_dirs;
 mod extra_scan_paths;
 mod filter_parity_probe;
 mod hourly_report;
+mod keychain_consent;
 mod kiro_integrations;
 mod model_report;
 mod opencode_integrations;
@@ -969,6 +970,41 @@ fn set_claude_config_dirs(raw: &str) -> Result<serde_json::Value, String> {
     Ok(result)
 }
 
+/// Replace the registry of credential reads the user has agreed to (see the
+/// `keychain_consent` module doc). `json` is `{"<public-client-id>": true|false}`,
+/// e.g. `{"grok-bot":true}`; full-replace (`{}` clears every grant). Success
+/// data is `{"grantedCount":N,"rejectedCount":M}`; an id not wired to the
+/// registry is counted as rejected and never stored. Errors are fixed codes
+/// (`nullPayload`, `invalidUtf8`, `invalidJson`); the input is never echoed and
+/// on an error nothing changed.
+///
+/// On Windows this is the only gate in front of the Grok Bot desktop login:
+/// DPAPI shows no prompt. Without a grant `tb_agent_usage` publishes the
+/// `grok-bot` card with `source == "keychain-consent"` and neither reads
+/// `Local State` nor unwraps the key. The registry is in-memory and starts
+/// empty every launch; the caller re-applies the stored answer.
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_set_keychain_consent(json: *const c_char) -> *mut c_char {
+    guarded("tb_set_keychain_consent", || {
+        envelope(unsafe { set_keychain_consent_from_c(json) })
+    })
+}
+
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+unsafe fn set_keychain_consent_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
+    if json.is_null() {
+        return Err("nullPayload".to_string());
+    }
+    let raw = unsafe { CStr::from_ptr(json) }
+        .to_str()
+        .map_err(|_| "invalidUtf8".to_string())?;
+    keychain_consent::set_from_json(raw)
+}
+
 /// Test seam: the generation observed right after the config-dir registry
 /// commit and before the bump. Equal to the pre-call generation iff the bump
 /// comes after the commit (W4b ordering rule).
@@ -1060,6 +1096,29 @@ mod tests {
         let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
         unsafe { tb_free(p) };
         s
+    }
+
+    /// The C entry the app's consent store calls: the exact payloads it sends
+    /// grant and clear the registry; NULL and bad UTF-8 are fixed codes.
+    #[test]
+    fn set_keychain_consent_entry_grants_clears_and_rejects() {
+        let _guard = keychain_consent::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        keychain_consent::reset_for_test();
+        let call = |payload: &[u8]| {
+            let raw = CString::new(payload).unwrap();
+            let json = unsafe { take(tb_set_keychain_consent(raw.as_ptr())) };
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()
+        };
+        assert_eq!(call(br#"{"grok-bot":true}"#)["ok"], true);
+        assert!(keychain_consent::allowed("grok-bot"));
+        assert_eq!(call(b"{}")["data"]["grantedCount"], 0);
+        assert!(!keychain_consent::allowed("grok-bot"));
+        assert_eq!(call(b"\xff")["err"], "invalidUtf8");
+        let null = unsafe { take(tb_set_keychain_consent(std::ptr::null())) };
+        assert!(null.contains("nullPayload"), "{null}");
+        keychain_consent::reset_for_test();
     }
 
     #[test]
