@@ -113,6 +113,7 @@ public sealed class SettingsWindow : Window
 
         _shared.Rebuild();
         _shared.AppWindow.Show();
+        _shared.SyncPreviewTimer();
         // Activate() alone cannot bring the window forward when the opener
         // has no foreground rights (tray/schtasks context, the flyout's old
         // lesson) — hoist it in z-order explicitly.
@@ -202,6 +203,7 @@ public sealed class SettingsWindow : Window
         {
             e.Cancel = true; // hide, macOS isReleasedWhenClosed=false parity
             AppWindow.Hide();
+            SyncPreviewTimer();
             // Singleton across hide/show (see AttributionReportGate's own doc
             // comment): reset the fetch guard here so the next visit to the
             // attribution page refetches, instead of a provider first observed
@@ -223,11 +225,10 @@ public sealed class SettingsWindow : Window
             }
 
             // A fresh stamp lands beside lastRemaining on every quota poll, so
-            // excluding it here means the preview's staleness flag only
-            // updates when something else triggers a rebuild — a reading can
-            // sit rendered non-grey after crossing 30 minutes until the next
-            // unrelated setting change. Known macOS limitation too (pr418
-            // "Known limitations"), left as-is rather than adding a timer.
+            // excluding it here keeps polls from redrawing the preview. The
+            // stale rule reads the clock instead: _previewTimer redraws the
+            // preview every 60 s while the window is shown, as macOS does
+            // (SettingsPreviewRefresh, Syrtis #440).
 
             // Changed fires on the writing thread — and a vanished-year clear
             // runs Store.Remove on a background parse lane — so hop to the UI
@@ -647,6 +648,41 @@ public sealed class SettingsWindow : Window
     // answers, and PageState needs them apart.
     private ModelReport? _attributionReport;
     private readonly AttributionReportGate _attributionGate = new();
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _previewTimer;
+
+    /// <summary>Starts the 60 s preview redraw while the window is shown and
+    /// stops it when hidden (SettingsPreviewRefresh). The tick checks again,
+    /// so a hide that bypassed Closing cannot leave it redrawing a hidden
+    /// window.</summary>
+    private void SyncPreviewTimer()
+    {
+        if (!AppWindow.IsVisible)
+        {
+            _previewTimer?.Stop();
+            return;
+        }
+
+        if (_previewTimer is null)
+        {
+            _previewTimer = DispatcherQueue.CreateTimer();
+            _previewTimer.Interval = SettingsPreviewRefresh.Interval;
+            _previewTimer.IsRepeating = true;
+            _previewTimer.Tick += (timer, _) =>
+            {
+                if (AppWindow.IsVisible)
+                {
+                    RebuildPreview();
+                }
+                else
+                {
+                    timer.Stop();
+                }
+            };
+        }
+
+        _previewTimer.Start();
+    }
     private string? _attributionNotice;
     private string? _attributionSignature;
 
