@@ -816,6 +816,7 @@ public sealed class DashboardModel
             }
 
             RememberYears(publication.Payload);
+            LocalRecordClients.Record(AppSettings.Store, publication.Payload.Summary.Clients);
             if (year is null)
             {
                 _allTimeGraph = publication.Payload;
