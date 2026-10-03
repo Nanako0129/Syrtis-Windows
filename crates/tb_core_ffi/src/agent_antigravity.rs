@@ -3042,10 +3042,12 @@ mod credential_manager_tests {
             persist,
             blob: built_blob,
         };
-        assert!(
-            matches!(credential_manager::call(write), CredOutcome::Ok(_)),
-            "write failed"
-        );
+        if !matches!(credential_manager::call(write), CredOutcome::Ok(_)) {
+            // SAFETY: reads the calling thread's last-error value only; nothing
+            // since CredWriteW has made a Win32 call that sets it.
+            let error = unsafe { GetLastError() };
+            panic!("write failed: Win32 error {error}");
+        }
 
         match credential_manager::call(CredCall::Read {
             target: target.clone(),
