@@ -43,7 +43,7 @@ internal static class ClaudeAccountsCopy
         "homeDirectory" => "That's your user folder. Pick the Claude config folder inside it.",
         "defaultConfigDir" => "That folder overlaps your main Claude account's folder, which is already shown.",
         "duplicate" => "Already added.",
-        "unsupportedPath" => "Only a full folder path that starts with a drive letter, like D:\\folder, can be added. Network and WSL paths can't.",
+        "unsupportedPath" => "Only a full folder path that starts with a drive letter, like D:\\folder, can be added. Network paths can't, and WSL paths can't yet.",
         "rootDirectory" => "A drive's root can't be added.",
         "invalidComponent" => "Windows can't open this path as written.",
         "limitExceeded" => "Up to 8 folders can be added.",

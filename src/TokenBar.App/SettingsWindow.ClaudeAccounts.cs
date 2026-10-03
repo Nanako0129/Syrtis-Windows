@@ -72,8 +72,9 @@ public sealed partial class SettingsWindow
             Grid.SetColumn(missing, 1);
             row.Children.Add(missing);
             // Off the UI thread: a stat on a stalled network drive can block.
-            // A UNC path is never stat-ed (MayCheckExists); it already shows
-            // its refusal reason.
+            // Only an absolute drive path is stat-ed (MayCheckExists): never a
+            // UNC/WSL, rooted or drive-relative one, which already shows its
+            // refusal reason.
             _ = Task.Run(() => !ClaudeExtraRoots.MayCheckExists(dir) || Directory.Exists(dir)).ContinueWith(
                 exists =>
                 {
