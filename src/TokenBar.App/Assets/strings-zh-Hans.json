@@ -443,5 +443,6 @@
   "Set up manually…": "手动设置…",
   "Apply suggestions": "应用建议",
   "Bars": "条形图",
-  "Heatmap": "热力图"
+  "Heatmap": "热力图",
+  "No local usage matched {0}, though this subscription has other usage in this window": "本地没有与“{0}”匹配的用量，但此订阅在该窗口内还有其他用量"
 }

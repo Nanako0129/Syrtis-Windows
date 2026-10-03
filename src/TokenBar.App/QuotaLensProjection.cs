@@ -101,7 +101,13 @@ public static class QuotaLensProjection
         // its own copy because the two are built from different snapshot
         // reads (BuildOverview vs BuildClient) and neither may read the
         // other's field.
-        WindowEquivalence.FetchOutcome QuotaHistoryOutcome);
+        WindowEquivalence.FetchOutcome QuotaHistoryOutcome,
+        // The selected window is model-scoped and none of this
+        // subscription's usage inside it matched the scope, though some
+        // unscoped usage did (macOS WindowUsageHalf.scopeMatchedNothing,
+        // WindowCardLoader.swift:327-329). Said on the card, not drawn as an
+        // idle week.
+        bool ScopeMatchedNothing = false);
 
     /// <summary>Site 6 on its own: the window-history card's rows and its
     /// pooled ≈ line.</summary>
@@ -207,7 +213,12 @@ public static class QuotaLensProjection
         // with no key rather than computing one from a read that did not
         // land; see this method's own doc comment on `windowUsageOutcome`.
         var equivalences = windowUsageOutcome == WindowEquivalence.FetchOutcome.Succeeded
-            ? QuotaEquivalenceFold.Build(history ?? [], windowUsage?.Messages ?? [], confirmed)
+            ? QuotaEquivalenceFold.Build(
+                history ?? [], windowUsage?.Messages ?? [], confirmed,
+                // Each window's estimate narrowed to its OWN scope, not to
+                // whichever window a card happens to show (macOS
+                // DashboardModel.swift:1836-1843).
+                series => ModelScope.Of(quota, series.ProviderId, series.AccountScope, series.WindowKey))
             : new Dictionary<QuotaWindowIdentity, WindowEquivalence.Row>();
         return new Overview(summaries, windows, grids, quotaHistoryOutcome, equivalences);
     }
@@ -281,7 +292,30 @@ public static class QuotaLensProjection
         var selected = tabs.FirstOrDefault(tab => WindowId(tab.Id) == windowCardTab)
             ?? DefaultTab(tabs);
         var messages = windowUsage?.Messages ?? [];
-        var mine = WindowCardText.Mine(messages, owner, confirmed.Records);
+        // The selected window's model scope, looked up once (ModelScope.Of)
+        // and handed to every surface of this card: the bars and live line
+        // (`mine`), and the history rows (BuildHistory). Port of macOS
+        // WindowCardLoader.swift:300-330 / DashboardModel.swift:1893-1902.
+        var modelScope = ModelScope.Of(
+            quota, selected?.Id.ProviderId, selected?.Id.AccountScope, selected?.Id.WindowKey);
+        var subscription = WindowCardText.Mine(messages, owner, confirmed.Records);
+        // The scope narrows what the card DISPLAYS only. Placement
+        // (selected.Active) comes from the quota samples and never reads
+        // messages, so a scope join that matches nothing leaves the window
+        // where it is instead of blanking it (macOS's own reason for keeping
+        // the scope out of placement).
+        var mine = QuotaHistoryFold.InScope(subscription, modelScope);
+        var scopeMatchedNothing = false;
+        // Only from a read that landed: a failed refetch keeps stale messages,
+        // and the note is a claim about this subscription's usage.
+        if (modelScope is not null
+            && windowUsageOutcome == WindowEquivalence.FetchOutcome.Succeeded
+            && selected?.Active is { IsPlaced: true } placed)
+        {
+            bool Inside(WindowMessage message) =>
+                message.Timestamp >= placed.StartMs!.Value && message.Timestamp < placed.ResetAtMs!.Value;
+            scopeMatchedNothing = !mine.Any(Inside) && subscription.Any(Inside);
+        }
 
         // Only when the selected tab has a placed running cycle — the same
         // condition WindowCardText.State resolves to WindowCardState.Chart
@@ -308,10 +342,11 @@ public static class QuotaLensProjection
         }
 
         var windowHistory = BuildHistory(
-            history, selected, messages, confirmed, owner, windowUsageOutcome, selection);
+            history, selected, messages, confirmed, owner, windowUsageOutcome, selection, modelScope);
         return new Client(
             owner, tabs, selected, messages, mine, liveEquivalence,
-            windowUsage?.UndatedCount ?? 0, windowHistory, quotaHistoryOutcome);
+            windowUsage?.UndatedCount ?? 0, windowHistory, quotaHistoryOutcome,
+            scopeMatchedNothing);
     }
 
     /// <summary>Which tab opens when the user has no explicit pick for this
@@ -345,7 +380,8 @@ public static class QuotaLensProjection
         UsageAttribution.Table confirmed,
         string owner,
         WindowEquivalence.FetchOutcome windowUsageOutcome,
-        Selection selection)
+        Selection selection,
+        string? modelScope)
     {
         IReadOnlyList<QuotaHistorySeries> series = history ?? [];
         var matched = selected is null
@@ -369,12 +405,11 @@ public static class QuotaLensProjection
             : WindowHistoryText.VisibleRows;
 
         // One join for the whole card, same shape as the view held before
-        // this move: sorted once, one contiguous slice per cycle.
-        //
-        // modelScope: null. Windows has no scoped-window data wired yet, so
-        // every model counts — the same unscoped behaviour this card already
-        // had.
-        var rows = QuotaHistoryFold.Rows(cycles, messages, owner, modelScope: null, confirmed.Records);
+        // this move: sorted once, one contiguous slice per cycle. Narrowed to
+        // the selected window's model scope: the history has to answer for the
+        // same allowance the chart above it draws (macOS
+        // DashboardModel.swift:1893-1902).
+        var rows = QuotaHistoryFold.Rows(cycles, messages, owner, modelScope, confirmed.Records);
         var byResetAt = rows.ToDictionary(row => row.Id);
         // MineTokens/MineCost — the WHOLE-WINDOW totals attributed to this
         // subscription — not SpanTokens/SpanCost, which QuotaHistoryFold

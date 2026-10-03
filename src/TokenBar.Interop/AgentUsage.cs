@@ -89,6 +89,13 @@ public sealed record UsageWindow
     public HistoricalPace? HistoricalPace { get; init; }
     /// <summary>Derived only from <see cref="PaceStatus.DurationSeconds"/>.</summary>
     public long? DurationSeconds { get; init; }
+    /// <summary>The model this window's allowance is scoped to, as the
+    /// provider's display-name slug (<c>fable</c> for a "Fable only" weekly
+    /// limit). Decided once, in Rust (<c>append_claude_scoped_windows</c>),
+    /// only where the provider declares a scope; null means "not scoped",
+    /// never "scoped to nothing". Port of macOS
+    /// <c>UsageWindow.modelScope</c> (AgentUsage.swift:310).</summary>
+    public string? ModelScope { get; init; }
 
     // Nullable params carry = null defaults so existing C# callers keep their
     // pre-v3 construction shape while the decoder enforces the strict wire.
@@ -102,7 +109,8 @@ public sealed record UsageWindow
         string? CardId = null,
         PaceStatus? PaceStatus = null,
         HistoricalPace? HistoricalPace = null,
-        long? DurationSeconds = null)
+        long? DurationSeconds = null,
+        string? ModelScope = null)
     {
         var resolvedPaceStatus = PaceStatus ?? global::TokenBar.Interop.PaceStatus.LegacyMissing;
         if (resolvedPaceStatus.State == UsagePaceState.LegacyMissing && DurationSeconds is not null)
@@ -126,6 +134,7 @@ public sealed record UsageWindow
         this.WindowMinutes = WindowMinutes;
         this.PaceStatus = resolvedPaceStatus;
         this.HistoricalPace = HistoricalPace;
+        this.ModelScope = ModelScope;
         this.DurationSeconds = resolvedPaceStatus.State == UsagePaceState.LegacyMissing
             ? null
             : resolvedPaceStatus.DurationSeconds;
@@ -158,6 +167,7 @@ public sealed class UsageWindowJsonConverter : JsonConverter<UsageWindow>
         var resetText = OptionalString(root, "resetText");
         var windowMinutes = OptionalInt64(root, "windowMinutes");
         var historicalPace = OptionalHistoricalPace(root);
+        var modelScope = OptionalString(root, "modelScope");
 
         if (root.TryGetProperty("paceStatus", out var paceStatusElement))
         {
@@ -183,7 +193,8 @@ public sealed class UsageWindowJsonConverter : JsonConverter<UsageWindow>
                 CardId: cardId,
                 PaceStatus: paceStatus,
                 HistoricalPace: historicalPace,
-                DurationSeconds: paceStatus.DurationSeconds);
+                DurationSeconds: paceStatus.DurationSeconds,
+                ModelScope: modelScope);
         }
 
         string? legacyCardId = null;
@@ -209,7 +220,8 @@ public sealed class UsageWindowJsonConverter : JsonConverter<UsageWindow>
             WindowMinutes: windowMinutes,
             CardId: legacyCardId,
             PaceStatus: global::TokenBar.Interop.PaceStatus.LegacyMissing,
-            HistoricalPace: historicalPace);
+            HistoricalPace: historicalPace,
+            ModelScope: modelScope);
     }
 
     public override void Write(
@@ -259,6 +271,8 @@ public sealed class UsageWindowJsonConverter : JsonConverter<UsageWindow>
             }
         }
 
+        // Omitted when null, as Rust's `skip_serializing_if`.
+        if (value.ModelScope is not null) writer.WriteString("modelScope", value.ModelScope);
         writer.WriteEndObject();
     }
 
