@@ -64,6 +64,16 @@ public static class TooltipPlacement
             return null;
         }
 
+        // A card taller than the scroll area is placed in the whole window
+        // instead, so it still shows in full rather than hanging over the
+        // footer (macOS pins it to the viewport top; there the popover's
+        // viewport is the only space).
+        if (tipHeight >= visible.Height && area != window && !window.IsEmpty)
+        {
+            area = window;
+            visible = area.Inset(EdgeInset);
+        }
+
         // Horizontally within the hovered element and the visible area; an
         // element narrower than the tooltip (or outside the area) leaves just
         // the area.
@@ -85,9 +95,14 @@ public static class TooltipPlacement
         var aboveY = pointerY - tipHeight - CursorGap;
         // The region dodge reads the hovered element, not the whole viewport:
         // "below while the viewport has room" would always win on a tall
-        // flyout and feel like a sticky follow.
-        var preferBelow = container.Height > 0
-            ? pointerY - container.Y < container.Height * PreferAboveRatio
+        // flyout and feel like a sticky follow. macOS's element is a whole
+        // chart or row block. On Windows the hovered element is often a single
+        // heatmap cell or row shorter than the card, and its 45% line would
+        // flip the card every few pixels, so such an element defers to the
+        // visible area.
+        var region = container.Height >= tipHeight ? container : visible;
+        var preferBelow = region.Height > 0
+            ? pointerY - region.Y < region.Height * PreferAboveRatio
             : true;
         double originY;
         if (tipHeight >= visible.Height)

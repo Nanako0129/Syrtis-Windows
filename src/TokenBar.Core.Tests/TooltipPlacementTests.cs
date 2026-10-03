@@ -45,11 +45,37 @@ public class TooltipPlacementTests
             TooltipPlacement.Origin(200, 20, 100, 50, new Box(180, 10, 40, 20), Viewport, Window));
 
     [Fact]
-    public void ATooltipTallerThanTheViewportStartsAtItsTop() =>
-        Assert.Equal(64.0,
-            TooltipPlacement.Origin(200, 100, 100, 600, Card, Viewport, Window)!.Value.Y);
+    public void ATooltipTallerThanTheWindowStartsAtItsTop() =>
+        Assert.Equal(4.0,
+            TooltipPlacement.Origin(200, 100, 100, 700, Card, Viewport, Window)!.Value.Y);
 
     [Fact]
     public void AnUnmeasuredTooltipIsNotPlaced() =>
         Assert.Null(TooltipPlacement.Origin(200, 100, 0, 50, Card, Viewport, Window));
+
+    // An 11 px heatmap cell must not flip the card as the pointer crosses
+    // its middle: a hovered element shorter than the card defers to the
+    // visible area for the above/below choice.
+    [Fact]
+    public void ASmallCellDoesNotFlipTheCardAsThePointerMoves()
+    {
+        var cell = new Box(100, 100, 11, 11);
+
+        var top = TooltipPlacement.Origin(105, 101, 100, 50, cell, Viewport, Window)!.Value.Y;
+        var bottom = TooltipPlacement.Origin(105, 110, 100, 50, cell, Viewport, Window)!.Value.Y;
+
+        Assert.Equal(113.0, top);
+        Assert.Equal(122.0, bottom);
+    }
+
+    // A card taller than the scroll area still shows in full: it moves to
+    // the whole window rather than hanging over the footer.
+    [Fact]
+    public void ACardTallerThanTheViewportShowsInFullInTheWindow()
+    {
+        var at = TooltipPlacement.Origin(200, 100, 100, 520, Card, Viewport, Window)!.Value;
+
+        Assert.True(at.Y >= TooltipPlacement.EdgeInset);
+        Assert.True(at.Y + 520 <= Window.Bottom - TooltipPlacement.EdgeInset);
+    }
 }

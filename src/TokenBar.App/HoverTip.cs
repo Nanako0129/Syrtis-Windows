@@ -160,8 +160,18 @@ public static class HoverTip
             return null;
         }
 
-        var origin = element.TransformToVisual(rootContent).TransformPoint(default);
-        return new Box(origin.X, origin.Y, element.ActualWidth, element.ActualHeight);
+        try
+        {
+            var origin = element.TransformToVisual(rootContent).TransformPoint(default);
+            return new Box(origin.X, origin.Y, element.ActualWidth, element.ActualHeight);
+        }
+        catch (InvalidOperationException)
+        {
+            // Detached while a pointer event was queued (Graph3DPanel guards
+            // the same transform for the same reason); place against the
+            // window instead.
+            return null;
+        }
     }
 
     private static void Position(
