@@ -150,22 +150,12 @@ public class GrokBotConsentTests : IDisposable
     {
         var marked = Snapshot("grok-bot", "keychain-consent");
         Assert.Equal(GrokBotConsent.Card.Ask, GrokBotConsent.CardFor(marked, null));
+        // A stored yes still asks: the fetch that honours it has not landed,
+        // or the yes never reached the core, and Allow must re-send it.
+        Assert.Equal(GrokBotConsent.Card.Ask, GrokBotConsent.CardFor(marked, true));
         Assert.Equal(GrokBotConsent.Card.Declined, GrokBotConsent.CardFor(marked, false));
         Assert.Equal(GrokBotConsent.Card.None, GrokBotConsent.CardFor(Snapshot("grok-bot", "oauth"), null));
         Assert.Equal(GrokBotConsent.Card.None, GrokBotConsent.CardFor(Snapshot("grok", "keychain-consent"), null));
-    }
-
-    // Allow pressed (or the Settings switch turned on) while a fetch was in
-    // flight: that fetch still publishes the consent marker. The stored yes
-    // must turn it into a waiting line, not the full prompt asking again.
-    [Fact]
-    public void AStoredYesWithAConsentSnapshotWaitsInsteadOfAsking()
-    {
-        var marked = Snapshot("grok-bot", "keychain-consent");
-        Assert.Equal(GrokBotConsent.Card.Waiting, GrokBotConsent.CardFor(marked, true));
-        Assert.Equal(GrokBotConsent.Card.Ask, GrokBotConsent.CardFor(marked, null));
-        Assert.Equal(GrokBotConsent.Card.Declined, GrokBotConsent.CardFor(marked, false));
-        Assert.Equal(GrokBotConsent.Card.None, GrokBotConsent.CardFor(Snapshot("grok-bot", "oauth"), true));
     }
 
     // The grouped "Grok Build & Bot" tab: its limits card carries grok-bot's
@@ -195,7 +185,6 @@ public class GrokBotConsentTests : IDisposable
         GrokBotConsent.Copy.Declined,
         GrokBotConsent.Copy.Allow,
         GrokBotConsent.Copy.NotNow,
-        GrokBotConsent.Copy.Waiting,
         GrokBotConsent.Copy.SettingsToggle,
         GrokBotConsent.Copy.SettingsHint,
     ];
@@ -232,7 +221,18 @@ public class GrokBotConsentTests : IDisposable
     public void ConsentCardSaysWhereItGoesAndHowToStop()
     {
         Assert.Contains("api2.cursor.sh", GrokBotConsent.Copy.Explanation);
-        Assert.EndsWith("You can stop this any time in Settings.", GrokBotConsent.Copy.Explanation);
+        // One contract on the card and the switch: consent from either place,
+        // a withdrawal that stops the next send even mid-refresh, and the
+        // Cursor IDE fallback only when Grok Bot is signed out.
+        foreach (var copy in new[] { GrokBotConsent.Copy.Explanation, GrokBotConsent.Copy.SettingsHint })
+        {
+            Assert.Contains("stops Syrtis before it next sends the sign-in, even during a refresh already under way", copy);
+            Assert.Contains("Cursor IDE sign-in instead, if there is one, and sends it only to cursor.com", copy);
+            Assert.DoesNotContain("next refresh", copy);
+        }
+
+        Assert.Contains("Choosing Allow on the Grok Bot card turns this on too", GrokBotConsent.Copy.SettingsHint);
+        Assert.Contains(GrokBotConsent.Copy.SettingsToggle, GrokBotConsent.Copy.Explanation);
         Assert.Contains("without encryption", GrokBotConsent.Copy.SettingsHint);
         // sand-secrets.json is read every refresh to learn whether Grok Bot is
         // signed in; the copy must not claim it is untouched before Allow.

@@ -19,9 +19,11 @@
 //! a desktop secret — `plaintext:v1:` values included (Q6-4, a deliberate
 //! divergence from macOS) — and the key loader, which is the only code that
 //! reads `Local State` or calls DPAPI, runs lazily behind that check. Consent
-//! is re-read before the second (team id) decode and once more immediately
+//! is re-read before the second (team id) decode, again before the decoded
+//! sign-in is fingerprinted for the account scope, and once more immediately
 //! before the request is sent, so a withdrawal made while a fetch is in flight
-//! stops it before the sign-in leaves the machine, not at the next poll.
+//! stops it before the sign-in is used or leaves the machine, not at the next
+//! poll.
 //!
 //! Credentials are read-only and never logged or persisted by Syrtis; only HMAC
 //! fingerprints reach the account-scope store. Every error is a fixed string.
@@ -273,6 +275,16 @@ async fn fetch_with_credentials(
     resolve_credential: &ResolveCredential,
     resolve_history_scope: &ResolveHistoryScope,
 ) -> Result<GrokBotData, ProviderFetchFailure> {
+    // The decoded desktop sign-in is used twice below: HMAC'd into the
+    // account scope, then sent. Consent is re-read before each, so a Settings
+    // withdrawal that lands after the decodes resolves and sends nothing.
+    let consent_withdrawn =
+        || matches!(credentials, GrokBotCredentials::Desktop { .. }) && !consent();
+    if consent_withdrawn() {
+        return Err(ProviderFetchFailure::terminal(
+            GROK_BOT_KEYCHAIN_CONSENT_REQUIRED,
+        ));
+    }
     let scope = credentials
         .resolve_account_scope(resolve_credential)
         .map_err(|_| {
@@ -288,9 +300,9 @@ async fn fetch_with_credentials(
         })?;
 
     // The last consent read before the desktop sign-in leaves the machine:
-    // a Settings withdrawal that landed after the decodes (the scope resolve
-    // and client build sit between) still sends nothing.
-    if matches!(credentials, GrokBotCredentials::Desktop { .. }) && !consent() {
+    // a withdrawal during the scope resolve or client build still sends
+    // nothing.
+    if consent_withdrawn() {
         return Err(ProviderFetchFailure::terminal(
             GROK_BOT_KEYCHAIN_CONSENT_REQUIRED,
         ));

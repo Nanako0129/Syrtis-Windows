@@ -15677,8 +15677,8 @@ mod grokbot_tests {
             let decrypts = if team.is_some() { 2 } else { 1 };
             assert_eq!(
                 spy.counts(),
-                (decrypts + 1, 1, decrypts),
-                "consent per decode plus once before send; lazy key: loaded once"
+                (decrypts + 2, 1, decrypts),
+                "consent per decode, pre-scope and pre-send; lazy key: loaded once"
             );
             let owner =
                 serde_json::json!([DESKTOP_SUBJECT, team.map(|t| t.parse::<u64>().unwrap())])
@@ -15756,13 +15756,51 @@ mod grokbot_tests {
         assert!(cursor.await.unwrap().is_empty());
     }
 
-    /// Consent withdrawn after both decodes but before the request goes out
-    /// (Settings switched off while the fetch is in flight): the pre-send
-    /// re-read refuses, the marker is published and the mock gets nothing.
+    /// Consent withdrawn after both decodes, before the decoded sign-in is
+    /// fingerprinted (Settings switched off while the fetch is in flight): the
+    /// pre-scope re-read refuses, no account-scope binding is written, the
+    /// marker is published and the mock gets nothing.
     #[tokio::test]
     async fn consent_withdrawn_before_send_sends_nothing() {
         // No scripted reply: `mock` would wait forever for a connection the
         // correct code never makes; a stray request is still recorded.
+        let (desktop_url, desktop) = mock(vec![]).await;
+        let (cursor_url, cursor) = mock(vec![]).await;
+        let harness = Harness::new("withdrawn-before-scope", cursor_url);
+        harness.install_grok_bot(|path| {
+            fs::write(
+                path,
+                desktop_secrets(&sealed(&desktop_jwt()), Some(&sealed("42"))),
+            )
+            .unwrap()
+        });
+        let metadata_before = harness.scope.try_metadata_bytes();
+        let (access, spy) = spy_access(&[true, true, false], Ok(()));
+        let snapshot = fetch_grokbot_with(&harness.deps().with_desktop(&desktop_url, access))
+            .await
+            .unwrap();
+        assert_consent_card(&snapshot);
+        assert_eq!(
+            spy.counts(),
+            (3, 1, 2),
+            "both decodes ran; the third read is the pre-scope one"
+        );
+        assert_eq!(
+            harness.scope.try_metadata_bytes(),
+            metadata_before,
+            "no account-scope binding written"
+        );
+        assert_eq!(harness.enrich_calls(), 0);
+        assert!(desktop.await.unwrap().is_empty(), "nothing sent");
+        assert!(cursor.await.unwrap().is_empty());
+    }
+
+    /// Sibling: consent withdrawn after the scope resolve, immediately before
+    /// the request. The pre-send re-read refuses and the mock gets nothing.
+    /// Control for the test above: here the scope WAS resolved, so the
+    /// metadata observation there can see a write.
+    #[tokio::test]
+    async fn consent_withdrawn_after_scope_resolve_sends_nothing() {
         let (desktop_url, desktop) = mock(vec![]).await;
         let (cursor_url, cursor) = mock(vec![]).await;
         let harness = Harness::new("withdrawn-before-send", cursor_url);
@@ -15773,15 +15811,21 @@ mod grokbot_tests {
             )
             .unwrap()
         });
-        let (access, spy) = spy_access(&[true, true, false], Ok(()));
+        let metadata_before = harness.scope.try_metadata_bytes();
+        let (access, spy) = spy_access(&[true, true, true, false], Ok(()));
         let snapshot = fetch_grokbot_with(&harness.deps().with_desktop(&desktop_url, access))
             .await
             .unwrap();
         assert_consent_card(&snapshot);
         assert_eq!(
             spy.counts(),
-            (3, 1, 2),
-            "both decodes ran; the third read is the pre-send one"
+            (4, 1, 2),
+            "decodes and scope resolve ran; the fourth read is the pre-send one"
+        );
+        assert_ne!(
+            harness.scope.try_metadata_bytes(),
+            metadata_before,
+            "control: the scope resolve writes its binding"
         );
         assert_eq!(harness.enrich_calls(), 0);
         assert!(desktop.await.unwrap().is_empty(), "nothing sent");

@@ -57,9 +57,14 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
         }
     }
 
-    /// <summary>Settings' "Use Grok Bot's sign-in" switch turned off (Q6-2):
-    /// the core stops unlocking and sending it at its next consent check (one
-    /// per decode, one just before the request), and the answer sticks.</summary>
+    /// <summary>Settings' "Use Grok Bot's sign-in" switch turned off (Q6-2),
+    /// the same answer as "Not now" on the card. The core refuses at its next
+    /// consent check — before each decode, before the account-scope
+    /// fingerprint and just before the request — so Syrtis stops before it
+    /// next sends the sign-in, even during a refresh already under way. While
+    /// Grok Bot is signed in the card then shows the declined line; the
+    /// Cursor IDE sign-in is used only when Grok Bot is signed out. The answer
+    /// sticks.</summary>
     public void Withdraw() => Answer(false);
 
     /// <summary>Launch: re-install a stored yes. Anything else is already what
@@ -96,27 +101,17 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
 
         /// <summary>The one-line "isn't reading" row, Allow kept.</summary>
         Declined,
-
-        /// <summary>Allowed, but this payload predates the answer (the fetch
-        /// that will honour it has not landed yet): a waiting line with the
-        /// buttons disabled instead of asking again.</summary>
-        Waiting,
     }
 
     /// <summary>The projection the limits card renders: only a
     /// <c>grok-bot</c> snapshot the core marked <c>keychain-consent</c> becomes
-    /// a consent card, and the stored answer picks which: never asked =
-    /// <see cref="Card.Ask"/>, no = <see cref="Card.Declined"/>, yes =
-    /// <see cref="Card.Waiting"/> (the fetch that will honour it has not
-    /// landed yet — e.g. Allow pressed while a fetch was in flight).</summary>
+    /// a consent card. A stored no is <see cref="Card.Declined"/>; anything
+    /// else asks, a stored yes included (the fetch that honours it has not
+    /// landed yet, or the yes never reached the core), so Allow can always
+    /// send the answer to the core again.</summary>
     public static Card CardFor(AgentUsageSnapshot agent, bool? answer) =>
         agent.ClientId == "grok-bot" && agent.Source == "keychain-consent"
-            ? answer switch
-            {
-                true => Card.Waiting,
-                false => Card.Declined,
-                null => Card.Ask,
-            }
+            ? answer == false ? Card.Declined : Card.Ask
             : Card.None;
 
     /// <summary>English source strings (the localization keys). Windows copy
@@ -127,10 +122,14 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
         public const string Explanation =
             "To show your weekly Grok Bot limits, Syrtis needs to unlock and use Grok Bot's "
             + "saved sign-in on this PC. Windows does not ask separately, so this is the only "
-            + "prompt. Until you allow it, Syrtis only checks whether Grok Bot is signed in. "
+            + "prompt: choose Allow here, or turn on \"Use Grok Bot's sign-in\" in Settings. "
+            + "Until you allow it, Syrtis only checks whether Grok Bot is signed in. "
             + "The sign-in is sent only to Grok Bot's usage service (api2.cursor.sh). Syrtis "
             + "keeps no copy, only a one-way fingerprint to tell accounts apart, and doesn't "
-            + "log it. You can stop this any time in Settings.";
+            + "log it. Turning the switch off in Settings stops Syrtis before it next sends "
+            + "the sign-in, even during a refresh already under way. If you sign out of Grok "
+            + "Bot, Syrtis uses the Cursor IDE sign-in instead, if there is one, and sends it "
+            + "only to cursor.com.";
 
         public const string Declined = "Syrtis isn't reading your Grok Bot limits.";
 
@@ -138,15 +137,16 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
 
         public const string NotNow = "Not now";
 
-        public const string Waiting = "Waiting for the next refresh…";
-
         public const string SettingsToggle = "Use Grok Bot's sign-in";
 
         public const string SettingsHint =
             "When on, Syrtis unlocks Grok Bot's saved sign-in each time it refreshes — "
             + "including sign-ins Grok Bot saved without encryption — and sends it only to "
-            + "api2.cursor.sh. When off, Syrtis still checks Grok Bot's sign-in file each "
-            + "refresh to see whether it is signed in, but does not unlock or send the "
-            + "sign-in. Turning this off takes effect from the next refresh.";
+            + "api2.cursor.sh. Choosing Allow on the Grok Bot card turns this on too. When "
+            + "off, Syrtis still checks Grok Bot's sign-in file each refresh to see whether "
+            + "it is signed in, but does not unlock or send the sign-in. Turning this off "
+            + "stops Syrtis before it next sends the sign-in, even during a refresh already "
+            + "under way. When Grok Bot is signed out, Syrtis uses the Cursor IDE sign-in "
+            + "instead, if there is one, and sends it only to cursor.com.";
     }
 }
