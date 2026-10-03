@@ -5700,34 +5700,40 @@ fn append_claude_scoped_windows(
         // same persisted selection and history the flat lane already owns —
         // for an otherwise unchanged quota. The flat-window guard above means
         // this branch only runs once the flat field is actually gone.
-        let (window_key, label) = CLAUDE_SCOPED_FLAT_SUCCESSORS
+        let (window_key, label, is_model) = CLAUDE_SCOPED_FLAT_SUCCESSORS
             .iter()
-            .find(|(model_slug, _, _)| *model_slug == slug)
+            .find(|(model_slug, _, _, _)| *model_slug == slug)
             .map_or_else(
                 || {
                     (
                         format!("weekly_scoped.{slug}.v1"),
                         format!("{display_name} only"),
+                        true,
                     )
                 },
-                |(_, key, label)| ((*key).to_string(), (*label).to_string()),
+                |(_, key, label, is_model)| ((*key).to_string(), (*label).to_string(), *is_model),
             );
         let resets_at = entry.resets_at.as_deref().and_then(parse_datetime);
         if let Some(window) = UsageWindow::try_from_provider_used_percent(
             label, percent, resets_at, now,
         )
         .map(|window| {
-            window
-                .with_identity(
-                    window_key.clone(),
-                    Some(window_key),
-                    None,
-                    Some(DurationEvidence::contract(7 * 24 * 60 * 60)),
-                )
-                // The same slug the identity is derived from, so a consumer
-                // filtering usage by scope and a consumer keying history by
-                // window cannot disagree about which model this is.
-                .with_model_scope(slug.clone())
+            let window = window.with_identity(
+                window_key.clone(),
+                Some(window_key),
+                None,
+                Some(DurationEvidence::contract(7 * 24 * 60 * 60)),
+            );
+            // The same slug the identity is derived from, so a consumer
+            // filtering usage by scope and a consumer keying history by
+            // window cannot disagree about which model this is. Designs and
+            // Daily Routines narrow a quota to a product surface, not a model;
+            // scoping them would filter usage to a model id no message carries.
+            if is_model {
+                window.with_model_scope(slug.clone())
+            } else {
+                window
+            }
         }) {
             windows.push(window);
         }
@@ -5739,11 +5745,15 @@ fn append_claude_scoped_windows(
 /// quota move from `seven_day_*` into `limits[]` without the user losing a
 /// pinned gauge or its learned pace. Entries here must match the identities
 /// emitted by `claude_windows()` for the corresponding flat fields.
-const CLAUDE_SCOPED_FLAT_SUCCESSORS: &[(&str, &str, &str)] = &[
-    ("sonnet", "sonnet.weekly.v1", "Sonnet"),
-    ("opus", "opus.weekly.v1", "Opus"),
-    ("designs", "design.weekly.v1", "Designs"),
-    ("daily-routines", "routines.weekly.v1", "Daily Routines"),
+///
+/// The fourth field says whether the slug names a model, which decides
+/// whether the window carries a `model_scope`: this table is the one place a
+/// successor slug is classified, so there is no second list to drift.
+const CLAUDE_SCOPED_FLAT_SUCCESSORS: &[(&str, &str, &str, bool)] = &[
+    ("sonnet", "sonnet.weekly.v1", "Sonnet", true),
+    ("opus", "opus.weekly.v1", "Opus", true),
+    ("designs", "design.weekly.v1", "Designs", false),
+    ("daily-routines", "routines.weekly.v1", "Daily Routines", false),
 ];
 
 fn claude_is_all_models_slug(slug: &str) -> bool {
@@ -11088,6 +11098,47 @@ mod tests {
                 "label drifted for {display_name}"
             );
         }
+    }
+
+    /// Designs and Daily Routines successors keep their flat lane's identity
+    /// but carry no model scope: they narrow a quota to a product surface,
+    /// not a model, and a scope would filter their usage to a model id no
+    /// message carries. Control: a model successor (Sonnet) and a
+    /// non-successor (Fable) are still scoped.
+    #[test]
+    fn a_designs_or_routines_successor_carries_no_model_scope() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scoped = |display_name: &str| {
+            claude_windows(
+                &serde_json::from_str::<ClaudeUsageResponse>(&format!(
+                    r#"{{"limits": [{{"kind": "weekly_scoped", "group": "weekly",
+                         "percent": 40,
+                         "scope": {{"model": {{"id": null,
+                                               "display_name": "{display_name}"}}}}}}]}}"#
+                ))
+                .unwrap(),
+                now,
+            )
+        };
+
+        for (display_name, card_id) in [
+            ("Designs", "design.weekly.v1"),
+            ("Daily Routines", "routines.weekly.v1"),
+        ] {
+            let windows = scoped(display_name);
+            assert_eq!(windows.len(), 1, "{display_name}");
+            assert_eq!(windows[0].card_id, card_id, "{display_name}");
+            assert_eq!(windows[0].model_scope, None, "{display_name}");
+            let wire = serde_json::to_value(&windows[0]).expect("serialize window");
+            assert!(wire.get("modelScope").is_none(), "{display_name}");
+        }
+
+        let sonnet = scoped("Sonnet");
+        assert_eq!(sonnet[0].card_id, "sonnet.weekly.v1");
+        assert_eq!(sonnet[0].model_scope.as_deref(), Some("sonnet"));
+        let fable = scoped("Fable");
+        assert_eq!(fable[0].card_id, "weekly_scoped.fable.v1");
+        assert_eq!(fable[0].model_scope.as_deref(), Some("fable"));
     }
 
     /// End-to-end shape check against a real `oauth/usage` response captured
