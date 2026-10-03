@@ -15734,7 +15734,7 @@ mod grokbot_tests {
     async fn consent_withdrawn_between_decrypts_refuses_the_second() {
         let (desktop_url, desktop) = mock(vec![]).await;
         let (cursor_url, cursor) = mock(vec![]).await;
-        let harness = Harness::new("withdrawn", cursor_url);
+        let harness = Harness::new("withdrawn-between-decrypts", cursor_url);
         harness.install_grok_bot(|path| {
             fs::write(
                 path,
@@ -15761,12 +15761,12 @@ mod grokbot_tests {
     /// pre-scope re-read refuses, no account-scope binding is written, the
     /// marker is published and the mock gets nothing.
     #[tokio::test]
-    async fn consent_withdrawn_before_send_sends_nothing() {
+    async fn consent_withdrawn_before_scope_resolve_sends_nothing() {
         // No scripted reply: `mock` would wait forever for a connection the
         // correct code never makes; a stray request is still recorded.
         let (desktop_url, desktop) = mock(vec![]).await;
         let (cursor_url, cursor) = mock(vec![]).await;
-        let harness = Harness::new("withdrawn-before-scope", cursor_url);
+        let harness = Harness::new("withdrawn-before-scope-resolve", cursor_url);
         harness.install_grok_bot(|path| {
             fs::write(
                 path,
@@ -15803,7 +15803,7 @@ mod grokbot_tests {
     async fn consent_withdrawn_after_scope_resolve_sends_nothing() {
         let (desktop_url, desktop) = mock(vec![]).await;
         let (cursor_url, cursor) = mock(vec![]).await;
-        let harness = Harness::new("withdrawn-before-send", cursor_url);
+        let harness = Harness::new("withdrawn-after-scope-resolve", cursor_url);
         harness.install_grok_bot(|path| {
             fs::write(
                 path,

@@ -26,7 +26,9 @@ public sealed class DashboardModel
     // (a CI/test target) that can wedge a lane permanently "in flight".
     private int _slowInFlight;
     private int _fastInFlight;
-    private int _quotaInFlight;
+    // The quota lane's gate: a request during a fetch is kept as one follow-up
+    // fetch rather than dropped (CoalescingRun).
+    private readonly CoalescingRun _quotaLane;
     // Latest quota fetch, kept outside the snapshot so a fetch that lands
     // before the first graph parse isn't lost — the first snapshot seeds
     // from it (quota is usually done in ~1s, the cold parse in seconds).
@@ -230,6 +232,7 @@ public sealed class DashboardModel
     {
         _dispatcher = dispatcher;
         _graphCoordinator = graphCoordinator;
+        _quotaLane = new CoalescingRun(work => _ = Task.Run(work), FetchQuota);
         _graphCoordinator.Started += OnGraphStarted;
         _graphCoordinator.Published += OnGraphPublished;
         _graphCoordinator.Completed += OnGraphCompleted;
@@ -935,8 +938,8 @@ public sealed class DashboardModel
 
     /// <summary>Quota lane only, now — after an answer that changes what the
     /// core may read (the Grok Bot consent card). A fetch already in flight is
-    /// not restarted; its payload predates the answer and the next tick
-    /// corrects it.</summary>
+    /// not restarted; one more fetch runs when it ends, so the answer is
+    /// honoured without waiting for the next tick.</summary>
     public void RefreshQuotaNow() => RefreshQuota();
 
     /// <summary>The OAuth quota lane, macOS pollAgentUsage parity: fully
@@ -944,55 +947,44 @@ public sealed class DashboardModel
     /// for ~30s per agent) never delays the first paint, never holds the
     /// EcoQoS boost through a network wait, and never blocks the next
     /// graph tick behind <c>_slowInFlight</c>.</summary>
-    private void RefreshQuota()
+    private void RefreshQuota() => _quotaLane.Request();
+
+    /// <summary>One quota fetch and its publish; runs on the pool under
+    /// <see cref="_quotaLane"/>, never two at once.</summary>
+    private void FetchQuota()
     {
-        if (Interlocked.Exchange(ref _quotaInFlight, 1) == 1)
+        var quota = TryFetch(
+            () => AgentUsageFetchCoordinator.Shared.FetchAsync().GetAwaiter().GetResult(),
+            "agentUsage");
+        // Recorded before publishing, and outside the snapshot: the
+        // publish below is dropped entirely if the graph lane has not
+        // seeded Current yet, and this is the only thing that survives
+        // that window. The payload is written BEFORE the flag, and
+        // CreateBaseline reads the flag before the payload (both
+        // fields are volatile, so the order holds): a baseline taken
+        // between the two writes must never see "attempted" without
+        // the quota, because LazyLaneFold.Outcome(QuotaAttempted,
+        // Quota) reads exactly that pair as a failed fetch, and a
+        // fetch that succeeded would render as failed for a frame.
+        if (quota is not null)
         {
-            return;
+            _latestQuota = quota;
         }
 
-        _ = Task.Run(() =>
+        _quotaAttempted = true;
+        if (quota is not null)
         {
-            try
-            {
-                var quota = TryFetch(
-                    () => AgentUsageFetchCoordinator.Shared.FetchAsync().GetAwaiter().GetResult(),
-                    "agentUsage");
-                // Recorded before publishing, and outside the snapshot: the
-                // publish below is dropped entirely if the graph lane has not
-                // seeded Current yet, and this is the only thing that survives
-                // that window. The payload is written BEFORE the flag, and
-                // CreateBaseline reads the flag before the payload (both
-                // fields are volatile, so the order holds): a baseline taken
-                // between the two writes must never see "attempted" without
-                // the quota, because LazyLaneFold.Outcome(QuotaAttempted,
-                // Quota) reads exactly that pair as a failed fetch, and a
-                // fetch that succeeded would render as failed for a frame.
-                if (quota is not null)
-                {
-                    _latestQuota = quota;
-                }
-
-                _quotaAttempted = true;
-                if (quota is not null)
-                {
-                    Publish(s => s with { Quota = quota, QuotaAttempted = true }, graph: null);
-                }
-                else
-                {
-                    // Publish the completion even though there is nothing to
-                    // show. Without this the failure is silent in exactly the
-                    // way that matters: Quota stays null, and a surface that
-                    // reads null as "not yet" waits forever for an answer that
-                    // already came back.
-                    Publish(s => s with { QuotaAttempted = true }, graph: null);
-                }
-            }
-            finally
-            {
-                Volatile.Write(ref _quotaInFlight, 0);
-            }
-        });
+            Publish(s => s with { Quota = quota, QuotaAttempted = true }, graph: null);
+        }
+        else
+        {
+            // Publish the completion even though there is nothing to
+            // show. Without this the failure is silent in exactly the
+            // way that matters: Quota stays null, and a surface that
+            // reads null as "not yet" waits forever for an answer that
+            // already came back.
+            Publish(s => s with { QuotaAttempted = true }, graph: null);
+        }
     }
 
     private static T? TryFetch<T>(Func<T> fetch, string label) where T : class

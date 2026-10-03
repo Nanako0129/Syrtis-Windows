@@ -127,9 +127,9 @@ public sealed partial class DashboardView : UserControl
             else if (key == GrokBotConsent.StorageKey)
             {
                 // The card's buttons and the Settings switch both land here.
-                // A yes asks for a quota refresh; one already in flight makes
-                // that a no-op, and the answer is then honoured by the next
-                // poll. Either answer re-renders the card.
+                // A yes asks for a quota refresh; one already in flight gets
+                // exactly one follow-up fetch when it ends, which honours the
+                // answer. Either answer re-renders the card.
                 _ = DispatcherQueue.TryEnqueue(() =>
                 {
                     if (AppSettings.GrokBotConsent.Stored == true)
@@ -1715,15 +1715,13 @@ public sealed partial class DashboardView : UserControl
     /// Windows this is the only question before Syrtis decrypts Grok Bot's
     /// sign-in — DPAPI never asks — so it states what is read, where it goes
     /// and how to stop. After "Not now" it collapses to one line and keeps
-    /// Allow: a decline has to be reversible where it was made.</summary>
+    /// Allow: a decline has to be reversible where it was made. A stored yes
+    /// the core has not acted on yet shows the short "Allowed" line, Allow
+    /// kept to re-send it.</summary>
     private FrameworkElement BuildGrokBotConsent(GrokBotConsent.Card state)
     {
         var body = new StackPanel { Spacing = 6 };
-        var text = Ui.Dim(
-            (state == GrokBotConsent.Card.Declined
-                ? GrokBotConsent.Copy.Declined
-                : GrokBotConsent.Copy.Explanation).Localized(),
-            11);
+        var text = Ui.Dim(GrokBotConsent.TextFor(state).Localized(), 11);
         body.Children.Add(text);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         var allow = new Button
@@ -1735,12 +1733,15 @@ public sealed partial class DashboardView : UserControl
         var notNow = new Button { Content = GrokBotConsent.Copy.NotNow.Localized(), FontSize = 12 };
         allow.Click += (_, _) =>
         {
-            // A changed answer reaches the store's Changed handler, which asks
-            // for a refresh and re-renders this card. Allowing again over a
-            // stored yes (one the core never received) changes nothing in the
-            // store: it re-sends the grant to the core, and the next poll
-            // honours it.
-            TryAnswerGrokBotConsent(true);
+            // A changed answer also reaches the store's Changed handler, which
+            // re-renders this card. Allowing again over a stored yes (one the
+            // core never received) changes nothing in the store, so the
+            // refresh is asked for here as well: the grant is re-sent and a
+            // fetch after it honours it (coalesced with the Changed path's).
+            if (TryAnswerGrokBotConsent(true))
+            {
+                _model?.RefreshQuotaNow();
+            }
         };
         notNow.Click += (_, _) =>
         {

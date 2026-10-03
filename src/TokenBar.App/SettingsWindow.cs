@@ -592,11 +592,11 @@ public sealed class SettingsWindow : Window
         // Grok Bot sign-in consent (Q6-2): the same answer as Allow / Not now
         // on the card. Outside the master switch: hiding the card must not hide
         // the way to stop the read behind it. Off withdraws in the core at
-        // once, and the core re-checks before each decode, the account-scope
-        // fingerprint and the send, so Syrtis stops before it next sends the
-        // sign-in, even during a refresh already under way. The Cursor IDE
-        // sign-in is used only when Grok Bot is signed out, never because this
-        // is off.
+        // once and takes effect from the next refresh; a refresh already under
+        // way may finish (the core's re-checks before each decode, the
+        // account-scope fingerprint and the send are best-effort hardening,
+        // not a guarantee). The Cursor IDE sign-in is used only when Grok Bot
+        // is signed out, never because this is off.
         var grokBot = new ToggleSwitch
         {
             IsOn = AppSettings.GrokBotConsent.Stored == true,
