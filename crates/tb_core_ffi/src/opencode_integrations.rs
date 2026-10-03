@@ -222,7 +222,7 @@ pub(crate) fn opencode_go_credential() -> OpenCodeGoCredentialLoad {
     opencode_go_credential_at(&path)
 }
 
-/// `pub(crate)` on Windows so `agent_usage`'s tests can drive the production
+/// `pub(crate)` (macOS keeps it private) so `agent_usage`'s tests can drive the production
 /// loader on a fixture file; production reaches it only through
 /// `opencode_go_credential`.
 pub(crate) fn opencode_go_credential_at(path: &std::path::Path) -> OpenCodeGoCredentialLoad {
