@@ -33,6 +33,7 @@
   "Auto (tightest window)": "自動（最吃緊的時間窗）",
   "Automatic": "自動",
   "Bars count up (used) instead of down (left).": "長條由零往上累加（已用），而非從滿格往下遞減（剩餘）。",
+  "Hide one client's quota card and keep its tab. Grayed out when the tab is hidden, which already hides the card.": "隱藏單一用戶端的額度卡片，分頁保留。分頁已隱藏時會變灰，因為隱藏分頁就不會有卡片。",
   "Billing": "帳務",
   "Black": "黑色",
   "Blue": "藍色",

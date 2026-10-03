@@ -538,6 +538,7 @@ public sealed class SettingsWindow : Window
                     + "usage curve; Linear paces evenly by the clock; Off hides it.")
                 .Localized()));
         }
+        limitOptions.Children.Add(BuildLimitsClientToggles(store));
         if (limitsOn)
         {
             limits.Children.Add(limitOptions);
@@ -1477,6 +1478,70 @@ public sealed class SettingsWindow : Window
         var full = order.Concat(visible).Where(seen.Add).ToList();
         var merged = ClientRegistry.MergeReorder(full, visible, from, to);
         store.SetString(ClientRegistry.TabOrderKey, string.Join(',', merged));
+    }
+
+    /// <summary>One switch per client that can show a quota card (macOS
+    /// SettingsPanel Agent limits rows): on = its card shows. A client whose
+    /// tab is hidden reads off and disabled, because a hidden tab already
+    /// hides its card (LimitsCardFilter); the stored limits flag is left
+    /// alone.</summary>
+    private StackPanel BuildLimitsClientToggles(SettingsStore store)
+    {
+        var panel = new StackPanel { Spacing = 4 };
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var present = (_graph()?.Summary.Clients ?? [])
+            .Select(ClientRegistry.CanonicalClient)
+            .Where(seen.Add)
+            .ToList();
+        var quotaSeen = new HashSet<string>(StringComparer.Ordinal);
+        var quotaIds = (_quota()?.Agents ?? [])
+            .Select(agent => agent.ClientId)
+            .Where(quotaSeen.Add)
+            .ToList();
+        var known = ClientRegistry.OrderedClients(
+            ClientRegistry.KnownLimitsClients(present, quotaIds, new HashSet<string>()), store);
+        if (known.Count == 0)
+        {
+            return panel;
+        }
+
+        var tabHidden = ClientRegistry.HiddenTabClients(store);
+        var limitsHidden = ClientRegistry.HiddenLimitsClients(store);
+        foreach (var id in known)
+        {
+            var isTabHidden = tabHidden.Contains(id);
+            var toggle = new ToggleSwitch
+            {
+                IsOn = !isTabHidden && !limitsHidden.Contains(id),
+                IsEnabled = !isTabHidden,
+                OnContent = null,
+                OffContent = null,
+            };
+            var clientId = id;
+            toggle.Toggled += (_, _) => ClientRegistry.SetLimitsHidden(store, clientId, !toggle.IsOn);
+            var name = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                VerticalAlignment = VerticalAlignment.Center,
+                Opacity = isTabHidden ? 0.5 : 1,
+            };
+            name.Children.Add(AgentIcon.Create(id, 14));
+            name.Children.Add(Ui.Text(ClientRegistry.ShortName(id), 12));
+            // ToggleRow's layout with an icon + name in place of its text.
+            var row = new Grid();
+            row.Children.Add(name);
+            toggle.HorizontalAlignment = HorizontalAlignment.Right;
+            toggle.MinWidth = 0;
+            toggle.Margin = new Thickness(0, -4, 0, -4);
+            row.Children.Add(toggle);
+            panel.Children.Add(row);
+        }
+
+        panel.Children.Add(Hint(
+            "Hide one client's quota card and keep its tab. Grayed out when the tab is hidden, which already hides the card."
+                .Localized()));
+        return panel;
     }
 
     private static void SetClientTabVisible(SettingsStore store, string id, bool visible)

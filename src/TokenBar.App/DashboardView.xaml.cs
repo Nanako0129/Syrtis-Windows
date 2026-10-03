@@ -1602,12 +1602,14 @@ public sealed partial class DashboardView : UserControl
         DashboardModel.Snapshot snapshot, string? clientId = null)
     {
         var panel = new StackPanel { Spacing = 10 };
-        var agents = snapshot.Quota?.Agents ?? [];
-        if (clientId is not null)
-        {
-            // Every account of the client: hiding or narrowing is per client.
-            agents = [.. agents.Where(agent => agent.ClientId == clientId)];
-        }
+        // Narrowed to the tab's client, then the per-client limits toggle and
+        // (Overview only) tab visibility applied, before any exit below reads
+        // the list (LimitsCardFilter).
+        var agents = LimitsCardFilter.Visible(
+            snapshot.Quota?.Agents ?? [],
+            clientId,
+            ClientRegistry.HiddenTabClients(AppSettings.Store),
+            ClientRegistry.HiddenLimitsClients(AppSettings.Store));
 
         // Round 11's P2 finding, corrected: retained data wins over a failed
         // refetch — QuotaSummaryText.LimitsState checks `agents.Count > 0`

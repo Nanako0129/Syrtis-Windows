@@ -140,6 +140,24 @@ public class ClientRegistryTests : IDisposable
             ClientRegistry.QuotaExcludedClients(store));
     }
 
+    /// <summary>The Settings switch writes what every reader parses: hiding
+    /// adds the id (sorted, comma-joined as macOS stores it), showing removes
+    /// only that id, and a fresh store reads the same set back.</summary>
+    [Fact]
+    public void SetLimitsHiddenRoundTripsThroughTheReaders()
+    {
+        var store = NewStore();
+        ClientRegistry.SetLimitsHidden(store, "gemini", hidden: true);
+        ClientRegistry.SetLimitsHidden(store, "codex", hidden: true);
+        Assert.Equal("codex,gemini", store.GetString(ClientRegistry.LimitsHiddenKey));
+
+        ClientRegistry.SetLimitsHidden(store, "gemini", hidden: false);
+        ClientRegistry.SetLimitsHidden(store, "claude", hidden: false);
+        var reread = NewStore();
+        Assert.Equal(new HashSet<string> { "codex" }, ClientRegistry.HiddenLimitsClients(reread));
+        Assert.Contains("codex", ClientRegistry.QuotaExcludedClients(reread));
+    }
+
     [Fact]
     public void KnownLimitsClientsDedupesKeepingPresentThenQuotaOrder()
     {
