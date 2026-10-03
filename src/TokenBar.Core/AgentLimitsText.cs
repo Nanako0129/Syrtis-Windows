@@ -59,9 +59,6 @@ public static class LimitsCardOrder
     public static string Dropped(string orderRaw, IReadOnlyList<string> visible, string from, string to) =>
         string.Join(',', ClientRegistry.MergeReorder(ClientRegistry.ParseIdList(orderRaw), visible, from, to));
 
-    /// <summary>Whether the drop line sits under the target (dragging down)
-    /// rather than over it — the direction-aware insert
-    /// <see cref="ClientRegistry.Reorder"/> performs.</summary>
     /// <summary>One card group's vertical extent while dragging.</summary>
     public readonly record struct Span(string Id, double Top, double Bottom);
 
@@ -84,6 +81,9 @@ public static class LimitsCardOrder
             : ordered.First(span => span.Bottom >= y).Id;
     }
 
+    /// <summary>Whether the drop line sits under the target (dragging down)
+    /// rather than over it — the direction-aware insert
+    /// <see cref="ClientRegistry.Reorder"/> performs.</summary>
     public static bool DropsBelow(IReadOnlyList<string> visible, string from, string to)
     {
         List<string> list = [.. visible];
