@@ -151,6 +151,35 @@ fn claude_graph_output(graph: &serde_json::Value) -> i64 {
         .sum()
 }
 
+/// Output on the Claude lane including its `.cc-mirror` variants: the engine
+/// labels a variant's messages `cc-mirror/<variant>`, not `claude`.
+fn claude_lane_output(window: &serde_json::Value) -> i64 {
+    window["data"]["messages"]
+        .as_array()
+        .unwrap_or_else(|| panic!("window payload: {window}"))
+        .iter()
+        .filter(|message| is_claude_lane(&message["client"]))
+        .map(|message| message["output"].as_i64().unwrap_or(0))
+        .sum()
+}
+
+fn claude_lane_graph_output(graph: &serde_json::Value) -> i64 {
+    graph["data"]["contributions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("graph payload: {graph}"))
+        .iter()
+        .flat_map(|day| day["clients"].as_array().cloned().unwrap_or_default())
+        .filter(|row| is_claude_lane(&row["client"]))
+        .map(|row| row["tokens"]["output"].as_i64().unwrap_or(0))
+        .sum()
+}
+
+fn is_claude_lane(client: &serde_json::Value) -> bool {
+    client
+        .as_str()
+        .is_some_and(|id| id == "claude" || id.starts_with("cc-mirror/"))
+}
+
 // ---- 1′ and 9: run everywhere -------------------------------------------
 
 /// 1′ structural: with no registry calls, and again after both registries are
@@ -307,17 +336,21 @@ fn a_config_dir_alone_never_reaches_the_primary_window() {
     .unwrap();
 
     assert_eq!(
-        claude_output(&call_window(None, WINDOW_FROM, WINDOW_UNTIL)),
+        claude_lane_output(&call_window(None, WINDOW_FROM, WINDOW_UNTIL)),
         PRIMARY + EXTRA,
         "fixture is inert: the mirror route did not reach D"
     );
     crate::apply_config_dirs_for_test(vec![dir.display().to_string()]);
     assert_eq!(
-        claude_output(&call_window(None, WINDOW_FROM, WINDOW_UNTIL)),
+        claude_lane_output(&call_window(None, WINDOW_FROM, WINDOW_UNTIL)),
         PRIMARY,
         "a configured directory reached the primary window through the mirror route"
     );
-    assert_eq!(claude_graph_output(&call_graph()), PRIMARY + EXTRA, "totals keep every account");
+    assert_eq!(
+        claude_lane_graph_output(&call_graph()),
+        PRIMARY + EXTRA,
+        "totals keep every account"
+    );
 }
 
 // ---- 4′: the gate, everywhere (empty setters still move the generation) --
