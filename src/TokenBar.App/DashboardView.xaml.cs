@@ -922,6 +922,7 @@ public sealed partial class DashboardView : UserControl
             // release in.
             if (_tabDragMoved)
             {
+                _tabDragMoved = false;
                 return;
             }
 
@@ -1007,6 +1008,11 @@ public sealed partial class DashboardView : UserControl
 
         var (dragging, over) = (_tabDragging, _tabDragOver);
         EndTabDrag();
+        // The flag only has to outlive this release's own Click, which Button
+        // raises inside the same pointer dispatch. A drop on another tab
+        // raises none, and a keyboard or UIA click raises no press to clear
+        // it. Clear it once this dispatch is over.
+        DispatcherQueue.TryEnqueue(() => _tabDragMoved = false);
         if (drop && dragging && over is not null)
         {
             var store = AppSettings.Store;
