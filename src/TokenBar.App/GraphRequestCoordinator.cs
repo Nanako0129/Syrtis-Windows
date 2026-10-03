@@ -153,6 +153,58 @@ public sealed class GraphRequestCoordinator
         Func<string?, UsagePayload>? refreshGraph = null,
         Func<DateTimeOffset>? utcNow = null)
     {
+        // Read on every access, never once per process: the id changes when
+        // the extra Claude scan roots do, so a snapshot written before a root
+        // was removed must stop matching (security review R4). Called off the
+        // UI thread only, after the launch push.
+        var currentId = sourceContextId ?? (() =>
+        {
+            ClaudeExtraRoots.AwaitLaunch();
+            return TbCore.SourceContextId();
+        });
+        string? SourceId()
+        {
+            try
+            {
+                var id = currentId();
+                return string.IsNullOrWhiteSpace(id) ? null : id;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // A richer scan records the id it started under, and its snapshot is
+        // written only while that is still the current id: a scan that
+        // straddled a root change is never saved under the new roots' id.
+        var scannedUnder = new System.Runtime.CompilerServices.ConditionalWeakTable<UsagePayload, string>();
+        Func<string?, UsagePayload> Track(Func<string?, UsagePayload> scan) => year =>
+        {
+            var startedUnder = SourceId();
+            var payload = scan(year);
+            if (startedUnder is not null)
+            {
+                scannedUnder.AddOrUpdate(payload, startedUnder);
+            }
+
+            return payload;
+        };
+
+        // The app's graph scans wait for the launch push of the saved extra
+        // Claude roots, so the first graph already includes them.
+        localFirst ??= year =>
+        {
+            ClaudeExtraRoots.AwaitLaunch();
+            return TbCore.GraphLocalFirst(year);
+        };
+        refreshGraph ??= graph ?? (year =>
+        {
+            ClaudeExtraRoots.AwaitLaunch();
+            return TbCore.RefreshGraph(year);
+        });
+        graph = Track(graph ?? refreshGraph);
+        refreshGraph = Track(refreshGraph);
         try
         {
             var root = getFolderPath is null
@@ -174,20 +226,17 @@ public sealed class GraphRequestCoordinator
                 createDirectory(profile);
             }
 
-            var sourceId = sourceContextId is null
-                ? TbCore.SourceContextId()
-                : sourceContextId();
-            if (string.IsNullOrWhiteSpace(sourceId))
-            {
-                throw new InvalidOperationException();
-            }
-
             var store = new GraphSnapshotStore(
                 Path.Combine(profile, "graph-snapshot.json"));
             var snapshot = new SnapshotAccess(
-                year => store.Read(sourceId, year),
+                year => SourceId() is { } id
+                    ? store.Read(id, year)
+                    : new GraphSnapshotReadResult(GraphSnapshotReadStatus.Missing),
                 (year, capturedAt, payload, commitFence) =>
-                    store.Write(sourceId, year, capturedAt, payload, commitFence));
+                    SourceId() is { } id
+                        && (!scannedUnder.TryGetValue(payload, out var startedUnder) || startedUnder == id)
+                        ? store.Write(id, year, capturedAt, payload, commitFence)
+                        : GraphSnapshotWriteStatus.Skipped);
             return new GraphRequestCoordinator(
                 localFirst,
                 graph,

@@ -73,11 +73,27 @@ fn classify(path: &Path) -> Shape {
     }
 }
 
+/// The scan registry's rule for one path on its own, before any list or
+/// filesystem check: the drive-path rule (`claude_config_dirs::normalize`),
+/// then nothing at or under the primary's `<home>\.claude` (security review
+/// R2). Shared with the pre-save check (`claude_config_dirs::validate`), so
+/// that check gives this registry's answer without touching the disk.
+pub(crate) fn path_rule(raw: &str, home: Option<&Path>) -> Result<String, &'static str> {
+    let path = normalize(raw)?;
+    if is_at_or_under_default_config_dir(&path, home) {
+        return Err("defaultConfigDir");
+    }
+    Ok(path)
+}
+
 /// Parse a `{"<client-id>": ["<path>", ...]}` replacement. Full-replace: `{}`
 /// clears every root. Each path is normalized by the config-dir rule, refused
 /// when it is at or under the primary's `<home>\.claude` (security review R2),
 /// de-duplicated on the folded form, and capped. Malformed JSON is an error
 /// and nothing is parsed.
+///
+/// Per path, in order: [`path_rule`], then the list rules (duplicate,
+/// limit), then the filesystem shape.
 pub(crate) fn parse(raw: &str, home: Option<&Path>) -> Result<Candidate, &'static str> {
     let input: BTreeMap<String, Vec<String>> =
         serde_json::from_str(raw).map_err(|_| "invalidJson")?;
@@ -94,9 +110,8 @@ pub(crate) fn parse(raw: &str, home: Option<&Path>) -> Result<Candidate, &'stati
             let reason = if !supported {
                 "unsupportedClient"
             } else {
-                match normalize(raw_path) {
+                match path_rule(raw_path, home) {
                     Err(reason) => reason,
-                    Ok(path) if is_at_or_under_default_config_dir(&path, home) => "defaultConfigDir",
                     Ok(path) if seen.contains(&duplicate_key(&path)) => "duplicate",
                     Ok(_) if seen.len() >= MAX_EXTRA_SCAN_PATHS => "limitExceeded",
                     Ok(path) => match classify(Path::new(&path)) {

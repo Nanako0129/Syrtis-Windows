@@ -151,29 +151,11 @@ pub(crate) fn is_at_or_under_default_config_dir(dir: &str, home: Option<&std::pa
 /// input is never echoed back across the FFI.
 pub(crate) fn set_from_json(raw: &str) -> Result<(serde_json::Value, Vec<String>), &'static str> {
     let input: Vec<String> = serde_json::from_str(raw).map_err(|_| "invalidJson")?;
-
-    let mut registered: Vec<String> = Vec::new();
-    let mut rejected: Vec<serde_json::Value> = Vec::new();
-    let home = crate::user_home_dir();
-    for (index, raw_dir) in input.iter().enumerate() {
-        let reason = match normalize(raw_dir) {
-            Ok(dir) if is_default_config_dir(&dir, home.as_deref()) => "defaultConfigDir",
-            Ok(dir)
-                if registered
-                    .iter()
-                    .any(|existing| duplicate_key(existing) == duplicate_key(&dir)) =>
-            {
-                "duplicate"
-            }
-            Ok(_) if registered.len() >= MAX_CLAUDE_CONFIG_DIRS => "limitExceeded",
-            Ok(dir) => {
-                registered.push(dir);
-                continue;
-            }
-            Err(reason) => reason,
-        };
-        rejected.push(serde_json::json!({ "index": index, "reason": reason }));
-    }
+    let (registered, refused) = register(&input, crate::user_home_dir().as_deref());
+    let rejected: Vec<serde_json::Value> = refused
+        .iter()
+        .map(|(index, reason)| serde_json::json!({ "index": index, "reason": reason }))
+        .collect();
 
     {
         let mut state = CLAUDE_CONFIG_DIRS
@@ -192,6 +174,81 @@ pub(crate) fn set_from_json(raw: &str) -> Result<(serde_json::Value, Vec<String>
     ))
 }
 
+/// The registry's per-entry rule, in list order: which directories a replace
+/// with `input` registers, and the index and fixed reason of each one it
+/// refuses. Shared by [`set_from_json`] and [`validate`], so a pre-save check
+/// gives exactly the setter's answer.
+fn register(
+    input: &[String],
+    home: Option<&std::path::Path>,
+) -> (Vec<String>, Vec<(usize, &'static str)>) {
+    let mut registered: Vec<String> = Vec::new();
+    let mut rejected: Vec<(usize, &'static str)> = Vec::new();
+    for (index, raw_dir) in input.iter().enumerate() {
+        let reason = match normalize(raw_dir) {
+            Ok(dir) if is_default_config_dir(&dir, home) => "defaultConfigDir",
+            Ok(dir)
+                if registered
+                    .iter()
+                    .any(|existing| duplicate_key(existing) == duplicate_key(&dir)) =>
+            {
+                "duplicate"
+            }
+            Ok(_) if registered.len() >= MAX_CLAUDE_CONFIG_DIRS => "limitExceeded",
+            Ok(dir) => {
+                registered.push(dir);
+                continue;
+            }
+            Err(reason) => reason,
+        };
+        rejected.push((index, reason));
+    }
+    (registered, rejected)
+}
+
+/// Why appending `candidate` to the saved list `existing` would not give a
+/// working extra account, or `None` if it would. In order:
+/// - the config registry's own answer for that position ([`register`]),
+///   with `homeDirectory` in place of `defaultConfigDir` when the candidate
+///   is the home folder itself (so the copy can say "pick the folder inside");
+/// - the scan registry's rule for the account's two roots,
+///   `<dir>\projects` and `<dir>\transcripts`
+///   ([`crate::extra_scan_paths::path_rule`]);
+/// - `nestedConfigDir` when the candidate contains, or is inside, a directory
+///   the saved list registers, whose transcripts would then be scanned twice.
+///
+/// Touches no filesystem (no stat, so a `\\wsl.localhost` path cannot wake
+/// WSL) and changes no registry. Returns a fixed reason code, never the input.
+pub(crate) fn validate(
+    candidate: &str,
+    existing: &[String],
+    home: Option<&std::path::Path>,
+) -> Option<&'static str> {
+    let is_home = |dir: &str| {
+        home.is_some_and(|home| duplicate_key(dir) == duplicate_key(&home.to_string_lossy()))
+    };
+    let mut all = existing.to_vec();
+    all.push(candidate.to_string());
+    let (_, rejected) = register(&all, home);
+    if let Some((_, reason)) = rejected.iter().find(|(index, _)| *index == existing.len()) {
+        let home_itself = *reason == "defaultConfigDir"
+            && normalize(candidate).is_ok_and(|dir| is_home(&dir));
+        return Some(if home_itself { "homeDirectory" } else { reason });
+    }
+    let dir = normalize(candidate).ok()?;
+    for root in ["projects", "transcripts"] {
+        if let Err(reason) = crate::extra_scan_paths::path_rule(&format!("{dir}\\{root}"), home) {
+            return Some(reason);
+        }
+    }
+    let key = duplicate_key(&dir);
+    let (registered, _) = register(existing, home);
+    let nested = registered.iter().map(|other| duplicate_key(other)).any(|other| {
+        other.starts_with(&format!("{key}\\")) || key.starts_with(&format!("{other}\\"))
+    });
+    nested.then_some("nestedConfigDir")
+}
+
 /// One process-wide mutex for every test that writes the static, so parallel
 /// `cargo test` threads do not observe each other's registry.
 #[cfg(test)]
@@ -208,6 +265,75 @@ pub(crate) fn reset_for_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-save check gives the setter's answer for the appended entry,
+    /// plus the scan registry's at-or-under rule, without touching the
+    /// registry or the filesystem.
+    #[test]
+    fn validate_answers_as_the_setter_would_for_the_appended_entry() {
+        let home = std::path::Path::new(r"C:\Users\Me");
+        let some = |raw: &[&str]| raw.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let empty: Vec<String> = Vec::new();
+        for (candidate, existing, expected) in [
+            (r"D:\work\.claude", empty.clone(), None),
+            ("", empty.clone(), Some("empty")),
+            ("C:work", empty.clone(), Some("unsupportedPath")),
+            (r"\Users\x", empty.clone(), Some("unsupportedPath")),
+            (
+                r"\\wsl.localhost\Ubuntu\home\me\.claude",
+                empty.clone(),
+                Some("unsupportedPath"),
+            ),
+            (r"E:\", empty.clone(), Some("rootDirectory")),
+            (r"D:\a\con", empty.clone(), Some("invalidComponent")),
+            (r"D:\a\b ", empty.clone(), Some("invalidComponent")),
+            (
+                r"c:/users/ME/.CLAUDE",
+                empty.clone(),
+                Some("defaultConfigDir"),
+            ),
+            (r"C:\Users", empty.clone(), Some("defaultConfigDir")),
+            (r"C:\Users\Me", empty.clone(), Some("homeDirectory")),
+            (r"c:/users/me/", empty.clone(), Some("homeDirectory")),
+            // Accepted by the config registry, refused by the scan registry.
+            (
+                r"C:\Users\Me\.claude\work",
+                empty.clone(),
+                Some("defaultConfigDir"),
+            ),
+            (r"D:\a\projects", some(&[r"D:\a"]), Some("nestedConfigDir")),
+            (r"D:\", some(&[r"D:\a"]), Some("rootDirectory")),
+            (r"D:\x", some(&[r"D:\x\y"]), Some("nestedConfigDir")),
+            (r"D:\ab", some(&[r"D:\a"]), None),
+            (
+                r"d:/WORK/.claude/",
+                some(&[r"D:\work\.claude"]),
+                Some("duplicate"),
+            ),
+            // A refused saved entry does not take a slot or cause a duplicate.
+            (r"D:\b", some(&[r"\\server\share", "D:/b/../b"]), None),
+            (
+                r"D:\z",
+                some(&[
+                    r"D:\a", r"D:\b", r"D:\c", r"D:\d", r"D:\e", r"D:\f", r"D:\g", r"D:\h",
+                ]),
+                Some("limitExceeded"),
+            ),
+            (
+                r"D:\z",
+                some(&[
+                    r"D:\a", r"D:\b", r"D:\c", r"D:\d", r"D:\e", r"D:\f", r"D:\g", r"E:\",
+                ]),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                validate(candidate, &existing, Some(home)),
+                expected,
+                "{candidate:?} after {existing:?}"
+            );
+        }
+    }
 
     #[test]
     fn normalize_accepts_only_absolute_drive_paths() {

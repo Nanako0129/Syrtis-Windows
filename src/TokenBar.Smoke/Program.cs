@@ -203,6 +203,15 @@ Step("tb_tokens_per_min", () =>
     return $"ok rate={rate:F1}";
 });
 
+// Empty replaces: the shipping DLL binds both setters, and a fresh process's
+// registries are already empty, so nothing the steps above read changes.
+Step("tb_set_claude_config_dirs", () =>
+    $"ok registered={TbCore.SetClaudeConfigDirs([]).RegisteredCount}");
+Step("tb_set_extra_scan_paths", () =>
+    $"ok registered={TbCore.SetExtraClaudeScanPaths([]).RegisteredCount}");
+Step("tb_validate_claude_config_dir", () =>
+    $"ok reason={TbCore.ValidateClaudeConfigDir("C:work", []) ?? "none"}");
+
 if (skipNetwork)
 {
     Console.WriteLine($"{"tb_agent_usage",-18} skipped (TB_SMOKE_SKIP_NETWORK=1)");

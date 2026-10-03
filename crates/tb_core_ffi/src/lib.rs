@@ -851,15 +851,25 @@ pub unsafe extern "C" fn tb_set_extra_scan_paths(json: *const c_char) -> *mut c_
     })
 }
 
+/// The setters' JSON argument as `&str`, with their fixed error codes
+/// (`nullPayload`, `invalidUtf8`); never the input.
+///
 /// # Safety
-/// `json` must be NULL or a valid NUL-terminated string.
-unsafe fn set_extra_scan_paths_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
+/// `json` must be NULL or a valid NUL-terminated string that outlives the
+/// returned `&str`.
+unsafe fn json_arg<'a>(json: *const c_char) -> Result<&'a str, String> {
     if json.is_null() {
         return Err("nullPayload".to_string());
     }
-    let raw = unsafe { CStr::from_ptr(json) }
+    unsafe { CStr::from_ptr(json) }
         .to_str()
-        .map_err(|_| "invalidUtf8".to_string())?;
+        .map_err(|_| "invalidUtf8".to_string())
+}
+
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+unsafe fn set_extra_scan_paths_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
+    let raw = unsafe { json_arg(json) }?;
     set_extra_scan_paths(raw)
 }
 
@@ -930,12 +940,7 @@ pub unsafe extern "C" fn tb_set_claude_config_dirs(json: *const c_char) -> *mut 
 /// # Safety
 /// `json` must be NULL or a valid NUL-terminated string.
 unsafe fn set_claude_config_dirs_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
-    if json.is_null() {
-        return Err("nullPayload".to_string());
-    }
-    let raw = unsafe { CStr::from_ptr(json) }
-        .to_str()
-        .map_err(|_| "invalidUtf8".to_string())?;
+    let raw = unsafe { json_arg(json) }?;
     set_claude_config_dirs(raw)
 }
 
@@ -964,6 +969,45 @@ fn set_claude_config_dirs(raw: &str) -> Result<serde_json::Value, String> {
     // pre-refresh graph must not stay cached and keep being served.
     invalidate_scan_caches();
     Ok(result)
+}
+
+/// Whether `{"candidate": "<dir>", "existing": ["<dir>", ...]}` (the saved
+/// list before the candidate) would add a working extra Claude account:
+/// success data `{"reason": null}` or `{"reason": "<code>"}` with the config
+/// registry's code for that position or `defaultConfigDir` for anything at or
+/// under the primary's `<home>\.claude` (`claude_config_dirs::validate`).
+/// Lets Settings refuse a path before saving it without re-implementing the
+/// rule. Changes no registry and touches no filesystem; errors are fixed
+/// codes (`nullPayload`, `invalidUtf8`, `invalidJson`); the input is never
+/// echoed.
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_validate_claude_config_dir(json: *const c_char) -> *mut c_char {
+    guarded("tb_validate_claude_config_dir", || {
+        envelope(unsafe { validate_claude_config_dir_from_c(json) })
+    })
+}
+
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+unsafe fn validate_claude_config_dir_from_c(
+    json: *const c_char,
+) -> Result<serde_json::Value, String> {
+    #[derive(serde::Deserialize)]
+    struct Request {
+        candidate: String,
+        existing: Vec<String>,
+    }
+    let raw = unsafe { json_arg(json) }?;
+    let request: Request = serde_json::from_str(raw).map_err(|_| "invalidJson".to_string())?;
+    let reason = claude_config_dirs::validate(
+        &request.candidate,
+        &request.existing,
+        user_home_dir().as_deref(),
+    );
+    Ok(serde_json::json!({ "reason": reason }))
 }
 
 /// Test seam: the generation observed right after the config-dir registry
