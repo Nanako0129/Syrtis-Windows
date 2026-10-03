@@ -318,7 +318,7 @@ public static class QuotaLensProjection
         // One card per client: the primary when it has windows, else the
         // first other account that does (Desktop-only users).
         var account = WindowCardText.WindowCardAccount(quota, owner, selection.WindowCardAccount);
-        var unattributed = account is not null || TabHasNoLocalRecords(clientId, selection.LocalUsageClients);
+        var unattributed = account is not null || TabHasNoLocalRecords(clientId, selection.LocalUsageClients, confirmed.Records);
         var tabs = WindowCardText.Tabs(history, quota, owner, account);
         var selected = tabs.FirstOrDefault(tab => WindowId(tab.Id) == windowCardTab)
             ?? DefaultTab(tabs);
@@ -392,11 +392,38 @@ public static class QuotaLensProjection
     /// tab returns zeros that read as "nothing used", so every account of it is
     /// unattributed. Null (not loaded) keeps today's behaviour. Members come
     /// from <see cref="ClientRegistry.TabSlice"/>, so an Antigravity tab with
-    /// records only under antigravity-cli still counts as having records.</summary>
-    internal static bool TabHasNoLocalRecords(string clientId, IReadOnlyCollection<string>? localClients) =>
-        localClients is not null
-        && !ClientRegistry.TabSlice(ClientRegistry.QuotaOwner(clientId))
-            .Any(member => localClients.Select(ClientRegistry.CanonicalClient).Contains(member));
+    /// records only under antigravity-cli still counts as having records; so
+    /// does a present client with a confirmed Assigned record whose target is
+    /// a member (<paramref name="confirmed"/> is the table the card's Mine fold
+    /// reads; macOS WindowCardGate.tabHasLocalRecords).</summary>
+    internal static bool TabHasNoLocalRecords(
+        string clientId,
+        IReadOnlyCollection<string>? localClients,
+        IReadOnlyList<UsageAttribution.Record> confirmed)
+    {
+        if (localClients is null)
+        {
+            return false;
+        }
+
+        var present = localClients.Select(ClientRegistry.CanonicalClient).ToHashSet();
+        var slice = ClientRegistry.TabSlice(ClientRegistry.QuotaOwner(clientId));
+        if (slice.Any(present.Contains))
+        {
+            return false;
+        }
+
+        // A present client whose usage is confirmed as this tab's (the same
+        // records WindowCardText.Mine credits to the owner) counts too: a
+        // Codex used only through OpenCode (confirmed opencode·openai → codex)
+        // otherwise read as quota-only and hid that usage (macOS #468).
+        // Excluded records never count.
+        return !confirmed.Any(record =>
+            record.State.Kind == UsageAttribution.StateKind.Assigned
+            && record.State.Target is { } target
+            && slice.Contains(target)
+            && present.Contains(ClientRegistry.CanonicalClient(record.Client)));
+    }
 
     /// <summary>Which tab opens when the user has no explicit pick for this
     /// client — port of macOS's <c>WindowCardLoader.pick</c> (its

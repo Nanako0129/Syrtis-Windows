@@ -20,12 +20,12 @@ public class LocalRecordClientsTests
         LocalRecordClients.Record(store, ["claude", "codex"]);
         // The selected year's graph has no codex.
         var gate = LocalRecordClients.Union(store, ["claude"]);
-        Assert.False(QuotaLensProjection.TabHasNoLocalRecords("codex", gate),
+        Assert.False(QuotaLensProjection.TabHasNoLocalRecords("codex", gate, []),
             "a client with records in another year must keep its card scanned");
         // Control: a client never seen in any graph is still quota-only.
-        Assert.True(QuotaLensProjection.TabHasNoLocalRecords("grok", gate));
+        Assert.True(QuotaLensProjection.TabHasNoLocalRecords("grok", gate, []));
         // And the selected year's own clients count without being recorded.
-        Assert.False(QuotaLensProjection.TabHasNoLocalRecords("opencode", LocalRecordClients.Union(store, ["opencode"])));
+        Assert.False(QuotaLensProjection.TabHasNoLocalRecords("opencode", LocalRecordClients.Union(store, ["opencode"]), []));
     }
 
     [Fact]
