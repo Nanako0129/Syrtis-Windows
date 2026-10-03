@@ -107,7 +107,7 @@ public sealed partial class DashboardView : UserControl
             _model?.RefreshForce();
             UpdateRefreshControl();
         };
-        HoverTip.Attach(RefreshButton, () => RefreshTip.Text(_model.Current?.RestoredAt, DateTimeOffset.Now));
+        HoverTip.Attach(RefreshButton, () => RefreshTip.Text(_model?.Current?.RestoredAt, DateTimeOffset.Now));
 
         SettingsButton.Click += (_, _) => TrayService.OpenSettings?.Invoke();
         HoverTip.Attach(SettingsButton, () => "Settings".Localized());
@@ -636,8 +636,11 @@ public sealed partial class DashboardView : UserControl
         RateValue.Text = Format.CompactTokens((long)rate);
         CostLine.Text = CostSurfaceProjection.HeaderCostLine(
             today?.Cost ?? 0, stats, snapshot.CostAuthoritative);
+        // While the graph on screen is a restored snapshot, "updated" is its
+        // capture time: FetchedAt is re-stamped by every quota / trace / model
+        // publish, which land long before the live graph does.
         FooterText.Text = "updated {0}".Localized(
-            snapshot.FetchedAt.ToString(
+            (snapshot.RestoredAt?.ToLocalTime() ?? snapshot.FetchedAt).ToString(
                 "HH:mm:ss", System.Globalization.CultureInfo.CurrentCulture));
     }
 

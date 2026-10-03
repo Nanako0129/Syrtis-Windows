@@ -886,17 +886,31 @@ public class GraphRequestCoordinatorTests
             now.AddMinutes(1),
         })
         {
+            // The live local stage waits until the snapshot has been read and
+            // given time to publish: if live published first, the race rule
+            // would drop the snapshot and this case would pass with no age
+            // check at all.
+            var snapshotRead = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
             var completion = new TaskCompletionSource<GraphRequestCompletion>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
+            var stale = Payload("2026", PricingMode.BestEffort);
             var publications = new ConcurrentQueue<GraphPublication>();
             var coordinator = new GraphRequestCoordinator(
-                _ => Payload("2026"),
+                _ =>
+                {
+                    snapshotRead.Task.GetAwaiter().GetResult();
+                    Thread.Sleep(300);
+                    return Payload("2026");
+                },
                 _ => Payload("2026", PricingMode.BestEffort, CostCoverage.Complete),
                 snapshot: new SnapshotAccess(
-                    _ => new GraphSnapshotReadResult(
-                        GraphSnapshotReadStatus.Hit,
-                        Payload("2026", PricingMode.BestEffort),
-                        capturedAt),
+                    _ =>
+                    {
+                        snapshotRead.TrySetResult(true);
+                        return new GraphSnapshotReadResult(
+                            GraphSnapshotReadStatus.Hit, stale, capturedAt);
+                    },
                     (_, _, _, _) => GraphSnapshotWriteStatus.Skipped),
                 utcNow: () => now);
             coordinator.Published += publications.Enqueue;
@@ -904,6 +918,7 @@ public class GraphRequestCoordinatorTests
 
             coordinator.Attach("2026");
             await completion.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.DoesNotContain(publications, value => ReferenceEquals(value.Payload, stale));
             Assert.Equal(2, publications.Count);
         }
     }
