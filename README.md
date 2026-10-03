@@ -69,7 +69,7 @@ submission pull request to `microsoft/winget-pkgs`.
 
 ## Supported providers
 
-The app reads quota for six agent CLIs, using credentials already written to disk by a login
+The app reads quota for seven agent CLIs, using credentials already written to disk by a login
 you have performed. That is usually the provider's own CLI — with one exception worth knowing
 before you go looking for a missing card:
 
@@ -79,6 +79,7 @@ before you go looking for a missing card:
 | Codex | OAuth via `~/.codex/auth.json` (`$CODEX_HOME` honored) |
 | GitHub Copilot | OAuth via **opencode's** `auth.json` — signing into the GitHub Copilot CLI alone is not enough, and the card is omitted rather than shown as an error |
 | Grok | OAuth via `~/.grok/auth.json` |
+| Grok Bot | Cursor IDE sign-in from `%APPDATA%\Cursor\User\globalStorage\state.vscdb` (read-only), sent only to `cursor.com` as Cursor's own session cookie. If the Grok Bot app is installed (`%APPDATA%\Grok Bot\sand-secrets.json` exists), Cursor's sign-in is not used instead and the card says the Grok Bot app sign-in isn't supported yet |
 | Kiro | Bearer token from the Kiro IDE sign-in, expected at `~/.aws/sso/cache/kiro-auth-token.json` (not yet observed on a Windows device; read-only, never refreshed or copied; sent only to `codewhisperer.us-east-1.amazonaws.com`). Kiro CLI's own store is not read on Windows |
 | Antigravity | OAuth or local IDE credentials, whichever the installed client itself uses |
 

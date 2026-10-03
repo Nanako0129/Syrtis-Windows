@@ -1002,9 +1002,9 @@ public sealed partial class DashboardView : UserControl
                 OverviewCard.Chart => BuildUsageChartCard(snapshot),
                 OverviewCard.Limits => Ui.Card(
                     limitsClientId is { } cid
-                        ? "{0} limits".Localized(ClientRegistry.ShortName(cid))
+                        ? "{0} limits".Localized(ClientRegistry.TabLabel(cid))
                         : "Agent limits".Localized(),
-                    BuildLimits(snapshot, limitsClientId)),
+                    BuildLimits(snapshot, OverviewScope.LimitsClients(singleClient))),
                 // Absent when there is no live session, or when this tab is
                 // scoped to one client — the trace answers "across everything
                 // right now", which a single-client tab did not ask.
@@ -1591,20 +1591,20 @@ public sealed partial class DashboardView : UserControl
             _ => PaceMode.Historical,
         };
 
-    /// <summary><paramref name="clientId"/> narrows the card to one
-    /// subscription for the per-client Quota lens (5e). A parameter rather than
-    /// a second builder: this card answers "where does the allowance stand
-    /// right now", and a copy of it would be free to disagree with the original
-    /// on the same window.</summary>
+    /// <summary><paramref name="clientIds"/> narrows the card to one tab's
+    /// subscriptions (a grouped tab has more than one) for a client tab and the
+    /// per-client Quota lens (5e). A parameter rather than a second builder:
+    /// this card answers "where does the allowance stand right now", and a copy
+    /// of it would be free to disagree with the original on the same window.</summary>
     private static FrameworkElement BuildLimits(
-        DashboardModel.Snapshot snapshot, string? clientId = null)
+        DashboardModel.Snapshot snapshot, IReadOnlyList<string>? clientIds = null)
     {
         var panel = new StackPanel { Spacing = 10 };
         var agents = snapshot.Quota?.Agents ?? [];
-        if (clientId is not null)
+        if (clientIds is not null)
         {
             // Every account of the client: hiding or narrowing is per client.
-            agents = [.. agents.Where(agent => agent.ClientId == clientId)];
+            agents = [.. agents.Where(agent => clientIds.Contains(agent.ClientId))];
         }
 
         // Round 11's P2 finding, corrected: retained data wins over a failed
