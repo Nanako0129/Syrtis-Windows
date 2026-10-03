@@ -209,15 +209,29 @@ public static class Ui
         var panel = new StackPanel { Spacing = 6 };
         foreach (var row in rows)
         {
-            var name = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-            name.Children.Add(Text(ClientRegistry.ShortName(row.Client), 10, bold: true));
-            name.Children.Add(Text(row.Agent, 10, 0.75));
-            var model = Text(row.Model, 10, 0.55);
-            model.TextTrimming = TextTrimming.CharacterEllipsis;
-            name.Children.Add(model);
+            // Client, agent, then the model in the star column so a long
+            // model id trims instead of pushing the rate off the row.
+            var head = new Microsoft.UI.Xaml.Controls.Grid { ColumnSpacing = 6 };
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var cells = new UIElement[]
+            {
+                Text(ClientRegistry.ShortName(row.Client), 10, bold: true),
+                Text(row.Agent, 10, 0.75),
+                Text(row.Model, 10, 0.55),
+                Text($"{Format.CompactTokens((long)Math.Round(row.TokensPerMin))}/m", 10, 0.75),
+            };
+            ((TextBlock)cells[2]).TextTrimming = TextTrimming.CharacterEllipsis;
+            for (var c = 0; c < cells.Length; c++)
+            {
+                Microsoft.UI.Xaml.Controls.Grid.SetColumn((FrameworkElement)cells[c], c);
+                head.Children.Add(cells[c]);
+            }
+
             var line = new StackPanel { Spacing = 2 };
-            line.Children.Add(Row(
-                name, Text($"{Format.CompactTokens((long)Math.Round(row.TokensPerMin))}/m", 10, 0.75)));
+            line.Children.Add(head);
             line.Children.Add(ShareBar(
                 TraceCollapse.BarPercent(row.TokensPerMin, maxRate) / 100,
                 TraceBarColor));

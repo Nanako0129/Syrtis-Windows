@@ -66,10 +66,13 @@ internal static class OverviewScope
     /// range: its chart card says so instead of drawing an empty chart (macOS
     /// OverviewView.swift:101-107, <c>singleClient != nil &amp;&amp; !hasLocalUsage</c>,
     /// where hasLocalUsage asks whether any tab client is among the stats'
-    /// present clients).</summary>
+    /// present clients). Present clients are raw stripe ids (claude-code)
+    /// and tab clients canonical (claude), so the present side is
+    /// canonicalized before the test.</summary>
     internal static bool HasNoLocalUsage(
         string? singleClient, IEnumerable<string> tabClients, IReadOnlyList<string> presentClients) =>
-        singleClient is not null && !tabClients.Any(presentClients.Contains);
+        singleClient is not null
+        && !tabClients.Intersect(presentClients.Select(ClientRegistry.CanonicalClient)).Any();
 
     /// <summary>The clientId <c>BuildLimits</c> should restrict its rows to,
     /// or null to show every agent (Overview tab).
