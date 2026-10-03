@@ -17,7 +17,8 @@ independent of both so a rename cannot move an installed app.
 ## Features
 
 - **Eight lenses** in the flyout: Overview, Quota, Models, Monthly, Daily, Hourly, Stats, Agents —
-  each hideable except Overview and Models, with Ctrl+1..8 accelerators.
+  each hideable except Overview and Models. Ctrl+1..9 select a tab (Overview, then the
+  client tabs in row order), Ctrl+[ / Ctrl+] step through them, and holding Ctrl shows the numbers.
 - **Quota lens** — overview strip, heatmap, per-client window and history cards, and an
   Agent-limits view, backed by a usage-attribution subsystem that resolves which client
   consumed which window.

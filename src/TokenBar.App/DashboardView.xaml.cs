@@ -42,6 +42,10 @@ public sealed partial class DashboardView : UserControl
     private bool _chartView3D =
         AppSettings.Store.GetString("tokenbar.chart.view", "2d") == "3d";
 
+    // Ctrl-held number hints on the tab row (macOS cmdHeld/cmdHintTask).
+    private readonly CtrlHintGate _hintGate = new();
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _hintTimer;
+
     public DashboardView()
     {
         InitializeComponent();
@@ -121,8 +125,9 @@ public sealed partial class DashboardView : UserControl
         };
 
         // In-flyout shortcuts, the macOS ⌘ set on Ctrl: Esc/Ctrl+W close,
-        // Ctrl+R refresh, Ctrl+, settings, Ctrl+Q quit, Ctrl+1..8 lenses,
-        // Ctrl+[ / Ctrl+] cycle.
+        // Ctrl+R refresh, Ctrl+, settings, Ctrl+Q quit, Ctrl+G chart view,
+        // Ctrl+1..9 select tab, Ctrl+[ / Ctrl+] previous/next tab. "Tab" is
+        // the client tab row (Overview first), as on macOS — not the lenses.
         // Esc yields to an open transient (the year menu): light-dismiss
         // should collapse the popup, not slide the whole flyout away.
         var escape = new Microsoft.UI.Xaml.Input.KeyboardAccelerator
@@ -157,12 +162,11 @@ public sealed partial class DashboardView : UserControl
             ToggleChartView);
         AddAccel(Windows.System.VirtualKey.Q, Windows.System.VirtualKeyModifiers.Control,
             () => TrayService.QuitApp?.Invoke());
-        var lenses = Enum.GetValues<AppView>();
-        for (var i = 0; i < lenses.Length && i < 9; i++)
+        for (var n = 1; n <= TabShortcuts.MaxNumbered; n++)
         {
-            var view = lenses[i];
-            AddAccel(Windows.System.VirtualKey.Number1 + i,
-                Windows.System.VirtualKeyModifiers.Control, () => SwitchTo(view));
+            var number = n;
+            AddAccel(Windows.System.VirtualKey.Number1 + (number - 1),
+                Windows.System.VirtualKeyModifiers.Control, () => SelectTabByNumber(number));
         }
 
         // WinRT's VirtualKey enum has no OEM members, so casting VK_OEM_4 /
@@ -175,6 +179,16 @@ public sealed partial class DashboardView : UserControl
         AddHandler(
             KeyDownEvent,
             new Microsoft.UI.Xaml.Input.KeyEventHandler(OnOemShortcut),
+            handledEventsToo: true);
+        // Ctrl held alone for 400 ms shows the number hints; any release or
+        // extra modifier hides them (macOS handleFlagsChanged).
+        AddHandler(
+            KeyDownEvent,
+            new Microsoft.UI.Xaml.Input.KeyEventHandler((_, _) => UpdateHints(CtrlHeldAlone())),
+            handledEventsToo: true);
+        AddHandler(
+            KeyUpEvent,
+            new Microsoft.UI.Xaml.Input.KeyEventHandler((_, _) => UpdateHints(CtrlHeldAlone())),
             handledEventsToo: true);
 
         ActualThemeChanged += (_, _) => UpdateGraph3DData(_snapshot);
@@ -222,6 +236,7 @@ public sealed partial class DashboardView : UserControl
     {
         _flyoutVisible = false;
         _graph3d?.Release();
+        UpdateHints(false); // a Ctrl release while hidden is never seen
     }
 
     private Graph3DPanel EnsureGraph3D() => _graph3d ??= new Graph3DPanel();
@@ -288,8 +303,57 @@ public sealed partial class DashboardView : UserControl
             + $"elapsed={elapsed:F1}ms");
     }
 
+    private void SelectTabByNumber(int number)
+    {
+        if (TabShortcuts.Target(TabShortcuts.Tabs(_displayClients), number) is { } id)
+        {
+            SelectClientTab(id);
+        }
+    }
+
+    private void StepTab(int step) =>
+        SelectClientTab(TabShortcuts.Step(
+            TabShortcuts.Tabs(_displayClients), _activeClientTab, step));
+
+    private static bool IsKeyDown(Windows.System.VirtualKey key) =>
+        Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(key)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+
+    private static bool CtrlHeldAlone() =>
+        IsKeyDown(Windows.System.VirtualKey.Control)
+        && !IsKeyDown(Windows.System.VirtualKey.Shift)
+        && !IsKeyDown(Windows.System.VirtualKey.Menu)
+        && !IsKeyDown(Windows.System.VirtualKey.LeftWindows)
+        && !IsKeyDown(Windows.System.VirtualKey.RightWindows);
+
+    private void UpdateHints(bool ctrlAlone)
+    {
+        switch (_hintGate.Update(ctrlAlone))
+        {
+            case HintStep.StartTimer:
+                if (_hintTimer is null)
+                {
+                    _hintTimer = DispatcherQueue.CreateTimer();
+                    _hintTimer.Interval = TimeSpan.FromMilliseconds(TabShortcuts.HintDelayMs);
+                    _hintTimer.IsRepeating = false;
+                    _hintTimer.Tick += (_, _) =>
+                    {
+                        _hintGate.Fire();
+                        UpdateClientTabs();
+                    };
+                }
+
+                _hintTimer.Start();
+                break;
+            case HintStep.CancelAndHide:
+                _hintTimer?.Stop();
+                UpdateClientTabs(); // no-op unless the hints were showing
+                break;
+        }
+    }
+
     /// <summary>Ctrl shortcuts whose key has no VirtualKey member: [ and ]
-    /// cycle lenses, comma opens Settings. Kept as raw virtual-key codes
+    /// step the tab row, comma opens Settings. Kept as raw virtual-key codes
     /// rather than characters, so the binding follows the physical key the
     /// same way the accelerator-based shortcuts do.</summary>
     private void OnOemShortcut(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
@@ -309,10 +373,83 @@ public sealed partial class DashboardView : UserControl
         switch ((int)e.Key)
         {
             case VkOem4:
-                CycleLens(-1);
+                StepTab(-1);
                 break;
             case VkOem6:
-                CycleLens(1);
+                StepTab(1);
+                break;
+            case VkOemComma:
+                TrayService.OpenSettings?.Invoke();
+                break;
+            default:
+                return;
+        }
+
+        e.Handled = true;
+        DevLog.Write($"oem shortcut: key=0x{(int)e.Key:X2}");
+    }
+
+    private void AddAccel(
+        Windows.System.VirtualKey key, Windows.System.VirtualKeyModifiers mods,
+        Action action)
+    {
+        var accel = new Microsoft.UI.Xaml.Input.KeyboardAccelerator
+        {
+            Key = key,
+            Modifiers = mods,
+        };
+        accel.Invoked += (_, e) =>
+        {
+            action();
+            e.Handled = true;
+        };
+        KeyboardAccelerators.Add(accel);
+    }
+
+    /// <summary>Push the hidden-lens set into the tab row. Buttons are built
+    /// once in the constructor, so this toggles Visibility rather than
+    /// rebuilding, and then re-runs the current selection through SwitchTo —
+    /// whose Effective() guard moves us off a lens that was just hidden.
+    /// Hiding the lens you are looking at must not leave it on screen with no
+    /// tab to return to.</summary>
+    private void ApplyLensVisibility()
+    {
+        var visible = AppViews.Visible(AppSettings.Store);
+        foreach (var (view, button) in _tabs)
+        {
+            button.Visibility = visible.Contains(view)
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        }
+
+        SwitchTo(_view);
+    }
+
+member: [ and ]
+    /// step the tab row, comma opens Settings. Kept as raw virtual-key codes
+    /// rather than characters, so the binding follows the physical key the
+    /// same way the accelerator-based shortcuts do.</summary>
+    private void OnOemShortcut(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        const int VkOem4 = 0xDB;  // [
+        const int VkOem6 = 0xDD;  // ]
+        const int VkOemComma = 0xBC;
+
+        var ctrl = Microsoft.UI.Input.InputKeyboardSource
+            .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        if (!ctrl)
+        {
+            return;
+        }
+
+        switch ((int)e.Key)
+        {
+            case VkOem4:
+                StepTab(-1);
+                break;
+            case VkOem6:
+                StepTab(1);
                 break;
             case VkOemComma:
                 TrayService.OpenSettings?.Invoke();
@@ -400,9 +537,8 @@ public sealed partial class DashboardView : UserControl
 
     public void SwitchTo(AppView view)
     {
-        // One guard for every caller: the numeric accelerators each bind a
-        // fixed lens at construction, so a hidden lens would otherwise stay
-        // reachable by shortcut even though its tab is gone.
+        // One guard for every caller, so a hidden lens (a stale selection, a
+        // programmatic request) can never be shown with no tab to leave it by.
         view = AppViews.Effective(view, AppSettings.Store);
         if (_view == view)
         {
@@ -715,7 +851,13 @@ public sealed partial class DashboardView : UserControl
 
     private void UpdateClientTabs()
     {
-        var signature = $"{_activeClientTab}|{string.Join(',', _displayClients)}";
+        if (_snapshot is null)
+        {
+            return; // loading: the row is empty on purpose
+        }
+
+        var signature =
+            $"{_activeClientTab}|{_hintGate.Visible}|{string.Join(',', _displayClients)}";
         if (signature == _clientTabsSignature)
         {
             return;
@@ -723,14 +865,15 @@ public sealed partial class DashboardView : UserControl
 
         _clientTabsSignature = signature;
         ClientTabsPanel.Children.Clear();
-        AddClientTab(ClientRegistry.OverviewTab, "Overview".Localized());
-        foreach (var id in _displayClients)
+        // Overview is tab 1 and clients follow from 2, as DashboardTabs.swift.
+        AddClientTab(ClientRegistry.OverviewTab, "Overview".Localized(), 1);
+        for (var i = 0; i < _displayClients.Count; i++)
         {
-            AddClientTab(id, ClientRegistry.TabLabel(id));
+            AddClientTab(_displayClients[i], ClientRegistry.TabLabel(_displayClients[i]), i + 2);
         }
     }
 
-    private void AddClientTab(string id, string label)
+    private void AddClientTab(string id, string label, int number)
     {
         var active = id == _activeClientTab;
         // DashboardTabs.swift:91-96 — icon + label, icon omitted for the
@@ -746,6 +889,28 @@ public sealed partial class DashboardView : UserControl
             row.Children.Add(AgentIcon.Create(id, 14));
             row.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center });
             content = row;
+        }
+
+        if (_hintGate.Visible && number <= TabShortcuts.MaxNumbered)
+        {
+            // DashboardTabs.swift:100-108 — a small "⌘N" badge after the label.
+            var withHint = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5 };
+            withHint.Children.Add(content);
+            withHint.Children.Add(new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(40, 128, 128, 128)),
+                CornerRadius = new CornerRadius(3),
+                Padding = new Thickness(3, 1, 3, 1),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock
+                {
+                    Text = $"Ctrl+{number}",
+                    FontSize = 8,
+                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                    Opacity = 0.75,
+                },
+            });
+            content = withHint;
         }
 
         var button = new Button

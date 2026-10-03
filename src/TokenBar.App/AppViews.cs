@@ -7,14 +7,9 @@ namespace TokenBar.App;
 public enum AppView
 {
     Overview,
-    // Second, as on macOS. Declaration order IS tab order and IS the numeric
-    // accelerator order (DashboardView binds one per value of this enum at
-    // construction), so inserting here moves every later lens's number key by
-    // one — deliberately, because the two must keep naming the same lenses.
-    // The range is Ctrl+1..N for N values, not a fixed Ctrl+1..9: eight values
-    // today means Ctrl+9 is bound to nothing. This comment said 1..9 and the
-    // README repeated it, which is how a reader learns a shortcut that does
-    // not exist.
+    // Second, as on macOS. Declaration order IS the lens tab order. The
+    // numeric accelerators (Ctrl+1..9) no longer address lenses: as on macOS
+    // they select tabs of the client row (see TabShortcuts).
     Quota,
     Models,
     Monthly,
