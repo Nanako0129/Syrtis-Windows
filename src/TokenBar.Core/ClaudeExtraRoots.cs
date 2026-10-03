@@ -197,8 +197,8 @@ public sealed record ClaudeRootsPush(
 /// list always wins, however the setters' completions would have interleaved.
 /// Order inside a push: config directories, then the scan roots of the
 /// directories that registry accepted. The two registries always end on the
-/// same directories: one whose scan roots are refused is taken out of the
-/// config registry too (no card without its usage), and a scan setter that
+/// same directories: one with a refused scan root is taken out of both
+/// (no card without its usage, no half-scanned directory), and a scan setter that
 /// throws puts the config registry back to the last list both accepted.
 /// </summary>
 public sealed class ClaudeRootsPusher(
@@ -316,6 +316,10 @@ public sealed class ClaudeRootsPusher(
         List<string> both = [.. Enumerable.Range(0, dirs.Count).Where(i => !rejected.ContainsKey(i)).Select(i => dirs[i])];
         if (both.Count != accepted.Count)
         {
+            // A refused root can be one of a directory's two: drop the
+            // directory from both registries, not only from the config one,
+            // or its other root keeps counting toward the totals.
+            setScanRoots(ClaudeExtraRoots.ScanRoots(both));
             setConfigDirs(both);
         }
 
