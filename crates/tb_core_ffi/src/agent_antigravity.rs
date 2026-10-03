@@ -177,7 +177,7 @@ const AGY_PAUSED_MESSAGE: &str =
 /// most likely agy waiting for a browser sign-in.
 #[cfg(any(windows, test))]
 const AGY_TIMED_OUT_MESSAGE: &str =
-    "Antigravity CLI quota check timed out; agy may be waiting for you to sign in. Sign in to agy again, or restart Syrtis, to retry.";
+    "Antigravity CLI quota check timed out; agy was probably waiting for a sign-in. Sign in to agy again, or restart Syrtis, to retry.";
 
 #[cfg(windows)]
 const AGY_CREDENTIAL_TARGET: &str = "gemini:antigravity";
@@ -196,7 +196,9 @@ enum AgyFailure {
     Unavailable,
 }
 
-/// A run's outcome as far as the latch cares: whether a process was created.
+/// A run's outcome as far as the latch cares: whether a process was created,
+/// and for a created one whether it timed out (the latch records that so the
+/// card can name the timeout).
 #[cfg(any(windows, test))]
 #[derive(Debug)]
 enum AgyRunFailure {
