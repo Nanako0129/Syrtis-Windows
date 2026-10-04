@@ -2068,8 +2068,8 @@ public sealed partial class DashboardView : UserControl
                 continue;
             }
 
-            // Ahead of the placeholder branch: "keychain-consent" is a setup
-            // placeholder, and this card is its setup prompt.
+            // Ahead of the setup-placeholder branch below: "keychain-consent"
+            // is a setup placeholder, and this card is its setup prompt.
             var consent = _grokBotWaiting.Decide(
                 agent, AppSettings.GrokBotConsent.Stored, snapshot.Quota, snapshot.QuotaFailures);
             if (consent.Card != GrokBotConsent.Card.None)
@@ -2105,7 +2105,8 @@ public sealed partial class DashboardView : UserControl
             // An error only colours the detail line and the badge: the core
             // returns the last-good windows with a transient error stamped on
             // them, and those still draw (macOS AgentLimitsCard.swift:771-787);
-            // with nothing cached there are no windows and no bars.
+            // with nothing cached there are no windows, and the placeholder
+            // rows below keep the card's shape.
             //
             // Chart layout draws each window's recorded quota history as a
             // curve instead of a bar. WindowCardText.Tabs — the same fold the

@@ -79,10 +79,12 @@ public static class LimitsPlaceholders
         IReadOnlySet<string> tabHidden,
         IReadOnlySet<string> limitsHidden)
     {
-        // A primary with a snapshot, hidden or not, is never replaced by a
-        // placeholder; an extra account's snapshot does not stand in for the
-        // primary, which still gets its placeholder (macOS
-        // expandedWithExtraAccounts).
+        // A placeholder is drawn only for a client macOS has placeholder rows
+        // for (Labels), and only when its primary has no snapshot at all —
+        // hidden or not, a primary snapshot is never replaced. An extra
+        // account's snapshot does not stand in for the primary, which still
+        // gets its placeholder (macOS expandedWithExtraAccounts); a client
+        // with only extra accounts and no Labels entry gets no invented card.
         var primaryIds = all.Where(static a => a.Account.AccountKey is null)
             .Select(static a => a.ClientId).ToHashSet(StringComparer.Ordinal);
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -92,7 +94,9 @@ public static class LimitsPlaceholders
         var rows = new List<LimitsRow>();
         foreach (var id in ids)
         {
-            if (!primaryIds.Contains(id) && !limitsHidden.Contains(id) && !(multiClient && tabHidden.Contains(id)))
+            if (Labels.ContainsKey(id)
+                && !primaryIds.Contains(id)
+                && !LimitsCardFilter.Hides(id, isPrimary: true, multiClient, tabHidden, limitsHidden))
             {
                 rows.Add(new LimitsRow(id, null));
             }

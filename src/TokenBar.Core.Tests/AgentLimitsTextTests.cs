@@ -327,6 +327,32 @@ public class AgentLimitsTextTests
         Assert.True(LimitsCardFilter.HidesClientCard([], ["grok", "grok-bot"], new HashSet<string> { "grok" }));
     }
 
+    // A client with only extra accounts and no placeholder labels (the
+    // Antigravity tab with captured accounts only) draws its accounts and no
+    // invented "Limit" card above them.
+    [Fact]
+    public void AnExtraOnlyClientWithoutLabelsGetsNoPlaceholder()
+    {
+        Assert.Equal(["antigravity#acct-1"],
+            Placeholders([Who("antigravity", accountKey: "acct-1")], ["antigravity", "antigravity-cli"], multiClient: false));
+    }
+
+    // The placeholder hide rule is LimitsCardFilter's, not a copy of it.
+    [Fact]
+    public void ThePlaceholderAndTheCardShareOneHideRule()
+    {
+        var tab = new HashSet<string> { "gemini" };
+        var limits = new HashSet<string> { "claude" };
+        foreach (var multi in new[] { true, false })
+        {
+            foreach (var id in new[] { "claude", "gemini", "codex" })
+            {
+                var placeholderShown = Placeholders([], [id], multiClient: multi, tabHidden: tab, limitsHidden: limits).Count == 1;
+                Assert.Equal(!LimitsCardFilter.Hides(id, isPrimary: true, multi, tab, limits), placeholderShown);
+            }
+        }
+    }
+
     [Fact]
     public void SettingsOffersAToggleForEveryKnownPresentClient()
     {
