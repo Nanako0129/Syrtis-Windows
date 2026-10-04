@@ -38,60 +38,41 @@ public class QuotaSourceChoicesTests
     }
 
     // The defect: Settings opened before the first fetch, or before a new
-    // agent appeared, kept its first options. An open page is rebuilt exactly
-    // when the payload offers a choice it was not built with.
+    // agent appeared, kept its first options. An open page is rebuilt when
+    // the payload's set of choices differs from the one it was built with.
     [Fact]
     public void ANewChoiceArrivesWithTheFirstFetchAndWithANewAgent()
     {
         var beforeFetch = QuotaSourceChoices.Selections(null);
         var codexOnly = QuotaSourceChoices.Selections(Payload(Codex));
 
-        Assert.True(QuotaSourceChoices.OffersNewChoice(beforeFetch, Payload(Codex)));
-        Assert.True(QuotaSourceChoices.OffersNewChoice(codexOnly, Payload(Codex, Copilot)));
-        Assert.False(QuotaSourceChoices.OffersNewChoice(codexOnly, Payload(Codex)));
-        Assert.True(QuotaSourceChoices.OffersNewChoice(null, Payload(Codex)));
+        Assert.True(QuotaSourceChoices.ChoicesChanged(beforeFetch, Payload(Codex)));
+        Assert.True(QuotaSourceChoices.ChoicesChanged(codexOnly, Payload(Codex, Copilot)));
+        Assert.False(QuotaSourceChoices.ChoicesChanged(codexOnly, Payload(Codex)));
+        Assert.True(QuotaSourceChoices.ChoicesChanged(null, Payload(Codex)));
     }
 
-    // An agent that errors on one poll and recovers on the next must not
-    // rebuild the page under the user each time.
+    // macOS recomputes the list from the current payload: an agent that stops
+    // reporting (Grok Bot after its sign-in is turned off, or an error) leaves
+    // the list, unless it is the selection, which stays as the unavailable
+    // row. The list used to keep every row seen while Settings was open.
     [Fact]
-    public void AnAgentFlappingIntoAnErrorOffersNothingNew()
+    public void AVanishedAgentLeavesTheListUnlessSelected()
     {
         const string failedCopilot =
             """{"clientId":"copilot","source":"oauth","updatedAt":"2026-10-05T00:00:00Z","windows":[],"error":"rate limited"}""";
         var built = QuotaSourceChoices.Selections(Payload(Codex, Copilot));
+        var withoutCopilot = Payload(Codex, failedCopilot);
+        var copilot = QuotaResolver.Selection("copilot", "premium.v1");
 
-        Assert.False(QuotaSourceChoices.OffersNewChoice(built, Payload(Codex, failedCopilot)));
-        Assert.False(QuotaSourceChoices.OffersNewChoice(built, Payload(Codex, Copilot)));
+        Assert.True(QuotaSourceChoices.ChoicesChanged(built, withoutCopilot));
+        Assert.DoesNotContain(copilot, QuotaSourceChoices.Selections(withoutCopilot));
+        Assert.Null(QuotaSourceChoices.Unavailable(withoutCopilot, QuotaResolver.Auto));
+        Assert.Equal(copilot, QuotaSourceChoices.Unavailable(withoutCopilot, copilot)?.Selection);
+        // The same set again (labels or order aside) is no change.
+        Assert.False(QuotaSourceChoices.ChoicesChanged(
+            QuotaSourceChoices.Selections(withoutCopilot), Payload(Codex, failedCopilot)));
     }
-
-    // Two agents erroring in turn: rebuilding from each payload alone swapped
-    // rows and rebuilt the page every poll. Rows accumulate, so after one
-    // rebuild per choice nothing is new.
-    [Fact]
-    public void AgentsErroringInTurnRebuildAtMostOncePerChoice()
-    {
-        const string failedCodex =
-            """{"clientId":"codex","source":"oauth","updatedAt":"2026-10-05T00:00:00Z","windows":[],"error":"rate limited"}""";
-        const string failedCopilot =
-            """{"clientId":"copilot","source":"oauth","updatedAt":"2026-10-05T00:00:00Z","windows":[],"error":"rate limited"}""";
-        var onlyCopilot = Payload(failedCodex, Copilot);
-        var onlyCodex = Payload(Codex, failedCopilot);
-
-        var listed = QuotaSourceChoices.Listed(onlyCopilot, []);
-        Assert.True(QuotaSourceChoices.OffersNewChoice(Keys(listed), onlyCodex));
-        listed = QuotaSourceChoices.Listed(onlyCodex, listed);
-
-        Assert.False(QuotaSourceChoices.OffersNewChoice(Keys(listed), onlyCopilot));
-        Assert.False(QuotaSourceChoices.OffersNewChoice(Keys(listed), onlyCodex));
-        Assert.True(Keys(listed).SetEquals(QuotaSourceChoices.Selections(Payload(Codex, Copilot))));
-        // Before: a page rebuilt from the payload alone lost the other row.
-        Assert.True(QuotaSourceChoices.OffersNewChoice(
-            QuotaSourceChoices.Selections(onlyCodex), onlyCopilot));
-    }
-
-    private static HashSet<string> Keys(IEnumerable<(string Selection, string Label)> rows) =>
-        rows.Select(row => row.Selection).ToHashSet(StringComparer.Ordinal);
 
     // The user picked a Copilot window, then Copilot errored (its last-good
     // lived only in memory, gone after a restart): the list used to drop it
