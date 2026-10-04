@@ -4175,9 +4175,11 @@ fn resolve_stored_claude_login(raw: &str, source: ClaudeCredentialSource) -> Cla
     }
 }
 
-/// `CLAUDE_CODE_OAUTH_TOKEN` as Claude Code itself resolves it: this process's
-/// own environment (covers `launchctl setenv` / terminal launch; on Windows the
-/// live user/machine registry values instead, see `claude_direct_env_token`), then a
+/// `CLAUDE_CODE_OAUTH_TOKEN`: this process's own environment, as Claude Code
+/// resolves it (covers `launchctl setenv` / terminal launch) — except on
+/// Windows, where the live user/machine registry values are read instead, so
+/// a token in only one shell's environment is seen by the CLI there but not
+/// by Syrtis (see `claude_direct_env_token`); then a
 /// login-shell harvest of the user's `~/.zshrc` (so a plain export a
 /// Finder-launched GUI app never inherits is still found). Per Claude Code's
 /// auth precedence this outranks a stored subscription `/login`.
@@ -13343,7 +13345,8 @@ mod tests {
         }
         assert_eq!(key.read(None, "number"), Err(RegistryReadError));
 
-        // The cap is the 32 767-WCHAR environment limit (see MAX_BYTES).
+        // The size bound (MAX_BYTES, a sanity bound, not the platform's exact
+        // environment limit), as measured on 188.
         key.set("at-limit", REG_SZ, &"x".repeat(32_767));
         key.set("over-limit", REG_SZ, &"x".repeat(32_768));
         assert_eq!(key.read(None, "at-limit"), Ok(value(&"x".repeat(32_767))));
