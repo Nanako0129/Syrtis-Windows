@@ -619,6 +619,8 @@ public sealed partial class DashboardView : UserControl
             return;
         }
 
+        // Once per payload, whichever card is on screen (GrokBotConsent.WaitingState.Observe).
+        _grokBotWaiting.Observe(snapshot.Quota);
         snapshot = ApplyClientSelection(snapshot);
         RenderHeader(snapshot);
         UpdateYearPicker();
