@@ -23,6 +23,7 @@ public sealed class TrayFeed : IDisposable
     private int _fastInFlight; // Interlocked: reset in a background finally
     private int _slowInFlight;
     private readonly QuotaPoller _quotaPoller;
+    private readonly Action<AgentUsagePayload, long> _onQuotaFetched;
     private bool _disposed;
 
     public UsagePayload? Graph { get; private set; }
@@ -102,6 +103,22 @@ public sealed class TrayFeed : IDisposable
         _slow.Start();
         AttachGraph();
         RefreshFast();
+        // Adopt every payload the shared coordinator fetches, the flyout's
+        // included, so the tray (and Settings, which reads quota through this
+        // feed) does not lag the flyout by up to a slow tick. Same epoch rule
+        // as QuotaPoller. The reading's age comes from the payload
+        // (ResolveRemaining), not from when it arrived.
+        _onQuotaFetched = (quota, epoch) => _ = _dispatcher.TryEnqueue(() =>
+        {
+            if (_disposed || QuotaEpoch.Current != epoch || ReferenceEquals(Quota, quota))
+            {
+                return;
+            }
+
+            ApplyQuota(quota);
+            SettleQuota();
+        });
+        AgentUsageFetchCoordinator.Shared.Fetched += _onQuotaFetched;
         RefreshQuota();
 
         _onStoreChanged = key =>
@@ -147,6 +164,7 @@ public sealed class TrayFeed : IDisposable
         _disposed = true; // fences any in-flight lane's enqueued callback
         _graphState.Dispose();
         _quotaPoller.Dispose();
+        AgentUsageFetchCoordinator.Shared.Fetched -= _onQuotaFetched;
         _graphCoordinator.Started -= OnGraphStarted;
         _graphCoordinator.Published -= OnGraphPublished;
         _graphCoordinator.Completed -= OnGraphCompleted;
@@ -309,10 +327,12 @@ public sealed class TrayFeed : IDisposable
     private void RefreshQuota() => _quotaPoller.Request();
 
     // Dispatcher side of the quota poll. Applied only for a payload fetched
-    // at the current epoch (QuotaPoller); a null is a failed fetch.
+    // at the current epoch (QuotaPoller); a null is a failed fetch. A payload
+    // already applied (Fetched delivers it before the poller's own await
+    // resumes, or the other way round) is applied once, whichever path wins.
     private void ApplyQuota(AgentUsagePayload? quota)
     {
-        if (_disposed || quota is null)
+        if (_disposed || quota is null || ReferenceEquals(Quota, quota))
         {
             return;
         }

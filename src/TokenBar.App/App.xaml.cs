@@ -72,6 +72,7 @@ public partial class App : Application
         // the first agent-usage fetch, whichever surface starts it.
         global::TokenBar.Core.AgentUsageFetchCoordinator.Shared.RunBeforeFirstFetch(
             AppSettings.GrokBotConsent.ApplyIfGranted);
+        global::TokenBar.Core.AgentUsageFetchCoordinator.Shared.Log = DevLog.Write;
 
         try
         {

@@ -550,6 +550,38 @@ public class GrokBotConsentTests : IDisposable
             waiting.Decide(Marked, true, shown, 2));
     }
 
+    // W6b gap (c), macOS AgentLimitsCard.swift:84-88 / :957-960 (state dies with
+    // the card): a payload that exists and has no Grok Bot snapshot (signed out)
+    // ends the record, so a later consent snapshot under a stored yes decides
+    // afresh. Declined is recorded so the stale card is distinguishable.
+    [Fact]
+    public void APayloadWithoutGrokBotEndsTheRecord()
+    {
+        var shown = new AgentUsagePayload("now", []);
+        var waiting = GrantedOver(shown, GrokBotConsent.Card.Declined);
+        var signedOut = new AgentUsagePayload("later", [Snapshot("claude", "oauth")]);
+        waiting.Observe(signedOut);
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.Ask, Waiting: false),
+            waiting.Decide(Marked, true, new AgentUsagePayload("again", []), 2));
+    }
+
+    // Controls: no payload yet, or a payload that still holds a Grok Bot
+    // snapshot (its card hidden, or the consent snapshot itself), keeps the
+    // record (#190: another client's card or a hidden one is not a sign-out).
+    [Fact]
+    public void ANullPayloadOrOneWithGrokBotKeepsTheRecord()
+    {
+        var shown = new AgentUsagePayload("now", []);
+        var waiting = GrantedOver(shown, GrokBotConsent.Card.Declined);
+        waiting.Observe(null);
+        waiting.Observe(new AgentUsagePayload("later", [Snapshot("claude", "oauth"), Marked]));
+        waiting.Observe(new AgentUsagePayload("later", [Snapshot("grok-bot", "oauth")]));
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.Declined, Waiting: true),
+            waiting.Decide(Marked, true, shown, 2));
+    }
+
     // The loop's real shape: cards on both sides of Grok Bot, rendered
     // twice (the grant's Changed re-render, then the next one). Grok Bot's
     // card each pass equals a state that saw Grok Bot alone; the Settings

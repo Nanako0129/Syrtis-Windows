@@ -321,26 +321,30 @@ public class AgentLimitsTextTests
             Placeholders([Who("grok")], ["grok", "grok-bot"], multiClient: false));
     }
 
-    // INTERIM, to be changed by the known() follow-up (W5-7): with grok
-    // switched off and no snapshot at all, main's HidesClientCard follows the
-    // tab's owner alone and drops the whole Grok tab card, so Grok Bot's
-    // placeholder from Rows is never drawn. macOS keeps the card for an
-    // unhidden grok-bot; aligning HidesClientCard with
-    // LimitsPlaceholders.Known flips this assertion.
+    // Flipped from the interim rule (macOS AgentLimitsCard.swift :502-510,
+    // :437-439): grok switched off and no snapshot at all no longer drops the
+    // Grok tab card, because grok-bot is known (it has placeholder rows) and not
+    // hidden, so Rows draws its placeholder. Only both hidden drops the card.
     [Fact]
-    public void Interim_PendingKnownFollowUp_GroupedTabHiddenOwnerHidesTheCardBeforeAnySnapshot()
+    public void GroupedTabHiddenOwnerKeepsTheCardForAnUnhiddenBotBeforeAnySnapshot()
     {
-        Assert.True(LimitsCardFilter.HidesClientCard([], ["grok", "grok-bot"], new HashSet<string> { "grok" }));
+        var grokHidden = new HashSet<string> { "grok" };
+        Assert.False(LimitsCardFilter.HidesClientCard([], ["grok", "grok-bot"], grokHidden, attempted: false));
+        Assert.Equal(["grok-bot?"], Placeholders([], ["grok", "grok-bot"], multiClient: false, limitsHidden: grokHidden));
     }
 
-    // A client with only extra accounts and no placeholder labels (the
-    // Antigravity tab with captured accounts only) draws its accounts and no
-    // invented "Limit" card above them.
+    // A client with only extra accounts and no placeholder labels is not
+    // known() (macOS :437-439), so a restricted (client-tab) card lists nothing
+    // for it (:444-447); the multi-client card still appends every snapshot
+    // (:449-451). Flipped from "the tab draws its accounts": that listed a
+    // client macOS's restricted card never lists.
     [Fact]
-    public void AnExtraOnlyClientWithoutLabelsGetsNoPlaceholder()
+    public void AnExtraOnlyClientWithoutLabelsDrawsNothingOnATabButStillOnOverview()
     {
-        Assert.Equal(["antigravity#acct-1"],
+        Assert.Empty(
             Placeholders([Who("antigravity", accountKey: "acct-1")], ["antigravity", "antigravity-cli"], multiClient: false));
+        Assert.Equal(["antigravity#acct-1"],
+            Placeholders([Who("antigravity", accountKey: "acct-1")], ["antigravity", "antigravity-cli"], multiClient: true));
     }
 
     // The placeholder hide rule is LimitsCardFilter's, not a copy of it.
@@ -357,6 +361,20 @@ public class AgentLimitsTextTests
                 Assert.Equal(!LimitsCardFilter.Hides(id, isPrimary: true, multi, tab, limits), placeholderShown);
             }
         }
+    }
+
+    // G's report (b), macOS ClientRegistry.swift:299-316: Grok Build present
+    // locally, Grok Bot signed out and without a snapshot - the card draws the
+    // Bot's placeholder, so Settings must offer a grok-bot toggle. The tab id
+    // "grok" alone (unexpanded `present`) offered none.
+    [Fact]
+    public void SettingsOffersAGrokBotToggleWhenOnlyGrokBuildIsPresent()
+    {
+        Assert.Equal(["grok", "grok-bot"],
+            ClientRegistry.KnownLimitsClients(["grok"], [], LimitsPlaceholders.Clients));
+        // Control: an id that is neither a placeholder client nor in the payload stays out.
+        Assert.Equal(["grok", "grok-bot"],
+            ClientRegistry.KnownLimitsClients(["grok", "foo"], [], LimitsPlaceholders.Clients));
     }
 
     [Fact]

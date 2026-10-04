@@ -90,8 +90,12 @@ public static class LimitsPlaceholders
         var primaryIds = all.Where(static a => a.Account.AccountKey is null)
             .Select(static a => a.ClientId).ToHashSet(StringComparer.Ordinal);
         var seen = new HashSet<string>(StringComparer.Ordinal);
+        // macOS baseClients: the multi-client card appends every other client
+        // with a snapshot (:449-451); a restricted (client-tab) card lists
+        // clients.filter(known) only (:444-447), so a member known by neither a
+        // placeholder nor a primary snapshot draws nothing, extras included.
         var ids = requested.Where(id => Known(id, all))
-            .Concat(visible.Select(static a => a.ClientId))
+            .Concat(multiClient ? visible.Select(static a => a.ClientId) : [])
             .Where(seen.Add);
         var rows = new List<LimitsRow>();
         foreach (var id in ids)
