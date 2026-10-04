@@ -11,6 +11,8 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
     private readonly object _gate = new();
     private Task<AgentUsagePayload>? _inFlight;
     private long _inFlightEpoch;
+    private long _inFlightId;
+    private long _lastId;
     private Action? _beforeFirstFetch;
     private bool _owed;
 
@@ -56,6 +58,7 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
         {
             var epoch = QuotaEpoch.Current;
             Task<AgentUsagePayload> next;
+            var id = ++_lastId;
             if (_inFlight is { } current)
             {
                 if (epoch <= _inFlightEpoch)
@@ -75,8 +78,7 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
                             _owed = false;
                         }
 
-                        chainedBefore?.Invoke();
-                        return FetchWithFollowUps();
+                        return FetchWithFollowUps(id, chainedBefore);
                     },
                     CancellationToken.None,
                     TaskContinuationOptions.None,
@@ -89,29 +91,12 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
                 _owed = false;
                 // The launch re-apply runs once, before the first fetch of the
                 // chain; follow-ups owed during it do not run it again.
-                next = Task.Run(() =>
-                {
-                    before?.Invoke();
-                    return FetchWithFollowUps();
-                });
+                next = Task.Run(() => FetchWithFollowUps(id, before));
             }
 
             _inFlight = next;
             _inFlightEpoch = epoch;
-            _ = next.ContinueWith(
-                completed =>
-                {
-                    lock (_gate)
-                    {
-                        if (ReferenceEquals(_inFlight, completed))
-                        {
-                            _inFlight = null;
-                        }
-                    }
-                },
-                CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default);
+            _inFlightId = id;
             return next;
         }
     }
@@ -131,16 +116,35 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
         }
     }
 
-    private AgentUsagePayload FetchWithFollowUps()
+    /// <summary>Runs the chain and clears <see cref="_inFlight"/> in the same
+    /// locked decision that ends it. A completed task runs its continuations
+    /// after it is marked complete, so clearing from a continuation left a
+    /// window where a caller that saw the chain finished still found it in
+    /// flight, lost its <see cref="RequestFollowUp"/> and joined the old
+    /// payload. The id check keeps a chain from clearing a newer one chained
+    /// after it.</summary>
+    private AgentUsagePayload FetchWithFollowUps(long id, Action? before)
     {
-        var payload = fetch();
-        for (var i = 0; i < MaxFollowUps; i++)
+        AgentUsagePayload payload;
+        try
+        {
+            before?.Invoke();
+            payload = fetch();
+        }
+        catch
+        {
+            Finish(id);
+            throw;
+        }
+
+        for (var i = 0; ; i++)
         {
             lock (_gate)
             {
-                if (!_owed)
+                if (i >= MaxFollowUps || !_owed)
                 {
-                    break;
+                    ClearIfCurrent(id);
+                    return payload;
                 }
 
                 _owed = false;
@@ -153,10 +157,26 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
             catch
             {
                 // A failed follow-up keeps the payload already fetched.
-                break;
+                Finish(id);
+                return payload;
             }
         }
+    }
 
-        return payload;
+    private void Finish(long id)
+    {
+        lock (_gate)
+        {
+            ClearIfCurrent(id);
+        }
+    }
+
+    private void ClearIfCurrent(long id)
+    {
+        if (_inFlightId == id)
+        {
+            _inFlight = null;
+            _inFlightEpoch = 0;
+        }
     }
 }
