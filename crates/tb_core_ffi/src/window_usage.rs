@@ -228,24 +228,32 @@ fn scoped_context(
             if own.is_empty() {
                 return Err(NO_REGISTERED_ROOTS.to_string());
             }
-            // Every other account nested under this one is excluded. This
-            // window is captured with `dir` as home, and the engine scans
-            // `<home>/.claude/projects`, `<home>/.claude/transcripts`,
-            // `.cc-mirror` variants and cowork trees under it on its own, so
-            // an account nested at `<dir>\.claude` was counted here and in
-            // its own window (#175 deferred). Only paths under `dir` can be
-            // reached from this scope, so only those are listed: an unrelated
-            // account adds nothing, and an account that contains this one
-            // (an ancestor) is never listed, which would remove this
-            // account's own files. Compared on the folded form; a nested
-            // account registered under another spelling of its folder (a
-            // junction, `subst` drive, 8.3 name) is not recognised, so it
-            // stays counted twice, as before this fix, rather than hidden.
-            let under_me = format!("{}\\", account_identity(dir));
-            let is_nested = |path: &str| account_identity(path).starts_with(&under_me);
+            // Every other account is excluded, as the primary excludes them
+            // all. This window is captured with `dir` as home, and the engine
+            // adds Claude roots on its own from there: `<home>/.claude/
+            // projects`, `<home>/.claude/transcripts`, cowork trees, and
+            // `.cc-mirror` variants whose `configDir` may name ANY directory,
+            // so an account nested at `<dir>\.claude`, or one a variant
+            // under `dir` points at, was counted here and in its own window
+            // (#175 deferred). An account whose directory contains this one
+            // (itself or an ancestor) is never excluded: its prefix would
+            // remove this account's own files. That is decided on the folded
+            // form and, as the engine compares, on canonical paths, so an
+            // ancestor registered under another spelling (junction, `subst`
+            // drive, 8.3 name) is still recognised when both exist.
+            let me = account_identity(dir);
+            let me_canonical = std::fs::canonicalize(dir).ok();
+            let contains_me = |path: &str| {
+                let other = account_identity(path);
+                other == me
+                    || me.starts_with(&format!("{other}\\"))
+                    || me_canonical.as_ref().is_some_and(|mine| {
+                        std::fs::canonicalize(path).is_ok_and(|theirs| mine.starts_with(theirs))
+                    })
+            };
             let mut excluded: Vec<std::path::PathBuf> = config_dirs
                 .iter()
-                .filter(|other| is_nested(other))
+                .filter(|other| !contains_me(other))
                 .map(std::path::PathBuf::from)
                 .collect();
             excluded.extend(
@@ -253,7 +261,7 @@ fn scoped_context(
                     .get(CLAUDE)
                     .into_iter()
                     .flatten()
-                    .filter(|root| !own.contains(root) && is_nested(&root.to_string_lossy()))
+                    .filter(|root| !own.contains(root) && !contains_me(&root.to_string_lossy()))
                     .cloned(),
             );
             let mut excluded_scan_paths = std::collections::BTreeMap::new();
