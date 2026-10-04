@@ -141,7 +141,6 @@ public class QuotaEpochTests
         await WaitUntil(() => fetch.StartedCount == 2);
         fetch.Release(1);
         await b;
-        await WaitUntil(() => { lock (raised) { return raised.Count == 2; } });
 
         Assert.Equal([before, before + 1], raised);
     }

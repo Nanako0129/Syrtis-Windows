@@ -69,6 +69,121 @@ public class AgentUsageFetchCoordinatorTests
         Assert.Equal(3, Volatile.Read(ref calls));
     }
 
+    /// <summary>The fixed code never hands out a completed chain: the chain
+    /// clears itself in the decision that ends it, so a caller that sees it
+    /// finished and immediately requests a follow-up and fetches starts a new
+    /// fetch. Looped because the old window (clearing from a continuation) was
+    /// a race; this does not prove the old code fails, it pins the new
+    /// behavior.</summary>
+    [Fact]
+    public async Task ACallerSeeingAChainFinishedAlwaysStartsANewFetch()
+    {
+        for (var i = 0; i < 1000; i++)
+        {
+            var calls = 0;
+            var coordinator = new AgentUsageFetchCoordinator(
+                () => new AgentUsagePayload(Interlocked.Increment(ref calls).ToString(), []));
+
+            await coordinator.FetchAsync();
+            coordinator.RequestFollowUp();
+            Assert.Equal("2", (await coordinator.FetchAsync()).GeneratedAt);
+            Assert.Equal(2, Volatile.Read(ref calls));
+        }
+    }
+
+    /// <summary>A chain's end clears only itself: when a newer-epoch caller
+    /// chained B after A, A finishing must not drop B from flight, so a caller
+    /// at B's epoch joins B and a follow-up requested during B is owed to B.</summary>
+    [Fact]
+    public async Task AFinishingChainDoesNotClearTheNewerChainChainedAfterIt()
+    {
+        var releaseA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var startedB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var coordinator = new AgentUsageFetchCoordinator(() =>
+        {
+            var n = Interlocked.Increment(ref calls);
+            if (n == 1)
+            {
+                releaseA.Task.GetAwaiter().GetResult();
+            }
+            else if (n == 2)
+            {
+                startedB.TrySetResult();
+                releaseB.Task.GetAwaiter().GetResult();
+            }
+
+            return new AgentUsagePayload(n.ToString(), []);
+        });
+
+        var a = coordinator.FetchAsync();
+        QuotaEpoch.Signal();
+        var b = coordinator.FetchAsync();
+        Assert.NotSame(a, b);
+
+        releaseA.SetResult();
+        Assert.Equal("1", (await a).GeneratedAt);
+        await startedB.Task;
+
+        Assert.Same(b, coordinator.FetchAsync());
+        coordinator.RequestFollowUp();
+        releaseB.SetResult();
+
+        Assert.Equal("3", (await b).GeneratedAt);
+        Assert.Equal(3, Volatile.Read(ref calls));
+        Assert.Equal("4", (await coordinator.FetchAsync()).GeneratedAt);
+    }
+
+    /// <summary>A follow-up that throws keeps the first payload and leaves
+    /// nothing in flight.</summary>
+    [Fact]
+    public async Task AThrowingFollowUpReturnsTheFirstPayloadAndLeavesNothingInFlight()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var coordinator = new AgentUsageFetchCoordinator(() =>
+        {
+            var n = Interlocked.Increment(ref calls);
+            if (n == 1)
+            {
+                started.TrySetResult();
+                release.Task.GetAwaiter().GetResult();
+            }
+            else if (n == 2)
+            {
+                throw new InvalidOperationException("follow-up failed");
+            }
+
+            return new AgentUsagePayload(n.ToString(), []);
+        });
+
+        var first = coordinator.FetchAsync();
+        await started.Task;
+        coordinator.RequestFollowUp();
+        release.SetResult();
+
+        Assert.Equal("1", (await first).GeneratedAt);
+        Assert.Equal("3", (await coordinator.FetchAsync()).GeneratedAt);
+        Assert.Equal(3, Volatile.Read(ref calls));
+    }
+
+    /// <summary>A launch re-apply that throws faults the task and leaves
+    /// nothing in flight.</summary>
+    [Fact]
+    public async Task AThrowingLaunchReApplyFaultsTheTaskAndLeavesNothingInFlight()
+    {
+        var calls = 0;
+        var coordinator = new AgentUsageFetchCoordinator(
+            () => new AgentUsagePayload(Interlocked.Increment(ref calls).ToString(), []));
+        coordinator.RunBeforeFirstFetch(() => throw new InvalidOperationException("re-apply failed"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.FetchAsync());
+        Assert.Equal(0, Volatile.Read(ref calls));
+        Assert.Equal("1", (await coordinator.FetchAsync()).GeneratedAt);
+    }
+
     /// <summary>The launch re-apply (RunBeforeFirstFetch) and an owed
     /// follow-up share one fetch chain: the action runs once, before the first
     /// fetch, not again before the follow-up, and a later chain does not run
@@ -146,7 +261,6 @@ public class AgentUsageFetchCoordinatorTests
         var second = coordinator.FetchAsync();
         bothJoined.Set();
         await Task.WhenAll(first, second);
-        await WaitFor(() => raised.Count >= 1);
 
         Assert.Same(payload, Assert.Single(raised));
     }
@@ -160,7 +274,6 @@ public class AgentUsageFetchCoordinatorTests
         coordinator.Fetched += (_, _) => Interlocked.Increment(ref raised);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.FetchAsync());
-        await Task.Delay(50);
 
         Assert.Equal(0, Volatile.Read(ref raised));
     }
@@ -178,19 +291,34 @@ public class AgentUsageFetchCoordinatorTests
         coordinator.Fetched += (_, _) => askedFromHandler ??= coordinator.FetchAsync();
 
         var first = await coordinator.FetchAsync();
-        await WaitFor(() => askedFromHandler is not null);
 
         Assert.Equal("call-1", first.GeneratedAt);
         Assert.Equal("call-1", (await askedFromHandler!).GeneratedAt);
         Assert.Equal(1, Volatile.Read(ref calls));
     }
 
-    private static async Task WaitFor(Func<bool> condition)
+    /// <summary>A handler's RequestFollowUp while it is raised for is honoured
+    /// by the same chain: it fetches once more, the awaited payload is the
+    /// second, both are raised in order, and nothing stays in flight.</summary>
+    [Fact]
+    public async Task AHandlerRequestingAFollowUpIsHonouredByTheSameChain()
     {
-        for (var i = 0; i < 200 && !condition(); i++)
+        var calls = 0;
+        var coordinator = new AgentUsageFetchCoordinator(() =>
+            new AgentUsagePayload($"call-{Interlocked.Increment(ref calls)}", []));
+        var raised = new List<string>();
+        coordinator.Fetched += (p, _) =>
         {
-            await Task.Delay(10);
-        }
+            raised.Add(p.GeneratedAt);
+            if (raised.Count == 1)
+            {
+                coordinator.RequestFollowUp();
+            }
+        };
+
+        Assert.Equal("call-2", (await coordinator.FetchAsync()).GeneratedAt);
+        Assert.Equal(["call-1", "call-2"], raised);
+        Assert.Equal("call-3", (await coordinator.FetchAsync()).GeneratedAt);
     }
 
     // A handler that throws must not leave the finished fetch in flight,
@@ -204,10 +332,79 @@ public class AgentUsageFetchCoordinatorTests
         coordinator.Fetched += (_, _) => throw new InvalidOperationException("handler");
 
         await coordinator.FetchAsync();
-        await WaitFor(() => Volatile.Read(ref calls) == 1);
-        await Task.Delay(50);
         var second = await coordinator.FetchAsync();
 
         Assert.Equal("call-2", second.GeneratedAt);
+    }
+
+    /// <summary>A follow-up that fails keeps the earlier payload, and
+    /// <see cref="AgentUsageFetchCoordinator.Fetched"/> sees it exactly once,
+    /// whether the follow-up was owed before the raise or requested by the
+    /// handler during it.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AFailedFollowUpRaisesTheEarlierPayloadExactlyOnce(bool requestedByHandler)
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var coordinator = new AgentUsageFetchCoordinator(() =>
+        {
+            var n = Interlocked.Increment(ref calls);
+            if (n == 1)
+            {
+                started.TrySetResult();
+                if (!requestedByHandler)
+                {
+                    release.Task.GetAwaiter().GetResult();
+                }
+            }
+            else
+            {
+                throw new InvalidOperationException("follow-up failed");
+            }
+
+            return new AgentUsagePayload("call-1", []);
+        });
+        var raised = new List<string>();
+        coordinator.Fetched += (p, _) =>
+        {
+            raised.Add(p.GeneratedAt);
+            if (requestedByHandler)
+            {
+                coordinator.RequestFollowUp();
+            }
+        };
+
+        var fetch = coordinator.FetchAsync();
+        if (!requestedByHandler)
+        {
+            await started.Task;
+            coordinator.RequestFollowUp();
+            release.SetResult();
+        }
+
+        Assert.Equal("call-1", (await fetch).GeneratedAt);
+        Assert.Equal(["call-1"], raised);
+        Assert.Equal(2, Volatile.Read(ref calls));
+    }
+
+    /// <summary>A throwing handler is logged once by exception type and does
+    /// not starve the handlers after it.</summary>
+    [Fact]
+    public async Task AThrowingHandlerIsLoggedAndTheNextHandlerStillRuns()
+    {
+        var coordinator = new AgentUsageFetchCoordinator(() => new AgentUsagePayload("now", []));
+        var logged = new List<string>();
+        coordinator.Log = logged.Add;
+        AgentUsagePayload? received = null;
+        coordinator.Fetched += (_, _) => throw new InvalidOperationException("handler");
+        coordinator.Fetched += (p, _) => received = p;
+
+        var result = await coordinator.FetchAsync();
+
+        Assert.Same(result, received);
+        Assert.Equal(["agentUsage fetched handler failed: InvalidOperationException"], logged);
     }
 }
