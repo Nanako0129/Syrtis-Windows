@@ -603,8 +603,7 @@ public sealed partial class DashboardView
                 WindowCardText.Title(selected),
                 body,
                 WindowCardText.Subtitle(state, selected, DateTimeOffset.Now),
-                titleAccessory: client.AccountLabel,
-                stackSubtitle: true);
+                titleAccessory: client.AccountLabel);
         }
 
         var active = selected!.Active!;
@@ -671,8 +670,7 @@ public sealed partial class DashboardView
             body,
             WindowCardText.Subtitle(state, selected, DateTimeOffset.Now),
             WindowMetricToggle(),
-            titleAccessory: client.AccountLabel,
-            stackSubtitle: true);
+            titleAccessory: client.AccountLabel);
     }
 
     /// <summary>Pills keep their old 2px gap, and wrap onto further lines when

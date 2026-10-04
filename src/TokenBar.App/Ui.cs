@@ -25,15 +25,37 @@ public static class Ui
         ("reasoning", "R", "#ec4899"),
     ];
 
+    // Card header metrics, from macOS DashCard (Cards.swift:220-233).
+    // Title 13 semibold is the same number on both platforms.
+    private const double CardTitleSize = 13;
+
+    // macOS sets the subtitle and the title accessory in .caption (10 pt).
+    // Windows keeps 11: every secondary line here (Ui.Text's default, Ui.Dim,
+    // the old right-aligned subtitle) is 11, and a 10 would read a size
+    // smaller than its neighbours rather than "the same role".
+    private const double CardSecondarySize = 11;
+
+    // macOS .secondary foreground; 0.6 is the opacity the old subtitle and the
+    // rest of the dashboard's secondary text already use for it.
+    private const double CardSecondaryOpacity = 0.6;
+
+    // macOS: VStack(spacing: 2) between the title line and the subtitle.
+    private const double CardTitleSubtitleGap = 2;
+
+    // macOS: HStack(spacing: 6) between the title and its accessory.
+    private const double CardTitleAccessoryGap = 6;
+
+    /// <summary>A dashboard card, laid out as macOS <c>DashCard</c>: the title
+    /// (and <paramref name="titleAccessory"/>) on the first line, the
+    /// subtitle under it on its own line, wrapping, and
+    /// <paramref name="trailing"/> at the right end of the header.</summary>
     /// <param name="titleAccessory">Secondary text right after the title on
-    /// the same line (the non-primary account a window card shows), trimmed
-    /// before the title is (macOS <c>DashCard.titleAccessory</c>).</param>
-    /// <param name="stackSubtitle">Put the subtitle on its own line under the
-    /// title, as macOS <c>DashCard</c> does (Cards.swift:220-233), instead of
-    /// right-aligned beside it. Only the window card asks for this today.</param>
+    /// the same line (the non-primary account a window card shows). The title
+    /// takes its full width and the accessory trims (macOS
+    /// <c>DashCard.titleAccessory</c>).</param>
     public static Border Card(
         string title, UIElement content, string? subtitle = null, UIElement? trailing = null,
-        string? titleAccessory = null, bool stackSubtitle = false)
+        string? titleAccessory = null)
     {
         var stack = new StackPanel();
         var head = new Microsoft.UI.Xaml.Controls.Grid { Margin = new Thickness(0, 0, 0, 8) };
@@ -42,14 +64,14 @@ public static class Ui
             Width = new GridLength(1, GridUnitType.Star),
         });
         head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        // The title owns the star column and trims with an ellipsis rather than
-        // running under the right-aligned subtitle (long window labels such as
-        // Antigravity's "Gemini Models · Weekly Limit Remaining"). Nothing
-        // changes when it fits. The full text shows on hover only when trimmed.
+        // Without an accessory the title owns the line and trims with an
+        // ellipsis (long window labels such as Antigravity's "Gemini Models ·
+        // Weekly Limit Remaining"); the full text shows on hover only when
+        // trimmed.
         var titleText = new TextBlock
         {
             Text = title,
-            FontSize = 13,
+            FontSize = CardTitleSize,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
             TextTrimming = TextTrimming.CharacterEllipsis,
             TextWrapping = TextWrapping.NoWrap,
@@ -90,85 +112,66 @@ public static class Ui
         }
         titleText.PointerExited += (_, _) => Hide();
         titleText.Unloaded += (_, _) => Hide();
-        if (stackSubtitle || titleAccessory is not null)
+
+        var left = new StackPanel { Spacing = CardTitleSubtitleGap };
+        if (titleAccessory is null)
         {
-            // macOS DashCard: title and accessory on one line, the subtitle
-            // under them. The title takes its full width and the accessory
-            // trims, so the window name is what stays readable.
-            // ponytail: a title wider than the card is clipped, not trimmed;
-            // window titles are short since ShortLabel.
-            var left = new StackPanel { Spacing = 2 };
-            var line = new Microsoft.UI.Xaml.Controls.Grid { ColumnSpacing = 6 };
+            left.Children.Add(titleText);
+        }
+        else
+        {
+            // The window name is what must stay readable, so the title takes
+            // its width (Auto) and the account label trims in the rest. The
+            // title's MaxWidth follows the line, so a title wider than the
+            // whole card still trims with its ellipsis and hover tip instead
+            // of being clipped.
+            var line = new Microsoft.UI.Xaml.Controls.Grid { ColumnSpacing = CardTitleAccessoryGap };
+            line.SizeChanged += (_, e) => titleText.MaxWidth = e.NewSize.Width;
             line.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             line.ColumnDefinitions.Add(new ColumnDefinition
             {
                 Width = new GridLength(1, GridUnitType.Star),
             });
-            titleText.TextTrimming = TextTrimming.None;
             line.Children.Add(titleText);
-            if (titleAccessory is not null)
+            var accessory = new TextBlock
             {
-                var accessory = new TextBlock
-                {
-                    Text = titleAccessory,
-                    FontSize = 11,
-                    Opacity = 0.6,
-                    TextTrimming = TextTrimming.CharacterEllipsis,
-                    TextWrapping = TextWrapping.NoWrap,
-                    VerticalAlignment = VerticalAlignment.Bottom,
-                };
-                ToolTipService.SetToolTip(accessory, titleAccessory);
-                Microsoft.UI.Xaml.Controls.Grid.SetColumn(accessory, 1);
-                line.Children.Add(accessory);
-            }
-
-            left.Children.Add(line);
-            if (subtitle is not null)
-            {
-                left.Children.Add(new TextBlock
-                {
-                    Text = subtitle,
-                    FontSize = 11,
-                    Opacity = 0.6,
-                    TextWrapping = TextWrapping.Wrap,
-                });
-            }
-
-            head.Children.Add(left);
-            subtitle = null;
-        }
-        else
-        {
-            head.Children.Add(titleText);
-        }
-
-        if (subtitle is not null || trailing is not null)
-        {
-            var end = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                Spacing = 6,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Center,
+                Text = titleAccessory,
+                FontSize = CardSecondarySize,
+                Opacity = CardSecondaryOpacity,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                TextWrapping = TextWrapping.NoWrap,
+                VerticalAlignment = VerticalAlignment.Bottom,
             };
-            if (subtitle is not null)
+            ToolTipService.SetToolTip(accessory, titleAccessory);
+            Microsoft.UI.Xaml.Controls.Grid.SetColumn(accessory, 1);
+            line.Children.Add(accessory);
+            left.Children.Add(line);
+        }
+
+        if (subtitle is not null)
+        {
+            left.Children.Add(new TextBlock
             {
-                end.Children.Add(new TextBlock
-                {
-                    Text = subtitle,
-                    FontSize = 11,
-                    Opacity = 0.6,
-                    VerticalAlignment = VerticalAlignment.Center,
-                });
+                Text = subtitle,
+                FontSize = CardSecondarySize,
+                Opacity = CardSecondaryOpacity,
+                TextWrapping = TextWrapping.Wrap,
+            });
+        }
+
+        head.Children.Add(left);
+        if (trailing is not null)
+        {
+            // macOS aligns the trailing control on the title's first baseline,
+            // so with a subtitle line it sits by the title, not between lines.
+            if (trailing is FrameworkElement end)
+            {
+                end.HorizontalAlignment = HorizontalAlignment.Right;
+                end.VerticalAlignment = subtitle is null ? VerticalAlignment.Center : VerticalAlignment.Top;
             }
 
-            if (trailing is not null)
-            {
-                end.Children.Add(trailing);
-            }
-
-            Microsoft.UI.Xaml.Controls.Grid.SetColumn(end, 1);
-            head.Children.Add(end);
+            Microsoft.UI.Xaml.Controls.Grid.SetColumn((FrameworkElement)trailing, 1);
+            head.Children.Add(trailing);
         }
 
         stack.Children.Add(head);
