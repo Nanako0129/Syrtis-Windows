@@ -418,13 +418,12 @@ public static class QuotaLensProjection
     /// "Grok Build &amp; Bot" tab), else the owner. At most one card per tab,
     /// as macOS: with both members reporting, the owner's card is drawn and
     /// the other's windows stay on the limits card and the all-agent lens.
-    /// The Bot-only case deliberately differs from macOS, which draws no
-    /// window card there (<c>WindowCardGate.clients</c> returns nil when the
-    /// tab id is not a card client) and only the history strip and heatmap;
-    /// Windows shows the Bot's weekly card instead (maintainer's decision,
-    /// 2026-10-04, with macOS to follow). Antigravity's other member,
-    /// antigravity-cli, is never a quota provider, so that tab is
-    /// unchanged.</summary>
+    /// The Bot-only case matches macOS since syrtis #471 (b5583fad):
+    /// <c>WindowCardGate.clients</c> (WindowCardLoader.swift:601-641) draws
+    /// the tab's first quota member's card when the tab id is not itself a
+    /// card client, so both platforms show the Bot's weekly card there.
+    /// Antigravity's other member, antigravity-cli, is never a quota
+    /// provider, so that tab is unchanged.</summary>
     internal static string WindowCardOwner(
         IReadOnlyList<QuotaHistorySeries>? history, AgentUsagePayload? quota, string clientId)
     {
