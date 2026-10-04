@@ -57,9 +57,11 @@ public sealed class AntigravityAutoCapture
 
     /// <summary><c>{"key","marker"}</c>: a hash and a FILETIME, no secret.
     /// Safe to restore without re-reading agy's login: dedup's merge requires
-    /// the primary fetched under that marker, and its promotion of a captured
+    /// the primary fetched under that marker; its promotion of a captured
     /// account over an errored primary requires this fetch's own marker read
-    /// to equal it.</summary>
+    /// to equal it, a re-read after the fetch (only while automatic capture is
+    /// on) to still equal it, Current unchanged meanwhile, and the errored
+    /// primary to carry no windows.</summary>
     public const string CurrentKey = "tokenbar.antigravity.currentAgy";
 
     /// <summary>The error code recorded for a failure that carried no core
@@ -301,20 +303,33 @@ public sealed class AntigravityAutoCapture
         await PollIfOwed().ConfigureAwait(false);
     }
 
-    /// <summary>One more bounded marker read (null: failed or timed out), for
-    /// the fetch to confirm after <c>fetch()</c> that agy's login did not
-    /// change meanwhile. No state is touched.</summary>
-    public string? ReadMarkerNow() => TryMarker().GetAwaiter().GetResult();
+    /// <summary>One more bounded marker read, for the fetch to confirm after
+    /// <c>fetch()</c> that agy's login did not change meanwhile. It reads
+    /// agy's credential, so it is gated like every other read: only while
+    /// automatic capture is on and not paused, checked under the gate right
+    /// before the read; otherwise null, as for a failed or timed-out read. No
+    /// state is touched.</summary>
+    public string? ReadMarkerAfterFetch()
+    {
+        lock (_gate)
+        {
+            if (_paused || !IsEnabled)
+            {
+                return null;
+            }
+        }
+
+        return TryMarker().GetAwaiter().GetResult();
+    }
 
     /// <summary>Before a quota fetch: read agy's login marker and, when it
     /// differs from the last attempt, forget the current account NOW, so the
     /// fetch that follows a login change is never drawn as the previous
     /// account. The capture attempt is returned, not awaited, so the fetch
-    /// never waits on Google. Never throws.</summary>
-    /// <summary>Also returns the marker it read (null: paused, another marker
-    /// read already holds the checking state, or the read failed or timed
-    /// out), so the fetch can tell dedup which login this fetch
-    /// observed.</summary>
+    /// never waits on Google. Never throws. Also returns the marker it read
+    /// (null: paused, another marker read already holds the checking state, or
+    /// the read failed or timed out), so the fetch can tell dedup which login
+    /// this fetch observed.</summary>
     public async Task<(string? Marker, Task? Poll)> ReadMarkerForFetch()
     {
         lock (_gate)

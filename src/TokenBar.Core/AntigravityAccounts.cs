@@ -208,7 +208,11 @@ public sealed class AntigravityAccountsInstaller(
 /// the stored list first, so the first fetch of a launch already carries the
 /// captured cards; when automatic capture is on, run its pre-fetch step (the
 /// capture attempt it starts is not awaited, so the fetch never waits on
-/// Google); then apply <see cref="AntigravityDedup"/> to the result.
+/// Google); then apply <see cref="AntigravityDedup"/> to the result. A
+/// captured account replaces an errored primary only when this fetch's marker
+/// read equals Current's, a re-read after the fetch (made only while automatic
+/// capture is on and not paused) still equals it, Current is unchanged
+/// meanwhile, and the errored primary carries no windows.
 /// </summary>
 public static class AntigravityFetch
 {
@@ -232,20 +236,8 @@ public static class AntigravityFetch
         }
 
         var (key, marker) = capture.Current;
-        var result = AntigravityDedup.Apply(payload, key, marker, fetchMarker);
-        if (fetchMarker is not null
-            && !ReferenceEquals(result, payload)
-            && payload.Agents.Any(a => a.ClientId == AntigravityDedup.ClientId
-                && a.Account.AccountKey is null && a.Error is not null)
-            && capture.ReadMarkerNow() != fetchMarker)
-        {
-            // A promotion is about to land, but the marker was read BEFORE
-            // fetch() (which can take 30 s or more): agy's login changed (or
-            // cannot be read) since, so the error card stays this cycle.
-            return AntigravityDedup.Apply(payload, key, marker, null);
-        }
-
-        return result;
+        return AntigravityDedup.Apply(payload, key, marker, fetchMarker, () =>
+            capture.Current == (key, marker) && capture.ReadMarkerAfterFetch() == fetchMarker);
     }
 }
 
@@ -260,11 +252,14 @@ public static class AntigravityFetch
 /// ERRORED primary: a captured card with windows and no error replaces it,
 /// promoted to the primary slot (<see cref="PromotedToPrimary"/>), only when
 /// <c>fetchMarker</c> (the marker read during this fetch; null when automatic
-/// capture is off, the read failed or timed out, or another marker read held
-/// the capture's checking state during the fetch) equals <c>currentMarker</c>,
-/// and (from <see cref="AntigravityFetch.Run"/>) agy's marker read again after
-/// the fetch still equals it; and only when that errored primary has no
-/// windows (an errored card with windows is cached last-good data and stays).
+/// capture is off or paused, the read failed or timed out, or another marker
+/// read held the capture's checking state during the fetch) equals
+/// <c>currentMarker</c>, <c>confirmPromotion</c> (asked only on this branch,
+/// after every other guard; the fetch uses it to check that Current is
+/// unchanged and that a marker re-read after the fetch, made only while
+/// automatic capture is on, still equals the pre-fetch one) returns true, and
+/// that errored primary has no windows (an errored card with windows is
+/// cached last-good data and stays).
 /// The merged
 /// primary takes the captured plan when it has none.
 /// <para>
@@ -282,7 +277,11 @@ public static class AntigravityDedup
     public const string ClientId = AccountLabel.AntigravityClientId;
 
     public static AgentUsagePayload Apply(
-        AgentUsagePayload payload, string? currentKey, string? currentMarker, string? fetchMarker)
+        AgentUsagePayload payload,
+        string? currentKey,
+        string? currentMarker,
+        string? fetchMarker,
+        Func<bool> confirmPromotion)
     {
         if (currentKey is null || currentMarker is null || currentMarker == "present")
         {
@@ -317,6 +316,13 @@ public static class AntigravityDedup
             // another account's, and stays as it is.
             if (fetchMarker is null || fetchMarker != currentMarker || primary.Windows.Count != 0
                 || captured.Error is not null || captured.Windows.Count == 0)
+            {
+                return payload;
+            }
+
+            // Asked only here, after every other guard: the fetch re-checks
+            // that nothing moved while it ran.
+            if (!confirmPromotion())
             {
                 return payload;
             }
