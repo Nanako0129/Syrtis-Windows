@@ -151,6 +151,27 @@ public sealed partial class DashboardView : UserControl
             {
                 _ = DispatcherQueue.TryEnqueue(ApplyLensVisibility);
             }
+            else if (key == GrokBotConsent.StorageKey)
+            {
+                // The card's buttons and the Settings switch both land here,
+                // after the core took the answer. The refetch is not asked for
+                // here: a changed grant signals QuotaEpoch (GrokBotConsent),
+                // which wakes both quota pollers. Either answer re-renders the
+                // card.
+                _ = DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (AppSettings.GrokBotConsent.Stored == true)
+                    {
+                        // A yes from the Settings switch keeps the last
+                        // consent card drawn (Declined stays one line), or
+                        // the one line if none was; after the card's own
+                        // Allow this is a no-op.
+                        _grokBotWaiting.GrantedElsewhere();
+                    }
+
+                    RenderContent(animated: false);
+                });
+            }
             else if (key.StartsWith("tokenbar.limits.", StringComparison.Ordinal)
                 || key == "tokenbar.trace.detailed"
                 || key == OverviewCards.HiddenKey
@@ -1043,7 +1064,7 @@ public sealed partial class DashboardView : UserControl
         };
         if (id != ClientRegistry.OverviewTab)
         {
-            HoverTip.Attach(button, () => ClientRegistry.Style(id).DisplayName);
+            HoverTip.Attach(button, () => ClientRegistry.TabDragHint.Localized());
             AttachTabDrag(button, id);
         }
 
@@ -1915,7 +1936,7 @@ public sealed partial class DashboardView : UserControl
     /// per-client Quota lens (5e). A parameter rather than a second builder:
     /// this card answers "where does the allowance stand right now", and a copy
     /// of it would be free to disagree with the original on the same window.</summary>
-    private static FrameworkElement BuildLimits(
+    private FrameworkElement BuildLimits(
         DashboardModel.Snapshot snapshot, IReadOnlyList<string>? clientIds = null)
     {
         var panel = new StackPanel { Spacing = 10 };
@@ -2014,6 +2035,16 @@ public sealed partial class DashboardView : UserControl
                 panel.Children.Add(host);
             }
 
+            // Ahead of the placeholder branch: "keychain-consent" is a setup
+            // placeholder, and this card is its setup prompt.
+            var consent = _grokBotWaiting.Decide(
+                agent, AppSettings.GrokBotConsent.Stored, snapshot.Quota, snapshot.QuotaFailures);
+            if (consent.Card != GrokBotConsent.Card.None)
+            {
+                section.Children.Add(BuildGrokBotConsent(consent, snapshot.Quota, snapshot.QuotaFailures));
+                continue;
+            }
+
             if (agent.IsSetupPlaceholder)
             {
                 if (AgentLimitsText.Setup(agent) is { } prompt)
@@ -2038,21 +2069,21 @@ public sealed partial class DashboardView : UserControl
                 section.Children.Add(line);
             }
 
-            if (agent.Error is not null)
-            {
-                continue;
-            }
-
+            // An error only colours the detail line and the badge: the core
+            // returns the last-good windows with a transient error stamped on
+            // them, and those still draw (macOS AgentLimitsCard.swift:771-787);
+            // with nothing cached there are no windows and no bars.
+            //
             // Chart layout draws each window's recorded quota history as a
             // curve instead of a bar. WindowCardText.Tabs — the same fold the
             // Session-window card already resolves its own samples through —
             // returns one WindowCardTab per live window in agent's own order
-            // when the client has live windows to enumerate (guaranteed here:
-            // snapshot.Quota is non-null inside this loop and agent.Error was
-            // just checked null above, so WindowCardText.LiveWindowsUnavailable
-            // cannot be true), so a plain index zip against UniqueCardWindows
-            // lines each tab up with the window it belongs to.
-            var windows = agent.UniqueCardWindows;
+            // whenever the agent has windows (snapshot.Quota is non-null inside
+            // this loop, and WindowCardText.LiveWindowsUnavailable needs an
+            // empty window list, so it is false whenever this loop draws), so a
+            // plain index zip against the same windows lines each tab up with
+            // the window it belongs to.
+            var windows = AgentLimitsText.BarWindows(agent);
             // The same tabs feed the trend, which is information rather than a
             // density option, so it appears in every layout and on every
             // surface — macOS passes the curves to the client tab's card too
@@ -2073,6 +2104,91 @@ public sealed partial class DashboardView : UserControl
         }
 
         return panel;
+    }
+
+    // A grant the core accepted over a consent card; its card and exits live
+    // in WaitingState.
+    private readonly GrokBotConsent.WaitingState _grokBotWaiting = new();
+
+    /// <summary>The Grok Bot consent prompt (source "keychain-consent"). On
+    /// Windows this is the only question before Syrtis decrypts Grok Bot's
+    /// sign-in — DPAPI never asks — so it states what is read and where it
+    /// goes. After "Not now" it collapses to one line and keeps Allow: a
+    /// decline has to be reversible where it was made. A grant keeps the card
+    /// it was made on while the answer stays yes (GrokBotConsent.WaitingState);
+    /// once Waiting ends, Allow is enabled again to re-send it. A stored yes
+    /// with no grant recorded shows the full card (macOS parity).</summary>
+    private FrameworkElement BuildGrokBotConsent(
+        GrokBotConsent.Prompt prompt, AgentUsagePayload? shownQuota, int failedFetches)
+    {
+        var body = new StackPanel { Spacing = 6 };
+        var text = Ui.Dim(prompt.Text.Localized(), 11);
+        body.Children.Add(text);
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        var allow = new Button
+        {
+            Style = (Style)Application.Current.Resources["AccentButtonStyle"],
+            FontSize = 12,
+        };
+        var notNow = new Button { Content = GrokBotConsent.Copy.NotNow.Localized(), FontSize = 12 };
+        allow.Click += (_, _) =>
+        {
+            // A changed answer reaches the store's Changed handler, which
+            // re-renders this card; the quota refetch comes from the
+            // QuotaEpoch signal GrokBotConsent raises when the installed
+            // grant changes (also when a stored yes the core never received
+            // is allowed again). A failed setter leaves Allow enabled.
+            if (!TryAnswerGrokBotConsent(true))
+            {
+                return;
+            }
+
+            _grokBotWaiting.Granted(prompt.Card, shownQuota, failedFetches);
+            ApplyGrokBotButtons(prompt with { Waiting = true }, allow, notNow);
+        };
+        notNow.Click += (_, _) =>
+        {
+            if (!TryAnswerGrokBotConsent(false))
+            {
+                return;
+            }
+
+            text.Text = GrokBotConsent.Copy.Declined.Localized();
+            notNow.Visibility = Visibility.Collapsed;
+        };
+        ApplyGrokBotButtons(prompt, allow, notNow);
+        buttons.Children.Add(allow);
+        if (prompt.ShowsNotNow)
+        {
+            buttons.Children.Add(notNow);
+        }
+
+        body.Children.Add(buttons);
+        return body;
+    }
+
+    // macOS: "Waiting for macOS…" with Not now disabled beside it.
+    private static void ApplyGrokBotButtons(GrokBotConsent.Prompt prompt, Button allow, Button notNow)
+    {
+        allow.IsEnabled = !prompt.Waiting;
+        allow.Content = prompt.Waiting
+            ? GrokBotConsent.Copy.Waiting.Localized()
+            : GrokBotConsent.Copy.Allow.LocalizedKey(GrokBotConsent.Copy.AllowEnglish);
+        notNow.IsEnabled = prompt.NotNowEnabled;
+    }
+
+    private static bool TryAnswerGrokBotConsent(bool granted)
+    {
+        try
+        {
+            AppSettings.GrokBotConsent.Answer(granted);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DevLog.Write($"grok-bot consent: answer failed: {ex.GetType().Name}");
+            return false;
+        }
     }
 
     private FrameworkElement BuildTrace(DashboardModel.Snapshot snapshot) =>

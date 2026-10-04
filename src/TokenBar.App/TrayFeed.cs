@@ -22,7 +22,7 @@ public sealed class TrayFeed : IDisposable
     private readonly Action<string> _onStoreChanged;
     private int _fastInFlight; // Interlocked: reset in a background finally
     private int _slowInFlight;
-    private int _quotaInFlight;
+    private readonly QuotaPoller _quotaPoller;
     private bool _disposed;
 
     public UsagePayload? Graph { get; private set; }
@@ -68,6 +68,12 @@ public sealed class TrayFeed : IDisposable
     {
         _dispatcher = dispatcher;
         _graphCoordinator = graphCoordinator;
+        _quotaPoller = new QuotaPoller(
+            async () => await AgentUsageFetchCoordinator.Shared.FetchAsync().ConfigureAwait(false),
+            action => _dispatcher.TryEnqueue(() => action()),
+            ApplyQuota,
+            SettleQuota,
+            ex => DevLog.Write($"tray quota refresh failed: {ex.Message}"));
         _graphCoordinator.Started += OnGraphStarted;
         _graphCoordinator.Published += OnGraphPublished;
         _graphCoordinator.Completed += OnGraphCompleted;
@@ -119,7 +125,20 @@ public sealed class TrayFeed : IDisposable
             }
         };
         AppSettings.Store.Changed += _onStoreChanged;
+        AntigravityAccounts.Changed += OnAntigravityAccountsChanged;
     }
+
+    /// <summary>A changed captured-account list reached the core, or agy's
+    /// current account changed: refetch the quota now, as DashboardModel does
+    /// (macOS RegistryChange wakes both pollers). A fetch already in flight
+    /// absorbs this (QuotaPoller and the shared coordinator coalesce).</summary>
+    private void OnAntigravityAccountsChanged() => _dispatcher.TryEnqueue(() =>
+    {
+        if (!_disposed)
+        {
+            RefreshQuota();
+        }
+    });
 
     /// <summary>Stop polling and unsubscribe so the feed can't raise Changed
     /// into a disposed tray icon after shutdown.</summary>
@@ -127,12 +146,14 @@ public sealed class TrayFeed : IDisposable
     {
         _disposed = true; // fences any in-flight lane's enqueued callback
         _graphState.Dispose();
+        _quotaPoller.Dispose();
         _graphCoordinator.Started -= OnGraphStarted;
         _graphCoordinator.Published -= OnGraphPublished;
         _graphCoordinator.Completed -= OnGraphCompleted;
         _fast.Stop();
         _slow.Stop();
         AppSettings.Store.Changed -= _onStoreChanged;
+        AntigravityAccounts.Changed -= OnAntigravityAccountsChanged;
     }
 
     private void RefreshFast()
@@ -285,55 +306,42 @@ public sealed class TrayFeed : IDisposable
         }
     }
 
-    private void RefreshQuota()
+    private void RefreshQuota() => _quotaPoller.Request();
+
+    // Dispatcher side of the quota poll. Applied only for a payload fetched
+    // at the current epoch (QuotaPoller); a null is a failed fetch.
+    private void ApplyQuota(AgentUsagePayload? quota)
     {
-        if (Interlocked.Exchange(ref _quotaInFlight, 1) == 1)
+        if (_disposed || quota is null)
         {
             return;
         }
 
-        _ = Task.Run(() =>
+        Quota = quota;
+        var persistedSelection = AppSettings.Store.GetString(
+            "tokenbar.quota.source", QuotaResolver.Auto) ?? QuotaResolver.Auto;
+        if (QuotaSelectionPolicy.MigrationToPersist(quota, persistedSelection)
+            is { } migrated)
         {
-            try
-            {
-                var quota = TryFetch(
-                    () => AgentUsageFetchCoordinator.Shared.FetchAsync().GetAwaiter().GetResult(),
-                    "tray quota");
+            AppSettings.Store.SetString("tokenbar.quota.source", migrated);
+        }
 
-                _ = _dispatcher.TryEnqueue(() =>
-                {
-                    if (_disposed)
-                    {
-                        return;
-                    }
+        RecomputeVisibleUsage();
+    }
 
-                    if (quota is not null)
-                    {
-                        Quota = quota;
-                        var persistedSelection = AppSettings.Store.GetString(
-                            "tokenbar.quota.source", QuotaResolver.Auto) ?? QuotaResolver.Auto;
-                        if (QuotaSelectionPolicy.MigrationToPersist(quota, persistedSelection)
-                            is { } migrated)
-                        {
-                            AppSettings.Store.SetString("tokenbar.quota.source", migrated);
-                        }
+    // Runs after every posted quota action, applied or discarded. Re-resolve
+    // and re-render even without a new payload: the value doesn't change, but
+    // its age can cross the stale threshold (macOS TrayAnimator.swift:
+    // 477-481, "nothing changed but the reading's age").
+    private void SettleQuota()
+    {
+        if (_disposed)
+        {
+            return;
+        }
 
-                        RecomputeVisibleUsage();
-                    }
-
-                    // Re-resolve and re-render even on a failed fetch: with no
-                    // new payload the value doesn't change, but its age can
-                    // cross the stale threshold (macOS TrayAnimator.swift:
-                    // 477-481, "nothing changed but the reading's age").
-                    ResolveRemaining();
-                    Changed?.Invoke();
-                });
-            }
-            finally
-            {
-                Volatile.Write(ref _quotaInFlight, 0);
-            }
-        });
+        ResolveRemaining();
+        Changed?.Invoke();
     }
 
     private void RecomputeVisibleUsage()
@@ -410,19 +418,6 @@ public sealed class TrayFeed : IDisposable
                 // candidates hidden (display suppressed only): leave the
                 // pair and the stamp untouched.
                 break;
-        }
-    }
-
-    private static T? TryFetch<T>(Func<T> fetch, string label) where T : class
-    {
-        try
-        {
-            return fetch();
-        }
-        catch (Exception ex)
-        {
-            DevLog.Write($"{label} failed: {ex.Message}");
-            return null;
         }
     }
 }
