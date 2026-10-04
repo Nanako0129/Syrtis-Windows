@@ -62,6 +62,9 @@ pub(crate) struct Fetched {
     pub history_scope: Result<HistoryScope, AccountScopeError>,
     pub cache_binding: Option<ProviderCacheBinding>,
     pub windows: Vec<UsageWindow>,
+    /// Set only by the agy route (`fetch_agy_cli_gated`): the login marker of
+    /// agy's credential as read BEFORE the run. `None` on every other route.
+    pub agy_login_marker: Option<String>,
 }
 
 #[derive(Debug)]
@@ -360,8 +363,11 @@ where
         Ok(stdout) => (parse_agy_usage(&stdout, now).ok(), false),
     };
     match parsed {
-        Some(fetched) => {
+        Some(mut fetched) => {
             latch.set(None);
+            // The PRE-run value: agy may switch logins during the run, and a
+            // card fetched under one login must never carry the next one's.
+            fetched.agy_login_marker = agy_login_marker(Ok(Some(before)));
             Ok(fetched)
         }
         None => {
@@ -1091,6 +1097,7 @@ fn parse_agy_usage(body: &[u8], now: DateTime<Utc>) -> Result<Fetched, String> {
         history_scope: Err(AccountScopeError::NoTrustedEvidence),
         cache_binding: None,
         windows,
+        agy_login_marker: None,
     })
 }
 
@@ -1209,6 +1216,7 @@ fn parse_user_status(body: &str, now: DateTime<Utc>) -> Result<Fetched, String> 
         history_scope: Err(AccountScopeError::NoTrustedEvidence),
         cache_binding: None,
         windows,
+        agy_login_marker: None,
     })
 }
 
@@ -1296,6 +1304,7 @@ impl RemoteContext {
             history_scope,
             cache_binding: self.cache_binding,
             windows,
+            agy_login_marker: None,
         }
     }
 }
@@ -3645,7 +3654,7 @@ async fn auto_capture_with<I: CapturedIo>(
 /// The one place agy's `LastWritten` becomes a login marker: the FILETIME as a
 /// decimal string, `"absent"` when agy has no credential, `None` when it could
 /// not be read (the caller does nothing that poll). `tb_antigravity_login_marker`
-/// returns it, and the agy snapshot's marker (W7b) must come from here too.
+/// returns it, and so does the agy route's card (`fetch_agy_cli_gated`).
 pub(crate) fn agy_login_marker(
     last_written: Result<Option<u64>, CredentialUnreadable>,
 ) -> Option<String> {
@@ -4617,6 +4626,7 @@ mod tests {
             history_scope: Err(AccountScopeError::NoTrustedEvidence),
             cache_binding: None,
             windows: Vec::new(),
+            agy_login_marker: None,
         }
     }
 
@@ -5289,7 +5299,7 @@ mod tests {
     /// Counting fakes for one gated poll. `last_written` is what the credential
     /// read returns (`None` = absent); `unreadable` makes the read fail.
     #[derive(Default)]
-    struct AgyFakes {
+    pub(super) struct AgyFakes {
         last_written: std::cell::Cell<Option<u64>>,
         unreadable: std::cell::Cell<bool>,
         resolves: std::cell::Cell<bool>,
@@ -5299,7 +5309,7 @@ mod tests {
     }
 
     impl AgyFakes {
-        fn signed_in(last_written: u64) -> Self {
+        pub(super) fn signed_in(last_written: u64) -> Self {
             let fakes = Self::default();
             fakes.last_written.set(Some(last_written));
             fakes.resolves.set(true);
@@ -5340,7 +5350,7 @@ mod tests {
             .await
         }
 
-        async fn poll_with(
+        pub(super) async fn poll_with(
             &self,
             latch: &AgyLatch,
             run: impl FnOnce() -> Result<Vec<u8>, AgyRunFailure>,
@@ -5350,8 +5360,24 @@ mod tests {
         }
     }
 
-    fn agy_success() -> Result<Vec<u8>, AgyRunFailure> {
+    pub(super) fn agy_success() -> Result<Vec<u8>, AgyRunFailure> {
         Ok(AGY_WINDOWS_USAGE.to_vec())
+    }
+
+    /// The card carries the marker of the login it was fetched under: agy's
+    /// credential as read BEFORE the run, not as the run left it.
+    #[tokio::test]
+    async fn agy_card_carries_the_login_marker_read_before_the_run() {
+        let fakes = AgyFakes::signed_in(1);
+        let fetched = fakes
+            .poll_with(&AgyLatch::new(), || {
+                fakes.last_written.set(Some(2));
+                agy_success()
+            })
+            .await
+            .expect("a parsed run is a card");
+        assert_eq!(fetched.agy_login_marker.as_deref(), Some("1"));
+        assert_eq!(fetched.agy_login_marker, agy_login_marker(Ok(Some(1))));
     }
 
     #[tokio::test]
@@ -5954,6 +5980,7 @@ pub(crate) mod captured_test_support {
                 history_scope,
                 cache_binding: Some(ProviderCacheBinding::primary(account_scope)),
                 windows: vec![window],
+                agy_login_marker: None,
             })
         }
     }
@@ -6878,10 +6905,10 @@ mod captured_account_tests {
 
     /// Acceptance 9. The FFI marker (`login_marker_with`, which
     /// `tb_antigravity_login_marker` calls through `SystemCapturedIo`) and
-    /// `agy_login_marker` are one function. W7b: add the agy snapshot's
-    /// stamped marker to the same byte-equality assertion here.
-    #[test]
-    fn agy_login_marker_is_one_function_for_every_path() {
+    /// `agy_login_marker` are one function, and so is the marker the agy
+    /// route stamps on its card (`fetch_agy_cli_gated`).
+    #[tokio::test]
+    async fn agy_login_marker_is_one_function_for_every_path() {
         const FILETIME: u64 = 134_037_498_000_000_000;
         let mut io = FakeIo::new("marker");
         io.agy_last_written = Ok(Some(FILETIME));
@@ -6902,6 +6929,16 @@ mod captured_account_tests {
             "the marker reads no blob"
         );
         assert_eq!(io.network_calls(), 0);
+
+        // The agy route, driven through its seam with the same `LastWritten`.
+        io.agy_last_written = Ok(Some(FILETIME));
+        let fakes = super::tests::AgyFakes::signed_in(FILETIME);
+        let card = fakes
+            .poll_with(&AgyLatch::new(), super::tests::agy_success)
+            .await
+            .expect("a parsed run is a card");
+        assert_eq!(card.agy_login_marker, function);
+        assert_eq!(card.agy_login_marker, login_marker_with(&io));
     }
 
     #[test]
