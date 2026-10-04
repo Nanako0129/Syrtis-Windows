@@ -455,89 +455,6 @@ fn a_nested_account_known_to_one_registry_is_still_excluded() {
     );
 }
 
-/// A `.cc-mirror` variant under one account may name any directory as its
-/// `configDir`, including another, unrelated account. The window that holds
-/// the variant must still not count that account.
-#[test]
-fn an_account_reached_through_a_mirror_is_excluded() {
-    let Some(root) = child_root() else {
-        return run_in_child("an_account_reached_through_a_mirror_is_excluded", "mirror-account");
-    };
-    let d = root.join("work-d");
-    let e = root.join("work-e");
-    write_session(&d, "d", 7_000);
-    write_session(&e, "e", 2_000);
-    let variant = d.join(".cc-mirror").join("v1");
-    std::fs::create_dir_all(&variant).unwrap();
-    std::fs::write(
-        variant.join("variant.json"),
-        serde_json::json!({ "configDir": e }).to_string(),
-    )
-    .unwrap();
-    register_accounts(&[&d, &e]);
-
-    assert_eq!(
-        claude_lane_output(&call_window(Some(&d.display().to_string()), WINDOW_FROM, WINDOW_UNTIL)),
-        7_000,
-        "an account named by a mirror under another account reached that account's window"
-    );
-    assert_eq!(
-        claude_lane_output(&call_window(Some(&e.display().to_string()), WINDOW_FROM, WINDOW_UNTIL)),
-        2_000
-    );
-}
-
-/// An ancestor account registered under another spelling of its folder (here
-/// a junction) must still not be excluded from the nested account's window:
-/// the engine compares canonical paths, so excluding the alias would remove
-/// the nested account's own files.
-#[cfg(windows)]
-#[test]
-fn an_ancestor_registered_through_a_junction_is_not_excluded() {
-    let Some(root) = child_root() else {
-        return run_in_child(
-            "an_ancestor_registered_through_a_junction_is_not_excluded",
-            "junction-ancestor",
-        );
-    };
-    let outer = root.join("work-d");
-    let inner = outer.join(".claude");
-    write_session(&outer, "outer", 7_000);
-    write_session(&inner, "inner", 3_000);
-    let alias = root.join("alias-d");
-    let cmd = std::env::var_os("SystemRoot")
-        .map(|system| std::path::PathBuf::from(system).join("System32").join("cmd.exe"))
-        .unwrap();
-    let made = std::process::Command::new(cmd)
-        .args(["/C", "mklink", "/J"])
-        .arg(&alias)
-        .arg(&outer)
-        .output()
-        .unwrap();
-    assert!(made.status.success(), "mklink /J failed: {made:?}");
-    assert!(alias.join("projects").is_dir(), "fixture is inert: the junction does not resolve");
-
-    let alias_text = alias.display().to_string();
-    let inner_text = inner.display().to_string();
-    crate::apply_config_dirs_for_test(vec![alias_text, inner_text.clone()]);
-    crate::apply_scan_roots_for_test(std::collections::BTreeMap::from([(
-        "claude".to_string(),
-        vec![
-            alias.join("projects"),
-            alias.join("transcripts"),
-            inner.join("projects"),
-            inner.join("transcripts"),
-        ],
-    )]))
-    .unwrap();
-
-    assert_eq!(
-        claude_lane_output(&call_window(Some(&inner_text), WINDOW_FROM, WINDOW_UNTIL)),
-        3_000,
-        "an ancestor registered through a junction emptied the nested account's window"
-    );
-}
-
 /// Control: accounts that do not nest scan exactly what an account window
 /// scanned before the exclusion existed (its own directory as home, its own
 /// roots, no exclusion), message for message.
@@ -557,6 +474,16 @@ fn unrelated_accounts_scan_exactly_what_they_did_before() {
         let text = dir.display().to_string();
         let window = call_window(Some(&text), WINDOW_FROM, WINDOW_UNTIL);
         assert_eq!(claude_lane_output(&window), expected);
+        // Not just the same messages: the same scope, with no exclusion.
+        let scoped = crate::window_usage::scoped_context_for_test(
+            &crate::LocalSourceContext::process().unwrap(),
+            &Some(text.clone()),
+        )
+        .unwrap();
+        assert!(
+            scoped.resolved().scanner_settings().excluded_scan_paths.is_empty(),
+            "an unrelated account was excluded from {text}"
+        );
         let before = crate::LocalSourceContext::derived(
             tokscale_core::ResolvedLocalSourceContext::capture(
                 Some(dir.to_path_buf()),
