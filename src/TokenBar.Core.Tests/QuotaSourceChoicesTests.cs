@@ -38,18 +38,31 @@ public class QuotaSourceChoicesTests
     }
 
     // The defect: Settings opened before the first fetch, or before a new
-    // agent appeared, kept its first options. The key an open Settings
-    // compares changes exactly when the offered set does.
+    // agent appeared, kept its first options. An open page is rebuilt exactly
+    // when the payload offers a choice it was not built with.
     [Fact]
-    public void TheMenuBarKeyChangesWhenTheFirstFetchOrANewAgentArrives()
+    public void ANewChoiceArrivesWithTheFirstFetchAndWithANewAgent()
     {
-        var beforeFetch = QuotaSourceChoices.MenuBarKey(null);
-        var codexOnly = QuotaSourceChoices.MenuBarKey(Payload(Codex));
-        var withCopilot = QuotaSourceChoices.MenuBarKey(Payload(Codex, Copilot));
+        var beforeFetch = QuotaSourceChoices.Selections(null);
+        var codexOnly = QuotaSourceChoices.Selections(Payload(Codex));
 
-        Assert.NotEqual(beforeFetch, codexOnly);
-        Assert.NotEqual(codexOnly, withCopilot);
-        Assert.Equal(codexOnly, QuotaSourceChoices.MenuBarKey(Payload(Codex)));
+        Assert.True(QuotaSourceChoices.OffersNewChoice(beforeFetch, Payload(Codex)));
+        Assert.True(QuotaSourceChoices.OffersNewChoice(codexOnly, Payload(Codex, Copilot)));
+        Assert.False(QuotaSourceChoices.OffersNewChoice(codexOnly, Payload(Codex)));
+        Assert.True(QuotaSourceChoices.OffersNewChoice(null, Payload(Codex)));
+    }
+
+    // An agent that errors on one poll and recovers on the next must not
+    // rebuild the page under the user each time.
+    [Fact]
+    public void AnAgentFlappingIntoAnErrorOffersNothingNew()
+    {
+        const string failedCopilot =
+            """{"clientId":"copilot","source":"oauth","updatedAt":"2026-10-05T00:00:00Z","windows":[],"error":"rate limited"}""";
+        var built = QuotaSourceChoices.Selections(Payload(Codex, Copilot));
+
+        Assert.False(QuotaSourceChoices.OffersNewChoice(built, Payload(Codex, failedCopilot)));
+        Assert.False(QuotaSourceChoices.OffersNewChoice(built, Payload(Codex, Copilot)));
     }
 
     [Fact]

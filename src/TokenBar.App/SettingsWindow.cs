@@ -339,8 +339,13 @@ public sealed partial class SettingsWindow : Window
 
     /// <summary>The quota-derived option sets the menu-bar and dashboard pages
     /// were last built from (<see cref="QuotaSourceChoices"/>).</summary>
-    private string? _menuBarQuotaKey;
+    private IReadOnlySet<string>? _menuBarQuotaChoices;
     private string? _dashboardQuotaKey;
+
+    /// <summary>Whether the attribution page was built before any quota
+    /// arrived: its suggestions and subscription rows come from the payload,
+    /// so it is rebuilt once the first one lands.</summary>
+    private bool _attributionBuiltWithoutQuota;
 
     /// <summary>The payload the preview was last drawn from.</summary>
     private AgentUsagePayload? _previewQuota;
@@ -349,7 +354,8 @@ public sealed partial class SettingsWindow : Window
     /// quota through the feed, and an open window used to keep the options it
     /// was built with (only "Auto" when opened before the first fetch) until
     /// it was rebuilt. macOS observes the shared payload directly. Only a page
-    /// whose option set actually changed is rebuilt, and it is re-shown only
+    /// whose options grew (or that was built before any quota) is rebuilt,
+    /// and it is re-shown only
     /// when it is the page on screen, because a rebuild drops keyboard focus
     /// and re-showing resets the scroll. The preview is redrawn whenever the
     /// payload is a new one, since its percentages can move with the same
@@ -364,7 +370,7 @@ public sealed partial class SettingsWindow : Window
         var payload = window._quota();
         var store = AppSettings.Store;
         var shownRebuilt = false;
-        if (QuotaSourceChoices.MenuBarKey(payload) != window._menuBarQuotaKey)
+        if (QuotaSourceChoices.OffersNewChoice(window._menuBarQuotaChoices, payload))
         {
             window._pages["menubar"] = window.BuildMenuBarPage(store);
             shownRebuilt |= window._selectedTag == "menubar";
@@ -374,6 +380,12 @@ public sealed partial class SettingsWindow : Window
         {
             window._pages["dashboard"] = window.BuildDashboardPage(store);
             shownRebuilt |= window._selectedTag == "dashboard";
+        }
+
+        if (window._attributionBuiltWithoutQuota && payload is not null)
+        {
+            window._pages["attribution"] = window.BuildAttributionPage(store);
+            shownRebuilt |= window._selectedTag == "attribution";
         }
 
         if (shownRebuilt)
@@ -542,7 +554,7 @@ public sealed partial class SettingsWindow : Window
         var selection = QuotaSelectionPolicy.EffectiveSelection(
             payload, persistedSelection);
         var choices = QuotaSourceChoices.Of(payload);
-        _menuBarQuotaKey = QuotaSourceChoices.MenuBarKey(payload);
+        _menuBarQuotaChoices = QuotaSourceChoices.Selections(payload);
 
         var quotaGroup = new StackPanel { Spacing = 8 };
         quotaGroup.Children.Add(RadioGroup(
@@ -903,6 +915,7 @@ public sealed partial class SettingsWindow : Window
 
     private StackPanel BuildAttributionPage(SettingsStore store)
     {
+        _attributionBuiltWithoutQuota = _quota() is null;
         SyncAttributionSuggestions();
         var view = UsageAttributionPage.Resolve(
             _attributionReport?.Entries,

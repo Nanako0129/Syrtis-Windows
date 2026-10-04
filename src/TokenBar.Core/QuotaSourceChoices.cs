@@ -29,11 +29,18 @@ public static class QuotaSourceChoices
         return choices;
     }
 
-    /// <summary>What the menu-bar page's quota choices depend on: the
-    /// selection keys, in order. Labels are left out: a label change alone
-    /// (a plan rename) is not worth rebuilding a page under the user.</summary>
-    public static string MenuBarKey(AgentUsagePayload? payload) =>
-        string.Join('\n', Of(payload).Select(choice => choice.Selection));
+    /// <summary>The selection keys a payload offers.</summary>
+    public static IReadOnlySet<string> Selections(AgentUsagePayload? payload) =>
+        Of(payload).Select(choice => choice.Selection).ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>Whether <paramref name="payload"/> offers a choice the page was
+    /// not built with — the only change worth rebuilding an open page for. A
+    /// choice that disappears does not count: an agent that errors on one
+    /// poll and recovers on the next would otherwise rebuild the page (losing
+    /// focus and scroll) on every poll, and its option stays listed until the
+    /// page is next built. Labels are left out for the same reason.</summary>
+    public static bool OffersNewChoice(IReadOnlySet<string>? built, AgentUsagePayload? payload) =>
+        built is null || Of(payload).Any(choice => !built.Contains(choice.Selection));
 
     /// <summary>What the dashboard page's quota-derived rows depend on: the
     /// configured quota clients (client tabs) and the reporting agents'
