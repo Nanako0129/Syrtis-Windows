@@ -418,12 +418,19 @@ public static class QuotaLensProjection
     /// "Grok Build &amp; Bot" tab), else the owner. At most one card per tab,
     /// as macOS: with both members reporting, the owner's card is drawn and
     /// the other's windows stay on the limits card and the all-agent lens.
-    /// The Bot-only case matches macOS since syrtis #471 (b5583fad):
-    /// <c>WindowCardGate.clients</c> (WindowCardLoader.swift:601-641) draws
-    /// the tab's first quota member's card when the tab id is not itself a
-    /// card client, so both platforms show the Bot's weekly card there.
-    /// Antigravity's other member, antigravity-cli, is never a quota
-    /// provider, so that tab is unchanged.</summary>
+    /// Since syrtis #471 (b5583fad) macOS also falls back to another member:
+    /// <c>WindowCardGate.clients</c> (WindowCardLoader.swift:625-639) draws
+    /// the tab's first non-excluded quota member when the tab id is not
+    /// itself a card client. The two rules still differ. macOS keys on
+    /// card-client membership (<c>ClientRegistry.quotaClients</c>,
+    /// ClientRegistry.swift:255-264, includes every present client's tab
+    /// slice), Windows on whether the owner has a window tab. So they agree
+    /// for a pure Bot-only install (no local Grok Build records), but with
+    /// Grok Build records and only the Bot reporting, macOS keys the card
+    /// on grok (which has no window) and Windows draws the Bot's weekly
+    /// card. Windows also ignores the hidden set here. Antigravity's other
+    /// member, antigravity-cli, is never a quota provider, so that tab is
+    /// unchanged.</summary>
     internal static string WindowCardOwner(
         IReadOnlyList<QuotaHistorySeries>? history, AgentUsagePayload? quota, string clientId)
     {
