@@ -20,6 +20,7 @@ public sealed class TrayFeed : IDisposable
     private readonly DispatcherQueueTimer _fast;
     private readonly DispatcherQueueTimer _slow;
     private readonly Action<string> _onStoreChanged;
+    private readonly Action<AgentUsagePayload> _onQuotaFetched;
     private int _fastInFlight; // Interlocked: reset in a background finally
     private int _slowInFlight;
     private int _quotaInFlight;
@@ -96,6 +97,12 @@ public sealed class TrayFeed : IDisposable
         _slow.Start();
         AttachGraph();
         RefreshFast();
+        // Every successful agent-usage fetch lands here, the flyout's too, so
+        // the tray (and the Settings that reads it) never trails the flyout by
+        // up to a slow tick. The coordinator raises them in fetch order and
+        // the dispatcher keeps that order.
+        _onQuotaFetched = quota => _ = _dispatcher.TryEnqueue(() => ApplyQuota(quota));
+        AgentUsageFetchCoordinator.Shared.Fetched += _onQuotaFetched;
         RefreshQuota();
 
         _onStoreChanged = key =>
@@ -133,6 +140,7 @@ public sealed class TrayFeed : IDisposable
         _fast.Stop();
         _slow.Stop();
         AppSettings.Store.Changed -= _onStoreChanged;
+        AgentUsageFetchCoordinator.Shared.Fetched -= _onQuotaFetched;
     }
 
     private void RefreshFast()
@@ -299,26 +307,16 @@ public sealed class TrayFeed : IDisposable
                 var quota = TryFetch(
                     () => AgentUsageFetchCoordinator.Shared.FetchAsync().GetAwaiter().GetResult(),
                     "tray quota");
+                if (quota is not null)
+                {
+                    return; // applied through Fetched, in fetch order
+                }
 
                 _ = _dispatcher.TryEnqueue(() =>
                 {
                     if (_disposed)
                     {
                         return;
-                    }
-
-                    if (quota is not null)
-                    {
-                        Quota = quota;
-                        var persistedSelection = AppSettings.Store.GetString(
-                            "tokenbar.quota.source", QuotaResolver.Auto) ?? QuotaResolver.Auto;
-                        if (QuotaSelectionPolicy.MigrationToPersist(quota, persistedSelection)
-                            is { } migrated)
-                        {
-                            AppSettings.Store.SetString("tokenbar.quota.source", migrated);
-                        }
-
-                        RecomputeVisibleUsage();
                     }
 
                     // Re-resolve and re-render even on a failed fetch: with no
@@ -334,6 +332,31 @@ public sealed class TrayFeed : IDisposable
                 Volatile.Write(ref _quotaInFlight, 0);
             }
         });
+    }
+
+    /// <summary>Adopt a fetched payload, whoever fetched it. The reading's
+    /// age still comes from the payload (ResolveRemaining's resolved-at), not
+    /// from when it arrived, so adopting the flyout's fetch earlier cannot
+    /// make a stale reading look fresh.</summary>
+    private void ApplyQuota(AgentUsagePayload quota)
+    {
+        if (_disposed || ReferenceEquals(Quota, quota))
+        {
+            return;
+        }
+
+        Quota = quota;
+        var persistedSelection = AppSettings.Store.GetString(
+            "tokenbar.quota.source", QuotaResolver.Auto) ?? QuotaResolver.Auto;
+        if (QuotaSelectionPolicy.MigrationToPersist(quota, persistedSelection)
+            is { } migrated)
+        {
+            AppSettings.Store.SetString("tokenbar.quota.source", migrated);
+        }
+
+        RecomputeVisibleUsage();
+        ResolveRemaining();
+        Changed?.Invoke();
     }
 
     private void RecomputeVisibleUsage()

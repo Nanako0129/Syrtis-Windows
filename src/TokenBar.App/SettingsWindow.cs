@@ -337,6 +337,46 @@ public sealed partial class SettingsWindow : Window
             area.Y + (area.Height - AppWindow.Size.Height) / 3));
     }
 
+    /// <summary>The quota-derived option sets the menu-bar and dashboard pages
+    /// were last built from (<see cref="QuotaSourceChoices"/>).</summary>
+    private string? _menuBarQuotaKey;
+    private string? _dashboardQuotaKey;
+
+    /// <summary>Called by the tray whenever its feed changes. Settings reads
+    /// quota through the feed, and an open window used to keep the options it
+    /// was built with (only "Auto" when opened before the first fetch) until
+    /// it was rebuilt. macOS observes the shared payload directly. Only a page
+    /// whose option set actually changed is rebuilt, because a rebuild drops
+    /// keyboard focus; the preview is redrawn either way.</summary>
+    internal static void OnQuotaMaybeChanged()
+    {
+        if (_shared is not { } window || !window.AppWindow.IsVisible)
+        {
+            return;
+        }
+
+        var payload = window._quota();
+        var store = AppSettings.Store;
+        var rebuilt = false;
+        if (QuotaSourceChoices.MenuBarKey(payload) != window._menuBarQuotaKey)
+        {
+            window._pages["menubar"] = window.BuildMenuBarPage(store);
+            rebuilt = true;
+        }
+
+        if (QuotaSourceChoices.DashboardKey(payload) != window._dashboardQuotaKey)
+        {
+            window._pages["dashboard"] = window.BuildDashboardPage(store);
+            rebuilt = true;
+        }
+
+        if (rebuilt)
+        {
+            window.ShowPage(window._selectedTag);
+            window.RebuildPreview();
+        }
+    }
+
     private void Rebuild()
     {
         var store = AppSettings.Store;
@@ -491,19 +531,8 @@ public sealed partial class SettingsWindow : Window
         var payload = _quota();
         var selection = QuotaSelectionPolicy.EffectiveSelection(
             payload, persistedSelection);
-        var choices = new List<(string, string)> { (QuotaResolver.Auto, "Auto (tightest window)".Localized()) };
-        if (payload is not null)
-        {
-            foreach (var agent in payload.Agents.Where(a => a.Error is null))
-            {
-                foreach (var window in agent.UniqueCardWindows)
-                {
-                    choices.Add((
-                        QuotaResolver.Selection(agent.ClientId, window.CardId, agent.Account.AccountKey),
-                        $"{AccountLabel.Of(agent, payload)} · {window.Label.Localized()}"));
-                }
-            }
-        }
+        var choices = QuotaSourceChoices.Of(payload);
+        _menuBarQuotaKey = QuotaSourceChoices.MenuBarKey(payload);
 
         var quotaGroup = new StackPanel { Spacing = 8 };
         quotaGroup.Children.Add(RadioGroup(
@@ -1447,6 +1476,7 @@ public sealed partial class SettingsWindow : Window
         // IDE + CLI pair into one "Antigravity" row — the same TabClients
         // helper the app's tab bar and its selection both use, so this list
         // and the live tab bar can never derive different rows.
+        _dashboardQuotaKey = QuotaSourceChoices.DashboardKey(_quota());
         var quotaIds = _quota()?.ConfiguredClientIds ?? [];
         var present = ClientRegistry.TabClients(usagePresent, quotaIds);
         var orderRaw = store.GetString(ClientRegistry.TabOrderKey) ?? "";

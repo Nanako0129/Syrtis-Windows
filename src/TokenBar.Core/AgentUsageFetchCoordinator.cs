@@ -9,6 +9,14 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
     private Task<AgentUsagePayload>? _inFlight;
     private Action? _beforeFirstFetch;
 
+    /// <summary>Raised with every successfully fetched payload, whichever
+    /// surface asked for it, so a consumer that did not ask (the tray feed,
+    /// when the flyout polled) still holds the newest payload instead of one
+    /// up to a slow tick old. Raised on the fetch thread, before the next
+    /// fetch can start, so payloads are raised in fetch order; a handler must
+    /// marshal to its own thread. Not raised for a failed fetch.</summary>
+    public event Action<AgentUsagePayload>? Fetched;
+
     // Waits for the launch push so the first fetch already carries the extra
     // Claude accounts' cards.
     public static AgentUsageFetchCoordinator Shared { get; } = new(() =>
@@ -51,6 +59,13 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
             _ = next.ContinueWith(
                 completed =>
                 {
+                    // Before the in-flight slot clears: no later fetch exists
+                    // yet, so handlers see payloads in fetch order.
+                    if (completed.Status == TaskStatus.RanToCompletion)
+                    {
+                        Fetched?.Invoke(completed.Result);
+                    }
+
                     lock (_gate)
                     {
                         if (ReferenceEquals(_inFlight, completed))
