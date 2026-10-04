@@ -261,7 +261,7 @@ public class GrokBotConsentTests : IDisposable
     }
 
     [Fact]
-    public void NotNowDuringWaitingLeavesAllowEnabledOnTheDeclinedCard()
+    public void NotNowDuringWaitingEndsWaitingAndShowsTheDeclinedCard()
     {
         var shown = new AgentUsagePayload("now", []);
         var waiting = GrantedOver(shown);

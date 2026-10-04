@@ -945,9 +945,11 @@ public sealed class DashboardModel
     }
 
     /// <summary>After the Grok Bot grant reached the core: a best-effort
-    /// quota refresh. Dropped while one is in flight (as every other
-    /// RefreshQuota call is), and that in-flight fetch may have begun before
-    /// the grant, so the grant can wait for the next poll. macOS guarantees a
+    /// quota refresh. Dropped while this lane's own fetch is in flight (as
+    /// every other RefreshQuota call is); and when not dropped, its FetchAsync
+    /// can still join a fetch the tray started before the grant. Either way
+    /// the payload can predate the grant, and the grant waits for the next
+    /// poll. macOS guarantees a
     /// refetch here (GrokBotKeychainConsent.swift: throttle invalidate plus
     /// the RegistryChange epoch); Windows aligns in slice W6c.</summary>
     public void RefreshQuotaNow() => RefreshQuota();
@@ -981,9 +983,16 @@ public sealed class DashboardModel
                 // the quota, because LazyLaneFold.Outcome(QuotaAttempted,
                 // Quota) reads exactly that pair as a failed fetch, and a
                 // fetch that succeeded would render as failed for a frame.
+                var failures = 0;
                 if (quota is not null)
                 {
                     _latestQuota = quota;
+                }
+                else
+                {
+                    // Counter before the flag, like the payload: a baseline
+                    // that sees "attempted" also sees this failure counted.
+                    failures = Interlocked.Increment(ref _quotaFailures);
                 }
 
                 _quotaAttempted = true;
@@ -998,7 +1007,6 @@ public sealed class DashboardModel
                     // way that matters: Quota stays null, and a surface that
                     // reads null as "not yet" waits forever for an answer that
                     // already came back.
-                    var failures = Interlocked.Increment(ref _quotaFailures);
                     Publish(s => s with { QuotaAttempted = true, QuotaFailures = failures }, graph: null);
                 }
             }
