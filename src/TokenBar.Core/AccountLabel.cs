@@ -82,6 +82,23 @@ public static class AccountLabel
     /// at launch (<c>AntigravityAccounts.Label</c>).</summary>
     public static Func<string, string?> AntigravityLabel { get; set; } = _ => null;
 
+    /// <summary>A captured Antigravity account's 1-based position in the
+    /// app's account list, by key; null when the key is not listed. Set once
+    /// at launch beside <see cref="AntigravityLabel"/>.</summary>
+    public static Func<string, int?> AntigravityOrdinal { get; set; } = _ => null;
+
+    /// <summary>The label for surfaces a passer-by can read (the tray
+    /// tooltip): <see cref="Of"/> except that a captured Antigravity account
+    /// is "Antigravity account {n}" (its list position) instead of its email,
+    /// and an unlisted one the generic "Antigravity account". Never the email
+    /// or the key.</summary>
+    public static string OfPublic(AccountIdentity account, AgentUsagePayload? payload = null) =>
+        account.AccountKey is { } key && key != ClaudeDesktopKey && account.ClientId == AntigravityClientId
+            ? AntigravityOrdinal(key) is { } n
+                ? "Antigravity account {0}".Localized(n)
+                : "Antigravity account".Localized()
+            : Of(account, payload);
+
     // Either separator: the key is a Windows path, but this must not depend
     // on the OS the tests run on. A key that is all separators keeps itself.
     private static string[] Parts(string path)
