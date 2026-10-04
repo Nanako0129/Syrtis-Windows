@@ -73,11 +73,36 @@ fn classify(path: &Path) -> Shape {
     }
 }
 
+/// Whether two folded roots ([`duplicate_key`]) are distinct but one is inside
+/// the other, by whole components: scanning both would count the inner one's
+/// files twice.
+pub(crate) fn overlaps(a: &str, b: &str) -> bool {
+    a.starts_with(&format!("{b}\\")) || b.starts_with(&format!("{a}\\"))
+}
+
+/// The scan registry's rule for one path on its own, before any list or
+/// filesystem check: the drive-path rule (`claude_config_dirs::normalize`),
+/// then nothing at or under the primary's `<home>\.claude` (security review
+/// R2). Shared with the pre-save check (`claude_config_dirs::validate`), so
+/// that check gives this registry's answer without touching the disk.
+pub(crate) fn path_rule(raw: &str, home: Option<&Path>) -> Result<String, &'static str> {
+    let path = normalize(raw)?;
+    if is_at_or_under_default_config_dir(&path, home) {
+        return Err("defaultConfigDir");
+    }
+    Ok(path)
+}
+
 /// Parse a `{"<client-id>": ["<path>", ...]}` replacement. Full-replace: `{}`
 /// clears every root. Each path is normalized by the config-dir rule, refused
 /// when it is at or under the primary's `<home>\.claude` (security review R2),
 /// de-duplicated on the folded form, and capped. Malformed JSON is an error
 /// and nothing is parsed.
+///
+/// Per path, in order: [`path_rule`], then the list rules (duplicate;
+/// `overlappingRoot` for a root at, under or above one already accepted,
+/// whose files would otherwise be scanned twice; limit), then the filesystem
+/// shape.
 pub(crate) fn parse(raw: &str, home: Option<&Path>) -> Result<Candidate, &'static str> {
     let input: BTreeMap<String, Vec<String>> =
         serde_json::from_str(raw).map_err(|_| "invalidJson")?;
@@ -94,10 +119,12 @@ pub(crate) fn parse(raw: &str, home: Option<&Path>) -> Result<Candidate, &'stati
             let reason = if !supported {
                 "unsupportedClient"
             } else {
-                match normalize(raw_path) {
+                match path_rule(raw_path, home) {
                     Err(reason) => reason,
-                    Ok(path) if is_at_or_under_default_config_dir(&path, home) => "defaultConfigDir",
                     Ok(path) if seen.contains(&duplicate_key(&path)) => "duplicate",
+                    Ok(path) if seen.iter().any(|other| overlaps(other, &duplicate_key(&path))) => {
+                        "overlappingRoot"
+                    }
                     Ok(_) if seen.len() >= MAX_EXTRA_SCAN_PATHS => "limitExceeded",
                     Ok(path) => match classify(Path::new(&path)) {
                         Shape::NotDirectory => "notDirectory",
@@ -173,6 +200,31 @@ mod tests {
         assert!(reasons[2..].iter().all(|reason| *reason == "limitExceeded"));
         // Missing directories are registered but reported, never dropped.
         assert_eq!(candidate.report["unreadable"].as_array().unwrap().len(), MAX_EXTRA_SCAN_PATHS);
+    }
+
+    /// A root at, under or above one already accepted is refused (its files
+    /// would be scanned twice); a sibling with a shared prefix is not.
+    #[test]
+    fn refuses_overlapping_roots() {
+        let raw = serde_json::json!({ "claude": [
+            r"D:\a\projects",
+            r"D:\a\projects\x\projects",
+            "d:/A",
+            r"D:\a\projects2",
+        ]})
+        .to_string();
+        let candidate = parse(&raw, None).unwrap();
+        let reasons: Vec<(u64, &str)> = candidate.report["rejected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| (entry["index"].as_u64().unwrap(), entry["reason"].as_str().unwrap()))
+            .collect();
+        assert_eq!(reasons, [(1, "overlappingRoot"), (2, "overlappingRoot")]);
+        assert_eq!(
+            candidate.registry["claude"],
+            [PathBuf::from(r"D:\a\projects"), PathBuf::from(r"D:\a\projects2")]
+        );
     }
 
     /// R2 for the scan registry: anything at or under the primary's

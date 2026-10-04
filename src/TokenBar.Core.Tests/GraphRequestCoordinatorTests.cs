@@ -780,6 +780,29 @@ public class GraphRequestCoordinatorTests
         Assert.DoesNotContain("ago", RefreshTip.Footer(null, now, now));
     }
 
+    /// <summary>The header control and Ctrl+R share one busy condition, and
+    /// a background request (poll, year switch) counts, not only a manual
+    /// refresh (macOS refreshDisabled).</summary>
+    [Fact]
+    public void RefreshIsBusyForAnyGraphRequest()
+    {
+        Assert.False(RefreshTip.Busy(loading: false, manualRefresh: false, graphInFlight: false));
+        Assert.True(RefreshTip.Busy(loading: false, manualRefresh: false, graphInFlight: true));
+        Assert.True(RefreshTip.Busy(loading: false, manualRefresh: true, graphInFlight: false));
+        Assert.True(RefreshTip.Busy(loading: true, manualRefresh: false, graphInFlight: false));
+    }
+
+    /// <summary>Only restored data whose live refresh failed is tinted; restored
+    /// data with the refresh still to come, and live data, are not.</summary>
+    [Fact]
+    public void OnlyAFailedRestoreIsTinted()
+    {
+        var at = new DateTimeOffset(2026, 10, 3, 9, 0, 0, TimeSpan.Zero);
+        Assert.True(RefreshTip.ShowsStaleRestore(at, restoreFailed: true));
+        Assert.False(RefreshTip.ShowsStaleRestore(at, restoreFailed: false));
+        Assert.False(RefreshTip.ShowsStaleRestore(null, restoreFailed: true));
+    }
+
     [Fact]
     public void RefreshTipSaysHowOldRestoredDataIs()
     {

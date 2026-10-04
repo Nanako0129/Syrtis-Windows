@@ -35,6 +35,38 @@ public static class TraceCollapse
             .Where(b => selected.Contains(b.Client))
             .ToList();
 
+    /// <summary>The trailing window the live trace is read over, in seconds
+    /// (macOS UsageTraceCard windowSecs: 600).</summary>
+    public const int WindowSecs = 600;
+
+    /// <summary>Rows the live-session card lists at most (UsageTraceCard
+    /// maxRows).</summary>
+    public const int MaxRows = 5;
+
+    /// <summary>The card's rows: the selected clients' buckets, per bucket when
+    /// detailed or collapsed per client, capped at <see cref="MaxRows"/>.
+    /// Selection happens before collapse and the cap, or a high-rate hidden
+    /// client could evict every selected row.</summary>
+    public static IReadOnlyList<TraceBucket> CardRows(
+        IEnumerable<TraceBucket> buckets, IReadOnlySet<string> selected, bool detailed)
+    {
+        var picked = FilterByClients(buckets, selected);
+        return [.. (detailed ? picked : CollapseByClient(picked)).Take(MaxRows)];
+    }
+
+    /// <summary>The card header, "last 10m · 12K/m total": the window in whole
+    /// minutes and the selected clients' summed rate, every row and not only
+    /// the five shown (UsageTraceCard.swift:30-41).</summary>
+    public static string Header(IEnumerable<TraceBucket> buckets, IReadOnlySet<string> selected) =>
+        "last {0}m · {1}/m total".Localized(
+            Math.Max(1, (int)Math.Round(WindowSecs / 60.0)),
+            Format.CompactTokens((long)Math.Round(FilterByClients(buckets, selected).Sum(b => b.TokensPerMin))));
+
+    /// <summary>A row's bar length in percent of the fastest shown row, never
+    /// under 4 so a slow row stays visible (UsageTraceCard.swift row).</summary>
+    public static double BarPercent(double tokensPerMin, double maxTokensPerMin) =>
+        maxTokensPerMin > 0 ? Math.Max(4, tokensPerMin / maxTokensPerMin * 100) : 0;
+
     public static IReadOnlyList<TraceBucket> CollapseByClient(IEnumerable<TraceBucket> buckets)
     {
         var groups = new Dictionary<string, Slot>();

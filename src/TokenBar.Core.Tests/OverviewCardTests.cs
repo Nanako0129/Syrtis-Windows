@@ -94,6 +94,29 @@ public class OverviewScopeTests
         Assert.Equal("antigravity", OverviewScope.LimitsClientId("antigravity-cli"));
     }
 
+    // The "Grok Build & Bot" tab's limits card filtered on the owner alone
+    // ("grok"), so the grok-bot card never showed. It covers the whole group;
+    // the Antigravity group (control) shows exactly what the owner filter did,
+    // because its payload rows are all keyed "antigravity".
+    [Fact]
+    public void LimitsClientsCoverEveryMemberOfTheTabGroup()
+    {
+        static IReadOnlyList<string> Shown(string? tab, params string[] payload) =>
+            OverviewScope.LimitsClients(tab) is { } ids ? [.. payload.Where(ids.Contains)] : payload;
+
+        Assert.Equal(["grok", "grok-bot"], Shown("grok", "grok", "grok-bot", "codex"));
+        Assert.Equal(["grok-bot"], Shown("grok", "grok-bot", "codex"));
+        Assert.Equal(["antigravity"], Shown("antigravity", "antigravity", "codex"));
+        Assert.Equal(["antigravity"], Shown("antigravity-cli", "antigravity", "codex"));
+        Assert.Equal(["claude"], Shown("claude", "claude", "grok-bot"));
+        Assert.Null(OverviewScope.LimitsClients(null));
+        // The card title is what ships: TabDisplayName of the tab's own id.
+        Assert.Equal("Grok Build & Bot", ClientRegistry.TabDisplayName("grok"));
+        Assert.Equal("Antigravity", ClientRegistry.TabDisplayName("antigravity"));
+        // antigravity-cli is not a TabGroups key (TabSlice has one member), so it keeps its own name.
+        Assert.Equal("Antigravity CLI", ClientRegistry.TabDisplayName("antigravity-cli"));
+    }
+
     [Fact]
     public void LimitsClientIdLeavesAClientThatOwnsItsOwnQuotaAlone()
     {

@@ -110,11 +110,7 @@ public sealed partial class DashboardView : UserControl
         YearButton.Content = "All".Localized();
         QuitButton.Content = "Quit".Localized();
 
-        RefreshButton.Click += (_, _) =>
-        {
-            _model?.RefreshForce();
-            UpdateRefreshControl();
-        };
+        RefreshButton.Click += (_, _) => TryRefresh();
         HoverTip.Attach(RefreshButton, () => RefreshTip.Text(_model?.Current?.RestoredAt, DateTimeOffset.Now));
 
         SettingsButton.Click += (_, _) => TrayService.OpenSettings?.Invoke();
@@ -182,12 +178,10 @@ public sealed partial class DashboardView : UserControl
         KeyboardAccelerators.Add(escape);
         AddAccel(Windows.System.VirtualKey.W, Windows.System.VirtualKeyModifiers.Control,
             () => HideRequested?.Invoke());
+        // Same busy condition as the visible control: the shortcut cannot
+        // start a refresh the disabled button would refuse (macOS ⌘R guard).
         AddAccel(Windows.System.VirtualKey.R, Windows.System.VirtualKeyModifiers.Control,
-            () =>
-            {
-                _model?.RefreshForce();
-                UpdateRefreshControl();
-            });
+            TryRefresh);
         AddAccel(Windows.System.VirtualKey.G, Windows.System.VirtualKeyModifiers.Control,
             ToggleChartView);
         AddAccel(Windows.System.VirtualKey.Q, Windows.System.VirtualKeyModifiers.Control,
@@ -498,15 +492,50 @@ public sealed partial class DashboardView : UserControl
         SwitchTo(_view);
     }
 
-    /// <summary>One control, two states (macOS refreshButton): the glyph
-    /// while idle, a spinner while a forced re-read or the initial load runs.</summary>
+    /// <summary>Button and Ctrl+R. Refused while a request runs, but not
+    /// for "nothing loaded yet": when a first load failed with no snapshot,
+    /// a manual retry must stay possible (macOS refreshDisabled has no
+    /// loading term either).</summary>
+    private void TryRefresh()
+    {
+        if (_model is null
+            || RefreshTip.Busy(loading: false, _model.Refreshing, _model.GraphInFlight))
+        {
+            return;
+        }
+
+        _model.RefreshForce();
+        UpdateRefreshControl(loading: _model.Current is null);
+    }
+
+    /// <summary>One control (macOS refreshButton): a spinner, disabled, while
+    /// any graph request or the initial load runs; otherwise the glyph,
+    /// tinted when restored data is on screen and its refresh failed.</summary>
     private void UpdateRefreshControl(bool loading = false)
     {
-        var spinning = loading || _model?.Refreshing == true;
+        var spinning = RefreshTip.Busy(
+            loading, _model?.Refreshing == true, _model?.GraphInFlight == true);
         RefreshButton.Visibility = spinning ? Visibility.Collapsed : Visibility.Visible;
+        RefreshButton.IsEnabled = !spinning;
         RefreshSpinner.Visibility = spinning ? Visibility.Visible : Visibility.Collapsed;
         RefreshSpinner.IsActive = spinning;
+        var current = _model?.Current;
+        if (RefreshTip.ShowsStaleRestore(current?.RestoredAt, current?.RestoreFailed == true))
+        {
+            RefreshGlyph.Foreground = StaleRestoreBrush;
+        }
+        else
+        {
+            // Back to the inherited button foreground, as before this state
+            // existed (and correct across a theme switch).
+            RefreshGlyph.ClearValue(IconElement.ForegroundProperty);
+        }
     }
+
+    /// <summary>macOS tints the glyph orange in this state; one brush, made
+    /// once.</summary>
+    private static readonly SolidColorBrush StaleRestoreBrush =
+        new(Microsoft.UI.Colors.Orange);
 
     /// <summary>The model powers lazy lens loading, told which lens is
     /// active here and then by <see cref="SwitchTo"/>. Here because SwitchTo
@@ -1060,7 +1089,7 @@ public sealed partial class DashboardView : UserControl
         // itself, a client id on that client's own tab. See OverviewScope's
         // own doc comment for why that changes what below renders.
         var singleClient = OverviewScope.SingleClient(_activeClientTab);
-        var limitsClientId = OverviewScope.LimitsClientId(singleClient);
+        var limitsClients = OverviewScope.LimitsClients(singleClient);
 
         // First-run setup cards, at the top of the global Overview lens only
         // (macOS PopoverView.swift:712-720).
@@ -1084,24 +1113,38 @@ public sealed partial class DashboardView : UserControl
                 OverviewCard.QuotaSummary => OverviewScope.ShowsQuotaSummary(singleClient)
                     ? BuildQuotaSummary(snapshot)
                     : null,
-                OverviewCard.Chart => BuildUsageChartCard(snapshot),
-                OverviewCard.Limits => limitsClientId is { } hiddenCid
+                // A client tab whose client has no local records gets a line
+                // saying so, not an empty chart (OverviewView.swift:101-107).
+                OverviewCard.Chart => OverviewScope.HasNoLocalUsage(
+                        singleClient, _selectedClients, (_selectedStats
+                            ?? new UsageStats(snapshot.Graph, _selectedSet)).PresentClients)
+                    ? Ui.Card(
+                        "Token Usage".Localized(),
+                        Ui.Dim("No local usage records in this range.".Localized()))
+                    : BuildUsageChartCard(snapshot),
+                OverviewCard.Limits => limitsClients is not null
                     && LimitsCardFilter.HidesClientCard(
                         snapshot.Quota?.Agents ?? [],
-                        hiddenCid,
+                        limitsClients,
                         ClientRegistry.HiddenLimitsClients(AppSettings.Store))
                     ? null
                     : Ui.Card(
-                        limitsClientId is { } cid
-                            ? "{0} limits".Localized(ClientRegistry.ShortName(cid))
+                        // macOS "%@ limits" over tabDisplayName(singleClient)
+                        // (OverviewView.swift:86, QuotaView.swift:72); the
+                        // grouped tab keeps its label ("Grok Build & Bot").
+                        singleClient is { } tab
+                            ? "{0} limits".Localized(ClientRegistry.TabDisplayName(tab))
                             : "Agent limits".Localized(),
-                        BuildLimits(snapshot, limitsClientId)),
-                // Absent when there is no live session, or when this tab is
-                // scoped to one client — the trace answers "across everything
-                // right now", which a single-client tab did not ask.
+                        BuildLimits(snapshot, limitsClients)),
+                // Absent when this tab is scoped to one client — the trace
+                // answers "across everything right now", which a single-client
+                // tab did not ask. With nothing running it stays and says so
+                // (macOS OverviewView.swift:111-114).
                 OverviewCard.Trace => OverviewScope.ShowsTrace(singleClient)
-                    && BuildTrace(snapshot) is { } trace
-                    ? Ui.Card("Live session".Localized(), trace)
+                    ? Ui.Card(
+                        "Live session".Localized(),
+                        BuildTrace(snapshot),
+                        TraceCollapse.Header(snapshot.Trace, _selectedSet))
                     : null,
                 OverviewCard.Models => Ui.Card(
                     OverviewScope.ModelsTitle(singleClient), BuildModelRows(snapshot, collapsible: true)),
@@ -1683,21 +1726,21 @@ public sealed partial class DashboardView : UserControl
             _ => PaceMode.Historical,
         };
 
-    /// <summary><paramref name="clientId"/> narrows the card to one
-    /// subscription for the per-client Quota lens (5e). A parameter rather than
-    /// a second builder: this card answers "where does the allowance stand
-    /// right now", and a copy of it would be free to disagree with the original
-    /// on the same window.</summary>
+    /// <summary><paramref name="clientIds"/> narrows the card to one tab's
+    /// subscriptions (a grouped tab has more than one) for a client tab and the
+    /// per-client Quota lens (5e). A parameter rather than a second builder:
+    /// this card answers "where does the allowance stand right now", and a copy
+    /// of it would be free to disagree with the original on the same window.</summary>
     private static FrameworkElement BuildLimits(
-        DashboardModel.Snapshot snapshot, string? clientId = null)
+        DashboardModel.Snapshot snapshot, IReadOnlyList<string>? clientIds = null)
     {
         var panel = new StackPanel { Spacing = 10 };
-        // Narrowed to the tab's client, then the per-client limits toggle and
-        // (Overview only) tab visibility applied, before any exit below reads
-        // the list (LimitsCardFilter).
+        // Narrowed to the tab's clients (every member of a grouped tab), then
+        // the per-client limits toggle and (Overview only) tab visibility
+        // applied, before any exit below reads the list (LimitsCardFilter).
         var agents = LimitsCardFilter.Visible(
             snapshot.Quota?.Agents ?? [],
-            clientId,
+            clientIds,
             ClientRegistry.HiddenTabClients(AppSettings.Store),
             ClientRegistry.HiddenLimitsClients(AppSettings.Store));
 
@@ -1712,7 +1755,7 @@ public sealed partial class DashboardView : UserControl
         // for an empty visible list). A client tab whose card is off draws no
         // card at all (LimitsCardFilter.HidesClientCard, at the callers).
         var payloadHasCards = (snapshot.Quota?.Agents.Count ?? 0) > 0;
-        if (clientId is null && payloadHasCards && agents.Count == 0)
+        if (clientIds is null && payloadHasCards && agents.Count == 0)
         {
             panel.Children.Add(Ui.Dim("No supported agents yet".Localized()));
             return panel;
@@ -1740,7 +1783,7 @@ public sealed partial class DashboardView : UserControl
         var now = DateTimeOffset.Now;
         var liveClients = AgentLimitsText.LiveClients(snapshot.Trace);
         // Only the multi-client card reorders, as on macOS (`reorderable`).
-        var reorderable = clientId is null;
+        var reorderable = clientIds is null;
         if (reorderable)
         {
             agents = LimitsCardOrder.Apply(
@@ -1835,7 +1878,7 @@ public sealed partial class DashboardView : UserControl
         return panel;
     }
 
-    private FrameworkElement? BuildTrace(DashboardModel.Snapshot snapshot) =>
+    private FrameworkElement BuildTrace(DashboardModel.Snapshot snapshot) =>
         Ui.TraceRows(
             snapshot.Trace,
             _selectedSet,

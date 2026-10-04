@@ -20,7 +20,7 @@ namespace TokenBar.App;
 /// re-read from the registry, quota windows from the tray feed). Every
 /// control binds the same tokenbar.* keys the cards and tray read.
 /// </summary>
-public sealed class SettingsWindow : Window
+public sealed partial class SettingsWindow : Window
 {
     private static SettingsWindow? _shared;
     private readonly Func<AgentUsagePayload?> _quota;
@@ -955,6 +955,8 @@ public sealed class SettingsWindow : Window
         refresh.Children.Add(Hint(SettingsCopy.RefreshHint.Localized()));
         panel.Children.Add(Section("Data refresh".Localized(), refresh));
 
+        panel.Children.Add(Section(ClaudeAccountsCopy.Section.Localized(), BuildClaudeAccounts(store)));
+
         // ── Discord (macOS SettingsPanel :944-1007) ─────────────────────
         _discordSection = Section(DiscordCopy.Section.Localized(), BuildDiscord(store));
         panel.Children.Add(_discordSection);
@@ -1766,11 +1768,10 @@ public sealed class SettingsWindow : Window
         var selected = new HashSet<string>(
             ClientRegistry.DisplayClients(present, store), StringComparer.Ordinal);
         var detailed = store.GetBool("tokenbar.trace.detailed", false);
-        if (Ui.TraceRows(_trace(), selected, detailed) is { } rows)
-        {
-            _preview.Children.Add(Ui.Text("LIVE SESSION".Localized(), 10, 0.55, bold: true));
-            _preview.Children.Add(rows);
-        }
+        // Always shown, like the macOS preview's UsageTraceCard: an idle
+        // session reads "No activity in this window" rather than vanishing.
+        _preview.Children.Add(Ui.Text("LIVE SESSION".Localized(), 10, 0.55, bold: true));
+        _preview.Children.Add(Ui.TraceRows(_trace(), selected, detailed));
     }
 
     /// <summary>frame-00 of the cat/parrot set, letterboxed like the

@@ -5,6 +5,7 @@ use crate::agent_account_scope::{
 use crate::agent_antigravity;
 use crate::agent_copilot;
 use crate::agent_grok;
+use crate::agent_grokbot;
 use crate::agent_kiro;
 use crate::agent_opencode_go;
 use crate::agent_quota_duration::{DurationEvidence, DurationSource, DurationUnavailableReason};
@@ -1375,6 +1376,13 @@ fn usable_success(snapshot: &AgentUsageSnapshot) -> bool {
             .windows
             .iter()
             .any(|window| window.card_id == "billing.weekly.v1"),
+        // Grok Bot is stricter than the rest: a response can carry windows
+        // while omitting the weekly meter, and only that meter is the card
+        // (macOS `usable_success`).
+        "grok-bot" => snapshot
+            .windows
+            .iter()
+            .any(|window| window.card_id == agent_grokbot::WEEKLY_WINDOW_KEY),
         // "kiro" carries the Kiro subscription quota and "opencode" the OpenCode
         // Go quota; each success is a non-empty window set, so a later transient
         // keeps the last-good card instead of a bare error (macOS `usable_success`).
@@ -1537,6 +1545,7 @@ struct Fetchers {
     grok: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
     kiro: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
     opencode_go: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
+    grok_bot: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
     subscriptions: fn() -> Vec<String>,
 }
 
@@ -1548,6 +1557,7 @@ const PRODUCTION_FETCHERS: Fetchers = Fetchers {
     grok: || Box::pin(fetch_grok()),
     kiro: || Box::pin(fetch_kiro()),
     opencode_go: || Box::pin(fetch_opencode_go()),
+    grok_bot: || Box::pin(fetch_grokbot()),
     subscriptions: crate::opencode_integrations::detect_subscriptions,
 };
 
@@ -1557,14 +1567,15 @@ pub async fn run(publication_generation: u64) -> AgentUsagePayload {
 
 async fn run_with(fetchers: &Fetchers, publication_generation: u64) -> AgentUsagePayload {
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    let (codex, claude, antigravity, copilot, grok, kiro, opencode_go) = tokio::join!(
+    let (codex, claude, antigravity, copilot, grok, kiro, opencode_go, grok_bot) = tokio::join!(
         (fetchers.codex)(),
         (fetchers.claude_accounts)(),
         (fetchers.antigravity)(),
         (fetchers.copilot)(),
         (fetchers.grok)(),
         (fetchers.kiro)(),
-        (fetchers.opencode_go)()
+        (fetchers.opencode_go)(),
+        (fetchers.grok_bot)()
     );
     let mut agents = vec![codex];
     agents.extend(claude);
@@ -1576,6 +1587,11 @@ async fn run_with(fetchers: &Fetchers, publication_generation: u64) -> AgentUsag
     // Grok only appears when ~/.grok/auth.json has credentials.
     if let Some(grok) = grok {
         agents.push(grok);
+    }
+    // Grok Bot right after Grok Build, as macOS's QUOTA_PROVIDERS orders them;
+    // it only appears when a Cursor login or a Grok Bot install is present.
+    if let Some(grok_bot) = grok_bot {
+        agents.push(grok_bot);
     }
     // Kiro only appears when its IDE token file is present.
     if let Some(kiro) = kiro {
@@ -1607,12 +1623,8 @@ mod kiro_deps {
     use crate::kiro_integrations::KiroCredentialLoad;
 
     pub(super) type KiroLoad = Pin<Box<dyn Future<Output = KiroCredentialLoad>>>;
-    pub(super) use crate::agent_kiro::ResolveCredential;
+    pub(super) use crate::agent_kiro::{ResolveCredential, ResolveHistoryScope};
     pub(super) type Enrich = dyn Fn(&mut AgentUsageSnapshot, i64);
-    pub(super) type ResolveHistoryScope = dyn Fn(
-        &str,
-        Option<(AuthoritativeIdKind, &str)>,
-    ) -> Result<HistoryScope, AccountScopeError>;
 
     pub(super) struct KiroDeps<'a> {
         pub(super) load_credential: &'a dyn Fn(DateTime<Utc>) -> KiroLoad,
@@ -1819,6 +1831,116 @@ async fn fetch_opencode_go_with(deps: &OpenCodeGoDeps<'_>) -> Option<AgentUsageS
         outcome,
         |snapshot| (deps.enrich)(snapshot, now.timestamp()),
     )
+}
+
+/// Everything `fetch_grokbot_with` reaches outside itself, sealed the same way
+/// as `KiroDeps`: outside `#[cfg(test)]` the only constructor is
+/// `GrokBotDeps::system()`, so release builds read the real config root and
+/// send only to `GROK_BOT_USAGE_URL`. No environment variable overrides either.
+mod grokbot_deps {
+    use super::kiro_deps::{Enrich, ResolveCredential, ResolveHistoryScope};
+    use super::*;
+
+    pub(super) struct GrokBotDeps<'a> {
+        /// `%APPDATA%`; both the Grok Bot and the Cursor store live under it.
+        pub(super) config_dir: Option<PathBuf>,
+        pub(super) resolve_credential: &'a ResolveCredential,
+        pub(super) resolve_history_scope: &'a ResolveHistoryScope,
+        pub(super) usage_url: &'a str,
+        pub(super) last_good: &'a Mutex<ProviderLastGoodCache>,
+        pub(super) enrich: &'a Enrich,
+        _sealed: (),
+    }
+
+    impl GrokBotDeps<'static> {
+        pub(super) fn system() -> Self {
+            Self {
+                config_dir: dirs::config_dir(),
+                resolve_credential: &agent_account_scope::resolve_credential,
+                resolve_history_scope: &agent_account_scope::resolve_history_scope,
+                usage_url: agent_grokbot::GROK_BOT_USAGE_URL,
+                last_good: &PROVIDER_LAST_GOOD,
+                enrich: &enrich_snapshot,
+                _sealed: (),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    impl<'a> GrokBotDeps<'a> {
+        pub(super) fn for_test(
+            config_dir: PathBuf,
+            resolve_credential: &'a ResolveCredential,
+            resolve_history_scope: &'a ResolveHistoryScope,
+            usage_url: &'a str,
+            last_good: &'a Mutex<ProviderLastGoodCache>,
+            enrich: &'a Enrich,
+        ) -> Self {
+            Self {
+                config_dir: Some(config_dir),
+                resolve_credential,
+                resolve_history_scope,
+                usage_url,
+                last_good,
+                enrich,
+                _sealed: (),
+            }
+        }
+    }
+}
+use grokbot_deps::GrokBotDeps;
+
+async fn fetch_grokbot() -> Option<AgentUsageSnapshot> {
+    fetch_grokbot_with(&GrokBotDeps::system()).await
+}
+
+async fn fetch_grokbot_with(deps: &GrokBotDeps<'_>) -> Option<AgentUsageSnapshot> {
+    let result = agent_grokbot::fetch(
+        deps.config_dir.clone(),
+        deps.usage_url,
+        deps.resolve_credential,
+        deps.resolve_history_scope,
+    )
+    .await;
+    // After the fetch, not before it: this instant becomes `updated_at` and
+    // the enrich timestamp (macOS `fetch_grokbot`).
+    let now = Utc::now();
+    let outcome = grokbot_outcome(result, now);
+    apply_provider_outcome_with(
+        deps.last_good,
+        "grok-bot",
+        "oauth",
+        now,
+        outcome,
+        |snapshot| (deps.enrich)(snapshot, now.timestamp()),
+    )
+}
+
+fn grokbot_outcome(
+    result: Result<Option<agent_grokbot::GrokBotData>, ProviderFetchFailure>,
+    now: DateTime<Utc>,
+) -> ProviderFetchOutcome {
+    match result {
+        Ok(Some(data)) => ProviderFetchOutcome::Success {
+            cache_binding: data.cache_binding,
+            snapshot: AgentUsageSnapshot {
+                account_key: None,
+                merge_scope: None,
+                client_id: "grok-bot".to_string(),
+                source: "oauth".to_string(),
+                updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+                identity: data.identity,
+                account_scope: data.account_scope,
+                history_scope: data.history_scope,
+                windows: data.windows,
+                credits: None,
+                error: None,
+                transport_diagnostic: None,
+            },
+        },
+        Ok(None) => ProviderFetchOutcome::Absent,
+        Err(failure) => ProviderFetchOutcome::Failure(failure),
+    }
 }
 
 async fn fetch_grok() -> Option<AgentUsageSnapshot> {
@@ -15134,6 +15256,7 @@ mod kiro_tests {
             grok: || Box::pin(async { Some(stub("grok")) }),
             kiro: || Box::pin(async { Some(stub("kiro")) }),
             opencode_go: || Box::pin(async { Some(stub("opencode")) }),
+            grok_bot: || Box::pin(async { Some(stub("grok-bot")) }),
             subscriptions: || vec!["StubSubscription".to_string()],
         };
         let payload = run_with(&stubs, 7).await;
@@ -15151,6 +15274,7 @@ mod kiro_tests {
                 "antigravity",
                 "copilot",
                 "grok",
+                "grok-bot",
                 "kiro",
                 "opencode"
             ]
@@ -15454,5 +15578,479 @@ mod opencode_go_tests {
         );
         assert_eq!(server.await.unwrap().len(), 3);
         assert_eq!(harness.enrich_calls(), 1);
+    }
+}
+
+/// W6a: the Grok Bot card through its production entry (`fetch_grokbot_with`).
+/// Every dependency is test-owned, as in `kiro_tests`: the config root is a temp
+/// dir holding a fixture Cursor `state.vscdb` (and, for the guard, a Grok Bot
+/// install), account-scope rows go to a `TestRefreshScope` temp root, history
+/// goes to a recorder, and the request goes to a loopback mock.
+#[cfg(test)]
+mod grokbot_tests {
+    use super::kiro_deps::{Enrich, ResolveCredential, ResolveHistoryScope};
+    use super::*;
+    use crate::agent_account_scope::test_support::TestRefreshScope;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    const SENTINEL_TOKEN: &str = "grokbot-sentinel-session-9b21e4";
+    const USER_ID: &str = "user_FixtureAbc1234567890xyz";
+    const PROFILE_PRIVATE: &str = "profile-private-canary";
+    const USAGE_OK: &str = r#"{
+        "usagePercent": 25,
+        "currentPeriodStart": "2026-09-08T12:00:00Z",
+        "nextResetTimestampUtc": "2099-01-01T00:00:00Z",
+        "grokPlanLabel": "SuperGrok"
+    }"#;
+
+    struct Harness {
+        dir: PathBuf,
+        scope: Arc<TestRefreshScope>,
+        cache: Mutex<ProviderLastGoodCache>,
+        enrich_calls: Arc<AtomicUsize>,
+        resolve_credential: Box<ResolveCredential>,
+        resolve_history: Box<ResolveHistoryScope>,
+        enrich: Box<Enrich>,
+        url: String,
+    }
+
+    impl Harness {
+        fn new(tag: &str, url: String) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "tb-grokbot-fetch-{tag}-{}-{}",
+                std::process::id(),
+                Utc::now().timestamp_nanos_opt().unwrap()
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            // Written at a literal path, read back through the production
+            // path derivation from the config root.
+            crate::agent_grokbot::tests::write_state_db(
+                &dir.join("Cursor")
+                    .join("User")
+                    .join("globalStorage")
+                    .join("state.vscdb"),
+                &[
+                    ("cursorAuth/accessToken", &format!("\"{SENTINEL_TOKEN}\"")),
+                    ("glass.lastSignedInAuthId", &format!("glass-{USER_ID}")),
+                    (
+                        "cursorAuth/cachedScopedProfile",
+                        &format!("{{\"userId\":\"{USER_ID}\",\"email\":\"{PROFILE_PRIVATE}\"}}"),
+                    ),
+                ],
+            );
+            let scope = Arc::new(TestRefreshScope::new("grok-bot", tag));
+            let enrich_calls = Arc::new(AtomicUsize::new(0));
+            let credential_scope = Arc::clone(&scope);
+            let history_scope = Arc::clone(&scope);
+            let calls = Arc::clone(&enrich_calls);
+            Self {
+                dir,
+                cache: Mutex::new(ProviderLastGoodCache::default()),
+                enrich_calls,
+                resolve_credential: Box::new(move |provider, source, location, marker| {
+                    assert_eq!(provider, "grok-bot");
+                    credential_scope.resolve_current(source, location, marker)
+                }),
+                resolve_history: Box::new(move |provider, authoritative| {
+                    history_scope.resolve_history(provider, authoritative)
+                }),
+                enrich: Box::new(move |snapshot, now| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    enrich_snapshot_with(snapshot, now, |_, _, _| Ok(vec![]));
+                }),
+                scope,
+                url,
+            }
+        }
+
+        /// A Grok Bot install: `sand-secrets.json` exists (here, as whatever
+        /// `make` creates at that path).
+        fn install_grok_bot(&self, make: impl FnOnce(&Path)) {
+            let folder = self.dir.join("Grok Bot");
+            fs::create_dir_all(&folder).unwrap();
+            make(&folder.join("sand-secrets.json"));
+        }
+
+        fn deps(&self) -> GrokBotDeps<'_> {
+            GrokBotDeps::for_test(
+                self.dir.clone(),
+                &*self.resolve_credential,
+                &*self.resolve_history,
+                &self.url,
+                &self.cache,
+                &*self.enrich,
+            )
+        }
+
+        fn enrich_calls(&self) -> usize {
+            self.enrich_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+            self.scope.cleanup();
+        }
+    }
+
+    /// Loopback stand-in: answers one connection per scripted raw response, in
+    /// order, and returns every request head it saw — including any connection
+    /// beyond the scripted ones.
+    async fn mock(responses: Vec<String>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/api/dashboard/get-sand-usage-status",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move {
+            async fn read_head(stream: &mut tokio::net::TcpStream) -> String {
+                let mut head = Vec::new();
+                let mut buf = [0_u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let read = stream.read(&mut buf).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&buf[..read]);
+                }
+                String::from_utf8(head).unwrap()
+            }
+            let mut heads = Vec::new();
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                heads.push(read_head(&mut stream).await);
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            if let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await
+            {
+                heads.push(read_head(&mut stream).await);
+            }
+            heads
+        });
+        (url, server)
+    }
+
+    fn reply(status: u16, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn header_lines<'a>(head: &'a str, name: &str) -> Vec<&'a str> {
+        head.lines()
+            .filter(|line| {
+                line.to_ascii_lowercase()
+                    .starts_with(&format!("{}:", name.to_ascii_lowercase()))
+            })
+            .collect()
+    }
+
+    /// (1) + (6): fixture Cursor DB -> one `grok-bot` card; the mock saw exactly
+    /// one POST carrying the cookie built from the fixture, macOS's Origin and
+    /// Referer, and nothing else of the fixture. Rows land in the temp root and
+    /// enrich ran once.
+    #[tokio::test]
+    async fn fetch_grokbot_with_cursor_fixture_sends_only_the_session_cookie() {
+        let (url, server) = mock(vec![reply(200, USAGE_OK)]).await;
+        let harness = Harness::new("fixture", url);
+
+        let snapshot = fetch_grokbot_with(&harness.deps())
+            .await
+            .expect("a signed-in Cursor yields a card");
+        assert_eq!(snapshot.client_id, "grok-bot");
+        assert_eq!(snapshot.source, "oauth");
+        assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+        assert_eq!(snapshot.windows.len(), 1);
+        assert_eq!(snapshot.windows[0].card_id, "weekly.v1");
+        assert!(snapshot.account_scope.is_ok());
+        let owner = serde_json::json!([USER_ID, null]).to_string();
+        assert_eq!(
+            snapshot.history_scope.as_ref().ok(),
+            harness
+                .scope
+                .resolve_history("grok-bot", Some((AuthoritativeIdKind::OpaqueId, &owner)))
+                .as_ref()
+                .ok()
+        );
+        assert_eq!(
+            snapshot.identity.as_ref().and_then(|i| i.plan.as_deref()),
+            Some("SuperGrok")
+        );
+
+        let heads = server.await.unwrap();
+        assert_eq!(heads.len(), 1, "exactly one request: {heads:?}");
+        let head = &heads[0];
+        assert_eq!(
+            head.lines().next().unwrap(),
+            "POST /api/dashboard/get-sand-usage-status HTTP/1.1"
+        );
+        assert_eq!(
+            header_lines(head, "cookie"),
+            vec![
+                format!("cookie: WorkosCursorSessionToken={USER_ID}%3A%3A{SENTINEL_TOKEN}")
+                    .as_str()
+            ]
+        );
+        assert_eq!(
+            header_lines(head, "origin"),
+            vec!["origin: https://cursor.com"]
+        );
+        assert_eq!(
+            header_lines(head, "referer"),
+            vec!["referer: https://cursor.com/dashboard"]
+        );
+        assert!(header_lines(head, "authorization").is_empty());
+        assert!(header_lines(head, "x-cursor-team-id").is_empty());
+        assert!(
+            !head.contains(PROFILE_PRIVATE),
+            "profile leaked into {head}"
+        );
+
+        let metadata = harness.scope.metadata_bytes();
+        assert!(!metadata.is_empty());
+        let metadata = String::from_utf8_lossy(&metadata);
+        for private in [SENTINEL_TOKEN, USER_ID] {
+            assert!(!metadata.contains(private));
+        }
+        assert_eq!(harness.enrich_calls(), 1);
+    }
+
+    /// No Cursor DB and no Grok Bot install -> Absent: no card, no request.
+    #[tokio::test]
+    async fn fetch_grokbot_with_no_login_is_absent() {
+        let (url, server) = mock(vec![]).await;
+        let harness = Harness::new("absent", url);
+        fs::remove_dir_all(harness.dir.join("Cursor")).unwrap();
+        assert!(fetch_grokbot_with(&harness.deps()).await.is_none());
+        assert_eq!(harness.enrich_calls(), 0);
+        assert!(server.await.unwrap().is_empty(), "Absent sends nothing");
+    }
+
+    /// (2) R6-12: a Grok Bot install -> the fixed terminal and ZERO requests,
+    /// although the Cursor fixture alongside it is usable (control: the first
+    /// test). Both shapes of the file — arbitrary content, and a directory that
+    /// cannot be read as a file at all — give the same text, so the guard
+    /// decides on existence alone.
+    #[tokio::test]
+    async fn installed_grok_bot_is_terminal_and_sends_nothing() {
+        let make: [fn(&Path); 2] = [
+            |path| fs::write(path, SENTINEL_TOKEN).unwrap(),
+            |path| fs::create_dir_all(path).unwrap(),
+        ];
+        for (index, make) in make.into_iter().enumerate() {
+            let (url, server) = mock(vec![]).await;
+            let harness = Harness::new(&format!("installed-{index}"), url);
+            harness.install_grok_bot(make);
+            let snapshot = fetch_grokbot_with(&harness.deps())
+                .await
+                .expect("an installed Grok Bot shows its state");
+            assert_eq!(snapshot.client_id, "grok-bot");
+            assert_eq!(
+                snapshot.error.as_deref(),
+                Some(crate::agent_grokbot::GROK_BOT_DESKTOP_UNSUPPORTED)
+            );
+            assert!(snapshot.windows.is_empty());
+            assert_eq!(harness.enrich_calls(), 0);
+            assert!(
+                server.await.unwrap().is_empty(),
+                "the Cursor login must not be sent while Grok Bot is installed"
+            );
+        }
+    }
+
+    /// (3) R6-15: a 302 to a second loopback host is not followed — the second
+    /// host receives nothing, so neither the cookie nor any request reaches it.
+    #[tokio::test]
+    async fn redirect_is_not_followed() {
+        let (second_url, second) = mock(vec![]).await;
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nlocation: {second_url}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        let (url, first) = mock(vec![redirect]).await;
+        let harness = Harness::new("redirect", url);
+        let snapshot = fetch_grokbot_with(&harness.deps()).await.unwrap();
+        assert!(
+            second.await.unwrap().is_empty(),
+            "the redirect target must receive no request"
+        );
+        assert_eq!(first.await.unwrap().len(), 1);
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("Grok Bot usage API returned 302.")
+        );
+    }
+
+    /// (4): the session token never reaches the published snapshot, on success
+    /// or on either kind of failure. Success then 503 also proves the
+    /// `usable_success("grok-bot")` arm at the production entry: the cached
+    /// weekly window is replayed.
+    #[tokio::test]
+    async fn token_never_appears_in_snapshot_and_transient_replays_the_card() {
+        let (url, server) = mock(vec![
+            reply(200, USAGE_OK),
+            reply(503, ""),
+            reply(401, ""),
+            reply(503, ""),
+        ])
+        .await;
+        let harness = Harness::new("sentinel", url);
+        let mut results = Vec::new();
+        for _ in 0..4 {
+            let snapshot = fetch_grokbot_with(&harness.deps()).await.unwrap();
+            let json = serde_json::to_string(&snapshot).unwrap();
+            for secret in [SENTINEL_TOKEN, USER_ID] {
+                assert!(!json.contains(secret), "{secret} in {json}");
+            }
+            results.push((snapshot.error.clone(), snapshot.windows.len()));
+        }
+        let retry = "Grok Bot usage request failed. Retrying automatically.".to_string();
+        assert_eq!(
+            results,
+            vec![
+                (None, 1),
+                (Some(retry.clone()), 1),
+                (
+                    Some(
+                        "Cursor login expired. Open Cursor and sign in again, then refresh."
+                            .to_string()
+                    ),
+                    0
+                ),
+                // The 401 cleared the cache, so this transient has no fallback.
+                (Some(retry), 0),
+            ]
+        );
+        assert_eq!(server.await.unwrap().len(), 4);
+        assert_eq!(harness.enrich_calls(), 1);
+    }
+
+    /// Ported from macOS `grokbot_adapter_preserves_only_same_request_transients`:
+    /// only a transient for the same request binding keeps the cached card.
+    /// Also fails if `usable_success` does not admit "grok-bot" (nothing cached).
+    #[test]
+    fn grokbot_adapter_preserves_only_same_request_transients() {
+        let now = Utc.timestamp_opt(1_789_041_600, 0).single().unwrap();
+        let resolver = TestRefreshScope::new("grok-bot", "grokbot-transients");
+        let scope = resolver
+            .resolve_current("fixture", "account-a", b"personal")
+            .unwrap();
+        let binding = ProviderCacheBinding::primary(scope.clone());
+        let other = ProviderCacheBinding::primary(
+            resolver
+                .resolve_current("fixture", "account-a", b"team")
+                .unwrap(),
+        );
+        let diagnostic = || {
+            SafeTransportDiagnostic::from_facts(TransportErrorFacts::synthetic(
+                true,
+                false,
+                TransportPhase::Request,
+                None,
+            ))
+        };
+        let failures = [
+            (
+                "same request",
+                Err(ProviderFetchFailure::transient(
+                    "retry",
+                    Some(binding.clone()),
+                    diagnostic(),
+                )),
+                true,
+            ),
+            (
+                "different team",
+                Err(ProviderFetchFailure::transient(
+                    "retry",
+                    Some(other),
+                    diagnostic(),
+                )),
+                false,
+            ),
+            (
+                "unbound",
+                Err(ProviderFetchFailure::transient("retry", None, diagnostic())),
+                false,
+            ),
+            (
+                "expired login",
+                Err(ProviderFetchFailure::terminal("sign in again")),
+                false,
+            ),
+            (
+                "malformed meter",
+                agent_grokbot::map_response("{}", now)
+                    .map(Some)
+                    .map_err(ProviderFetchFailure::terminal),
+                false,
+            ),
+            ("signed out", Ok(None), false),
+            (
+                "no included allowance",
+                agent_grokbot::map_response(
+                    r#"{"hasNonZeroIncludedLimit":false,"usagePercent":0,
+                        "nextResetTimestampUtc":"2026-09-15T12:00:00Z"}"#,
+                    now,
+                )
+                .map(Some)
+                .map_err(ProviderFetchFailure::terminal),
+                false,
+            ),
+        ];
+        for (label, failure, keep) in failures {
+            let cache = Mutex::new(ProviderLastGoodCache::default());
+            let mut data = agent_grokbot::map_response(
+                r#"{
+                "usagePercent": 25,
+                "currentPeriodStart": "2026-09-08T12:00:00Z",
+                "nextResetTimestampUtc": "2026-09-15T12:00:00Z"
+            }"#,
+                now,
+            )
+            .unwrap();
+            data.account_scope = Ok(scope.clone());
+            data.history_scope = Ok(HistoryScope::for_test("bot-history-a"));
+            data.cache_binding = Some(binding.clone());
+            let fresh = apply_provider_outcome_with(
+                &cache,
+                "grok-bot",
+                "oauth",
+                now,
+                grokbot_outcome(Ok(Some(data)), now),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(fresh.windows[0].card_id, "weekly.v1");
+            assert_eq!(fresh.windows[0].remaining_percent, 75.0);
+            assert_eq!(lock_last_good(&cache).entries.len(), 1, "{label}");
+            let later = now + chrono::Duration::minutes(1);
+            let result = apply_provider_outcome_with(
+                &cache,
+                "grok-bot",
+                "oauth",
+                later,
+                grokbot_outcome(failure, later),
+                |_| panic!("failure must not enrich history"),
+            );
+            if keep {
+                let fallback = result.unwrap();
+                assert_eq!(fallback.updated_at, fresh.updated_at);
+                assert_eq!(fallback.windows.len(), 1);
+                assert!(fallback.error.is_some());
+                assert!(fallback.account_scope.is_err());
+            } else {
+                assert!(
+                    result.is_none_or(|snapshot| snapshot.windows.is_empty()),
+                    "{label}"
+                );
+                assert!(lock_last_good(&cache).entries.is_empty(), "{label}");
+            }
+        }
+        resolver.cleanup();
     }
 }
