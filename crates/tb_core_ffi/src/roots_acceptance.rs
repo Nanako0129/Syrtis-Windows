@@ -455,6 +455,49 @@ fn a_nested_account_known_to_one_registry_is_still_excluded() {
     );
 }
 
+/// `<D>\\.claude` registered as its own account but actually a junction back to
+/// D (registries compare folded strings, so both are accepted). The engine
+/// canonicalizes exclusion prefixes, so excluding the "nested" account would
+/// exclude D's own roots and empty D's window. D must keep its own usage.
+#[cfg(windows)]
+#[test]
+fn a_nested_alias_of_the_account_itself_does_not_empty_its_window() {
+    let Some(root) = child_root() else {
+        return run_in_child(
+            "a_nested_alias_of_the_account_itself_does_not_empty_its_window",
+            "nested-alias",
+        );
+    };
+    let d = root.join("work-d");
+    write_session(&d, "d", 7_000);
+    let alias = d.join(".claude");
+    let cmd = std::env::var_os("SystemRoot")
+        .map(|system| std::path::PathBuf::from(system).join("System32").join("cmd.exe"))
+        .unwrap();
+    let made = std::process::Command::new(cmd)
+        .args(["/C", "mklink", "/J"])
+        .arg(&alias)
+        .arg(&d)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "mklink /J failed: {made:?}");
+    assert!(
+        alias.join("projects").is_dir(),
+        "fixture is inert: the junction does not resolve"
+    );
+    register_accounts(&[&d, &alias]);
+
+    assert_eq!(
+        claude_lane_output(&call_window(
+            Some(&d.display().to_string()),
+            WINDOW_FROM,
+            WINDOW_UNTIL
+        )),
+        7_000,
+        "an alias of the account itself excluded the account's own roots"
+    );
+}
+
 /// Control: accounts that do not nest scan exactly what an account window
 /// scanned before the exclusion existed (its own directory as home, its own
 /// roots, no exclusion), message for message.
