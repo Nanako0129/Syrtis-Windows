@@ -150,7 +150,26 @@ public sealed class AntigravityAccountsInstaller(
     private readonly object _gate = new();
     private string? _installed;
 
+    /// <summary>Install after a list change (<see cref="AntigravityAccounts.Mutate"/>:
+    /// a user action, or a capture that can land during an in-flight fetch),
+    /// raising <see cref="AntigravityAccounts.Changed"/> when the core took a
+    /// new list, so the pollers (and an in-flight shared fetch) follow.</summary>
     public void Install()
+    {
+        if (TryInstall())
+        {
+            AntigravityAccounts.RaiseChanged();
+        }
+    }
+
+    /// <summary>Install from the shared fetch itself, before its
+    /// <c>tb_agent_usage</c> call: raises nothing, because the fetch that is
+    /// about to run already reflects this install (raising would owe that
+    /// same fetch a needless second <c>tb_agent_usage</c> at every launch with
+    /// a stored account, and after every retried failed install).</summary>
+    public void InstallForFetch() => TryInstall();
+
+    private bool TryInstall()
     {
         lock (_gate)
         {
@@ -158,7 +177,7 @@ public sealed class AntigravityAccountsInstaller(
             if (next == (_installed ?? AntigravityAccounts.EmptyPayload))
             {
                 _installed = next;
-                return;
+                return false;
             }
 
             try
@@ -169,13 +188,12 @@ public sealed class AntigravityAccountsInstaller(
             {
                 // Type only: nothing from the payload (an email) is logged.
                 log($"antigravityAccounts install failed: {ex.GetType().Name}");
-                return;
+                return false;
             }
 
             _installed = next;
+            return true;
         }
-
-        AntigravityAccounts.RaiseChanged();
     }
 }
 
@@ -194,7 +212,7 @@ public static class AntigravityFetch
         AntigravityAccountsInstaller? installer,
         AntigravityAutoCapture? capture)
     {
-        installer?.Install();
+        installer?.InstallForFetch();
         if (capture is { IsEnabled: true })
         {
             _ = capture.PrepareForFetch().GetAwaiter().GetResult();

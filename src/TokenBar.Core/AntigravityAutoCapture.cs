@@ -228,15 +228,24 @@ public sealed class AntigravityAutoCapture
                     // was signed into when the core read it, and a sign-in
                     // that landed meanwhile would label the next login's card
                     // with this one's email. Stricter than macOS (SW:306
-                    // binds to the pre-attempt marker unconditionally). A
-                    // moved marker leaves it unbound; the next fetch sees the
-                    // new marker and attempts again.
+                    // binds to the pre-attempt marker unconditionally).
+                    // - Moved (a different marker): left unbound; the next
+                    //   fetch sees the new marker and attempts again.
+                    // - Unreadable (the re-read failed or timed out): left
+                    //   unbound and the attempted marker is forgotten, so the
+                    //   next fetch retries this marker (the core answers
+                    //   `unchanged` with no Google request and no write)
+                    //   instead of waiting for agy's login to change.
                     var after = await TryMarker().ConfigureAwait(false);
                     lock (_gate)
                     {
                         if (after == marker)
                         {
                             changed = SetCurrentLocked(key, marker);
+                        }
+                        else if (after is null)
+                        {
+                            _lastAttemptedMarker = null;
                         }
                     }
                 }

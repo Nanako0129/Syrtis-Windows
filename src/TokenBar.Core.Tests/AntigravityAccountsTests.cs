@@ -35,12 +35,19 @@ public class AntigravityAccountsTests
         public Exception? InstallError;
         public ManualResetEventSlim? AutoGate;
         public ManualResetEventSlim? MarkerGate;
+        public HashSet<int> FailingMarkerReads = [];
+        private int _markerReads;
 
         public AntigravityAutoCapture.Io Io => new(
             Marker: () =>
             {
                 Calls.Enqueue("marker");
                 MarkerGate?.Wait(TimeSpan.FromSeconds(10));
+                if (FailingMarkerReads.Contains(Interlocked.Increment(ref _markerReads)))
+                {
+                    throw new TbCoreException("marker_unavailable");
+                }
+
                 lock (Markers)
                 {
                     if (Markers.Count > 0)
@@ -493,6 +500,71 @@ public class AntigravityAccountsTests
         {
             Assert.Null(capture.Current.Key);
         }
+    }
+
+    /// <summary>Verifier F1 on dd1a6e0: the install the shared fetch does
+    /// before its own tb_agent_usage call (a stored account at launch) owes
+    /// no follow-up, while a list change during an in-flight fetch (Mutate:
+    /// a user action or a capture landing) still owes exactly one.</summary>
+    [Fact]
+    public async Task TheFetchPathInstallOwesNoFollowUpButAMutateDuringTheFetchDoes()
+    {
+        var store = TempStore();
+        AntigravityAccounts.Save(store, [new AntigravityAccount(KeyA, "a@example.com")]);
+        var installer = new AntigravityAccountsInstaller(
+            () => AntigravityAccounts.PayloadJson(AntigravityAccounts.Load(store)),
+            _ => new RootsResult(1, []),
+            _ => { });
+        var calls = 0;
+        Action? duringFirst = null;
+        var coordinator = new AgentUsageFetchCoordinator(() => AntigravityFetch.Run(
+            () =>
+            {
+                if (Interlocked.Increment(ref calls) == 1)
+                {
+                    duringFirst?.Invoke();
+                }
+
+                return Payload();
+            },
+            installer,
+            null));
+        AntigravityAccounts.Changed += coordinator.RequestFollowUp;
+        try
+        {
+            await coordinator.FetchAsync(); // launch: installs [KeyA]
+            Assert.Equal(1, Volatile.Read(ref calls));
+
+            calls = 0;
+            duringFirst = () => AntigravityAccounts.Mutate(store, installer.Install, accounts =>
+                AntigravityAccounts.Adding(new AntigravityAccount(KeyB, "b@example.com"), accounts));
+            await coordinator.FetchAsync();
+            Assert.Equal(2, Volatile.Read(ref calls));
+        }
+        finally
+        {
+            AntigravityAccounts.Changed -= coordinator.RequestFollowUp;
+        }
+    }
+
+    /// <summary>Verifier A1 on dd1a6e0: a post-attempt marker re-read that
+    /// fails (not a moved marker) forgets the attempted marker, so the next
+    /// poll retries and binds.</summary>
+    [Fact]
+    public async Task AnUnreadableReReadIsRetriedByTheNextPoll()
+    {
+        var store = TempStore();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        var io = new FakeIo { FailingMarkerReads = [2] };
+        var capture = new AntigravityAutoCapture(io.Io, store);
+
+        await capture.Poll();
+        Assert.Null(capture.Current.Key);
+        Assert.Null(capture.LastAttemptedMarker);
+
+        io.AutoResult = () => new AntigravityAutoCaptureResult("unchanged", KeyA, "a@example.com");
+        await capture.Poll();
+        Assert.Equal((KeyA, "M1"), capture.Current);
     }
 
     [Fact]
