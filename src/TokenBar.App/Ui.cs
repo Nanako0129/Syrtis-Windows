@@ -25,8 +25,15 @@ public static class Ui
         ("reasoning", "R", "#ec4899"),
     ];
 
+    /// <param name="titleAccessory">Secondary text right after the title on
+    /// the same line (the non-primary account a window card shows), trimmed
+    /// before the title is (macOS <c>DashCard.titleAccessory</c>).</param>
+    /// <param name="stackSubtitle">Put the subtitle on its own line under the
+    /// title, as macOS <c>DashCard</c> does (Cards.swift:220-233), instead of
+    /// right-aligned beside it. Only the window card asks for this today.</param>
     public static Border Card(
-        string title, UIElement content, string? subtitle = null, UIElement? trailing = null)
+        string title, UIElement content, string? subtitle = null, UIElement? trailing = null,
+        string? titleAccessory = null, bool stackSubtitle = false)
     {
         var stack = new StackPanel();
         var head = new Microsoft.UI.Xaml.Controls.Grid { Margin = new Thickness(0, 0, 0, 8) };
@@ -83,7 +90,58 @@ public static class Ui
         }
         titleText.PointerExited += (_, _) => Hide();
         titleText.Unloaded += (_, _) => Hide();
-        head.Children.Add(titleText);
+        if (stackSubtitle || titleAccessory is not null)
+        {
+            // macOS DashCard: title and accessory on one line, the subtitle
+            // under them. The title takes its full width and the accessory
+            // trims, so the window name is what stays readable.
+            // ponytail: a title wider than the card is clipped, not trimmed;
+            // window titles are short since ShortLabel.
+            var left = new StackPanel { Spacing = 2 };
+            var line = new Microsoft.UI.Xaml.Controls.Grid { ColumnSpacing = 6 };
+            line.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            line.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = new GridLength(1, GridUnitType.Star),
+            });
+            titleText.TextTrimming = TextTrimming.None;
+            line.Children.Add(titleText);
+            if (titleAccessory is not null)
+            {
+                var accessory = new TextBlock
+                {
+                    Text = titleAccessory,
+                    FontSize = 11,
+                    Opacity = 0.6,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                    TextWrapping = TextWrapping.NoWrap,
+                    VerticalAlignment = VerticalAlignment.Bottom,
+                };
+                ToolTipService.SetToolTip(accessory, titleAccessory);
+                Microsoft.UI.Xaml.Controls.Grid.SetColumn(accessory, 1);
+                line.Children.Add(accessory);
+            }
+
+            left.Children.Add(line);
+            if (subtitle is not null)
+            {
+                left.Children.Add(new TextBlock
+                {
+                    Text = subtitle,
+                    FontSize = 11,
+                    Opacity = 0.6,
+                    TextWrapping = TextWrapping.Wrap,
+                });
+            }
+
+            head.Children.Add(left);
+            subtitle = null;
+        }
+        else
+        {
+            head.Children.Add(titleText);
+        }
+
         if (subtitle is not null || trailing is not null)
         {
             var end = new StackPanel

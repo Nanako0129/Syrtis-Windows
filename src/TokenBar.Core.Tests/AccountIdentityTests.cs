@@ -533,8 +533,6 @@ public class AccountIdentityTests
             Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")),
             Card(Dir, "D", null, Window("session.v1", "Session", 60, "session.v1")));
         Assert.Equal("Claude · team-b", WindowCardText.HeaderAccountLabel(withDir, "claude", Dir));
-        Assert.Equal("Claude Desktop · 5h", WindowCardText.WithAccountLabel("5h", "Claude Desktop"));
-        Assert.Equal("5h", WindowCardText.WithAccountLabel("5h", null));
         Assert.Equal("Claude Desktop", ClientFor(Desktop).AccountLabel);
         Assert.Null(ClientFor(null).AccountLabel);
     }

@@ -91,14 +91,10 @@ public static class WindowCardText
 
     /// <summary>The header label naming the resolved account: null for the
     /// primary (header unchanged), else the same label the pills use — shown
-    /// with or without pills.</summary>
+    /// with or without pills, right after the card title on its line
+    /// (macOS <c>DashCard.titleAccessory</c>), not in the subtitle.</summary>
     public static string? HeaderAccountLabel(AgentUsagePayload? quota, string clientId, string? accountKey) =>
         accountKey is null ? null : AccountLabel.Of(new AccountIdentity(clientId, accountKey), quota);
-
-    /// <summary>Folds the header label into the subtitle slot (the header's
-    /// secondary text); unchanged when there is no label.</summary>
-    public static string? WithAccountLabel(string? subtitle, string? accountLabel) =>
-        accountLabel is null ? subtitle : subtitle is null ? accountLabel : $"{accountLabel} · {subtitle}";
 
     /// <summary>One account pill: <see cref="Key"/> null = primary.</summary>
     public sealed record AccountPill(string? Key, string Label);
