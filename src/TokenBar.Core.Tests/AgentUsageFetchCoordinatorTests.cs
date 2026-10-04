@@ -135,24 +135,53 @@ public class AgentUsageFetchCoordinatorTests
         Assert.Equal("4", (await coordinator.FetchAsync()).GeneratedAt);
     }
 
-    /// <summary>A first fetch that throws leaves nothing in flight.</summary>
+    /// <summary>A follow-up that throws keeps the first payload and leaves
+    /// nothing in flight.</summary>
     [Fact]
-    public async Task AThrowingFetchLeavesNothingInFlight()
+    public async Task AThrowingFollowUpReturnsTheFirstPayloadAndLeavesNothingInFlight()
     {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var calls = 0;
         var coordinator = new AgentUsageFetchCoordinator(() =>
         {
-            if (Interlocked.Increment(ref calls) == 1)
+            var n = Interlocked.Increment(ref calls);
+            if (n == 1)
             {
-                throw new InvalidOperationException("boom");
+                started.TrySetResult();
+                release.Task.GetAwaiter().GetResult();
+            }
+            else if (n == 2)
+            {
+                throw new InvalidOperationException("follow-up failed");
             }
 
-            return new AgentUsagePayload("ok", []);
+            return new AgentUsagePayload(n.ToString(), []);
         });
 
+        var first = coordinator.FetchAsync();
+        await started.Task;
+        coordinator.RequestFollowUp();
+        release.SetResult();
+
+        Assert.Equal("1", (await first).GeneratedAt);
+        Assert.Equal("3", (await coordinator.FetchAsync()).GeneratedAt);
+        Assert.Equal(3, Volatile.Read(ref calls));
+    }
+
+    /// <summary>A launch re-apply that throws faults the task and leaves
+    /// nothing in flight.</summary>
+    [Fact]
+    public async Task AThrowingLaunchReApplyFaultsTheTaskAndLeavesNothingInFlight()
+    {
+        var calls = 0;
+        var coordinator = new AgentUsageFetchCoordinator(
+            () => new AgentUsagePayload(Interlocked.Increment(ref calls).ToString(), []));
+        coordinator.RunBeforeFirstFetch(() => throw new InvalidOperationException("re-apply failed"));
+
         await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.FetchAsync());
-        Assert.Equal("ok", (await coordinator.FetchAsync()).GeneratedAt);
-        Assert.Equal(2, Volatile.Read(ref calls));
+        Assert.Equal(0, Volatile.Read(ref calls));
+        Assert.Equal("1", (await coordinator.FetchAsync()).GeneratedAt);
     }
 
     /// <summary>The launch re-apply (RunBeforeFirstFetch) and an owed

@@ -57,29 +57,17 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
         lock (_gate)
         {
             var epoch = QuotaEpoch.Current;
+            if (_inFlight is { } joined && epoch <= _inFlightEpoch)
+            {
+                return joined;
+            }
+
             Task<AgentUsagePayload> next;
             var id = ++_lastId;
             if (_inFlight is { } current)
             {
-                if (epoch <= _inFlightEpoch)
-                {
-                    return current;
-                }
-
                 next = current.ContinueWith(
-                    _ =>
-                    {
-                        Action? chainedBefore;
-                        lock (_gate)
-                        {
-                            chainedBefore = _beforeFirstFetch;
-                            _beforeFirstFetch = null;
-                            // Starts after any owed change: owes nothing yet.
-                            _owed = false;
-                        }
-
-                        return FetchWithFollowUps(id, chainedBefore);
-                    },
+                    _ => FetchWithFollowUps(id, null, chained: true),
                     CancellationToken.None,
                     TaskContinuationOptions.None,
                     TaskScheduler.Default);
@@ -91,7 +79,7 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
                 _owed = false;
                 // The launch re-apply runs once, before the first fetch of the
                 // chain; follow-ups owed during it do not run it again.
-                next = Task.Run(() => FetchWithFollowUps(id, before));
+                next = Task.Run(() => FetchWithFollowUps(id, before, chained: false));
             }
 
             _inFlight = next;
@@ -121,53 +109,56 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
     /// after it is marked complete, so clearing from a continuation left a
     /// window where a caller that saw the chain finished still found it in
     /// flight, lost its <see cref="RequestFollowUp"/> and joined the old
-    /// payload. The id check keeps a chain from clearing a newer one chained
-    /// after it.</summary>
-    private AgentUsagePayload FetchWithFollowUps(long id, Action? before)
+    /// payload. The in-lock clear closes that race; the finally is the net for
+    /// every other exit (a throwing action or fetch). The id check keeps a
+    /// chain from clearing a newer one chained after it.</summary>
+    private AgentUsagePayload FetchWithFollowUps(long id, Action? before, bool chained)
     {
-        AgentUsagePayload payload;
         try
         {
-            before?.Invoke();
-            payload = fetch();
-        }
-        catch
-        {
-            Finish(id);
-            throw;
-        }
+            if (chained)
+            {
+                lock (_gate)
+                {
+                    before = _beforeFirstFetch;
+                    _beforeFirstFetch = null;
+                    // Starts after any owed change: owes nothing yet.
+                    _owed = false;
+                }
+            }
 
-        for (var i = 0; ; i++)
+            before?.Invoke();
+            var payload = fetch();
+            for (var i = 0; ; i++)
+            {
+                lock (_gate)
+                {
+                    if (i >= MaxFollowUps || !_owed)
+                    {
+                        ClearIfCurrent(id);
+                        return payload;
+                    }
+
+                    _owed = false;
+                }
+
+                try
+                {
+                    payload = fetch();
+                }
+                catch
+                {
+                    // A failed follow-up keeps the payload already fetched.
+                    return payload;
+                }
+            }
+        }
+        finally
         {
             lock (_gate)
             {
-                if (i >= MaxFollowUps || !_owed)
-                {
-                    ClearIfCurrent(id);
-                    return payload;
-                }
-
-                _owed = false;
+                ClearIfCurrent(id);
             }
-
-            try
-            {
-                payload = fetch();
-            }
-            catch
-            {
-                // A failed follow-up keeps the payload already fetched.
-                Finish(id);
-                return payload;
-            }
-        }
-    }
-
-    private void Finish(long id)
-    {
-        lock (_gate)
-        {
-            ClearIfCurrent(id);
         }
     }
 
@@ -176,7 +167,6 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
         if (_inFlightId == id)
         {
             _inFlight = null;
-            _inFlightEpoch = 0;
         }
     }
 }
