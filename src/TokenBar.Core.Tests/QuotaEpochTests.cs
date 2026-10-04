@@ -120,6 +120,32 @@ public class QuotaEpochTests
         Assert.Equal(1, fetch.MaxConcurrent);
     }
 
+    // Fetched reaches consumers that did not ask (the tray adopting the
+    // flyout's fetch), so it must say which epoch each payload belongs to:
+    // the fetch begun before a signal carries the old epoch and is discarded
+    // by a consumer at the new one.
+    [Fact]
+    public async Task FetchedCarriesTheEpochEachFetchWasRequestedAt()
+    {
+        var fetch = new GatedFetch();
+        var coordinator = new AgentUsageFetchCoordinator(fetch.Run);
+        var raised = new List<long>();
+        coordinator.Fetched += (_, epoch) => { lock (raised) { raised.Add(epoch); } };
+        var before = QuotaEpoch.Current;
+        var a = coordinator.FetchAsync();
+        await WaitUntil(() => fetch.StartedCount == 1);
+        QuotaEpoch.Signal();
+        var b = coordinator.FetchAsync();
+        fetch.Release(0);
+        await a;
+        await WaitUntil(() => fetch.StartedCount == 2);
+        fetch.Release(1);
+        await b;
+        await WaitUntil(() => { lock (raised) { return raised.Count == 2; } });
+
+        Assert.Equal([before, before + 1], raised);
+    }
+
     [Fact]
     public async Task ConcurrentCallersAcrossSignalsNeverOverlapFetches()
     {

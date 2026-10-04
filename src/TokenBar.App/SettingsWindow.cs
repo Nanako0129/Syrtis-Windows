@@ -225,8 +225,9 @@ public sealed partial class SettingsWindow : Window
             }
 
             // A fresh stamp lands beside lastRemaining on every quota poll, so
-            // excluding it here keeps polls from redrawing the preview. The
-            // stale rule reads the clock instead: _previewTimer redraws the
+            // excluding it here keeps those writes from rebuilding the pages.
+            // A new payload redraws the preview once, through
+            // OnQuotaMaybeChanged. The stale rule reads the clock instead: _previewTimer redraws the
             // preview every 60 s while the window is shown, as macOS does
             // (SettingsPreviewRefresh, Syrtis #440).
 
@@ -264,6 +265,19 @@ public sealed partial class SettingsWindow : Window
                 else
                 {
                     RebuildPreview();
+                }
+
+                // Picking another source drops the unavailable row, which was
+                // only listed because it was the selection (macOS recomputes
+                // availableClientIds + [selected] per render). Without one,
+                // a pick leaves the page alone (focus, arrow keys).
+                if (key == "tokenbar.quota.source" && !rebuildAll && _menuBarHasUnavailable)
+                {
+                    _pages["menubar"] = BuildMenuBarPage(AppSettings.Store);
+                    if (_selectedTag == "menubar")
+                    {
+                        ShowPage(_selectedTag);
+                    }
                 }
 
                 // The Quota lens's onboarding card is a second writer of the
@@ -335,6 +349,86 @@ public sealed partial class SettingsWindow : Window
         AppWindow.Move(new Windows.Graphics.PointInt32(
             area.X + (area.Width - AppWindow.Size.Width) / 2,
             area.Y + (area.Height - AppWindow.Size.Height) / 3));
+    }
+
+    /// <summary>The quota-derived option sets the menu-bar and dashboard pages
+    /// were last built from (<see cref="QuotaSourceChoices"/>).</summary>
+    private IReadOnlySet<string>? _menuBarQuotaChoices;
+
+    /// <summary>Whether the menu-bar page was built before any quota: an
+    /// explicit pick then reads "—", and the first payload must relabel it
+    /// even when its choices equal the empty set's (the picked agent
+    /// errored).</summary>
+    private bool _menuBarBuiltWithoutQuota;
+
+    /// <summary>Whether the menu-bar page lists the unavailable row for the
+    /// selection; a different pick must drop it.</summary>
+    private bool _menuBarHasUnavailable;
+    private string? _dashboardQuotaKey;
+
+    /// <summary>Whether the attribution page was built before any quota
+    /// arrived: its suggestions and subscription rows come from the payload,
+    /// so it is rebuilt once the first one lands.</summary>
+    private bool _attributionBuiltWithoutQuota;
+
+    /// <summary>The subscription targets the attribution page was built
+    /// with. macOS recomputes them from the current payload on every render
+    /// (SettingsPanel.swift:253), so the page rebuilds when the set changes
+    /// either way.</summary>
+    private HashSet<string> _attributionClients = [];
+
+    /// <summary>The payload the preview was last drawn from.</summary>
+    private AgentUsagePayload? _previewQuota;
+
+    /// <summary>Called by the tray whenever its feed changes. Settings reads
+    /// quota through the feed, and an open window used to keep the options it
+    /// was built with (only "Auto" when opened before the first fetch) until
+    /// it was rebuilt. macOS observes the shared payload directly. Only a page
+    /// whose option set changed (or that was built before any quota) is
+    /// rebuilt, and it is re-shown only
+    /// when it is the page on screen, because a rebuild drops keyboard focus
+    /// and re-showing resets the scroll. The preview is redrawn whenever the
+    /// payload is a new one, since its percentages can move with the same
+    /// options.</summary>
+    internal static void OnQuotaMaybeChanged()
+    {
+        if (_shared is not { } window || !window.AppWindow.IsVisible)
+        {
+            return;
+        }
+
+        var payload = window._quota();
+        var store = AppSettings.Store;
+        var shownRebuilt = false;
+        if (QuotaSourceChoices.ChoicesChanged(window._menuBarQuotaChoices, payload)
+            || (window._menuBarBuiltWithoutQuota && payload is not null))
+        {
+            window._pages["menubar"] = window.BuildMenuBarPage(store);
+            shownRebuilt |= window._selectedTag == "menubar";
+        }
+
+        if (QuotaSourceChoices.DashboardKey(payload) != window._dashboardQuotaKey)
+        {
+            window._pages["dashboard"] = window.BuildDashboardPage(store);
+            shownRebuilt |= window._selectedTag == "dashboard";
+        }
+
+        if ((window._attributionBuiltWithoutQuota && payload is not null)
+            || !window._attributionClients.SetEquals(UsageAttributionSettings.SubscriptionClients(payload)))
+        {
+            window._pages["attribution"] = window.BuildAttributionPage(store);
+            shownRebuilt |= window._selectedTag == "attribution";
+        }
+
+        if (shownRebuilt)
+        {
+            window.ShowPage(window._selectedTag);
+        }
+
+        if (!ReferenceEquals(payload, window._previewQuota))
+        {
+            window.RebuildPreview();
+        }
     }
 
     private void Rebuild()
@@ -491,24 +585,21 @@ public sealed partial class SettingsWindow : Window
         var payload = _quota();
         var selection = QuotaSelectionPolicy.EffectiveSelection(
             payload, persistedSelection);
-        var choices = new List<(string, string)> { (QuotaResolver.Auto, "Auto (tightest window)".Localized()) };
-        if (payload is not null)
+        var choices = QuotaSourceChoices.Of(payload).ToList();
+        _menuBarQuotaChoices = QuotaSourceChoices.Selections(payload);
+        var unavailable = QuotaSourceChoices.Unavailable(payload, selection);
+        _menuBarHasUnavailable = unavailable is not null;
+        _menuBarBuiltWithoutQuota = payload is null;
+        if (unavailable is { } row)
         {
-            foreach (var agent in payload.Agents.Where(a => a.Error is null))
-            {
-                foreach (var window in agent.UniqueCardWindows)
-                {
-                    choices.Add((
-                        QuotaResolver.Selection(agent.ClientId, window.CardId, agent.Account.AccountKey),
-                        $"{AccountLabel.Of(agent, payload)} · {window.Label.Localized()}"));
-                }
-            }
+            choices.Add(row);
         }
 
         var quotaGroup = new StackPanel { Spacing = 8 };
         quotaGroup.Children.Add(RadioGroup(
             "quota.source", choices, selection,
-            raw => store.SetString("tokenbar.quota.source", raw)));
+            raw => store.SetString("tokenbar.quota.source", raw),
+            disabledRaw: unavailable?.Selection));
         quotaGroup.Children.Add(Hint(
             "Feeds the gauge icon and the Quota left tray mode.".Localized()));
         panel.Children.Add(Section("Quota source".Localized(), quotaGroup));
@@ -864,6 +955,8 @@ public sealed partial class SettingsWindow : Window
 
     private StackPanel BuildAttributionPage(SettingsStore store)
     {
+        _attributionBuiltWithoutQuota = _quota() is null;
+        _attributionClients = [.. UsageAttributionSettings.SubscriptionClients(_quota())];
         SyncAttributionSuggestions();
         var view = UsageAttributionPage.Resolve(
             _attributionReport?.Entries,
@@ -1449,6 +1542,7 @@ public sealed partial class SettingsWindow : Window
         // IDE + CLI pair into one "Antigravity" row — the same TabClients
         // helper the app's tab bar and its selection both use, so this list
         // and the live tab bar can never derive different rows.
+        _dashboardQuotaKey = QuotaSourceChoices.DashboardKey(_quota());
         var quotaIds = _quota()?.ConfiguredClientIds ?? [];
         var present = ClientRegistry.TabClients(usagePresent, quotaIds);
         var orderRaw = store.GetString(ClientRegistry.TabOrderKey) ?? "";
@@ -1666,6 +1760,7 @@ public sealed partial class SettingsWindow : Window
         var persistedSelection = store.GetString(
             "tokenbar.quota.source", QuotaResolver.Auto) ?? QuotaResolver.Auto;
         var payload = _quota();
+        _previewQuota = payload;
         var selection = QuotaSelectionPolicy.EffectiveSelection(
             payload, persistedSelection);
         var hidden = ClientRegistry.QuotaExcludedClients(store);
@@ -1900,7 +1995,7 @@ public sealed partial class SettingsWindow : Window
 
     private static StackPanel RadioGroup(
         string group, IEnumerable<(string Raw, string Label)> options,
-        string current, Action<string> pick)
+        string current, Action<string> pick, string? disabledRaw = null)
     {
         var stack = new StackPanel { Spacing = 2 };
         foreach (var (raw, label) in options)
@@ -1910,6 +2005,7 @@ public sealed partial class SettingsWindow : Window
                 Content = label,
                 GroupName = group,
                 IsChecked = raw == current,
+                IsEnabled = raw != disabledRaw,
                 FontSize = 12,
                 MinHeight = 28,
                 Padding = new Thickness(6, 0, 0, 0),

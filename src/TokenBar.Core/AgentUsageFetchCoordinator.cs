@@ -19,6 +19,19 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
     /// from holding the task forever. Later requests wait for the next tick.</summary>
     private const int MaxFollowUps = 2;
 
+    /// <summary>Raised with every successfully fetched payload, whichever
+    /// surface asked for it, so a consumer that did not ask (the tray feed,
+    /// when the flyout polled) still holds the newest payload instead of one
+    /// up to a slow tick old. Raised on the fetch thread, before the in-flight
+    /// slot clears, so within one epoch payloads are raised in fetch order. A
+    /// fetch chained for a newer epoch may start first, but the payload raised
+    /// before it carries the older epoch and is discarded. A handler must
+    /// marshal to its own thread. Not raised for a failed fetch. Carries the
+    /// <see cref="QuotaEpoch"/> the fetch was requested at: a handler must
+    /// discard a payload whose epoch is no longer current, as
+    /// <see cref="QuotaPoller"/> does.</summary>
+    public event Action<AgentUsagePayload, long>? Fetched;
+
     // Waits for the launch push so the first fetch already carries the extra
     // Claude accounts' cards; AntigravityFetch installs the captured
     // Antigravity accounts first, runs automatic capture's pre-fetch step and
@@ -98,14 +111,30 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
 
             _inFlight = next;
             _inFlightEpoch = epoch;
+            var fetchedEpoch = epoch;
             _ = next.ContinueWith(
                 completed =>
                 {
-                    lock (_gate)
+                    try
                     {
-                        if (ReferenceEquals(_inFlight, completed))
+                        // Before the in-flight slot clears: no later fetch at
+                        // this epoch exists yet, so within an epoch handlers
+                        // see payloads in fetch order.
+                        if (completed.Status == TaskStatus.RanToCompletion)
                         {
-                            _inFlight = null;
+                            Fetched?.Invoke(completed.Result, fetchedEpoch);
+                        }
+                    }
+                    finally
+                    {
+                        // A throwing handler must not pin this finished task
+                        // as every later caller's answer.
+                        lock (_gate)
+                        {
+                            if (ReferenceEquals(_inFlight, completed))
+                            {
+                                _inFlight = null;
+                            }
                         }
                     }
                 },
