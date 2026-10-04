@@ -1589,7 +1589,8 @@ async fn run_with(fetchers: &Fetchers, publication_generation: u64) -> AgentUsag
         agents.push(grok);
     }
     // Grok Bot right after Grok Build, as macOS's QUOTA_PROVIDERS orders them;
-    // it only appears when a Cursor login or a Grok Bot install is present.
+    // it only appears when a Grok Bot sign-in (desktop, consent-gated) or a
+    // Cursor login is present; an installed but signed-out Grok Bot adds nothing.
     if let Some(grok_bot) = grok_bot {
         agents.push(grok_bot);
     }

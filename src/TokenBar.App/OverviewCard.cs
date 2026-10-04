@@ -119,9 +119,11 @@ internal static class OverviewScope
     /// Overview lens and the Quota lens alike (the Quota lens once took
     /// <c>TabSlice(client.Owner)</c>, and <c>Owner</c> can be <c>grok-bot</c>,
     /// which dropped grok's rows). Every client id whose rows the limits card
-    /// shows: the owner's whole tab group, so the "Grok Build &amp; Bot" tab carries the
-    /// <c>grok-bot</c> card (and its consent prompt) beside <c>grok</c>. Null on the Overview tab
-    /// (every agent).</summary>
+    /// shows: the owner's whole tab group, so the "Grok Build &amp; Bot" tab
+    /// carries the <c>grok-bot</c> card beside <c>grok</c> — and with it the
+    /// consent prompt, unless Grok Bot's limits are switched off in Settings,
+    /// where the Settings switch remains the way to answer. Null on the
+    /// Overview tab (every agent).</summary>
     internal static IReadOnlyList<string>? LimitsClients(string? singleClient) =>
         LimitsClientId(singleClient) is { } owner ? ClientRegistry.TabSlice(owner) : null;
 }
