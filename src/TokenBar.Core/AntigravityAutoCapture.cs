@@ -25,10 +25,14 @@ namespace TokenBar.Core;
 /// (before the attempt) and on a pause, and set by a <c>captured</c> /
 /// <c>unchanged</c> attempt. A successful manual Capture sets it whether or not
 /// the toggle is on, when agy's marker did not change during the capture.
-/// Turning the toggle off keeps it; Remove of that account clears it. A
-/// capture attempt already in flight when the toggle goes off cleared it
-/// before it started, and nothing re-binds it (macOS the same). It is
-/// persisted (<see cref="CurrentKey"/>) across relaunch.
+/// Turning the toggle off does not clear it; Remove of that account clears it.
+/// Exceptions, each from work that was already running when the toggle went
+/// off: a capture attempt in flight had cleared it before it started, and a
+/// pre-fetch marker read in flight still clears it if it returns a new marker.
+/// An attempt in flight binds only if the toggle is on when its re-read
+/// returns, so turning the toggle off and on again during an attempt lets that
+/// attempt bind. It is persisted (<see cref="CurrentKey"/>)
+/// across relaunch.
 /// </para>
 /// <para>
 /// One operation at a time: <see cref="Busy"/> covers the automatic attempt,
@@ -130,9 +134,11 @@ public sealed class AntigravityAutoCapture
     public (string? Key, string? Marker) Current { get { lock (_gate) { return (_currentKey, _currentMarker); } } }
 
     /// <summary>One check, from a quota fetch or right after the toggle turns
-    /// on. The caller gates on the toggle; this only refuses to overlap and to
-    /// run while paused. A poll refused because something is running is owed,
-    /// and runs when that work ends.</summary>
+    /// on. It starts a capture only if automatic capture is on when it commits
+    /// (checked under the lock after its marker read, before Busy is set or the
+    /// core is called), and refuses to overlap and to run while paused. A poll
+    /// refused because something is running is owed, and runs when that work
+    /// ends.</summary>
     public async Task Poll(string? known = null)
     {
         var marker = known;
@@ -251,14 +257,13 @@ public sealed class AntigravityAutoCapture
                     //   refresh token equals agy's; if Google ever rotated it
                     //   at capture, each retry is a full refresh plus a write
                     //   (rotation has not been observed).
-                    // The toggle is checked again after the re-read (up to
-                    // the marker timeout): turned off meanwhile, nothing is
-                    // bound or persisted and the retry is not armed; the
-                    // account stays in the list (macOS 215df805).
                     var after = await TryMarker().ConfigureAwait(false);
                     lock (_gate)
                     {
-                        // Off since the attempt: neither bind nor retry.
+                        // Checked again after the re-read (up to the marker
+                        // timeout): off now, nothing is bound or persisted and
+                        // the retry is not armed; the account stays listed
+                        // (macOS 215df805).
                         if (IsEnabled)
                         {
                             if (after == marker)
