@@ -1004,7 +1004,8 @@ struct AgyUsageBucket {
     id: Option<String>,
     name: Option<String>,
     /// The bucket's window, as agy `/usage` and `retrieveUserQuotaSummary`
-    /// both state it: "weekly" or "5h" (measured on macOS, 2026-10-02/03).
+    /// both state it: "weekly" or "5h" (measured on macOS, 2026-10-02/03; the
+    /// Windows fixture `AGY_WINDOWS_USAGE`, x64 2026-09-23, carries it too).
     window: Option<String>,
     #[serde(rename = "remaining_fraction")]
     remaining_fraction: Option<f64>,
@@ -1027,7 +1028,10 @@ fn valid_remaining_fraction(fraction: f64) -> bool {
 
 /// The window length a grouped Antigravity bucket declares in its `window`
 /// field. Without it the duration has to be learned over several resets.
-/// Unknown values stay unknown and are learned as before.
+/// Unknown values stay unknown and are learned as before. Measured on macOS
+/// (2026-10-02/03) and in the Windows fixture `AGY_WINDOWS_USAGE` (x64,
+/// 2026-09-23). A pure mapping: whether the bucket may declare it is
+/// `agy_bucket_window`'s call.
 fn agy_window_duration(window: Option<&str>) -> Option<DurationEvidence> {
     match window?.trim() {
         "weekly" => Some(DurationEvidence::contract(7 * 86_400)),
@@ -1038,7 +1042,19 @@ fn agy_window_duration(window: Option<&str>) -> Option<DurationEvidence> {
 
 /// A grouped bucket (agy `/usage` or `retrieveUserQuotaSummary`): card id and
 /// window key `agy.<bucketId>.v1`, with the declared window as a contract
-/// duration.
+/// duration once the cycle has started by our own clock.
+///
+/// An unused bucket reports a rolling reset of server time + window (measured:
+/// both unused 5h buckets in `AGY_WINDOWS_USAGE` share one reset instant). The
+/// engine's `valid_evidence` has no tolerance (`reset - duration <= now`) and
+/// a failing contract never falls back to observed, so a local clock even 1 s
+/// behind Google would turn such a bucket into InvalidEvidence on every poll,
+/// where observation would have learned it. Such a bucket passes no duration.
+/// This is stricter than macOS be24da44, which declares it always. `now` here
+/// is taken before the request and enrich's after it, so
+/// `reset - duration < now` holding here also holds there (strict: a
+/// bucket whose cycle starts exactly now is unused, and one tick of skew
+/// would fail it).
 fn agy_bucket_window(
     label: String,
     fraction: f64,
@@ -1047,9 +1063,14 @@ fn agy_bucket_window(
     card_id: String,
     window: Option<&str>,
 ) -> Option<UsageWindow> {
-    UsageWindow::try_from_provider_fraction(label, fraction, reset, now).map(|usage| {
-        usage.with_identity(card_id.clone(), Some(card_id), None, agy_window_duration(window))
-    })
+    let duration = agy_window_duration(window).filter(|evidence| {
+        reset.is_some_and(|reset| {
+            reset.timestamp() > now.timestamp()
+                && reset.timestamp().saturating_sub(evidence.duration_seconds) < now.timestamp()
+        })
+    });
+    UsageWindow::try_from_provider_fraction(label, fraction, reset, now)
+        .map(|usage| usage.with_identity(card_id.clone(), Some(card_id), None, duration))
 }
 
 fn quota_window(
@@ -2884,7 +2905,7 @@ async fn fetch_quota_summary(
     (!windows.is_empty()).then_some(windows)
 }
 
-fn windows_from_quota_summary(body: &str, now: DateTime<Utc>) -> Vec<UsageWindow> {
+pub(crate) fn windows_from_quota_summary(body: &str, now: DateTime<Utc>) -> Vec<UsageWindow> {
     let Ok(response) = serde_json::from_str::<Value>(body) else {
         return Vec::new();
     };
@@ -5305,6 +5326,14 @@ mod tests {
         assert_eq!(wire["cardId"], "agy.gemini-5h.v1");
         let third_wire = serde_json::to_value(&fetched.windows[2]).unwrap();
         assert_eq!(third_wire["cardId"], "agy.3p-weekly.v1");
+        // At 06:00Z only the buckets whose cycle has started declare a
+        // duration; the two unused 5h buckets (reset 12.5 h ahead) learn it.
+        let durations: Vec<Option<i64>> = fetched
+            .windows
+            .iter()
+            .map(|w| w.duration_seconds_for_test())
+            .collect();
+        assert_eq!(durations, [Some(7 * 86_400), None, Some(7 * 86_400), None]);
         // Control: the same fixture without the `window` field leaves the
         // duration to be learned, as before.
         let without = std::str::from_utf8(AGY_WINDOWS_USAGE)
@@ -5338,6 +5367,45 @@ mod tests {
             .map(|w| w.duration_seconds_for_test())
             .collect();
         assert_eq!(durations, [Some(7 * 86_400), Some(5 * 3_600), None]);
+    }
+
+    #[test]
+    fn an_unused_rolling_bucket_declares_no_duration() {
+        let now = agy_now();
+        let window = 5 * 3_600;
+        let duration = |reset_offset: i64, window_name: Option<&str>| {
+            agy_bucket_window(
+                "5h".to_string(),
+                1.0,
+                Some(now + chrono::Duration::seconds(reset_offset)),
+                now,
+                "agy.x.v1".to_string(),
+                window_name,
+            )
+            .unwrap()
+            .duration_seconds_for_test()
+        };
+        // Rolling reset = server time + window, with or without clock skew.
+        assert_eq!(duration(window, Some("5h")), None);
+        assert_eq!(duration(window + 1, Some("5h")), None);
+        // Started: the cycle began before now.
+        assert_eq!(duration(window - 1, Some("5h")), Some(window));
+        assert_eq!(duration(60, Some("5h")), Some(window));
+        // Already reset or no reset at all: nothing to declare.
+        assert_eq!(duration(0, Some("5h")), None);
+        assert_eq!(duration(-1, Some("5h")), None);
+        assert_eq!(duration(60, Some("monthly")), None);
+        assert!(agy_bucket_window(
+            "5h".to_string(),
+            1.0,
+            None,
+            now,
+            "agy.x.v1".to_string(),
+            Some("5h")
+        )
+        .unwrap()
+        .duration_seconds_for_test()
+        .is_none());
     }
 
     #[test]
@@ -7062,12 +7130,15 @@ mod captured_account_tests {
             windows[1].pace_window_key_for_test(),
             Some("agy.gemini-5h.v1")
         );
-        // The declared window becomes the duration.
+        // The declared window becomes the duration only for a started cycle.
+        // At `now` the gemini-5h cycle (reset 11:20, start 06:20) and the
+        // 3p-weekly one (reset 10-09 07:58, start 10-02 07:58) have not
+        // started yet: unused buckets, learned by observation.
         let durations: Vec<Option<i64>> = windows
             .iter()
             .map(|w| w.duration_seconds_for_test())
             .collect();
-        assert_eq!(durations, [Some(7 * 86_400), Some(5 * 3_600), Some(7 * 86_400)]);
+        assert_eq!(durations, [Some(7 * 86_400), None, None]);
         assert!(windows_from_quota_summary("not json", now).is_empty());
         assert!(windows_from_quota_summary("{}", now).is_empty());
     }

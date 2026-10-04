@@ -14137,6 +14137,99 @@ mod tests {
         scope.cleanup();
     }
 
+    /// The Antigravity grouped buckets, from the captured-account summary
+    /// parser through `enrich_snapshot_with`, with the real duration engine as
+    /// the `record` seam (no store). A started weekly bucket keeps its contract;
+    /// an unused one (a rolling reset, even 1 s of skew) must be learned, not
+    /// turned into InvalidEvidence; the agy route's unverified scope clears it.
+    #[test]
+    fn antigravity_window_duration_survives_enrich_only_for_started_cycles() {
+        use crate::agent_quota_duration::{resolve_duration, DurationResolution};
+        let scope = TestRefreshScope::new("stage4", "agy-window-duration");
+        let account_scope = scope
+            .resolve_current("antigravity", "agy", b"agy-marker")
+            .unwrap();
+        let now_dt = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let now = now_dt.timestamp();
+        let rfc = |offset: i64| (now_dt + chrono::Duration::seconds(offset)).to_rfc3339();
+        let body = serde_json::json!({ "groups": [{ "displayName": "G", "buckets": [
+            { "bucketId": "started", "displayName": "Weekly", "remainingFraction": 0.5,
+              "resetTime": rfc(86_400), "window": "weekly" },
+            { "bucketId": "unused", "displayName": "5h", "remainingFraction": 1,
+              "resetTime": rfc(5 * 3_600 + 1), "window": "5h" }
+        ]}]})
+        .to_string();
+        let snapshot_with = |account_scope: Result<AccountScope, AccountScopeError>| {
+            AgentUsageSnapshot {
+                account_key: None,
+                merge_scope: None,
+                client_id: "antigravity".to_string(),
+                source: "fixture".to_string(),
+                updated_at: String::new(),
+                identity: None,
+                history_scope: Ok(HistoryScope::for_test("agy")),
+                account_scope,
+                windows: agent_antigravity::windows_from_quota_summary(&body, now_dt),
+                credits: None,
+                error: None,
+                transport_diagnostic: None,
+            }
+        };
+        let engine = |_: &[SeriesKey], observations: &[QuotaObservation], now: i64| {
+            Ok(observations
+                .iter()
+                .map(|o| {
+                    Ok(
+                        match resolve_duration(now, o.reset_at, o.provider, o.contract, None) {
+                            DurationResolution::Ready {
+                                duration_seconds,
+                                source,
+                            } => (
+                                HistoryOutcome::Ready {
+                                    duration_seconds,
+                                    source,
+                                    sampled: false,
+                                },
+                                None,
+                                0,
+                            ),
+                            DurationResolution::LearningDuration => {
+                                (HistoryOutcome::LearningDuration, None, 0)
+                            }
+                            DurationResolution::Unavailable(reason) => {
+                                (HistoryOutcome::Unavailable(reason), None, 0)
+                            }
+                        },
+                    )
+                })
+                .collect())
+        };
+
+        // Captured account (verified scope).
+        let mut captured = snapshot_with(Ok(account_scope));
+        enrich_snapshot_with(&mut captured, now, engine);
+        let started = &captured.windows[0];
+        assert_eq!(started.duration_seconds, Some(604_800));
+        assert_eq!(started.duration_source, Some(DurationSource::Contract));
+        assert_eq!(started.pace_status.reason, None);
+        let unused = &captured.windows[1];
+        assert_eq!(unused.duration_seconds, None);
+        assert!(matches!(
+            unused.pace_status.state,
+            PaceState::LearningDuration
+        ));
+        assert_eq!(unused.pace_status.reason, None);
+
+        // The agy route has no trusted account evidence: cleared, as before.
+        let mut agy = snapshot_with(Err(AccountScopeError::NoTrustedEvidence));
+        enrich_snapshot_with(&mut agy, now, engine);
+        for window in &agy.windows {
+            assert_eq!(window.duration_seconds, None);
+            assert_eq!(window.pace_status.reason.as_deref(), Some("accountScope"));
+        }
+        scope.cleanup();
+    }
+
     #[test]
     fn stage4_chained_identity_collisions_keep_only_actual_uniques() {
         let scope = TestRefreshScope::new("stage4", "chained-collisions");
