@@ -397,19 +397,20 @@ public class AntigravityAccountsTests
         Assert.Same(payload, result);
     }
 
-    /// <summary>Current = (KeyA, M1) from a manual capture while the toggle
-    /// was off; then the toggle is on and the next marker reads are
-    /// <paramref name="before"/> (the pre-fetch read) and
+    /// <summary>Current = (KeyA, M1) from an automatic poll that also records
+    /// M1 as the last attempted marker (so the fetch's own read of M1 neither
+    /// clears Current nor starts a racing re-capture); then the next marker
+    /// reads are <paramref name="before"/> (the pre-fetch read) and
     /// <paramref name="after"/> (the post-fetch read).</summary>
     private static async Task<(AntigravityAutoCapture, FakeIo)> ArmedForPromotion(string before, string after)
     {
         var store = TempStore();
-        var io = new FakeIo();
-        io.Markers.Enqueue("M1"); // the manual capture's read
-        var capture = new AntigravityAutoCapture(io.Io, store);
-        await capture.ManualCapture();
-        Assert.Equal(KeyA, capture.Current.Key);
         store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        var io = new FakeIo();
+        var capture = new AntigravityAutoCapture(io.Io, store);
+        await capture.Poll();
+        Assert.Equal(KeyA, capture.Current.Key);
+        Assert.Equal("M1", capture.Current.Marker);
         io.Markers.Enqueue(before);
         io.Markers.Enqueue(after);
         return (capture, io);
