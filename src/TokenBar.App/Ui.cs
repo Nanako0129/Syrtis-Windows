@@ -143,6 +143,13 @@ public static class Ui
         TextTrimming = TextTrimming.CharacterEllipsis,
     };
 
+    /// <summary><see cref="Text"/> truncated in the middle rather than at the
+    /// end (macOS <c>.truncationMode(.middle)</c>), for model ids and account
+    /// labels whose distinguishing part is at the end. Needs a bounded width;
+    /// see <see cref="MiddleTrimmedText"/>.</summary>
+    public static MiddleTrimmedText MiddleText(string text, double size = 11, double opacity = 1.0,
+        bool bold = false) => new(Text(text, size, opacity, bold));
+
     public static TextBlock Dim(string text, double size = 11) => new()
     {
         Text = text,
