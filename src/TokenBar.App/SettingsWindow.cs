@@ -342,6 +342,11 @@ public sealed partial class SettingsWindow : Window
     /// were last built from (<see cref="QuotaSourceChoices"/>).</summary>
     private IReadOnlySet<string>? _menuBarQuotaChoices;
 
+    /// <summary>The quota-source rows the menu-bar page lists; a rebuild for
+    /// new quota keeps them (<see cref="QuotaSourceChoices.Listed"/>), a full
+    /// <see cref="Rebuild"/> starts over from the payload.</summary>
+    private IReadOnlyList<(string Selection, string Label)> _menuBarListed = [];
+
     /// <summary>Whether the menu-bar page was built before any quota: an
     /// explicit pick then reads "—", and the first payload must relabel it
     /// even when it offers no new choice (the picked agent errored). Once,
@@ -353,6 +358,14 @@ public sealed partial class SettingsWindow : Window
     /// arrived: its suggestions and subscription rows come from the payload,
     /// so it is rebuilt once the first one lands.</summary>
     private bool _attributionBuiltWithoutQuota;
+
+    /// <summary>Every subscription target the attribution page has been built
+    /// with since the last full <see cref="Rebuild"/>. A client that reports
+    /// for the first time (it errored on the first fetch) rebuilds the page
+    /// once; clients flapping in turn cannot rebuild it every poll.
+    /// ponytail: a client that flaps out drops from the page at the next
+    /// rebuild some other client triggers, until Settings is reopened.</summary>
+    private HashSet<string> _attributionClients = [];
 
     /// <summary>The payload the preview was last drawn from.</summary>
     private AgentUsagePayload? _previewQuota;
@@ -380,7 +393,7 @@ public sealed partial class SettingsWindow : Window
         if (QuotaSourceChoices.OffersNewChoice(window._menuBarQuotaChoices, payload)
             || (window._menuBarBuiltWithoutQuota && payload is not null))
         {
-            window._pages["menubar"] = window.BuildMenuBarPage(store);
+            window._pages["menubar"] = window.BuildMenuBarPage(store, keepListed: true);
             shownRebuilt |= window._selectedTag == "menubar";
         }
 
@@ -390,9 +403,11 @@ public sealed partial class SettingsWindow : Window
             shownRebuilt |= window._selectedTag == "dashboard";
         }
 
-        if (window._attributionBuiltWithoutQuota && payload is not null)
+        if ((window._attributionBuiltWithoutQuota && payload is not null)
+            || UsageAttributionSettings.SubscriptionClients(payload)
+                .Any(client => !window._attributionClients.Contains(client)))
         {
-            window._pages["attribution"] = window.BuildAttributionPage(store);
+            window._pages["attribution"] = window.BuildAttributionPage(store, keepSeen: true);
             shownRebuilt |= window._selectedTag == "attribution";
         }
 
@@ -443,7 +458,7 @@ public sealed partial class SettingsWindow : Window
     }
 
     // ── Menu bar page: Tray shows, Tray icon, Quota source ──────────────
-    private StackPanel BuildMenuBarPage(SettingsStore store)
+    private StackPanel BuildMenuBarPage(SettingsStore store, bool keepListed = false)
     {
         var panel = new StackPanel { Spacing = 16, MaxWidth = 380 };
 
@@ -561,9 +576,12 @@ public sealed partial class SettingsWindow : Window
         var payload = _quota();
         var selection = QuotaSelectionPolicy.EffectiveSelection(
             payload, persistedSelection);
-        var choices = QuotaSourceChoices.Of(payload).ToList();
-        _menuBarQuotaChoices = QuotaSourceChoices.Selections(payload);
-        var unavailable = QuotaSourceChoices.Unavailable(payload, selection);
+        var choices = QuotaSourceChoices.Listed(payload, keepListed ? _menuBarListed : []).ToList();
+        _menuBarListed = [.. choices];
+        _menuBarQuotaChoices = choices.Select(choice => choice.Selection).ToHashSet(StringComparer.Ordinal);
+        var unavailable = _menuBarQuotaChoices.Contains(selection)
+            ? null
+            : QuotaSourceChoices.Unavailable(payload, selection);
         _menuBarBuiltWithoutQuota = payload is null;
         if (unavailable is { } row)
         {
@@ -928,9 +946,15 @@ public sealed partial class SettingsWindow : Window
             : null;
     }
 
-    private StackPanel BuildAttributionPage(SettingsStore store)
+    private StackPanel BuildAttributionPage(SettingsStore store, bool keepSeen = false)
     {
         _attributionBuiltWithoutQuota = _quota() is null;
+        if (!keepSeen)
+        {
+            _attributionClients = [];
+        }
+
+        _attributionClients.UnionWith(UsageAttributionSettings.SubscriptionClients(_quota()));
         SyncAttributionSuggestions();
         var view = UsageAttributionPage.Resolve(
             _attributionReport?.Entries,

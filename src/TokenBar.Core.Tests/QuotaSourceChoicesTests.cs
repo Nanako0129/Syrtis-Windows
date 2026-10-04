@@ -65,6 +65,34 @@ public class QuotaSourceChoicesTests
         Assert.False(QuotaSourceChoices.OffersNewChoice(built, Payload(Codex, Copilot)));
     }
 
+    // Two agents erroring in turn: rebuilding from each payload alone swapped
+    // rows and rebuilt the page every poll. Rows accumulate, so after one
+    // rebuild per choice nothing is new.
+    [Fact]
+    public void AgentsErroringInTurnRebuildAtMostOncePerChoice()
+    {
+        const string failedCodex =
+            """{"clientId":"codex","source":"oauth","updatedAt":"2026-10-05T00:00:00Z","windows":[],"error":"rate limited"}""";
+        const string failedCopilot =
+            """{"clientId":"copilot","source":"oauth","updatedAt":"2026-10-05T00:00:00Z","windows":[],"error":"rate limited"}""";
+        var onlyCopilot = Payload(failedCodex, Copilot);
+        var onlyCodex = Payload(Codex, failedCopilot);
+
+        var listed = QuotaSourceChoices.Listed(onlyCopilot, []);
+        Assert.True(QuotaSourceChoices.OffersNewChoice(Keys(listed), onlyCodex));
+        listed = QuotaSourceChoices.Listed(onlyCodex, listed);
+
+        Assert.False(QuotaSourceChoices.OffersNewChoice(Keys(listed), onlyCopilot));
+        Assert.False(QuotaSourceChoices.OffersNewChoice(Keys(listed), onlyCodex));
+        Assert.True(Keys(listed).SetEquals(QuotaSourceChoices.Selections(Payload(Codex, Copilot))));
+        // Before: a page rebuilt from the payload alone lost the other row.
+        Assert.True(QuotaSourceChoices.OffersNewChoice(
+            QuotaSourceChoices.Selections(onlyCodex), onlyCopilot));
+    }
+
+    private static HashSet<string> Keys(IEnumerable<(string Selection, string Label)> rows) =>
+        rows.Select(row => row.Selection).ToHashSet(StringComparer.Ordinal);
+
     // The user picked a Copilot window, then Copilot errored (its last-good
     // lived only in memory, gone after a restart): the list used to drop it
     // with nothing checked. It now stays as a disabled row, which the radio

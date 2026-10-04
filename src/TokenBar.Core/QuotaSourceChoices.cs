@@ -53,6 +53,20 @@ public static class QuotaSourceChoices
         return (selection, $"{ClientRegistry.Style(clientId).DisplayName} · {window}");
     }
 
+    /// <summary>The rows an open page lists: what <paramref name="payload"/>
+    /// offers, then every row it listed before that the payload no longer
+    /// offers (that agent is erroring now). Rows only accumulate while the
+    /// page stays open, so each choice can rebuild the page at most once:
+    /// rebuilding from the payload alone would let two agents erroring in
+    /// turn swap rows, and rebuild, on every poll.</summary>
+    public static IReadOnlyList<(string Selection, string Label)> Listed(
+        AgentUsagePayload? payload, IReadOnlyList<(string Selection, string Label)> listedBefore)
+    {
+        var offered = Of(payload);
+        var keys = offered.Select(choice => choice.Selection).ToHashSet(StringComparer.Ordinal);
+        return [.. offered, .. listedBefore.Where(row => !keys.Contains(row.Selection))];
+    }
+
     /// <summary>The selection keys a payload offers.</summary>
     public static IReadOnlySet<string> Selections(AgentUsagePayload? payload) =>
         Of(payload).Select(choice => choice.Selection).ToHashSet(StringComparer.Ordinal);
@@ -61,8 +75,8 @@ public static class QuotaSourceChoices
     /// not built with — the only change worth rebuilding an open page for. A
     /// choice that disappears does not count: an agent that errors on one
     /// poll and recovers on the next would otherwise rebuild the page (losing
-    /// focus and scroll) on every poll, and its option stays listed until the
-    /// page is next built. Labels are left out for the same reason.</summary>
+    /// focus and scroll) on every poll; its row stays listed
+    /// (<see cref="Listed"/>). Labels are left out for the same reason.</summary>
     public static bool OffersNewChoice(IReadOnlySet<string>? built, AgentUsagePayload? payload) =>
         built is null || Of(payload).Any(choice => !built.Contains(choice.Selection));
 
