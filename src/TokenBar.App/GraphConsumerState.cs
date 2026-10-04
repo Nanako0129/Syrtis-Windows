@@ -47,16 +47,6 @@ public static class RefreshTip
     /// with a refresh still running is not tinted.</summary>
     public static bool ShowsStaleRestore(DateTimeOffset? restoredAt, bool restoreFailed) =>
         restoredAt is not null && restoreFailed;
-
-    /// <summary>The footer's "updated …". A restored snapshot can be up to 90
-    /// days old, so it reads as an age ("updated 1d ago") rather than a bare
-    /// time of day that would pass for today; live data keeps the clock
-    /// time.</summary>
-    public static string Footer(
-        DateTimeOffset? restoredAt, DateTimeOffset fetchedAt, DateTimeOffset now) =>
-        "updated {0}".Localized(restoredAt is { } at
-            ? Format.RelativeTime((ulong)Math.Max(0, at.ToUnixTimeSeconds()), now)
-            : fetchedAt.ToString("HH:mm:ss", System.Globalization.CultureInfo.CurrentCulture));
 }
 
 public static class GraphResumePolicy

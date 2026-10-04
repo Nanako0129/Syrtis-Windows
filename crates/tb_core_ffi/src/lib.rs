@@ -1045,6 +1045,155 @@ unsafe fn validate_claude_config_dir_from_c(
 #[cfg(test)]
 pub(crate) static GENERATION_AT_CONFIG_DIR_COMMIT: AtomicU64 = AtomicU64::new(u64::MAX);
 
+/// Replace the process-wide registry of captured Antigravity accounts. `json`
+/// is `[{"key":"<64 lowercase hex>","label":"<display label>"}]`, full-replace
+/// semantics (`[]` clears it). Each entry is fetched as its own Antigravity
+/// card after the primary, with `accountKey` = `key`. Success data is
+/// `{"registeredCount":N,"rejected":[{"index":i,"reason":"..."}]}`; an entry is
+/// rejected when it is not an object with string `key` and `label`, when its
+/// key is not `^[0-9a-f]{64}$`, or when it repeats a key. Malformed JSON is the
+/// error `invalid_accounts_json` and leaves the registry unchanged. The
+/// registry holds no secret; the credentials live in Credential Manager.
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_set_antigravity_accounts(json: *const c_char) -> *mut c_char {
+    guarded("tb_set_antigravity_accounts", || {
+        envelope(unsafe { set_antigravity_accounts_from_c(json) })
+    })
+}
+
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated UTF-8 string.
+unsafe fn set_antigravity_accounts_from_c(
+    json: *const c_char,
+) -> Result<serde_json::Value, String> {
+    if json.is_null() {
+        return Err("invalid_accounts_json".to_string());
+    }
+    let raw = unsafe { CStr::from_ptr(json) }
+        .to_str()
+        .map_err(|_| "invalid_accounts_json".to_string())?;
+    agent_antigravity::set_captured_accounts_from_json(raw)
+}
+
+/// Copy agy's current Google login into a Syrtis-owned Credential Manager
+/// generic credential (target `com.nyanako.tokenbar.antigravity-account:<key>`,
+/// persist local machine). Reads agy's `gemini:antigravity` credential once and
+/// never writes it, starts no process, and proves the token with one refresh
+/// at Google using the client named by its `aud`. Success data is
+/// `{"key":"<64 hex>","label":"<email or fallback>"}`. The error text is
+/// exactly one fixed code: `agy_not_signed_in`, `agy_login_unreadable`,
+/// `agy_login_missing_identity`, `oauth_client_not_found`,
+/// `oauth_client_rejected`, `refresh_rejected`, `refresh_unreachable`,
+/// `account_mismatch`, `invalid_credential_format`, `keychain_write_failed`
+/// (the macOS vocabulary, kept for both platforms). Blocking (network): call
+/// off the UI thread. Does not register the account; the caller adds
+/// `{key,label}` to its list and calls `tb_set_antigravity_accounts`.
+#[no_mangle]
+pub extern "C" fn tb_antigravity_capture() -> *mut c_char {
+    guarded("tb_antigravity_capture", || {
+        envelope(
+            RUNTIME
+                .block_on(agent_antigravity::capture())
+                .map(|account| serde_json::json!({ "key": account.key, "label": account.label }))
+                .map_err(|error| error.code().to_string()),
+        )
+    })
+}
+
+/// agy's login marker for automatic capture: the `LastWritten` FILETIME of
+/// its `gemini:antigravity` credential as a decimal string, or `"absent"`
+/// when agy has no login. Success data is `{"marker":"..."}`; an unreadable
+/// credential is the error `marker_unavailable`. The blob is zeroed unread.
+#[no_mangle]
+pub extern "C" fn tb_antigravity_login_marker() -> *mut c_char {
+    guarded("tb_antigravity_login_marker", || {
+        envelope(
+            agent_antigravity::login_marker()
+                .map(|marker| serde_json::json!({ "marker": marker }))
+                .ok_or_else(|| "marker_unavailable".to_string()),
+        )
+    })
+}
+
+/// One automatic capture of agy's current login, run by the app once per
+/// login-marker change while automatic capture is on. `removed_keys_json` is
+/// a JSON array of the keys the user removed (`["<64 hex>", ...]`); an account
+/// whose key is listed is skipped before any request. Success data is
+/// `{"status":"captured"|"unchanged","key":"<64 hex>","label":"..."}` or
+/// `{"status":"skipped_removed"}`. `unchanged` means Syrtis's own credential
+/// already holds this refresh token: nothing was scanned, requested or
+/// written. `captured` requires Google's refresh response to carry an
+/// `id_token` with the stored `sub`. The error is one fixed code: the
+/// `tb_antigravity_capture` codes (except `agy_not_signed_in`), plus
+/// `not_signed_in` (agy has no credential), `paused` (agy's credential read
+/// failed any other way) and `invalid_removed_keys`. Blocking (network): call
+/// off the UI thread. Does not register the account.
+///
+/// # Safety
+/// `removed_keys_json` must be NULL or a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_antigravity_auto_capture(
+    removed_keys_json: *const c_char,
+) -> *mut c_char {
+    guarded("tb_antigravity_auto_capture", || {
+        let removed: Option<Vec<String>> = (!removed_keys_json.is_null())
+            .then(|| unsafe { CStr::from_ptr(removed_keys_json) }.to_str().ok())
+            .flatten()
+            .and_then(|raw| serde_json::from_str(raw).ok());
+        let Some(removed) = removed else {
+            return envelope(Err("invalid_removed_keys".to_string()));
+        };
+        envelope(
+            RUNTIME
+                .block_on(agent_antigravity::auto_capture(&removed))
+                .map(|outcome| match outcome {
+                    agent_antigravity::AutoCaptured::Captured(account) => serde_json::json!({
+                        "status": "captured", "key": account.key, "label": account.label,
+                    }),
+                    agent_antigravity::AutoCaptured::Unchanged(account) => serde_json::json!({
+                        "status": "unchanged", "key": account.key, "label": account.label,
+                    }),
+                    agent_antigravity::AutoCaptured::SkippedRemoved => {
+                        serde_json::json!({ "status": "skipped_removed" })
+                    }
+                })
+                .map_err(|error| error.code().to_string()),
+        )
+    })
+}
+
+/// Delete one captured account's Credential Manager credential and its
+/// in-memory access token. `key` must be `^[0-9a-f]{64}$`, otherwise
+/// `invalid_key` and Credential Manager is not called; only targets under
+/// `com.nyanako.tokenbar.antigravity-account:` can be deleted. A credential
+/// that is already gone counts as removed. Never revokes the token at Google.
+/// Success data is `{"removed":true}`; errors are `invalid_key` or
+/// `keychain_delete_failed`. Does not change the registry.
+///
+/// # Safety
+/// `key` must be NULL or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_antigravity_remove(key: *const c_char) -> *mut c_char {
+    guarded("tb_antigravity_remove", || {
+        let key = if key.is_null() {
+            None
+        } else {
+            unsafe { CStr::from_ptr(key) }.to_str().ok()
+        };
+        envelope(match key {
+            Some(key) => agent_antigravity::remove(key)
+                .map(|()| serde_json::json!({ "removed": true }))
+                .map_err(|error| error.code().to_string()),
+            None => Err(agent_antigravity::CaptureError::InvalidKey
+                .code()
+                .to_string()),
+        })
+    })
+}
+
 /// Release a string returned by any tb_* entry point.
 ///
 /// # Safety
@@ -1168,6 +1317,46 @@ mod tests {
 
         assert_eq!(failure, r#"{"err":"sourceContextUnavailable","ok":false}"#);
         assert_eq!(panic, failure);
+    }
+
+    /// The Antigravity account exports validate their input before any
+    /// Credential Manager call or request, and answer with fixed codes only.
+    #[test]
+    fn antigravity_account_exports_return_fixed_codes_and_validate_before_any_io() {
+        let _guard = agent_antigravity::CAPTURED_ACCOUNTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = agent_antigravity::captured_key("sub-a");
+        let json = CString::new(format!(r#"[{{"key":"{key}","label":"a@example.com"}}]"#)).unwrap();
+        let s = unsafe { take(tb_set_antigravity_accounts(json.as_ptr())) };
+        assert!(
+            s.contains(r#""ok":true"#) && s.contains(r#""registeredCount":1"#),
+            "got: {s}"
+        );
+        let s = unsafe { take(tb_set_antigravity_accounts(std::ptr::null())) };
+        assert_eq!(s, r#"{"err":"invalid_accounts_json","ok":false}"#);
+        let clear = CString::new("[]").unwrap();
+        unsafe { take(tb_set_antigravity_accounts(clear.as_ptr())) };
+        assert!(agent_antigravity::captured_accounts().is_empty());
+
+        // A NULL or malformed key is refused before Credential Manager is called.
+        let s = unsafe { take(tb_antigravity_remove(std::ptr::null())) };
+        assert_eq!(s, r#"{"err":"invalid_key","ok":false}"#);
+        for bad in [
+            format!("{} x", &key[..56]),
+            "gemini:antigravity".to_string(),
+        ] {
+            let bad = CString::new(bad).unwrap();
+            let s = unsafe { take(tb_antigravity_remove(bad.as_ptr())) };
+            assert_eq!(s, r#"{"err":"invalid_key","ok":false}"#);
+        }
+
+        // A NULL or non-array removed list is refused before agy's credential is read.
+        let s = unsafe { take(tb_antigravity_auto_capture(std::ptr::null())) };
+        assert_eq!(s, r#"{"err":"invalid_removed_keys","ok":false}"#);
+        let bad = CString::new(r#"{"k":1}"#).unwrap();
+        let s = unsafe { take(tb_antigravity_auto_capture(bad.as_ptr())) };
+        assert_eq!(s, r#"{"err":"invalid_removed_keys","ok":false}"#);
     }
 
     #[test]

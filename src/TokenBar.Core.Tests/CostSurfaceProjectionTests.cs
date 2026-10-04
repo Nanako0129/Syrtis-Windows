@@ -158,6 +158,20 @@ public class CostSurfaceProjectionTests
         var unpriced = ExpensiveFewTokens with { Cost = 0 };
         Assert.Equal("0.0%", CostSurfaceProjection.ModelShare(unpriced, [unpriced], true));
 
+        // English singular, as macOS ModelsView ("%lld model · %@ · %@").
+        Assert.Equal("1 model · 1 · $100.00",
+            CostSurfaceProjection.ModelsSubtitle([ExpensiveFewTokens], true));
+        Localization.Load("zh-Hant", AppContext.BaseDirectory);
+        try
+        {
+            Assert.Equal("1 個模型 · 1 · 查詢中",
+                CostSurfaceProjection.ModelsSubtitle([ExpensiveFewTokens], false));
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
+
         var split = new ModelReportEntry("claude", "m", "anthropic", 1_500, 20, 3_000_000, 400, 7, 0, 1, 0);
         Assert.Equal(
             [("In", "1.5K"), ("Out", "20"), ("CR", "3M"), ("CW", "400")],

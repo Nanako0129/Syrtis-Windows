@@ -221,7 +221,7 @@ impl SafeTransportDiagnostic {
         }
     }
 
-    fn rate_limited(status: u16) -> Self {
+    pub(crate) fn rate_limited(status: u16) -> Self {
         Self {
             category: TransportCategory::RateLimited,
             status: (100..=599).contains(&status).then_some(status),
@@ -229,7 +229,7 @@ impl SafeTransportDiagnostic {
         }
     }
 
-    fn server_error(status: u16) -> Self {
+    pub(crate) fn server_error(status: u16) -> Self {
         Self {
             category: TransportCategory::ServerError,
             status: (100..=599).contains(&status).then_some(status),
@@ -1540,7 +1540,7 @@ type BoxedFetch<T> = Pin<Box<dyn Future<Output = T>>>;
 struct Fetchers {
     codex: fn() -> BoxedFetch<AgentUsageSnapshot>,
     claude_accounts: fn() -> BoxedFetch<Vec<AgentUsageSnapshot>>,
-    antigravity: fn() -> BoxedFetch<AgentUsageSnapshot>,
+    antigravity: fn() -> BoxedFetch<Vec<AgentUsageSnapshot>>,
     copilot: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
     grok: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
     kiro: fn() -> BoxedFetch<Option<AgentUsageSnapshot>>,
@@ -1552,7 +1552,7 @@ struct Fetchers {
 const PRODUCTION_FETCHERS: Fetchers = Fetchers {
     codex: || Box::pin(fetch_codex()),
     claude_accounts: || Box::pin(fetch_claude_accounts()),
-    antigravity: || Box::pin(fetch_antigravity()),
+    antigravity: || Box::pin(fetch_antigravity_accounts()),
     copilot: || Box::pin(fetch_copilot()),
     grok: || Box::pin(fetch_grok()),
     kiro: || Box::pin(fetch_kiro()),
@@ -1579,7 +1579,7 @@ async fn run_with(fetchers: &Fetchers, publication_generation: u64) -> AgentUsag
     );
     let mut agents = vec![codex];
     agents.extend(claude);
-    agents.push(antigravity);
+    agents.extend(antigravity);
     // Copilot only appears when signed in (via opencode); skip a bare not-signed-in error card.
     if let Some(copilot) = copilot {
         agents.push(copilot);
@@ -2031,6 +2031,85 @@ async fn fetch_antigravity() -> AgentUsageSnapshot {
     let source = required_card_source(&outcome, agent_antigravity::ANTIGRAVITY_UNCONFIGURED_ERROR);
     apply_provider_outcome("antigravity", source, outcome)
         .expect("Antigravity is a required provider card")
+}
+
+/// Every Antigravity card: the primary route (unchanged), then one card per
+/// captured account (`agent_antigravity::captured_accounts`), keyed by its
+/// hashed key. With none registered this is the single `fetch_antigravity`
+/// call it was before. Bounded and ordered like `fetch_claude_accounts`.
+async fn fetch_antigravity_accounts() -> Vec<AgentUsageSnapshot> {
+    antigravity_accounts_with(
+        agent_antigravity::captured_accounts(),
+        || Box::pin(fetch_antigravity()),
+        |account| Box::pin(fetch_antigravity_captured(account)),
+    )
+    .await
+}
+
+type SnapshotFuture<'a> = Pin<Box<dyn Future<Output = AgentUsageSnapshot> + 'a>>;
+
+async fn antigravity_accounts_with<'a, Primary, Each>(
+    accounts: Vec<agent_antigravity::CapturedAccount>,
+    primary: Primary,
+    each: Each,
+) -> Vec<AgentUsageSnapshot>
+where
+    Primary: FnOnce() -> SnapshotFuture<'a>,
+    Each: Fn(agent_antigravity::CapturedAccount) -> SnapshotFuture<'a>,
+{
+    if accounts.is_empty() {
+        return vec![primary().await];
+    }
+    let mut work = vec![primary()];
+    work.extend(accounts.into_iter().map(each));
+    join_bounded_ordered(work, MAX_ACCOUNT_FETCHES_IN_FLIGHT).await
+}
+
+async fn fetch_antigravity_captured(
+    account: agent_antigravity::CapturedAccount,
+) -> AgentUsageSnapshot {
+    let result = agent_antigravity::fetch_captured(&account.key, &account.label, Utc::now()).await;
+    // Same as `apply_provider_outcome`: the clock is read after the outcome.
+    let now = Utc::now();
+    apply_account_outcome_with(
+        &PROVIDER_LAST_GOOD,
+        "antigravity",
+        Some(&account.key),
+        "oauth",
+        now,
+        captured_antigravity_outcome(result, now),
+        |snapshot| enrich_snapshot(snapshot, now.timestamp()),
+    )
+    .expect("a captured Antigravity account always produces a card")
+}
+
+/// A captured account's fetch as an outcome. Never `Absent` and never the
+/// unconfigured marker: a registered account that fails is an error card for
+/// that account alone. `account_key` is stamped by `apply_account_outcome_with`.
+fn captured_antigravity_outcome(
+    result: Result<agent_antigravity::Fetched, ProviderFetchFailure>,
+    now: DateTime<Utc>,
+) -> ProviderFetchOutcome {
+    match result {
+        Ok(fetched) => ProviderFetchOutcome::Success {
+            cache_binding: fetched.cache_binding,
+            snapshot: AgentUsageSnapshot {
+                account_key: None,
+                merge_scope: None,
+                client_id: "antigravity".to_string(),
+                source: fetched.source,
+                updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+                identity: fetched.identity,
+                account_scope: fetched.account_scope,
+                history_scope: fetched.history_scope,
+                windows: fetched.windows,
+                credits: None,
+                error: None,
+                transport_diagnostic: None,
+            },
+        },
+        Err(failure) => ProviderFetchOutcome::Failure(failure),
+    }
 }
 
 async fn fetch_codex() -> AgentUsageSnapshot {
@@ -15216,6 +15295,188 @@ mod kiro_tests {
         empty_error_snapshot(client_id, "stub", Utc::now(), "stub".to_string(), None)
     }
 
+    /// Acceptance 6: with no captured account the Antigravity fetch is exactly
+    /// the primary — no captured fetch, no extra card.
+    #[tokio::test]
+    async fn an_empty_antigravity_registry_fetches_only_the_primary() {
+        let snapshots = antigravity_accounts_with(
+            Vec::new(),
+            || Box::pin(async { stub("antigravity") }),
+            |_| panic!("no captured account is fetched"),
+        )
+        .await;
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            serde_json::to_string(&snapshots[0]).unwrap(),
+            serde_json::to_string(&{
+                let mut primary = stub("antigravity");
+                primary.updated_at = snapshots[0].updated_at.clone();
+                primary
+            })
+            .unwrap()
+        );
+        assert!(snapshots[0].account_key.is_none());
+    }
+
+    /// Acceptance 5, 6, 7: captured Antigravity accounts compose after the
+    /// primary, each through its own per-account outcome: a key whose
+    /// credential is gone is an error card for that key alone, the others still
+    /// arrive with their windows, and no card carries the token, the raw sub or
+    /// a Google error_description. History goes to a recorder, scopes to a temp
+    /// store, last-good to a local cache.
+    #[tokio::test]
+    async fn a_failing_captured_antigravity_account_errors_alone() {
+        use crate::agent_antigravity::captured_test_support::*;
+        use crate::agent_antigravity::CapturedAccount;
+        use std::rc::Rc;
+
+        let mut fake = FakeIo::new("usage-captured");
+        fake.token = Box::new(|_, refresh_token| {
+            if refresh_token.ends_with("-d") {
+                Ok((
+                    400,
+                    r#"{"error":"invalid_grant","error_description":"SENTINELDESC"}"#.to_string(),
+                ))
+            } else {
+                Ok(token_ok("ya29.SENTINELTOKEN", serde_json::json!({})))
+            }
+        });
+        let io = Rc::new(fake);
+        let key = crate::agent_antigravity::captured_key;
+        let (key_a, key_b, key_c, key_d) = (
+            key("SENTINELSUB-a"),
+            key("SENTINELSUB-b"),
+            key("SENTINELSUB-c"),
+            key("SENTINELSUB-d"),
+        );
+        for (k, refresh_token) in [
+            (&key_a, "1//SENTINELTOKEN-a"),
+            (&key_c, "1//SENTINELTOKEN-c"),
+            (&key_d, "1//SENTINELTOKEN-d"),
+        ] {
+            io.items
+                .borrow_mut()
+                .insert(k.clone(), stored_value(refresh_token, AUD, &secret('a')));
+        }
+        // b has no credential at all; d's refresh is rejected with a description.
+        let accounts: Vec<CapturedAccount> = [&key_a, &key_b, &key_c, &key_d]
+            .iter()
+            .zip([
+                "a@example.com",
+                "b@example.com",
+                "c@example.com",
+                "d@example.com",
+            ])
+            .map(|(k, label)| CapturedAccount {
+                key: (*k).clone(),
+                label: label.to_string(),
+            })
+            .collect();
+
+        let cache = Rc::new(crate::agent_antigravity::captured_test_support::new_token_cache());
+        let last_good = Rc::new(Mutex::new(ProviderLastGoodCache::default()));
+        let enriched: Rc<std::cell::RefCell<Vec<Option<String>>>> = Rc::default();
+        let now = Utc::now();
+        let primary_cache = Rc::clone(&last_good);
+        let snapshots = {
+            let io = Rc::clone(&io);
+            let enriched = Rc::clone(&enriched);
+            antigravity_accounts_with(
+                accounts,
+                move || {
+                    Box::pin(async move {
+                        apply_provider_outcome_with(
+                            &primary_cache,
+                            "antigravity",
+                            "oauth",
+                            now,
+                            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                                "primary marker",
+                            )),
+                            |_| {},
+                        )
+                        .unwrap()
+                    })
+                },
+                move |account| {
+                    let io = Rc::clone(&io);
+                    let cache = Rc::clone(&cache);
+                    let last_good = Rc::clone(&last_good);
+                    let enriched = Rc::clone(&enriched);
+                    Box::pin(async move {
+                        let result = crate::agent_antigravity::fetch_captured_with(
+                            &*io,
+                            &cache,
+                            &account.key,
+                            &account.label,
+                            now,
+                        )
+                        .await;
+                        apply_account_outcome_with(
+                            &last_good,
+                            "antigravity",
+                            Some(&account.key),
+                            "oauth",
+                            now,
+                            captured_antigravity_outcome(result, now),
+                            |snapshot| enriched.borrow_mut().push(snapshot.account_key.clone()),
+                        )
+                        .unwrap()
+                    })
+                },
+            )
+            .await
+        };
+
+        let keys: Vec<Option<&str>> = snapshots
+            .iter()
+            .map(|snapshot| snapshot.account_key.as_deref())
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                None,
+                Some(key_a.as_str()),
+                Some(key_b.as_str()),
+                Some(key_c.as_str()),
+                Some(key_d.as_str())
+            ],
+            "primary first, then the accounts in registry order"
+        );
+        assert_eq!(snapshots[0].error.as_deref(), Some("primary marker"));
+        for ok in [&snapshots[1], &snapshots[3]] {
+            assert!(ok.error.is_none(), "{:?}", ok.error);
+            assert_eq!(ok.windows.len(), 1);
+            assert_eq!(ok.source, "oauth");
+            assert!(ok.history_scope.is_ok());
+        }
+        assert_eq!(
+            snapshots[1]
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.email.as_deref()),
+            Some("a@example.com")
+        );
+        assert_eq!(
+            snapshots[2].error.as_deref(),
+            Some(crate::agent_antigravity::CAPTURED_ITEM_MISSING)
+        );
+        assert!(snapshots[2].windows.is_empty());
+        assert!(snapshots[4].error.is_some() && snapshots[4].windows.is_empty());
+        assert_eq!(
+            *enriched.borrow(),
+            vec![Some(key_a.clone()), Some(key_c.clone())],
+            "history is recorded only for the successes, and only into the recorder"
+        );
+        assert!(io.scope.root().starts_with(std::env::temp_dir()));
+        for snapshot in &snapshots {
+            let wire = serde_json::to_string(snapshot).unwrap();
+            for sentinel in ["SENTINELTOKEN", "SENTINELSUB", "SENTINELDESC"] {
+                assert!(!wire.contains(sentinel), "{wire}");
+            }
+        }
+    }
+
     /// E: the join publishes every provider's card, in order, kiro after grok,
     /// and the subscriptions come from the fetcher set rather than the profile.
     #[tokio::test]
@@ -15223,7 +15484,7 @@ mod kiro_tests {
         let stubs = Fetchers {
             codex: || Box::pin(async { stub("codex") }),
             claude_accounts: || Box::pin(async { vec![stub("claude"), stub("claude")] }),
-            antigravity: || Box::pin(async { stub("antigravity") }),
+            antigravity: || Box::pin(async { vec![stub("antigravity"), stub("antigravity")] }),
             copilot: || Box::pin(async { Some(stub("copilot")) }),
             grok: || Box::pin(async { Some(stub("grok")) }),
             kiro: || Box::pin(async { Some(stub("kiro")) }),
@@ -15243,6 +15504,7 @@ mod kiro_tests {
                 "codex",
                 "claude",
                 "claude",
+                "antigravity",
                 "antigravity",
                 "copilot",
                 "grok",
