@@ -341,6 +341,11 @@ public sealed partial class SettingsWindow : Window
     /// <summary>The quota-derived option sets the menu-bar and dashboard pages
     /// were last built from (<see cref="QuotaSourceChoices"/>).</summary>
     private IReadOnlySet<string>? _menuBarQuotaChoices;
+
+    /// <summary>The unavailable-selection row's label the menu-bar page was
+    /// built with: "—" before any payload becomes "Unavailable selection"
+    /// once one arrives without the pick, which offers no new choice.</summary>
+    private string? _menuBarUnavailableLabel;
     private string? _dashboardQuotaKey;
 
     /// <summary>Whether the attribution page was built before any quota
@@ -371,7 +376,8 @@ public sealed partial class SettingsWindow : Window
         var payload = window._quota();
         var store = AppSettings.Store;
         var shownRebuilt = false;
-        if (QuotaSourceChoices.OffersNewChoice(window._menuBarQuotaChoices, payload))
+        if (QuotaSourceChoices.OffersNewChoice(window._menuBarQuotaChoices, payload)
+            || UnavailableQuotaRow(payload)?.Label != window._menuBarUnavailableLabel)
         {
             window._pages["menubar"] = window.BuildMenuBarPage(store);
             shownRebuilt |= window._selectedTag == "menubar";
@@ -556,7 +562,8 @@ public sealed partial class SettingsWindow : Window
             payload, persistedSelection);
         var choices = QuotaSourceChoices.Of(payload).ToList();
         _menuBarQuotaChoices = QuotaSourceChoices.Selections(payload);
-        var unavailable = QuotaSourceChoices.Unavailable(payload, selection);
+        var unavailable = UnavailableQuotaRow(payload);
+        _menuBarUnavailableLabel = unavailable?.Label;
         if (unavailable is { } row)
         {
             choices.Add(row);
@@ -573,6 +580,12 @@ public sealed partial class SettingsWindow : Window
 
         return panel;
     }
+
+    private static (string Selection, string Label)? UnavailableQuotaRow(AgentUsagePayload? payload) =>
+        QuotaSourceChoices.Unavailable(payload, QuotaSelectionPolicy.EffectiveSelection(
+            payload,
+            AppSettings.Store.GetString("tokenbar.quota.source", QuotaResolver.Auto)
+                ?? QuotaResolver.Auto));
 
     // ── Dashboard page: Agent limits, Client tabs, Live trace, Flyout size ──
     private StackPanel BuildDashboardPage(SettingsStore store)
