@@ -86,6 +86,53 @@ public class QuotaStalenessTests
             payload, "missing-client|no.such.card", NoneHidden, veryOldStamp, now));
     }
 
+    // The tray adopts every fetched payload, including the flyout's (#214),
+    // so a payload where the selected agent failed must not reset the
+    // reading's age, or a provider blocked for 30 minutes would never grey.
+    // A same-binding transient failure comes back from Rust as the last-good
+    // snapshot with its original updated_at plus an error
+    // (agent_usage.rs last_good_same_binding_fallback_preserves_clean_snapshot_without_enrichment);
+    // a terminal failure, or one with no last-good, is an error snapshot
+    // stamped now with no windows.
+    [Fact]
+    public void AdoptingAFailedPayloadKeepsTheReadingsAge()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var fetchedAt = now - QuotaStaleness.StaleAfter - TimeSpan.FromMinutes(1);
+        const string selection = "copilot|premium.v1";
+        var goodCopilot = new AgentUsageSnapshot(
+            "copilot", "oauth", fetchedAt.ToString("o"),
+            new[] { new UsageWindow("Premium", 60, 40, CardId: "premium.v1") });
+        var good = new AgentUsagePayload("now", new[] { goodCopilot });
+        var transient = new AgentUsagePayload(
+            "now", new[] { goodCopilot with { Error = "rate limited" } });
+        var terminal = new AgentUsagePayload(
+            "now",
+            new[]
+            {
+                new AgentUsageSnapshot(
+                    "copilot", "oauth", now.ToString("o"), Array.Empty<UsageWindow>(),
+                    Error: "signed out"),
+            });
+
+        var before = QuotaSelectionPolicy.ResolveReading(good, selection, NoneHidden, null, null);
+        var afterTransient = QuotaSelectionPolicy.ResolveReading(
+            transient, selection, NoneHidden, before.EffectiveSelection, before.Remaining);
+        var afterTerminal = QuotaSelectionPolicy.ResolveReading(
+            terminal, selection, NoneHidden, before.EffectiveSelection, before.Remaining);
+
+        Assert.NotEqual(good, transient);
+        Assert.Equal(fetchedAt.ToUnixTimeMilliseconds(), before.ResolvedAt?.ToUnixTimeMilliseconds());
+        Assert.Equal(before.ResolvedAt, afterTransient.ResolvedAt);
+        // A fresh stamp cannot stand in for the payload's own age.
+        Assert.True(QuotaStaleness.ReadingIsStale(transient, selection, NoneHidden, now, now));
+
+        // Terminal: no reading at all (#418 parity), never a fresh-looking one.
+        Assert.Equal(QuotaCacheWrite.Clear, afterTerminal.CacheWrite);
+        Assert.Null(afterTerminal.Remaining);
+        Assert.Null(afterTerminal.ResolvedAt);
+    }
+
     // A finite stamp outside DateTimeOffset's range (a hand-edited 1e300)
     // must read as unknown age rather than throw inside the tray update.
     [Theory]
