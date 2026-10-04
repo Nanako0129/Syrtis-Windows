@@ -74,20 +74,16 @@ internal static class OverviewScope
         singleClient is not null
         && !tabClients.Intersect(presentClients.Select(ClientRegistry.CanonicalClient)).Any();
 
-    /// <summary>The clientId <c>BuildLimits</c> should restrict its rows to,
-    /// or null to show every agent (Overview tab).
+    /// <summary>The quota owner of the tab's client, or null on Overview.
+    /// Its only production consumer is <see cref="LimitsClients"/>, the one
+    /// derivation of the limits card's client set; the card title reads
+    /// <see cref="ClientRegistry.TabDisplayName"/> of the tab, not this.
     /// <para>
     /// Mapped through <see cref="ClientRegistry.QuotaOwner"/>, not the raw tab
-    /// id: <c>BuildLimits</c> filters on <c>agent.ClientId == clientId</c>
-    /// against the quota payload (every account of that client passes), and a client that spends another
-    /// subscription's allowance is keyed there under the owner.
-    /// <c>antigravity-cli</c> is the one such client today — its rows arrive as
-    /// <c>antigravity</c>, so passing the tab id straight through matched
-    /// nothing and the card said "No quota data yet" while the quota was
-    /// sitting in the payload. Every other subscription-facing lookup already
-    /// keys by owner (see <c>QuotaLensProjection.BuildClient</c>); this is the
-    /// same rule, and it belongs here rather than at the call site so the
-    /// Overview cannot apply it differently from the Quota lens.
+    /// id: <c>antigravity-cli</c>'s rows arrive keyed <c>antigravity</c>, so
+    /// the raw id matched nothing and the card said "No quota data yet". Every
+    /// other subscription-facing lookup keys by owner too
+    /// (<c>QuotaLensProjection.BuildClient</c>).
     /// </para></summary>
     internal static string? LimitsClientId(string? singleClient) =>
         singleClient is null ? null : ClientRegistry.QuotaOwner(singleClient);
@@ -118,6 +114,16 @@ internal static class OverviewScope
             ? (count, "Show less".Localized())
             : (ModelRowCap, "Show {0} more".Localized(hidden));
     }
+
+    /// <summary>The ONE derivation of the limits card's client set, used by the
+    /// Overview lens and the Quota lens alike (the Quota lens once took
+    /// <c>TabSlice(client.Owner)</c>, and <c>Owner</c> can be <c>grok-bot</c>,
+    /// which dropped grok's rows). Every client id whose rows the limits card
+    /// shows: the owner's whole tab group, so the "Grok Build &amp; Bot" tab carries the
+    /// <c>grok-bot</c> card beside <c>grok</c>. Null on the Overview tab
+    /// (every agent).</summary>
+    internal static IReadOnlyList<string>? LimitsClients(string? singleClient) =>
+        LimitsClientId(singleClient) is { } owner ? ClientRegistry.TabSlice(owner) : null;
 }
 
 internal static class OverviewCards
