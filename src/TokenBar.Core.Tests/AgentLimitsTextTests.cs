@@ -98,6 +98,73 @@ public class AgentLimitsTextTests
         Assert.Equal(new HashSet<string> { "claude", "antigravity" }, live);
     }
 
+    // ---- Setup prompt -----------------------------------------------------
+
+    [Fact]
+    public void AnUnconfiguredClaudeCardOffersTheWindowsSetupTokenCommand()
+    {
+        var prompt = AgentLimitsText.Setup(new AgentUsageSnapshot(
+            "claude", "unconfigured", "2026-10-04T00:00:00Z", [], Error: "credentials not found"));
+        Assert.NotNull(prompt);
+        var prose = string.Join(" ", prompt!.Parts.Where(static p => !p.IsCommand).Select(static p => p.Text));
+        Assert.Contains("CLAUDE_CODE_OAUTH_TOKEN", prose);
+        Assert.Contains("Start menu", prose);
+        Assert.DoesNotContain("Keychain", prose);
+        // Setting first, then how to undo it: the claude CLI reads the same
+        // variable and prefers it over /login (user decision, 2026-10-04).
+        Assert.Equal(
+            [AgentLimitsText.ClaudeSetupCommand, AgentLimitsText.ClaudeRemoveCommand],
+            prompt.Parts.Where(static p => p.IsCommand).Select(static p => p.Text));
+        Assert.Contains("prefers it over /login", prose);
+        Assert.Equal("and reopen Syrtis.", prompt.Parts[^1].Text);
+        // The token is typed at a prompt, never passed on the command line.
+        Assert.Contains("Read-Host", AgentLimitsText.ClaudeSetupCommand);
+        Assert.Contains("'User'", AgentLimitsText.ClaudeSetupCommand);
+        Assert.Contains("$null, 'User'", AgentLimitsText.ClaudeRemoveCommand);
+    }
+
+    // Chinese folds "reopen Syrtis" into the sentence before the removal
+    // command, so nothing follows it there — the {0} entry, not a pair of
+    // keys, is what lets each language place it.
+    [Fact]
+    public void TheRemovalCommandSitsWhereEachLanguagePutsIt()
+    {
+        Localization.Load("zh-Hant", AppContext.BaseDirectory);
+        try
+        {
+            var prompt = AgentLimitsText.Setup(new AgentUsageSnapshot(
+                "claude", "unconfigured", "2026-10-04T00:00:00Z", []))!;
+            Assert.Equal(new LimitsSetupPart(AgentLimitsText.ClaudeRemoveCommand, IsCommand: true), prompt.Parts[^1]);
+            Assert.Contains("優先於 /login", prompt.Parts[^2].Text);
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
+    }
+
+    // Claude's instructions name Claude's variable; another provider keeps
+    // its own one-line instruction (macOS setupInstructions, #345).
+    [Fact]
+    public void OtherProvidersShowTheirOwnInstructionAndNothingWhenSilent()
+    {
+        Assert.Equal(new LimitsSetupPrompt("Run `codex` to log in"),
+            AgentLimitsText.Setup(new AgentUsageSnapshot(
+                "codex", "unconfigured", "2026-10-04T00:00:00Z", [], Error: "Run `codex` to log in")));
+        Assert.Null(AgentLimitsText.Setup(new AgentUsageSnapshot(
+            "codex", "unconfigured", "2026-10-04T00:00:00Z", [])));
+    }
+
+    [Theory]
+    [InlineData("oauth")]
+    [InlineData("keychain-consent")]
+    [InlineData("keychain-denied")]
+    public void OnlyAnUnconfiguredCardHasASetupPrompt(string source)
+    {
+        Assert.Null(AgentLimitsText.Setup(new AgentUsageSnapshot(
+            "claude", source, "2026-10-04T00:00:00Z", [], Error: "x")));
+    }
+
     // ---- Detail line ------------------------------------------------------
 
     private const string Email = "someone@example.com";
@@ -139,8 +206,12 @@ public class AgentLimitsTextTests
 
     // ---- Card order -------------------------------------------------------
 
-    private static IReadOnlyList<string> Rows(IReadOnlyList<AgentUsageSnapshot> agents) =>
-        [.. agents.Select(a => a.Account.AccountKey is null ? a.ClientId : $"{a.ClientId}#{a.Account.AccountKey}")];
+    private static IReadOnlyList<string> Rows(IReadOnlyList<LimitsRow> rows) =>
+        [.. rows.Select(r => r.Snapshot is null ? $"{r.ClientId}?"
+            : r.IsPrimary ? r.ClientId : $"{r.ClientId}#{r.Snapshot.Account.AccountKey}")];
+
+    private static IReadOnlyList<LimitsRow> Of(params AgentUsageSnapshot[] agents) =>
+        [.. agents.Select(LimitsRow.Of)];
 
     [Fact]
     public void CardsFollowTheSavedTabOrderWithExtrasAfterTheirPrimary()
@@ -150,17 +221,17 @@ public class AgentLimitsTextTests
             Who("claude"), Who("codex"), Who("claude", accountKey: "claude-desktop"), Who("gemini"),
         };
         Assert.Equal(["codex", "claude", "claude#claude-desktop", "gemini"],
-            Rows(LimitsCardOrder.Apply(agents, "codex,antigravity,claude")));
+            Rows(LimitsCardOrder.Apply(Of(agents), "codex,antigravity,claude")));
         // No saved order: payload order, extras still beside their primary.
         Assert.Equal(["claude", "claude#claude-desktop", "codex", "gemini"],
-            Rows(LimitsCardOrder.Apply(agents, "")));
+            Rows(LimitsCardOrder.Apply(Of(agents), "")));
     }
 
     [Fact]
     public void AnExtraWhosePrimaryIsHiddenKeepsItsCardAtTheEnd()
     {
         var agents = new[] { Who("claude", accountKey: "claude-desktop"), Who("codex") };
-        Assert.Equal(["codex", "claude#claude-desktop"], Rows(LimitsCardOrder.Apply(agents, "claude,codex")));
+        Assert.Equal(["codex", "claude#claude-desktop"], Rows(LimitsCardOrder.Apply(Of(agents), "claude,codex")));
     }
 
     [Fact]
@@ -171,6 +242,122 @@ public class AgentLimitsTextTests
             LimitsCardOrder.Dropped("claude,grok,codex,gemini", ["claude", "codex", "gemini"], "gemini", "claude"));
         Assert.Equal("codex,grok,claude,gemini",
             LimitsCardOrder.Dropped("claude,grok,codex,gemini", ["claude", "codex", "gemini"], "claude", "codex"));
+    }
+
+    // ---- Placeholder rows (macOS placeholderRows / known / baseClients) ---
+
+    private static readonly IReadOnlySet<string> None = new HashSet<string>();
+
+    private static IReadOnlyList<string> Placeholders(
+        IReadOnlyList<AgentUsageSnapshot> all, IReadOnlyList<string> requested,
+        bool multiClient = true, IReadOnlySet<string>? tabHidden = null,
+        IReadOnlySet<string>? limitsHidden = null, IReadOnlyList<AgentUsageSnapshot>? visible = null) =>
+        Rows(LimitsPlaceholders.Rows(
+            visible ?? all, all, requested, multiClient, tabHidden ?? None, limitsHidden ?? None));
+
+    [Fact]
+    public void KnownClientsWithoutASnapshotGetAPlaceholderInRequestedOrder()
+    {
+        // foo has no placeholder and no snapshot; copilot was not requested
+        // but has a snapshot, so it follows the requested ones.
+        Assert.Equal(["claude?", "codex", "gemini?", "copilot"],
+            Placeholders([Who("codex"), Who("copilot")], ["claude", "codex", "gemini", "foo"]));
+    }
+
+    [Fact]
+    public void ThePlaceholderLabelsAreMacOss()
+    {
+        Assert.Equal(["Session", "Weekly"], LimitsPlaceholders.Labels["claude"]);
+        Assert.Equal(["Session", "Weekly"], LimitsPlaceholders.Labels["codex"]);
+        Assert.Equal(["Pro", "Flash"], LimitsPlaceholders.Labels["gemini"]);
+        Assert.Equal(["Weekly"], LimitsPlaceholders.Labels["grok"]);
+        Assert.Equal(["Weekly"], LimitsPlaceholders.Labels["grok-bot"]);
+        Assert.Equal(5, LimitsPlaceholders.Clients.Count);
+    }
+
+    // A switched-off client must not come back as a placeholder: the limits
+    // toggle everywhere, tab visibility on the multi-client card only.
+    [Fact]
+    public void APlaceholderObeysTheSameHideRulesAsACard()
+    {
+        Assert.Equal(["gemini?"], Placeholders([], ["claude", "gemini"], limitsHidden: new HashSet<string> { "claude" }));
+        Assert.Equal(["claude?"], Placeholders([], ["claude", "gemini"], tabHidden: new HashSet<string> { "gemini" }));
+        Assert.Equal(["gemini?"], Placeholders([], ["gemini"], multiClient: false, tabHidden: new HashSet<string> { "gemini" }));
+    }
+
+    // A hidden snapshot is filtered out of `visible`; its client must not get
+    // a placeholder in its place.
+    [Fact]
+    public void AHiddenSnapshotIsNotReplacedByAPlaceholder()
+    {
+        Assert.Empty(Placeholders([Who("codex")], ["codex"], visible: []));
+    }
+
+    // An extra account does not stand in for the primary (macOS
+    // expandedWithExtraAccounts): the primary still gets its placeholder.
+    [Fact]
+    public void AnExtraAccountOnlyClientStillGetsItsPrimaryPlaceholder()
+    {
+        Assert.Equal(["claude?", "claude#claude-desktop"],
+            Placeholders([Who("claude", accountKey: "claude-desktop")], ["claude"]));
+        Assert.True(LimitsPlaceholders.Known("claude", []));
+        Assert.False(LimitsPlaceholders.Known("copilot", [Who("copilot", accountKey: "x")]));
+        Assert.True(LimitsPlaceholders.Known("copilot", [Who("copilot")]));
+    }
+
+    // A grouped client tab asks for all its members (macOS restrict mode,
+    // clients.filter(known)): with Grok Build signed in and Grok Bot not, the
+    // Grok tab draws Grok Bot's placeholder beside Grok Build's card.
+    [Fact]
+    public void AGroupedTabsMemberWithoutASnapshotGetsItsPlaceholder()
+    {
+        Assert.Equal(["grok", "grok-bot?"],
+            Placeholders([Who("grok")], ["grok", "grok-bot"], multiClient: false));
+    }
+
+    // INTERIM, to be changed by the known() follow-up (W5-7): with grok
+    // switched off and no snapshot at all, main's HidesClientCard follows the
+    // tab's owner alone and drops the whole Grok tab card, so Grok Bot's
+    // placeholder from Rows is never drawn. macOS keeps the card for an
+    // unhidden grok-bot; aligning HidesClientCard with
+    // LimitsPlaceholders.Known flips this assertion.
+    [Fact]
+    public void Interim_PendingKnownFollowUp_GroupedTabHiddenOwnerHidesTheCardBeforeAnySnapshot()
+    {
+        Assert.True(LimitsCardFilter.HidesClientCard([], ["grok", "grok-bot"], new HashSet<string> { "grok" }));
+    }
+
+    // A client with only extra accounts and no placeholder labels (the
+    // Antigravity tab with captured accounts only) draws its accounts and no
+    // invented "Limit" card above them.
+    [Fact]
+    public void AnExtraOnlyClientWithoutLabelsGetsNoPlaceholder()
+    {
+        Assert.Equal(["antigravity#acct-1"],
+            Placeholders([Who("antigravity", accountKey: "acct-1")], ["antigravity", "antigravity-cli"], multiClient: false));
+    }
+
+    // The placeholder hide rule is LimitsCardFilter's, not a copy of it.
+    [Fact]
+    public void ThePlaceholderAndTheCardShareOneHideRule()
+    {
+        var tab = new HashSet<string> { "gemini" };
+        var limits = new HashSet<string> { "claude" };
+        foreach (var multi in new[] { true, false })
+        {
+            foreach (var id in new[] { "claude", "gemini", "codex" })
+            {
+                var placeholderShown = Placeholders([], [id], multiClient: multi, tabHidden: tab, limitsHidden: limits).Count == 1;
+                Assert.Equal(!LimitsCardFilter.Hides(id, isPrimary: true, multi, tab, limits), placeholderShown);
+            }
+        }
+    }
+
+    [Fact]
+    public void SettingsOffersAToggleForEveryKnownPresentClient()
+    {
+        Assert.Equal(["gemini", "copilot"],
+            ClientRegistry.KnownLimitsClients(["gemini", "foo"], ["copilot"], LimitsPlaceholders.Clients));
     }
 
     // Three groups 100 tall with 10px gaps: A 0-100, B 110-210, C 220-320.

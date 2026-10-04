@@ -24,8 +24,19 @@ public static class LimitsCardFilter
         IReadOnlySet<string> tabHidden,
         IReadOnlySet<string> limitsHidden) =>
         [.. agents.Where(agent =>
-            (clientIds is null ? !tabHidden.Contains(agent.ClientId) : clientIds.Contains(agent.ClientId))
-            && !(agent.Account.AccountKey is null && limitsHidden.Contains(agent.ClientId)))];
+            (clientIds is null || clientIds.Contains(agent.ClientId))
+            && !Hides(agent.ClientId, agent.Account.AccountKey is null,
+                multiClient: clientIds is null, tabHidden, limitsHidden))];
+
+    /// <summary>The one hide rule for a card, snapshot or placeholder
+    /// (<see cref="LimitsPlaceholders.Rows"/> asks it too, so the two cannot
+    /// drift): the limits toggle hides a PRIMARY card everywhere; a hidden tab
+    /// hides every card of that client on the multi-client card only.</summary>
+    public static bool Hides(
+        string clientId, bool isPrimary, bool multiClient,
+        IReadOnlySet<string> tabHidden, IReadOnlySet<string> limitsHidden) =>
+        (isPrimary && limitsHidden.Contains(clientId))
+        || (multiClient && tabHidden.Contains(clientId));
 
     /// <summary>Whether a client tab draws no Agent-limits card at all: the
     /// ONE rule both call sites (Overview lens, Quota lens) ask.
@@ -54,9 +65,10 @@ public static class LimitsCardFilter
     /// <para>Known differences from macOS (not a complete list; reviewed against
     /// AgentLimitsCard.swift): placeholder rows (:228-234, drawn :784-787) for a
     /// codex/claude/gemini/grok member with no snapshot, and grok-bot's
-    /// sign-in/loading line (:763-769) — Windows draws neither, so such a member
-    /// is simply absent, and a tab with no visible member shows "No quota data
-    /// yet." or could-not-check; the :529 branch (no card once answered with
+    /// sign-in/loading line (:763-769) — Windows draws both now
+    /// (LimitsPlaceholders.Rows), but only once this rule has let the card
+    /// exist, so a member whose card this rule drops never shows them; the
+    /// :529 branch (no card once answered with
     /// nothing visible); on the Grok tab before any snapshot, Windows follows
     /// the owner (grok) alone, while macOS keeps the card for an unhidden
     /// grok-bot; the opencode tab's routed subscriptions (:421-436); and a

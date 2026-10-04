@@ -21,6 +21,28 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
     /// from holding the task forever. Later requests wait for the next tick.</summary>
     private const int MaxFollowUps = 2;
 
+    /// <summary>Raised with every fetch chain's resulting payload, whichever
+    /// surface asked for it, so a consumer that did not ask (the tray feed,
+    /// when the flyout polled) still holds the newest payload instead of one
+    /// up to a slow tick old. Raised on the fetch thread, before the chain
+    /// completes and before the in-flight slot clears. Within one epoch
+    /// payloads are raised in fetch order; a fetch chained for a newer epoch
+    /// may start first, but the payload raised before it carries the older
+    /// epoch and is discarded. A handler's <see cref="FetchAsync"/> joins the
+    /// chain being raised for, and its <see cref="RequestFollowUp"/> is
+    /// honoured by that chain (up to the follow-up cap; the payload that
+    /// follow-up fetches is raised too). A throwing handler is caught and
+    /// logged by exception type: it neither fails the fetch nor pins the slot.
+    /// Not raised for a failed fetch. A handler must marshal to its own
+    /// thread. Carries the <see cref="QuotaEpoch"/> the fetch was requested
+    /// at: a handler must discard a payload whose epoch is no longer current,
+    /// as <see cref="QuotaPoller"/> does.</summary>
+    public event Action<AgentUsagePayload, long>? Fetched;
+
+    /// <summary>Where a throwing <see cref="Fetched"/> handler is logged (the
+    /// exception type only). Silent until the host points it somewhere.</summary>
+    public Action<string> Log { get; set; } = _ => { };
+
     // Waits for the launch push so the first fetch already carries the extra
     // Claude accounts' cards; AntigravityFetch installs the captured
     // Antigravity accounts first, runs automatic capture's pre-fetch step and
@@ -67,7 +89,7 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
             if (_inFlight is { } current)
             {
                 next = current.ContinueWith(
-                    _ => FetchWithFollowUps(id, null, chained: true),
+                    _ => FetchWithFollowUps(id, epoch, null, chained: true),
                     CancellationToken.None,
                     TaskContinuationOptions.None,
                     TaskScheduler.Default);
@@ -79,7 +101,7 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
                 _owed = false;
                 // The launch re-apply runs once, before the first fetch of the
                 // chain; follow-ups owed during it do not run it again.
-                next = Task.Run(() => FetchWithFollowUps(id, before, chained: false));
+                next = Task.Run(() => FetchWithFollowUps(id, epoch, before, chained: false));
             }
 
             _inFlight = next;
@@ -104,15 +126,18 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
         }
     }
 
-    /// <summary>Runs the chain and clears <see cref="_inFlight"/> in the same
-    /// locked decision that ends it. A completed task runs its continuations
-    /// after it is marked complete, so clearing from a continuation left a
-    /// window where a caller that saw the chain finished still found it in
-    /// flight, lost its <see cref="RequestFollowUp"/> and joined the old
-    /// payload. The in-lock clear closes that race; the finally is the net for
-    /// every other exit (a throwing action or fetch). The id check keeps a
-    /// chain from clearing a newer one chained after it.</summary>
-    private AgentUsagePayload FetchWithFollowUps(long id, Action? before, bool chained)
+    /// <summary>Runs the chain, raises <see cref="Fetched"/> for its result
+    /// and clears <see cref="_inFlight"/> in the same locked decision that
+    /// ends it. A completed task runs its continuations after it is marked
+    /// complete, so clearing from a continuation left a window where a caller
+    /// that saw the chain finished still found it in flight, lost its
+    /// <see cref="RequestFollowUp"/> and joined the old payload. The in-lock
+    /// clear closes that race; the finally is the net for every other exit (a
+    /// throwing action or fetch). The id check keeps a chain from clearing a
+    /// newer one chained after it. A payload superseded by an owed follow-up
+    /// is not raised; the result is raised once, and a follow-up a handler
+    /// requests while it is raised makes the chain fetch (and raise) again.</summary>
+    private AgentUsagePayload FetchWithFollowUps(long id, long epoch, Action? before, bool chained)
     {
         try
         {
@@ -129,27 +154,43 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
 
             before?.Invoke();
             var payload = fetch();
-            for (var i = 0; ; i++)
+            var raised = false;
+            var failed = false;
+            for (var i = 0; ; )
             {
+                bool again;
                 lock (_gate)
                 {
-                    if (i >= MaxFollowUps || !_owed)
+                    again = !failed && i < MaxFollowUps && _owed;
+                    if (again)
+                    {
+                        _owed = false;
+                    }
+                    else if (raised)
                     {
                         ClearIfCurrent(id);
                         return payload;
                     }
+                }
 
-                    _owed = false;
+                if (!again)
+                {
+                    Raise(payload, epoch);
+                    raised = true;
+                    continue;
                 }
 
                 try
                 {
                     payload = fetch();
+                    i++;
+                    raised = false;
                 }
                 catch
                 {
-                    // A failed follow-up keeps the payload already fetched.
-                    return payload;
+                    // A failed follow-up keeps the payload already fetched
+                    // (raised once, by the end decision above).
+                    failed = true;
                 }
             }
         }
@@ -159,6 +200,19 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
             {
                 ClearIfCurrent(id);
             }
+        }
+    }
+
+    private void Raise(AgentUsagePayload payload, long epoch)
+    {
+        try
+        {
+            Fetched?.Invoke(payload, epoch);
+        }
+        catch (Exception ex)
+        {
+            // A handler's failure must not fail the fetch or pin the slot.
+            Log($"agentUsage fetched handler failed: {ex.GetType().Name}");
         }
     }
 

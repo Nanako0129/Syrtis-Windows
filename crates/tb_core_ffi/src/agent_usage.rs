@@ -4099,7 +4099,13 @@ fn load_codex_credentials_from(auth_path: &Path) -> Result<CodexCredentials, Str
 /// credential that exists but failed). `fetch_claude` turns this into a snapshot
 /// with `source == "unconfigured"`, so the UI shows a setup prompt rather than a
 /// red error.
-const CLAUDE_UNCONFIGURED_ERROR: &str = "Claude OAuth credentials not found. Run `claude` to authenticate, or set CLAUDE_CODE_OAUTH_TOKEN / add a `tokenbar-claude-oauth-token` Keychain item to use a setup-token.";
+///
+/// Names only what Windows reads: the Keychain item and the login-shell
+/// harvest are macOS-only and are stubs here
+/// (`load_claude_raw_token_from_keychain`, `harvest_shell_env_token_uncached`).
+/// The environment variable is read when the process starts, hence the
+/// reopen.
+const CLAUDE_UNCONFIGURED_ERROR: &str = "Claude OAuth credentials not found. Run `claude` to authenticate, or, to use a setup-token, set CLAUDE_CODE_OAUTH_TOKEN as a user environment variable, then quit Syrtis and reopen it from the Start menu.";
 const CLAUDE_CREDENTIALS_LOAD_ERROR: &str = "Claude credentials could not be loaded.";
 
 /// Full-login credentials: structured `claudeAiOauth` blobs (Keychain
@@ -7456,6 +7462,28 @@ mod tests {
             snapshot: cache_test_snapshot("claude", Err(AccountScopeError::NoTrustedEvidence), now),
             cache_binding: None,
         }
+    }
+
+    /// With no login and no setup token, the card the user sees tells them to
+    /// do something Windows can act on. The macOS copy named a Keychain item
+    /// that this build never reads.
+    #[tokio::test]
+    async fn an_unconfigured_claude_card_names_only_what_windows_reads() {
+        let (source, outcome) = fetch_claude_login_or_setup_with(
+            ClaudeLoginResolution::Absent,
+            |_| async { ("oauth", claude_test_success_outcome()) },
+            || Ok(None),
+            |_| async { ("setup-token", claude_test_success_outcome()) },
+        )
+        .await;
+        assert_eq!(source, "unconfigured");
+        let ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { display }) = outcome
+        else {
+            panic!("expected a terminal failure");
+        };
+        assert!(!display.contains("Keychain"), "{display}");
+        assert!(display.contains("CLAUDE_CODE_OAUTH_TOKEN"), "{display}");
+        assert!(display.contains("user environment variable"), "{display}");
     }
 
     #[tokio::test]
