@@ -195,7 +195,7 @@ public static class AgentLimitsText
         {
             List<LimitsSetupPart> parts =
             [
-                new("Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from your Windows user environment variables. Save the token as a user environment variable with this PowerShell command. The token is stored unencrypted in your Windows user environment."
+                new("Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from your Windows environment variables. Save the token as a user environment variable with this PowerShell command. The token is stored unencrypted in your Windows user environment."
                     .Localized(), IsCommand: false),
                 new(ClaudeSetupCommand, IsCommand: true),
             ];

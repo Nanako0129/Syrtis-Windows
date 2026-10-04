@@ -4893,16 +4893,20 @@ fn compose_user_system(user: Lookup, system: Lookup) -> Option<String> {
 /// keeps that location's last successful value (`Absent` before the first)
 /// rather than flapping to "unconfigured", while the other location still
 /// follows the registry — a failing machine value neither blocks a good user
-/// value nor resends a user token that was removed. Reads happen outside the
-/// lock; the lock only swaps values. Never touches the process environment.
+/// value nor resends a user token that was removed. Reads happen under the
+/// lock (see the body). Never touches the process environment.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn windows_claude_token_with(
     read: impl Fn(EnvRoot) -> Result<Lookup, RegistryReadError>,
     last: &Mutex<EnvCache>,
 ) -> Option<String> {
+    // The reads happen under the lock on purpose: read and store must be one
+    // step, or a slow read that started before a removal could land after a
+    // newer read and put the withdrawn token back in the cache, from where a
+    // later read error would resend it.
+    let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let user = read(EnvRoot::User);
     let system = read(EnvRoot::System);
-    let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Ok(user) = user {
         last.user = user;
     }
@@ -13242,6 +13246,12 @@ mod tests {
             );
         }
         assert_eq!(key.read(None, "number"), Err(RegistryReadError));
+
+        // The cap is the 32 767-WCHAR environment limit plus the NUL.
+        key.set("at-limit", REG_SZ, &"x".repeat(32_767));
+        key.set("over-limit", REG_SZ, &"x".repeat(32_768));
+        assert_eq!(key.read(None, "at-limit"), Ok(value(&"x".repeat(32_767))));
+        assert_eq!(key.read(None, "over-limit"), Err(RegistryReadError));
     }
 
     /// `env_location` points at the real environment keys: read-only, and
@@ -13249,11 +13259,19 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn env_location_reads_the_user_and_machine_environments() {
+        use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+        use windows_sys::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, KEY_READ};
+        // User: the key exists (every loaded profile has HKCU\Environment) and
+        // it is not the machine key, which is the only one carrying OS.
         let (hkey, subkey) = env_location(EnvRoot::User);
-        match read_string_value(hkey, subkey, "TEMP") {
-            Ok(Lookup::Value(temp)) => assert!(!temp.is_empty()),
-            other => panic!("user TEMP: {other:?}"),
-        }
+        let wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
+        let mut handle = std::ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated; `handle` is closed right after.
+        let status = unsafe { RegOpenKeyExW(hkey, wide.as_ptr(), 0, KEY_READ, &mut handle) };
+        assert_eq!(status, ERROR_SUCCESS, "user environment key must exist");
+        // SAFETY: `handle` was opened above.
+        unsafe { RegCloseKey(handle) };
+        assert_eq!(read_string_value(hkey, subkey, "OS"), Ok(Lookup::Absent));
         let (hkey, subkey) = env_location(EnvRoot::System);
         assert_eq!(
             read_string_value(hkey, subkey, "OS"),
