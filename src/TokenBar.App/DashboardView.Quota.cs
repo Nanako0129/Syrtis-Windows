@@ -561,18 +561,21 @@ public sealed partial class DashboardView
         // Same client set as the Overview lens (OverviewScope.LimitsClients):
         // client.Owner can be grok-bot, whose TabSlice lacks grok.
         var singleClient = OverviewScope.SingleClient(_activeClientTab)!;
-        var members = OverviewScope.LimitsClients(singleClient)!;
+        var tabClients = OverviewScope.LimitsClients(singleClient)!;
+        // The list the card draws: the tab's own, or opencode's routed one.
+        var members = OpencodeRoutes.LimitsClients(tabClients, snapshot.Quota);
         if (OverviewCards.ShowsLimitsCard(OverviewCards.LimitsEnabled(AppSettings.Store))
             && !LimitsCardFilter.HidesClientCard(
                 snapshot.Quota?.Agents ?? [],
                 members,
                 ClientRegistry.HiddenLimitsClients(AppSettings.Store),
-                snapshot.QuotaAttempted))
+                snapshot.QuotaAttempted,
+                tabClients))
         {
             stack.Children.Add(Ui.Card(
                 // macOS QuotaView.swift:72: tabDisplayName(singleClient).
                 "{0} limits".Localized(ClientRegistry.TabDisplayName(singleClient)),
-                BuildLimits(snapshot, members)));
+                BuildLimits(snapshot, members, opencodeView: OpencodeRoutes.IsView(tabClients))));
         }
 
         // Every subscription-facing lookup, including the history card's

@@ -1296,7 +1296,11 @@ public sealed partial class DashboardView : UserControl
         // itself, a client id on that client's own tab. See OverviewScope's
         // own doc comment for why that changes what below renders.
         var singleClient = OverviewScope.SingleClient(_activeClientTab);
-        var limitsClients = OverviewScope.LimitsClients(singleClient);
+        // The tab's own clients, and the list its card draws: the same, except
+        // on the opencode tab, which draws its routed subscriptions
+        // (OpencodeRoutes, macOS AgentLimitsCard.swift:421-440).
+        var tabClients = OverviewScope.LimitsClients(singleClient);
+        var limitsClients = tabClients is null ? null : OpencodeRoutes.LimitsClients(tabClients, snapshot.Quota);
 
         // First-run setup cards, at the top of the global Overview lens only
         // (macOS PopoverView.swift:712-720).
@@ -1334,7 +1338,8 @@ public sealed partial class DashboardView : UserControl
                         snapshot.Quota?.Agents ?? [],
                         limitsClients,
                         ClientRegistry.HiddenLimitsClients(AppSettings.Store),
-                        snapshot.QuotaAttempted)
+                        snapshot.QuotaAttempted,
+                        tabClients)
                     ? null
                     : Ui.Card(
                         // macOS "%@ limits" over tabDisplayName(singleClient)
@@ -1343,7 +1348,9 @@ public sealed partial class DashboardView : UserControl
                         singleClient is { } tab
                             ? "{0} limits".Localized(ClientRegistry.TabDisplayName(tab))
                             : "Agent limits".Localized(),
-                        BuildLimits(snapshot, limitsClients, _selectedClients)),
+                        BuildLimits(
+                            snapshot, limitsClients, _selectedClients,
+                            opencodeView: tabClients is not null && OpencodeRoutes.IsView(tabClients))),
                 // Absent when this tab is scoped to one client — the trace
                 // answers "across everything right now", which a single-client
                 // tab did not ask. With nothing running it stays and says so
@@ -1946,9 +1953,17 @@ public sealed partial class DashboardView : UserControl
     /// <c>clients.filter(known)</c> over the tab's clients.</param>
     private FrameworkElement BuildLimits(
         DashboardModel.Snapshot snapshot, IReadOnlyList<string>? clientIds = null,
-        IReadOnlyList<string>? requested = null)
+        IReadOnlyList<string>? requested = null, bool opencodeView = false)
     {
         var panel = new StackPanel { Spacing = 10 };
+        // macOS AgentLimitsCard.swift:537-543: the opencode routing line, or on
+        // the multi-client card the subscriptions opencode also taps.
+        var opencodeSubs = snapshot.Quota?.OpencodeSubscriptions ?? [];
+        if (OpencodeRoutes.HeaderLine(opencodeView, clientIds is not null, opencodeSubs) is { } routeLine)
+        {
+            panel.Children.Add(Ui.Dim(routeLine, 10));
+        }
+
         var all = snapshot.Quota?.Agents ?? [];
         var tabHidden = ClientRegistry.HiddenTabClients(AppSettings.Store);
         var limitsHidden = ClientRegistry.HiddenLimitsClients(AppSettings.Store);
@@ -1978,6 +1993,16 @@ public sealed partial class DashboardView : UserControl
         if (clientIds is null && payloadHasCards && rows.Count == 0)
         {
             panel.Children.Add(Ui.Dim("No supported agents yet".Localized()));
+            return panel;
+        }
+
+        // macOS :559-565. Reached only when HidesClientCard let the card
+        // through, which on a restricted card means before the fetch was
+        // attempted, so this stays behind the same `attempted` macOS has (there
+        // the :529 gate shadows it for a restricted card as well).
+        if (clientIds is not null && rows.Count == 0 && snapshot.QuotaAttempted)
+        {
+            panel.Children.Add(Ui.Dim(OpencodeRoutes.EmptyText(opencodeView, opencodeSubs)));
             return panel;
         }
 
