@@ -225,8 +225,9 @@ public sealed partial class SettingsWindow : Window
             }
 
             // A fresh stamp lands beside lastRemaining on every quota poll, so
-            // excluding it here keeps polls from redrawing the preview. The
-            // stale rule reads the clock instead: _previewTimer redraws the
+            // excluding it here keeps those writes from rebuilding the pages.
+            // A new payload redraws the preview once, through
+            // OnQuotaMaybeChanged. The stale rule reads the clock instead: _previewTimer redraws the
             // preview every 60 s while the window is shown, as macOS does
             // (SettingsPreviewRefresh, Syrtis #440).
 
