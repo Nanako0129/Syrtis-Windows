@@ -4919,8 +4919,8 @@ fn windows_claude_token_with(
 
 /// One string value, read raw: REG_SZ or REG_EXPAND_SZ with `RRF_NOEXPAND`, so
 /// no other environment value is expanded into it. Not found = `Absent`; any
-/// other failure, a value longer than `MAX_UNITS` UTF-16 units, or a value
-/// still growing after three tries = `RegistryReadError`.
+/// other failure, a value over `MAX_BYTES`, or a value still growing after
+/// three tries = `RegistryReadError`.
 #[cfg(windows)]
 fn read_string_value(
     root: windows_sys::Win32::System::Registry::HKEY,
@@ -4931,13 +4931,11 @@ fn read_string_value(
     use windows_sys::Win32::System::Registry::{
         RegGetValueW, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
     };
-    // A sanity bound, not the platform's exact environment limit (a setup-token
-    // is ~100 units): the decoded text is checked against MAX_UNITS, so the
-    // answer does not depend on whether a NUL was stored. MAX_BYTES only bounds
-    // the allocation and must leave room for the stored NUL and the one
-    // RegGetValueW's size query adds (measured on 188: a 32 767-unit REG_SZ
-    // stored with its NUL needs more than (32 767 + 1) * 2 bytes).
-    const MAX_UNITS: usize = 32_767;
+    // A sanity bound on the size query, not the platform's exact environment
+    // limit (a setup-token is ~100 units). It leaves room for the stored NUL and
+    // the one RegGetValueW's size query adds. Measured on 188 (tests below):
+    // 32 767 units stored with a NUL read; 32 768 units are refused whether
+    // stored with or without a NUL; (32 767 + 1) * 2 refused the 32 767 case.
     const MAX_BYTES: u32 = (32_767 + 2) * 2;
     let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
     let subkey: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
@@ -4981,9 +4979,6 @@ fn read_string_value(
             ERROR_SUCCESS => {
                 let written = &buffer[..(size as usize / 2).min(buffer.len())];
                 let text = written.split(|&unit| unit == 0).next().unwrap_or(&[]);
-                if text.len() > MAX_UNITS {
-                    return Err(RegistryReadError);
-                }
                 return String::from_utf16(text)
                     .map(Lookup::Value)
                     .map_err(|_| RegistryReadError);
@@ -13263,7 +13258,7 @@ mod tests {
         assert_eq!(key.read(None, "at-limit"), Ok(value(&"x".repeat(32_767))));
         assert_eq!(key.read(None, "over-limit"), Err(RegistryReadError));
         // Stored without a terminator, the same over-long text is still
-        // refused: the decoded length decides, not the byte count.
+        // refused by the size bound (measured; no separate length check).
         let name: Vec<u16> = "over-unterminated".encode_utf16().chain(Some(0)).collect();
         let data: Vec<u16> = "x".repeat(32_768).encode_utf16().collect();
         // SAFETY: both buffers are live and sized as passed.
