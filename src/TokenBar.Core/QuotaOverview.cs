@@ -88,6 +88,19 @@ public static class QuotaOverviewFold
     /// depending on when the last sample landed.</summary>
     public const double ExhaustedPercent = 99;
 
+    /// <summary>The tab's slice of the all-clients strip (macOS QuotaView.swift
+    /// :92, <c>windowSummaries.filter { clientIds.contains($0.clientId) }</c>):
+    /// a client tab with no window card draws the strip for its own clients
+    /// only.</summary>
+    public static IReadOnlyList<QuotaWindowSummary> ForClients(
+        IReadOnlyList<QuotaWindowSummary> summaries, IReadOnlyList<string> clientIds) =>
+        [.. summaries.Where(s => clientIds.Contains(s.Id.ProviderId))];
+
+    /// <summary>The same slice of the heatmap's windows (QuotaView.swift :96).</summary>
+    public static IReadOnlyList<QuotaHeatmapWindow> ForClients(
+        IReadOnlyList<QuotaHeatmapWindow> windows, IReadOnlyList<string> clientIds) =>
+        [.. windows.Where(w => clientIds.Contains(w.Id.ProviderId))];
+
     /// <summary>How many cycles a strip shows. Enough to read a rhythm at
     /// popover width without each bar becoming a hairline.</summary>
     public const int StripLength = 16;
