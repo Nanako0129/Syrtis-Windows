@@ -98,6 +98,73 @@ public class AgentLimitsTextTests
         Assert.Equal(new HashSet<string> { "claude", "antigravity" }, live);
     }
 
+    // ---- Setup prompt -----------------------------------------------------
+
+    [Fact]
+    public void AnUnconfiguredClaudeCardOffersTheWindowsSetupTokenCommand()
+    {
+        var prompt = AgentLimitsText.Setup(new AgentUsageSnapshot(
+            "claude", "unconfigured", "2026-10-04T00:00:00Z", [], Error: "credentials not found"));
+        Assert.NotNull(prompt);
+        var prose = string.Join(" ", prompt!.Parts.Where(static p => !p.IsCommand).Select(static p => p.Text));
+        Assert.Contains("CLAUDE_CODE_OAUTH_TOKEN", prose);
+        Assert.Contains("Start menu", prose);
+        Assert.DoesNotContain("Keychain", prose);
+        // Setting first, then how to undo it: the claude CLI reads the same
+        // variable and prefers it over /login (user decision, 2026-10-04).
+        Assert.Equal(
+            [AgentLimitsText.ClaudeSetupCommand, AgentLimitsText.ClaudeRemoveCommand],
+            prompt.Parts.Where(static p => p.IsCommand).Select(static p => p.Text));
+        Assert.Contains("prefers it over /login", prose);
+        Assert.Equal("and reopen Syrtis.", prompt.Parts[^1].Text);
+        // The token is typed at a prompt, never passed on the command line.
+        Assert.Contains("Read-Host", AgentLimitsText.ClaudeSetupCommand);
+        Assert.Contains("'User'", AgentLimitsText.ClaudeSetupCommand);
+        Assert.Contains("$null, 'User'", AgentLimitsText.ClaudeRemoveCommand);
+    }
+
+    // Chinese folds "reopen Syrtis" into the sentence before the removal
+    // command, so nothing follows it there — the {0} entry, not a pair of
+    // keys, is what lets each language place it.
+    [Fact]
+    public void TheRemovalCommandSitsWhereEachLanguagePutsIt()
+    {
+        Localization.Load("zh-Hant", AppContext.BaseDirectory);
+        try
+        {
+            var prompt = AgentLimitsText.Setup(new AgentUsageSnapshot(
+                "claude", "unconfigured", "2026-10-04T00:00:00Z", []))!;
+            Assert.Equal(new LimitsSetupPart(AgentLimitsText.ClaudeRemoveCommand, IsCommand: true), prompt.Parts[^1]);
+            Assert.Contains("優先於 /login", prompt.Parts[^2].Text);
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
+    }
+
+    // Claude's instructions name Claude's variable; another provider keeps
+    // its own one-line instruction (macOS setupInstructions, #345).
+    [Fact]
+    public void OtherProvidersShowTheirOwnInstructionAndNothingWhenSilent()
+    {
+        Assert.Equal(new LimitsSetupPrompt("Run `codex` to log in"),
+            AgentLimitsText.Setup(new AgentUsageSnapshot(
+                "codex", "unconfigured", "2026-10-04T00:00:00Z", [], Error: "Run `codex` to log in")));
+        Assert.Null(AgentLimitsText.Setup(new AgentUsageSnapshot(
+            "codex", "unconfigured", "2026-10-04T00:00:00Z", [])));
+    }
+
+    [Theory]
+    [InlineData("oauth")]
+    [InlineData("keychain-consent")]
+    [InlineData("keychain-denied")]
+    public void OnlyAnUnconfiguredCardHasASetupPrompt(string source)
+    {
+        Assert.Null(AgentLimitsText.Setup(new AgentUsageSnapshot(
+            "claude", source, "2026-10-04T00:00:00Z", [], Error: "x")));
+    }
+
     // ---- Detail line ------------------------------------------------------
 
     private const string Email = "someone@example.com";
