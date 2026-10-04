@@ -59,8 +59,10 @@ public static class LimitsPlaceholders
 
     /// <summary>The rows the card draws: the requested clients that are
     /// known, then every other client with a snapshot (macOS
-    /// <c>baseClients</c>), each as its snapshot rows or, with no primary
-    /// snapshot at all, one placeholder. <paramref name="visible"/> is the
+    /// <c>baseClients</c>), each as its snapshot rows plus, for a client in
+    /// <see cref="Labels"/> with no primary snapshot at all, one placeholder
+    /// (a client outside Labels with only extra accounts draws just those).
+    /// <paramref name="visible"/> is the
     /// already-filtered snapshot list (<see cref="LimitsCardFilter.Visible"/>);
     /// a placeholder obeys the same hide rules a primary does — the limits
     /// toggle everywhere, tab visibility on the multi-client card only — so
