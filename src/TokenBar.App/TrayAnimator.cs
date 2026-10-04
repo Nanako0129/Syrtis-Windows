@@ -181,7 +181,7 @@ internal sealed class TrayAnimator : IDisposable
                     g.DrawImage(raw, (32 - w) / 2, (32 - h) / 2, w, h);
                 }
 
-                composed.Add(System.Drawing.Icon.FromHandle(canvas.GetHicon()));
+                composed.Add(System.Drawing.Icon.FromHandle(TrayIconHandle.From(canvas)));
             }
         }
         catch (Exception ex)

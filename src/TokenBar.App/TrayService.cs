@@ -651,7 +651,7 @@ public sealed class TrayService : IDisposable
     /// when the next owned one replaces it.</summary>
     private void ApplyIcon(System.Drawing.Bitmap bmp)
     {
-        var hicon = bmp.GetHicon();
+        var hicon = TrayIconHandle.From(bmp);
         _icon.Icon = System.Drawing.Icon.FromHandle(hicon);
         EnsureIconCreated();
         if (_hicon != 0)
