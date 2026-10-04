@@ -59,18 +59,25 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
             _ = next.ContinueWith(
                 completed =>
                 {
-                    // Before the in-flight slot clears: no later fetch exists
-                    // yet, so handlers see payloads in fetch order.
-                    if (completed.Status == TaskStatus.RanToCompletion)
+                    try
                     {
-                        Fetched?.Invoke(completed.Result);
-                    }
-
-                    lock (_gate)
-                    {
-                        if (ReferenceEquals(_inFlight, completed))
+                        // Before the in-flight slot clears: no later fetch
+                        // exists yet, so handlers see payloads in fetch order.
+                        if (completed.Status == TaskStatus.RanToCompletion)
                         {
-                            _inFlight = null;
+                            Fetched?.Invoke(completed.Result);
+                        }
+                    }
+                    finally
+                    {
+                        // A throwing handler must not pin this finished task
+                        // as every later caller's answer.
+                        lock (_gate)
+                        {
+                            if (ReferenceEquals(_inFlight, completed))
+                            {
+                                _inFlight = null;
+                            }
                         }
                     }
                 },

@@ -342,12 +342,18 @@ public sealed partial class SettingsWindow : Window
     private string? _menuBarQuotaKey;
     private string? _dashboardQuotaKey;
 
+    /// <summary>The payload the preview was last drawn from.</summary>
+    private AgentUsagePayload? _previewQuota;
+
     /// <summary>Called by the tray whenever its feed changes. Settings reads
     /// quota through the feed, and an open window used to keep the options it
     /// was built with (only "Auto" when opened before the first fetch) until
     /// it was rebuilt. macOS observes the shared payload directly. Only a page
-    /// whose option set actually changed is rebuilt, because a rebuild drops
-    /// keyboard focus; the preview is redrawn either way.</summary>
+    /// whose option set actually changed is rebuilt, and it is re-shown only
+    /// when it is the page on screen, because a rebuild drops keyboard focus
+    /// and re-showing resets the scroll. The preview is redrawn whenever the
+    /// payload is a new one, since its percentages can move with the same
+    /// options.</summary>
     internal static void OnQuotaMaybeChanged()
     {
         if (_shared is not { } window || !window.AppWindow.IsVisible)
@@ -357,22 +363,26 @@ public sealed partial class SettingsWindow : Window
 
         var payload = window._quota();
         var store = AppSettings.Store;
-        var rebuilt = false;
+        var shownRebuilt = false;
         if (QuotaSourceChoices.MenuBarKey(payload) != window._menuBarQuotaKey)
         {
             window._pages["menubar"] = window.BuildMenuBarPage(store);
-            rebuilt = true;
+            shownRebuilt |= window._selectedTag == "menubar";
         }
 
         if (QuotaSourceChoices.DashboardKey(payload) != window._dashboardQuotaKey)
         {
             window._pages["dashboard"] = window.BuildDashboardPage(store);
-            rebuilt = true;
+            shownRebuilt |= window._selectedTag == "dashboard";
         }
 
-        if (rebuilt)
+        if (shownRebuilt)
         {
             window.ShowPage(window._selectedTag);
+        }
+
+        if (!ReferenceEquals(payload, window._previewQuota))
+        {
             window.RebuildPreview();
         }
     }
@@ -1694,6 +1704,7 @@ public sealed partial class SettingsWindow : Window
         var persistedSelection = store.GetString(
             "tokenbar.quota.source", QuotaResolver.Auto) ?? QuotaResolver.Auto;
         var payload = _quota();
+        _previewQuota = payload;
         var selection = QuotaSelectionPolicy.EffectiveSelection(
             payload, persistedSelection);
         var hidden = ClientRegistry.QuotaExcludedClients(store);

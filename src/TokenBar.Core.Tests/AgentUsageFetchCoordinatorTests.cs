@@ -61,12 +61,18 @@ public class AgentUsageFetchCoordinatorTests
     public async Task EverySuccessfulFetchIsRaisedOnceWhoeverAskedFor()
     {
         var payload = new AgentUsagePayload("now", []);
-        var coordinator = new AgentUsageFetchCoordinator(() => payload);
+        using var bothJoined = new ManualResetEventSlim();
+        var coordinator = new AgentUsageFetchCoordinator(() =>
+        {
+            bothJoined.Wait(TimeSpan.FromSeconds(5));
+            return payload;
+        });
         var raised = new List<AgentUsagePayload>();
         coordinator.Fetched += p => { lock (raised) { raised.Add(p); } };
 
         var first = coordinator.FetchAsync();
         var second = coordinator.FetchAsync();
+        bothJoined.Set();
         await Task.WhenAll(first, second);
         await WaitFor(() => raised.Count >= 1);
 
@@ -113,5 +119,23 @@ public class AgentUsageFetchCoordinatorTests
         {
             await Task.Delay(10);
         }
+    }
+
+    // A handler that throws must not leave the finished fetch in flight,
+    // where every later caller would get it back instead of a fresh fetch.
+    [Fact]
+    public async Task AThrowingHandlerDoesNotPinTheFinishedFetch()
+    {
+        var calls = 0;
+        var coordinator = new AgentUsageFetchCoordinator(() =>
+            new AgentUsagePayload($"call-{Interlocked.Increment(ref calls)}", []));
+        coordinator.Fetched += _ => throw new InvalidOperationException("handler");
+
+        await coordinator.FetchAsync();
+        await WaitFor(() => Volatile.Read(ref calls) == 1);
+        await Task.Delay(50);
+        var second = await coordinator.FetchAsync();
+
+        Assert.Equal("call-2", second.GeneratedAt);
     }
 }
