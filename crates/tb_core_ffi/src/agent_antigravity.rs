@@ -464,9 +464,6 @@ async fn oauth_endpoint_resolves() -> bool {
     }
 }
 
-/// Direct spawn, no shell and no Job Object (measured: a native exe whose only
-/// child is conhost; a job could also kill a browser agy started). The working
-/// directory is agy's own bin directory, not whatever Syrtis inherited.
 /// Turns off agy's own auto-update for the runs Syrtis starts (#204).
 ///
 /// On a run whose update check is due (agy throttles it to once per 15
@@ -482,6 +479,9 @@ async fn oauth_endpoint_resolves() -> bool {
 const AGY_DISABLE_AUTO_UPDATE: (&str, &str) = ("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
 
 /// The `agy --print /usage` command Syrtis runs, without spawning it.
+/// Direct spawn, no shell and no Job Object (measured: a native exe whose only
+/// child is conhost; a job could also kill a browser agy started). The working
+/// directory is agy's own bin directory, not whatever Syrtis inherited.
 #[cfg(windows)]
 fn agy_command(executable: &Path, bin_dir: &Path) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(executable);
