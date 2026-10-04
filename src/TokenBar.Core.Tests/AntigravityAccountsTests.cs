@@ -118,6 +118,12 @@ public class AntigravityAccountsTests
             HistoryScope: new AccountScopeStatus(Error: "noTrustedEvidence"),
             AgyLoginMarker: marker);
 
+    /// <summary>The production shape of a failed primary: an error card
+    /// carries neither the agy source nor a login marker.</summary>
+    private static AgentUsageSnapshot ErroredPrimary() => new(
+        "antigravity", "oauth", "2026-10-04T00:00:00Z", [],
+        Error: "timeout", HistoryScope: new AccountScopeStatus(Error: "noTrustedEvidence"));
+
     private static AgentUsageSnapshot Captured(
         string key = KeyA, string? error = null, bool windows = true) =>
         new("antigravity", "oauth", "2026-10-04T00:00:00Z",
@@ -295,7 +301,7 @@ public class AntigravityAccountsTests
     public void AHealthyCapturedAccountStandsInForAnErroredPrimary()
     {
         var captured = Captured() with { Identity = new AgentIdentity("a@example.com", "Google AI Pro") };
-        var merged = AntigravityDedup.Apply(Payload(Primary(error: "timeout"), captured), KeyA, "M1");
+        var merged = AntigravityDedup.Apply(Payload(ErroredPrimary(), captured), KeyA, "M1", "M1");
 
         var card = Assert.Single(merged.Agents);
         Assert.Null(card.AccountKey);
@@ -313,10 +319,59 @@ public class AntigravityAccountsTests
     public void AnErroredPrimaryStaysWhenTheCapturedAccountCannotStandIn(bool capturedErrored)
     {
         var payload = Payload(
-            Primary(error: "timeout"),
+            ErroredPrimary(),
             capturedErrored ? Captured(error: "refresh_rejected") : Captured(windows: false));
 
-        Assert.Same(payload, AntigravityDedup.Apply(payload, KeyA, "M1"));
+        Assert.Same(payload, AntigravityDedup.Apply(payload, KeyA, "M1", "M1"));
+    }
+
+    [Theory]
+    [InlineData("M1", true)]
+    [InlineData("M2", false)] // this fetch saw another login than Current's
+    [InlineData(null, false)] // toggle off, or the marker read failed
+    public void PromotionNeedsThisFetchsMarkerToEqualCurrents(string? fetchMarker, bool promoted)
+    {
+        var payload = Payload(ErroredPrimary(), Captured());
+        var result = AntigravityDedup.Apply(payload, KeyA, "M1", fetchMarker);
+
+        if (promoted)
+        {
+            Assert.Null(Assert.Single(result.Agents).Error);
+        }
+        else
+        {
+            Assert.Same(payload, result);
+        }
+    }
+
+    [Theory]
+    [InlineData("noCurrentKey")]
+    [InlineData("noMarker")]
+    [InlineData("markerPresent")]
+    [InlineData("noCapturedSnapshot")]
+    public void AnErroredPrimaryStaysWhenAnEarlyGuardFails(string failing)
+    {
+        var key = failing == "noCurrentKey" ? null : KeyA;
+        var marker = failing switch { "noMarker" => null, "markerPresent" => "present", _ => "M1" };
+        var payload = Payload(ErroredPrimary(), Captured(failing == "noCapturedSnapshot" ? KeyB : KeyA));
+
+        Assert.Same(payload, AntigravityDedup.Apply(payload, key, marker, marker));
+    }
+
+    [Fact]
+    public async Task WithAutomaticCaptureOffAnErroredPrimaryIsNeverPromoted()
+    {
+        var store = TempStore();
+        var io = new FakeIo();
+        io.Markers.Enqueue("M1");
+        var capture = new AntigravityAutoCapture(io.Io, store); // toggle off
+        await capture.ManualCapture();
+        Assert.Equal(KeyA, capture.Current.Key);
+
+        var payload = Payload(ErroredPrimary(), Captured());
+        var result = AntigravityFetch.Run(() => payload, null, capture);
+
+        Assert.Same(payload, result);
     }
 
     // ---- 5. history adoption --------------------------------------------------
@@ -1036,7 +1091,7 @@ public class AntigravityAccountsTests
 
             // Promoted (errored primary, healthy captured): same shape, same rule.
             var promoted = AntigravityDedup.Apply(
-                Payload(Primary(error: "timeout"), Captured(KeyA)), KeyA, "M1");
+                Payload(ErroredPrimary(), Captured(KeyA)), KeyA, "M1", "M1");
             var stand = promoted.Agents[0];
             Assert.Equal(EmailA, stand.Identity!.Email);
             var standLine = Tooltip(stand, promoted);

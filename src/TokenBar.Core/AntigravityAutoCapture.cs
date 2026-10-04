@@ -56,8 +56,10 @@ public sealed class AntigravityAutoCapture
     public const string EnabledKey = "tokenbar.antigravity.autoCapture";
 
     /// <summary><c>{"key","marker"}</c>: a hash and a FILETIME, no secret.
-    /// Safe to restore without re-reading agy's login, because dedup also
-    /// requires the primary card to have been fetched under that marker.</summary>
+    /// Safe to restore without re-reading agy's login: dedup's merge requires
+    /// the primary fetched under that marker, and its promotion of a captured
+    /// account over an errored primary requires this fetch's own marker read
+    /// to equal it.</summary>
     public const string CurrentKey = "tokenbar.antigravity.currentAgy";
 
     /// <summary>The error code recorded for a failure that carried no core
@@ -304,13 +306,18 @@ public sealed class AntigravityAutoCapture
     /// fetch that follows a login change is never drawn as the previous
     /// account. The capture attempt is returned, not awaited, so the fetch
     /// never waits on Google. Never throws.</summary>
-    public async Task<Task?> PrepareForFetch()
+    public async Task<Task?> PrepareForFetch() => (await ReadMarkerForFetch().ConfigureAwait(false)).Poll;
+
+    /// <summary><see cref="PrepareForFetch"/> that also returns the marker it
+    /// read (null: paused, already checking, or the read failed or timed out),
+    /// so the fetch can tell dedup which login this fetch observed.</summary>
+    public async Task<(string? Marker, Task? Poll)> ReadMarkerForFetch()
     {
         lock (_gate)
         {
             if (_paused || _checking)
             {
-                return null;
+                return (null, null);
             }
 
             _checking = true;
@@ -339,7 +346,7 @@ public sealed class AntigravityAutoCapture
 
         if (marker is null)
         {
-            return null;
+            return (null, null);
         }
 
         // No notification: Busy, Paused and the error did not change, so
@@ -354,7 +361,7 @@ public sealed class AntigravityAutoCapture
             CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
-        return poll;
+        return (marker, poll);
     }
 
     /// <summary>Run the poll a busy or checking moment refused. It captures

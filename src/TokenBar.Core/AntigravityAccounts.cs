@@ -218,9 +218,11 @@ public static class AntigravityFetch
         AntigravityAutoCapture? capture)
     {
         installer?.InstallForFetch();
+        string? fetchMarker = null;
         if (capture is { IsEnabled: true })
         {
-            _ = capture.PrepareForFetch().GetAwaiter().GetResult();
+            // The poll it starts is not awaited; only the marker read is.
+            fetchMarker = capture.ReadMarkerForFetch().GetAwaiter().GetResult().Marker;
         }
 
         var payload = fetch();
@@ -230,7 +232,7 @@ public static class AntigravityFetch
         }
 
         var (key, marker) = capture.Current;
-        return AntigravityDedup.Apply(payload, key, marker);
+        return AntigravityDedup.Apply(payload, key, marker, fetchMarker);
     }
 }
 
@@ -243,7 +245,9 @@ public static class AntigravityFetch
 /// Antigravity snapshot (no account key) has no error and came from the agy
 /// route, fetched under that same marker. Otherwise both are shown, except an
 /// ERRORED primary: a captured card with windows and no error replaces it,
-/// promoted to the primary slot (<see cref="PromotedToPrimary"/>). The merged
+/// promoted to the primary slot (<see cref="PromotedToPrimary"/>), only when
+/// <c>fetchMarker</c> (the marker read during this fetch; null when automatic
+/// capture is off or the read failed) equals <c>currentMarker</c>. The merged
 /// primary takes the captured plan when it has none.
 /// <para>
 /// The primary keeps its own windows and values. When the captured snapshot
@@ -259,7 +263,8 @@ public static class AntigravityDedup
 {
     public const string ClientId = AccountLabel.AntigravityClientId;
 
-    public static AgentUsagePayload Apply(AgentUsagePayload payload, string? currentKey, string? currentMarker)
+    public static AgentUsagePayload Apply(
+        AgentUsagePayload payload, string? currentKey, string? currentMarker, string? fetchMarker = null)
     {
         if (currentKey is null || currentMarker is null || currentMarker == "present")
         {
@@ -284,8 +289,13 @@ public static class AntigravityDedup
         if (primary.Error is not null)
         {
             // An errored primary (e.g. agy timed out): the healthy captured
-            // account is agy's current one and stands in for it.
-            if (captured.Error is not null || captured.Windows.Count == 0)
+            // account is agy's current one and stands in for it. An errored
+            // card does not say which route it came from or under which login,
+            // so (stricter than macOS) this needs the marker read during THIS
+            // fetch to equal the one Current is bound to: toggle off or a
+            // failed read (null) keeps the error card.
+            if (fetchMarker is null || fetchMarker != currentMarker
+                || captured.Error is not null || captured.Windows.Count == 0)
             {
                 return payload;
             }
