@@ -66,6 +66,11 @@ public static class AntigravityAccounts
     public static string? Label(SettingsStore store, string key) =>
         Load(store).FirstOrDefault(a => a.Key == key)?.Label;
 
+    /// <summary>The account's 1-based position in the stored list; null when
+    /// the key is not listed.</summary>
+    public static int? Ordinal(SettingsStore store, string key) =>
+        Load(store).Select((a, i) => (a.Key, N: i + 1)).FirstOrDefault(t => t.Key == key).N is var n and > 0 ? n : null;
+
     public static IReadOnlyList<string> RemovedKeys(SettingsStore store)
     {
         var raw = store.GetString(RemovedKeysKey);

@@ -94,7 +94,7 @@ internal static class AntigravityAccountsCopy
     ];
 
     internal static IEnumerable<string> All() =>
-        [Section, "Antigravity account", Capture, Capturing, Remove, RemoveNamed, Toggle, Paused, MergeOnlyUntilRefresh,
+        [Section, "Antigravity account", "Antigravity account {0}", Capture, Capturing, Remove, RemoveNamed, Toggle, Paused, MergeOnlyUntilRefresh,
             WhenOn, HowTo, Reads, RemoveMeans, TwiceFromIde, ConfirmTitle, ConfirmBody, ConfirmOk,
             ConfirmCancel, Generic, .. Codes.Select(Message)];
 }

@@ -922,4 +922,112 @@ public class AntigravityAccountsTests
         var json = JsonSerializer.Serialize(primary with { HistoryAccountKey = KeyA });
         Assert.DoesNotContain(KeyA, json);
     }
+
+    // ---- 10. the tray tooltip never names a captured account by email -------
+
+    private const string EmailA = "a@example.com";
+    private const string EmailB = "b@example.com";
+
+    // The resolvers are process-wide statics, so every test here installs its
+    // own (as the app does at launch) and restores the previous ones.
+    private static void WithRegistry(Action body)
+    {
+        var label = AccountLabel.AntigravityLabel;
+        var ordinal = AccountLabel.AntigravityOrdinal;
+        Localization.Load("en", AppContext.BaseDirectory);
+        var store = TempStore();
+        AntigravityAccounts.Save(store, [new(KeyA, EmailA), new(KeyB, EmailB)]);
+        AccountLabel.AntigravityLabel = key => AntigravityAccounts.Label(store, key);
+        AccountLabel.AntigravityOrdinal = key => AntigravityAccounts.Ordinal(store, key);
+        try
+        {
+            body();
+        }
+        finally
+        {
+            AccountLabel.AntigravityLabel = label;
+            AccountLabel.AntigravityOrdinal = ordinal;
+        }
+    }
+
+    private static string Tooltip(AgentUsageSnapshot agent, AgentUsagePayload payload) =>
+        new QuotaPick(agent, agent.Windows[0]).TooltipLine(payload);
+
+    [Fact]
+    public void TheTooltipNamesCapturedAccountsByPositionNeverEmailOrKey()
+    {
+        WithRegistry(() =>
+        {
+            var a = Captured(KeyA);
+            var b = Captured(KeyB) with { Identity = new AgentIdentity(EmailB) };
+            var payload = Payload(Primary(), a, b);
+            var (ta, tb) = (Tooltip(a, payload), Tooltip(b, payload));
+
+            Assert.Contains("Antigravity account 1", ta);
+            Assert.Contains("Antigravity account 2", tb);
+            Assert.NotEqual(ta, tb);
+            foreach (var t in new[] { ta, tb })
+            {
+                Assert.DoesNotContain(EmailA, t);
+                Assert.DoesNotContain(EmailB, t);
+                Assert.DoesNotContain(KeyA, t);
+                Assert.DoesNotContain(KeyB, t);
+            }
+        });
+    }
+
+    [Fact]
+    public void ThePrimaryTooltipCarriesNoEmailMergedOrNot()
+    {
+        WithRegistry(() =>
+        {
+            // Un-merged: the primary's own identity email.
+            var plain = Payload(Primary(), Captured(KeyA));
+            var unmerged = plain.Agents[0];
+            Assert.Equal("primary@example.com", unmerged.Identity!.Email);
+            Assert.DoesNotContain("primary@example.com", Tooltip(unmerged, plain));
+
+            // Merged: Apply copies the captured account's email onto the primary.
+            var merged = AntigravityDedup.Apply(plain, KeyA, "M1");
+            var primary = merged.Agents[0];
+            Assert.Equal(EmailA, primary.Identity!.Email);
+            var line = Tooltip(primary, merged);
+            Assert.DoesNotContain(EmailA, line);
+            Assert.DoesNotContain("primary@example.com", line);
+            Assert.DoesNotContain(KeyA, line);
+        });
+    }
+
+    [Fact]
+    public void TheTooltipNamesAnUnlistedCapturedAccountGenerically()
+    {
+        WithRegistry(() =>
+        {
+            var gone = Captured("c".PadRight(64, 'c'));
+            Assert.Equal("Antigravity account Weekly 70% left", Tooltip(gone, Payload(gone)));
+        });
+    }
+
+    [Theory]
+    [InlineData("antigravity", null)]
+    [InlineData("claude", AccountLabel.ClaudeDesktopKey)]
+    [InlineData("claude", @"D:\Work\team-b")]
+    public void TheTooltipNamesEveryOtherAccountKindAsTheLabelDoes(string clientId, string? key)
+    {
+        WithRegistry(() =>
+        {
+            var agent = Captured(KeyA) with { ClientId = clientId, AccountKey = key };
+            var payload = Payload(agent);
+            var id = AccountIdentity.Of(clientId, key);
+            Assert.Equal(AccountLabel.Of(id, payload), AccountLabel.OfPublic(id, payload));
+            Assert.StartsWith(AccountLabel.Of(id, payload), Tooltip(agent, payload));
+        });
+    }
+
+    [Fact]
+    public void MenusAndCardsStillNameACapturedAccountByEmail()
+    {
+        WithRegistry(() =>
+            Assert.Equal($"Antigravity · {EmailA}", AccountLabel.Of(new AccountIdentity("antigravity", KeyA))));
+    }
 }
