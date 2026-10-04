@@ -382,13 +382,21 @@ public static class ClientRegistry
     /// <c>quotaClients(present:quotaIds:tabHidden:orderRaw:)</c>,
     /// ClientRegistry.swift :255-263, without the display ordering, which does
     /// not change membership): every member of each present client's tab slice
-    /// plus the payload's configured quota ids, minus tab-hidden, deduped.</summary>
+    /// plus the payload's configured quota ids, minus tab-hidden, deduped.
+    /// A present MEMBER id is folded to its tab first (macOS
+    /// <c>tabClients</c>' memberToTabId, ClientRegistry.swift :248-252):
+    /// macOS <c>tabSlice</c> takes a tab id, and Antigravity's local usage
+    /// is recorded under <c>antigravity-cli</c>, whose own slice would leave
+    /// out the <c>antigravity</c> owner and move the tab's window card off
+    /// its stored history until a payload names antigravity configured
+    /// (before the first fetch, or offline).</summary>
     public static IReadOnlyList<string> QuotaClients(
         IReadOnlyList<string> present, IReadOnlyList<string> quotaIds, IReadOnlySet<string> tabHidden)
     {
         var hidden = HiddenTabClients(tabHidden);
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        return [.. present.SelectMany(TabSlice).Concat(quotaIds).Where(id => !hidden.Contains(id) && seen.Add(id))];
+        return [.. present.Select(id => FoldToTabId(CanonicalClient(id))).SelectMany(TabSlice)
+            .Concat(quotaIds).Where(id => !hidden.Contains(id) && seen.Add(id))];
     }
 
     /// <summary>The client whose window card a tab draws, or null for none

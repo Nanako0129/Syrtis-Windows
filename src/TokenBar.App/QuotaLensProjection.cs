@@ -322,8 +322,9 @@ public static class QuotaLensProjection
     {
         // Every subscription-facing lookup below is keyed by the quota OWNER,
         // not the raw client id — antigravity-cli spends the antigravity
-        // subscription — or, on a grouped tab whose owner has no windows, by
-        // the member that does (WindowCardOwner).
+        // subscription — or, on a grouped tab whose owner is not a card
+        // client (a Grok Bot-only install), by the member that is
+        // (WindowCardOwner).
         var owner = WindowCardOwner(quota, clientId, selection.PresentClients, selection.TabHidden, selection.LimitsHidden);
         // One card per client: the primary when it has windows, else the
         // first other account that does (Desktop-only users).
@@ -341,8 +342,10 @@ public static class QuotaLensProjection
             accountWindowUsage?.TryGetValue(account, out accountUsage);
         }
 
-        // A member other than the tab's own owner (grok-bot) carries no local
-        // usage, so its card reads none — macOS gives that tab no scan.
+        // The card moved to another member only when the owner is not a card
+        // client, i.e. has no local records in the tab and no configured
+        // quota (a Grok Bot-only install): the tab has no local usage to
+        // read, and macOS gives it no scan.
         var unattributed = (account is not null && accountUsage is null)
             || owner != ClientRegistry.QuotaOwner(clientId)
             || TabHasNoLocalRecords(clientId, selection.LocalUsageClients, confirmed.Records);

@@ -809,6 +809,16 @@ public class QuotaLensProjectionTests
         Assert.Equal("grok-bot", QuotaLensProjection.WindowCardOwner(botOnly, "grok", present: [], limitsHidden: new HashSet<string>()));
     }
 
+    // Antigravity's local usage is recorded under antigravity-cli; with no
+    // payload yet (before the first fetch, or offline) the tab must keep the
+    // antigravity owner, whose stored history the card draws, rather than
+    // move to antigravity-cli (whose slice alone leaves antigravity out).
+    [Fact]
+    public void AntigravityCliPresentKeepsTheAntigravityOwnerBeforeAnyPayload()
+    {
+        Assert.Equal("antigravity", QuotaLensProjection.WindowCardOwner(null, "antigravity", present: ["antigravity-cli"]));
+    }
+
     // Control: the Antigravity group's other member, antigravity-cli, is
     // never a quota provider, so its tab keeps the antigravity card whether
     // or not antigravity reports windows.

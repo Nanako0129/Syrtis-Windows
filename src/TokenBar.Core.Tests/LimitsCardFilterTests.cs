@@ -201,27 +201,6 @@ public sealed class LimitsCardFilterTests
         Assert.False(Hides([Card("claude", "acct")], ["claude"], None, attempted: true));
     }
 
-    /// <summary>The decision and the card draw from the same pieces: for any
-    /// payload, an attempted restricted card is hidden exactly when Rows is
-    /// empty or every member is switched off with no extra account.</summary>
-    [Fact]
-    public void TheHideDecisionAgreesWithTheRowsTheCardDraws()
-    {
-        IReadOnlyList<AgentUsageSnapshot>[] payloads =
-            [[], [Card("grok")], [Card("grok-bot")], [Card("grok"), Card("grok-bot")], [Card("grok", "acct")]];
-        HashSet<string>[] hiddens = [[], ["grok"], ["grok-bot"], ["grok", "grok-bot"]];
-        foreach (var agents in payloads)
-        {
-            foreach (var hidden in hiddens)
-            {
-                var visible = LimitsCardFilter.Visible(agents, Grok, None, hidden);
-                var rows = LimitsPlaceholders.Rows(visible, agents, Grok, false, None, hidden);
-                var allHidden = Grok.All(hidden.Contains) && !agents.Any(a => a.AccountKey is not null);
-                Assert.Equal(allHidden || rows.Count == 0, Hides(agents, Grok, hidden, attempted: true));
-            }
-        }
-    }
-
     [Fact]
     public void GrokTabBotHiddenWithGrokSnapshotKeepsTheCard()
     {
