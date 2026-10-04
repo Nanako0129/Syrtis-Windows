@@ -267,6 +267,19 @@ public sealed partial class SettingsWindow : Window
                     RebuildPreview();
                 }
 
+                // Picking another source drops the unavailable row, which was
+                // only listed because it was the selection (macOS recomputes
+                // availableClientIds + [selected] per render). Without one,
+                // a pick leaves the page alone (focus, arrow keys).
+                if (key == "tokenbar.quota.source" && !rebuildAll && _menuBarHasUnavailable)
+                {
+                    _pages["menubar"] = BuildMenuBarPage(AppSettings.Store);
+                    if (_selectedTag == "menubar")
+                    {
+                        ShowPage(_selectedTag);
+                    }
+                }
+
                 // The Quota lens's onboarding card is a second writer of the
                 // attribution tables. This page only redrew after its own
                 // writes (ApplyAttributionWrite), so an open Settings kept
@@ -347,6 +360,10 @@ public sealed partial class SettingsWindow : Window
     /// even when its choices equal the empty set's (the picked agent
     /// errored).</summary>
     private bool _menuBarBuiltWithoutQuota;
+
+    /// <summary>Whether the menu-bar page lists the unavailable row for the
+    /// selection; a different pick must drop it.</summary>
+    private bool _menuBarHasUnavailable;
     private string? _dashboardQuotaKey;
 
     /// <summary>Whether the attribution page was built before any quota
@@ -571,6 +588,7 @@ public sealed partial class SettingsWindow : Window
         var choices = QuotaSourceChoices.Of(payload).ToList();
         _menuBarQuotaChoices = QuotaSourceChoices.Selections(payload);
         var unavailable = QuotaSourceChoices.Unavailable(payload, selection);
+        _menuBarHasUnavailable = unavailable is not null;
         _menuBarBuiltWithoutQuota = payload is null;
         if (unavailable is { } row)
         {
