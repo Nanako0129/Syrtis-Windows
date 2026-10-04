@@ -162,10 +162,10 @@ public sealed partial class DashboardView : UserControl
                 {
                     if (AppSettings.GrokBotConsent.Stored == true)
                     {
-                        // A yes from the Settings switch keeps the card that
-                        // was showing (Declined stays one line), or the
-                        // one line if none was; after the card's own Allow
-                        // this is a no-op.
+                        // A yes from the Settings switch keeps the last
+                        // consent card drawn (Declined stays one line), or
+                        // the one line if none was; after the card's own
+                        // Allow this is a no-op.
                         _grokBotWaiting.GrantedElsewhere();
                         _model?.RefreshQuotaNow();
                     }

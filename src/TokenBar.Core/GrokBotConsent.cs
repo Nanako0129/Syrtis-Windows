@@ -153,7 +153,8 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     /// <see cref="CardFor"/> decision, Declined, then applies) or when a
     /// Grok Bot snapshot is not a consent snapshot (<see cref="Card.None"/>);
     /// other clients' cards, decided through the same state in the limits
-    /// loop, leave it untouched.</summary>
+    /// loop, leave it untouched, and so does a fetch with no Grok Bot
+    /// snapshot at all (the record waits for Grok Bot's next one).</summary>
     public sealed class WaitingState
     {
         private (Card Card, object? Over, int Failures)? _grant;
@@ -163,7 +164,8 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
             _grant = (shownCard, shownPayload, failedFetches);
 
         /// <summary>A yes that did not come from the card's Allow (the Settings
-        /// switch): record the consent card on screen, if one is. With none
+        /// switch): record the last consent card drawn, which may be off
+        /// screen (another tab, or the Grok Bot card hidden). With none
         /// drawn yet, record <see cref="Card.Declined"/> without Waiting (no
         /// payload to wait on; -1 matches no failure count), so a consent
         /// snapshot that arrives under the yes shows the one line, not the
