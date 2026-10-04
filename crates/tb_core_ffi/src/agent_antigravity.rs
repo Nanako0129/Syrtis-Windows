@@ -1907,6 +1907,16 @@ fn project_id(code_assist: &Value) -> Option<String> {
 }
 
 fn resolve_remote_plan(code_assist: &Value) -> Option<String> {
+    // A paying Google AI account still reports currentTier "free-tier"; the
+    // subscription is named by paidTier (macOS #477, CodexBar resolveAccountPlan).
+    if let Some(name) = code_assist
+        .pointer("/paidTier/name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(name.to_string());
+    }
     if let Some(plan_type) = code_assist
         .pointer("/planInfo/planType")
         .and_then(Value::as_str)
@@ -4616,6 +4626,28 @@ mod tests {
             resolve_remote_plan(&json!({"planInfo":{"planType":"standard"}})).as_deref(),
             Some("Standard")
         );
+    }
+
+    #[test]
+    fn paid_tier_name_is_the_plan_over_the_free_current_tier() {
+        assert_eq!(
+            resolve_remote_plan(&json!({
+                "currentTier":{"id":"free-tier"},
+                "paidTier":{"id":"g1-pro-tier","name":"Google AI Pro"}
+            }))
+            .as_deref(),
+            Some("Google AI Pro")
+        );
+        for blank in ["", "   "] {
+            assert_eq!(
+                resolve_remote_plan(&json!({
+                    "currentTier":{"id":"free-tier"},
+                    "paidTier":{"id":"g1-pro-tier","name":blank}
+                }))
+                .as_deref(),
+                Some("Free")
+            );
+        }
     }
 
     fn orchestration_fetched(source: &str) -> Fetched {
