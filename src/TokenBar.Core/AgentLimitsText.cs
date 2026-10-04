@@ -154,6 +154,16 @@ public static class AgentLimitsText
         return parts.Count == 0 ? null : new(string.Join(" · ", parts), IsError: false);
     }
 
+    /// <summary>The windows a card draws as bars, whether or not it carries
+    /// an error (macOS AgentLimitsCard.swift:771-787 draws the red detail and
+    /// then <c>uniqueWindows</c>). A transient failure after a success comes
+    /// back from the core as the last-good snapshot with the error stamped on
+    /// it (agent_usage.rs <c>apply_account_outcome_with</c>), so its bars stay
+    /// under the red line; a failure with nothing cached has no windows and
+    /// draws only the red line.</summary>
+    public static IReadOnlyList<UsageWindow> BarWindows(AgentUsageSnapshot snapshot) =>
+        snapshot.UniqueCardWindows;
+
     /// <summary>Clients whose live tail shows activity right now.</summary>
     public static IReadOnlySet<string> LiveClients(IReadOnlyList<TraceBucket>? trace) =>
         (trace ?? []).Where(static b => b.TokensPerMin > 0)

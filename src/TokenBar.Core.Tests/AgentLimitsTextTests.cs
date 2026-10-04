@@ -56,6 +56,31 @@ public class AgentLimitsTextTests
             AgentLimitsText.StatusBadge(null, isLive: false));
     }
 
+    // ---- Bars under an error (macOS AgentLimitsCard.swift:771-787) ---------
+
+    // A transient failure after a success: the core hands back the last-good
+    // windows with the error stamped on them. The card keeps the bars under
+    // the red detail and the red badge, as macOS does.
+    [Fact]
+    public void AnErrorWithLastGoodWindowsKeepsTheBarsUnderTheRedLine()
+    {
+        var stale = Snap(error: "Copilot usage request failed. Retrying automatically.", withWindow: true);
+
+        Assert.Equal("session.v1", Assert.Single(AgentLimitsText.BarWindows(stale)).CardId);
+        Assert.Equal(new LimitsDetail(stale.Error!, IsError: true), AgentLimitsText.Detail(stale));
+        Assert.Equal(LimitsTone.Red, AgentLimitsText.StatusBadge(stale, isLive: false).Tone);
+    }
+
+    // A failure with nothing cached carries no windows: only the red line.
+    [Fact]
+    public void AnErrorWithNoWindowsDrawsOnlyTheRedLine()
+    {
+        var failed = Snap(error: "Copilot usage request failed. Retrying automatically.");
+
+        Assert.Empty(AgentLimitsText.BarWindows(failed));
+        Assert.Equal(new LimitsDetail(failed.Error!, IsError: true), AgentLimitsText.Detail(failed));
+    }
+
     [Fact]
     public void LiveClientsFoldsTraceAliasesAndIgnoresIdleBuckets()
     {
