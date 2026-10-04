@@ -91,6 +91,11 @@ public class QuotaSourceChoicesTests
 
         Assert.Null(QuotaSourceChoices.Unavailable(payload, QuotaResolver.Auto));
         Assert.Null(QuotaSourceChoices.Unavailable(null, QuotaResolver.Auto));
+        // Before any payload an explicit pick is not known to be unavailable.
+        var copilot = QuotaResolver.Selection("copilot", "premium.v1");
+        Assert.Equal(
+            $"{ClientRegistry.Style("copilot").DisplayName} · —",
+            QuotaSourceChoices.Unavailable(null, copilot)?.Label);
         Assert.Null(QuotaSourceChoices.Unavailable(
             payload, QuotaResolver.Selection("copilot", "premium.v1")));
     }

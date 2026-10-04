@@ -32,7 +32,10 @@ public static class QuotaSourceChoices
     /// <summary>The persisted selection as a disabled, checked row when the
     /// payload does not offer it (its agent errored or is gone, e.g. a
     /// last-good that lived only in memory before a restart), so the user can
-    /// still see what is selected. Null for Auto or an offered selection. The
+    /// still see what is selected. With no payload yet (before the first
+    /// fetch, or while every fetch fails) nothing is known to be unavailable,
+    /// so the window reads "—", as macOS shows it with no agent. Null for
+    /// Auto or an offered selection. The
     /// persisted value is never rewritten. Port of macOS SettingsPanel
     /// (availableClientIds + [selected], "Unavailable selection").</summary>
     public static (string Selection, string Label)? Unavailable(
@@ -46,8 +49,8 @@ public static class QuotaSourceChoices
 
         var separator = selection.IndexOf('|');
         var clientId = separator < 0 ? selection : selection[..separator];
-        return (selection,
-            $"{ClientRegistry.Style(clientId).DisplayName} · {"Unavailable selection".Localized()}");
+        var window = payload is null ? "—" : "Unavailable selection".Localized();
+        return (selection, $"{ClientRegistry.Style(clientId).DisplayName} · {window}");
     }
 
     /// <summary>The selection keys a payload offers.</summary>

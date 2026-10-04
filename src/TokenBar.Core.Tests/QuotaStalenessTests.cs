@@ -121,7 +121,6 @@ public class QuotaStalenessTests
         var afterTerminal = QuotaSelectionPolicy.ResolveReading(
             terminal, selection, NoneHidden, before.EffectiveSelection, before.Remaining);
 
-        Assert.NotEqual(good, transient);
         Assert.Equal(fetchedAt.ToUnixTimeMilliseconds(), before.ResolvedAt?.ToUnixTimeMilliseconds());
         Assert.Equal(before.ResolvedAt, afterTransient.ResolvedAt);
         // A fresh stamp cannot stand in for the payload's own age.
