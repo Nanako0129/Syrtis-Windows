@@ -120,9 +120,5 @@ public sealed class OpencodeRoutesTests
         Assert.Null(OpencodeRoutes.HeaderLine(false, false, []));
         // A restricted card of another client says nothing.
         Assert.Null(OpencodeRoutes.HeaderLine(false, true, subs));
-
-        Assert.Equal("Subscriptions: Codex · Copilot", OpencodeRoutes.EmptyText(true, subs));
-        Assert.Equal("No supported agents yet", OpencodeRoutes.EmptyText(true, []));
-        Assert.Equal("No supported agents yet", OpencodeRoutes.EmptyText(false, subs));
     }
 }

@@ -58,12 +58,4 @@ public static class OpencodeRoutes
         : !restricted && subscriptions.Count > 0
             ? "opencode also taps: {0}".Localized(string.Join(" · ", subscriptions))
         : null;
-
-    /// <summary>The text for a card with nothing visible after the fetch was
-    /// attempted (:559-565): the labels on the opencode view when it has
-    /// any, else "No supported agents yet".</summary>
-    public static string EmptyText(bool opencodeView, IReadOnlyList<string> subscriptions) =>
-        opencodeView && subscriptions.Count > 0
-            ? "Subscriptions: {0}".Localized(string.Join(" · ", subscriptions))
-            : "No supported agents yet".Localized();
 }

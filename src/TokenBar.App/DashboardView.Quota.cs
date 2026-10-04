@@ -544,14 +544,16 @@ public sealed partial class DashboardView
     private string? _historyShownWindow;
     private int _historyShownCount = WindowHistoryText.VisibleRows;
 
-    /// <summary>One subscription's own three cards: the window it is in now,
-    /// where its allowance stands, and the windows before this one.</summary>
+    /// <summary>One client tab's quota cards (macOS QuotaView.swift
+    /// :59-100): the window card when the tab has one, the limits card, then
+    /// either the windows before this one (with a window card) or the
+    /// recorded-cycle strip and heatmap for the tab's clients (without).</summary>
     private UIElement BuildClientQuota(
         DashboardModel.Snapshot snapshot, QuotaLensProjection.Client client,
         QuotaLensProjection.Overview overview)
     {
         var stack = new StackPanel { Spacing = 10 };
-        // macOS QuotaView.swift:51-56: no window card when the gate gave none
+        // macOS QuotaView.swift:60-66: no window card when the gate gave none
         // (the tab's limits are switched off, or no member qualifies).
         if (client.HasWindowCard)
         {
@@ -598,7 +600,8 @@ public sealed partial class DashboardView
         {
             // macOS QuotaView.swift:85-100: nothing to list a history for, so the
             // all-clients strip and heatmap filtered to this tab's own clients
-            // (the same slice the limits card is asked for). Windows has no
+            // (macOS clientIds, the tab's slice; on the opencode tab the limits
+            // card draws the routed list, this stays the slice). Windows has no
             // `unreadable` flag on either builder; not ported.
             var slice = ClientRegistry.TabSlice(ClientRegistry.QuotaOwner(singleClient));
             stack.Children.Add(BuildQuotaStripCard(

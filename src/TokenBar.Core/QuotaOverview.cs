@@ -89,14 +89,14 @@ public static class QuotaOverviewFold
     public const double ExhaustedPercent = 99;
 
     /// <summary>The tab's slice of the all-clients strip (macOS QuotaView.swift
-    /// :92, <c>windowSummaries.filter { clientIds.contains($0.clientId) }</c>):
+    /// :85, <c>windowSummaries.filter { clientIds.contains($0.clientId) }</c>):
     /// a client tab with no window card draws the strip for its own clients
     /// only.</summary>
     public static IReadOnlyList<QuotaWindowSummary> ForClients(
         IReadOnlyList<QuotaWindowSummary> summaries, IReadOnlyList<string> clientIds) =>
         [.. summaries.Where(s => clientIds.Contains(s.Id.ProviderId))];
 
-    /// <summary>The same slice of the heatmap's windows (QuotaView.swift :96).</summary>
+    /// <summary>The same slice of the heatmap's windows (QuotaView.swift :89).</summary>
     public static IReadOnlyList<QuotaHeatmapWindow> ForClients(
         IReadOnlyList<QuotaHeatmapWindow> windows, IReadOnlyList<string> clientIds) =>
         [.. windows.Where(w => clientIds.Contains(w.Id.ProviderId))];

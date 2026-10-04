@@ -1996,16 +1996,6 @@ public sealed partial class DashboardView : UserControl
             return panel;
         }
 
-        // macOS :559-565. Reached only when HidesClientCard let the card
-        // through, which on a restricted card means before the fetch was
-        // attempted, so this stays behind the same `attempted` macOS has (there
-        // the :529 gate shadows it for a restricted card as well).
-        if (clientIds is not null && rows.Count == 0 && snapshot.QuotaAttempted)
-        {
-            panel.Children.Add(Ui.Dim(OpencodeRoutes.EmptyText(opencodeView, opencodeSubs)));
-            return panel;
-        }
-
         switch (QuotaSummaryText.LimitsState(agents.Count > 0, snapshot.QuotaOutcome))
         {
             case AgentLimitsState.Failed:
