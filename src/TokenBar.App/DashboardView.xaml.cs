@@ -1340,7 +1340,7 @@ public sealed partial class DashboardView : UserControl
                         singleClient is { } tab
                             ? "{0} limits".Localized(ClientRegistry.TabDisplayName(tab))
                             : "Agent limits".Localized(),
-                        BuildLimits(snapshot, limitsClients)),
+                        BuildLimits(snapshot, limitsClients, _selectedClients)),
                 // Absent when this tab is scoped to one client — the trace
                 // answers "across everything right now", which a single-client
                 // tab did not ask. With nothing running it stays and says so
@@ -1936,18 +1936,29 @@ public sealed partial class DashboardView : UserControl
     /// per-client Quota lens (5e). A parameter rather than a second builder:
     /// this card answers "where does the allowance stand right now", and a copy
     /// of it would be free to disagree with the original on the same window.</summary>
+    /// <param name="requested">The clients the multi-client card was asked
+    /// for, for placeholder rows (macOS <c>clients</c>): the tab's selected
+    /// clients on Overview and the Quota lens. A client tab asks for its own
+    /// members (<paramref name="clientIds"/>), as macOS restrict mode lists
+    /// <c>clients.filter(known)</c> over the tab's clients.</param>
     private FrameworkElement BuildLimits(
-        DashboardModel.Snapshot snapshot, IReadOnlyList<string>? clientIds = null)
+        DashboardModel.Snapshot snapshot, IReadOnlyList<string>? clientIds = null,
+        IReadOnlyList<string>? requested = null)
     {
         var panel = new StackPanel { Spacing = 10 };
+        var all = snapshot.Quota?.Agents ?? [];
+        var tabHidden = ClientRegistry.HiddenTabClients(AppSettings.Store);
+        var limitsHidden = ClientRegistry.HiddenLimitsClients(AppSettings.Store);
         // Narrowed to the tab's clients (every member of a grouped tab), then
         // the per-client limits toggle and (Overview only) tab visibility
-        // applied, before any exit below reads the list (LimitsCardFilter).
-        var agents = LimitsCardFilter.Visible(
-            snapshot.Quota?.Agents ?? [],
-            clientIds,
-            ClientRegistry.HiddenTabClients(AppSettings.Store),
-            ClientRegistry.HiddenLimitsClients(AppSettings.Store));
+        // applied, before any exit below reads the list (LimitsCardFilter, the
+        // only snapshot filter).
+        var agents = LimitsCardFilter.Visible(all, clientIds, tabHidden, limitsHidden);
+        // Known clients with no snapshot yet get a placeholder card, under the
+        // same hide rules (LimitsPlaceholders.Rows).
+        IReadOnlyList<LimitsRow> rows = LimitsPlaceholders.Rows(
+            agents, all, clientIds ?? requested ?? [],
+            multiClient: clientIds is null, tabHidden, limitsHidden);
 
         // Round 11's P2 finding, corrected: retained data wins over a failed
         // refetch — QuotaSummaryText.LimitsState checks `agents.Count > 0`
@@ -1959,8 +1970,8 @@ public sealed partial class DashboardView : UserControl
         // say so, not "No quota data yet" (macOS "No supported agents yet"
         // for an empty visible list). A client tab whose card is off draws no
         // card at all (LimitsCardFilter.HidesClientCard, at the callers).
-        var payloadHasCards = (snapshot.Quota?.Agents.Count ?? 0) > 0;
-        if (clientIds is null && payloadHasCards && agents.Count == 0)
+        var payloadHasCards = all.Count > 0;
+        if (clientIds is null && payloadHasCards && rows.Count == 0)
         {
             panel.Children.Add(Ui.Dim("No supported agents yet".Localized()));
             return panel;
@@ -1971,10 +1982,12 @@ public sealed partial class DashboardView : UserControl
             case AgentLimitsState.Failed:
                 panel.Children.Add(Ui.Dim(QuotaSummaryText.CouldNotCheckLimits()));
                 return panel;
-            case AgentLimitsState.Loading:
+            // Placeholder cards answer "still asking" themselves ("Checking…"),
+            // as on macOS; the bare line is for when there is nothing to draw.
+            case AgentLimitsState.Loading when rows.Count == 0:
                 panel.Children.Add(Ui.Dim("No quota data yet.".Localized()));
                 return panel;
-            case AgentLimitsState.Ready:
+            default:
                 break;
         }
 
@@ -1984,6 +1997,8 @@ public sealed partial class DashboardView : UserControl
         var classic = layout == LimitsLayout.Classic;
         var metric = asUsed ? QuotaMetric.Used : QuotaMetric.Remaining;
         var paceMode = CurrentPaceMode();
+        // macOS placeholderValueLabel: "No data" claims the provider was asked.
+        var placeholderValue = (snapshot.QuotaAttempted ? "No data" : "Checking…").Localized();
 
         var now = DateTimeOffset.Now;
         var liveClients = AgentLimitsText.LiveClients(snapshot.Trace);
@@ -1991,13 +2006,15 @@ public sealed partial class DashboardView : UserControl
         var reorderable = clientIds is null;
         if (reorderable)
         {
-            agents = LimitsCardOrder.Apply(
-                agents, AppSettings.Store.GetString(ClientRegistry.TabOrderKey) ?? "");
+            rows = LimitsCardOrder.Apply(
+                rows, AppSettings.Store.GetString(ClientRegistry.TabOrderKey) ?? "");
         }
 
-        var drag = reorderable ? new LimitsDrag(panel, agents) : null;
-        foreach (var agent in agents)
+        var drag = reorderable ? new LimitsDrag(panel, rows) : null;
+        foreach (var limitsRow in rows)
         {
+            var agent = limitsRow.Snapshot;
+            var id = limitsRow.ClientId;
             var section = new StackPanel { Spacing = 5 };
             // A Grid, not a horizontal StackPanel: the StackPanel measured the
             // label unbounded, so a long config-dir label was clipped with no
@@ -2011,32 +2028,48 @@ public sealed partial class DashboardView : UserControl
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            if (drag is not null && agent.Account.AccountKey is null)
+            if (drag is not null && limitsRow.IsPrimary)
             {
-                header.Children.Add(drag.Grip(agent.ClientId));
+                header.Children.Add(drag.Grip(id));
             }
 
-            var icon = AgentIcon.Create(agent.ClientId, 14);
+            var icon = AgentIcon.Create(id, 14);
             Grid.SetColumn(icon, 1);
             header.Children.Add(icon);
-            var title = Ui.MiddleText(AccountLabel.Of(agent, snapshot.Quota), 12, bold: true);
+            var account = agent?.Account ?? AccountIdentity.Of(id, null);
+            var title = Ui.MiddleText(AccountLabel.Of(account, snapshot.Quota), 12, bold: true);
             title.HorizontalAlignment = HorizontalAlignment.Left;
             title.VerticalAlignment = VerticalAlignment.Center;
-            ToolTipService.SetToolTip(title, AccountLabel.Detail(agent.Account) ?? title.Full);
+            ToolTipService.SetToolTip(title, AccountLabel.Detail(account) ?? title.Full);
             Grid.SetColumn(title, 2);
             header.Children.Add(title);
 
-            var badge = AgentLimitsText.StatusBadge(agent, liveClients.Contains(agent.ClientId));
+            var badge = AgentLimitsText.StatusBadge(agent, liveClients.Contains(id));
             section.Children.Add(Ui.Row(header, ToneText(badge.Text, 10, badge.Tone)));
             // Added before the section is filled; null when the card joined
             // its primary's drag group.
-            if ((drag is null ? section : drag.Host(agent, section)) is { } host)
+            if ((drag is null ? section : drag.Host(limitsRow, section)) is { } host)
             {
                 panel.Children.Add(host);
             }
 
-            // Ahead of the placeholder branch: "keychain-consent" is a setup
-            // placeholder, and this card is its setup prompt.
+            if (agent is null)
+            {
+                if (id == "grok-bot")
+                {
+                    // macOS shows Grok Bot's sign-in line instead of rows.
+                    section.Children.Add(Ui.Dim((snapshot.QuotaAttempted
+                        ? "Sign in to Grok Bot on this PC, then refresh to see its weekly limits."
+                        : "Loading Grok Bot limits…").Localized(), 10));
+                    continue;
+                }
+
+                AddPlaceholderRows(section, id, classic, placeholderValue);
+                continue;
+            }
+
+            // Ahead of the setup-placeholder branch below: "keychain-consent"
+            // is a setup placeholder, and this card is its setup prompt.
             var consent = _grokBotWaiting.Decide(
                 agent, AppSettings.GrokBotConsent.Stored, snapshot.Quota, snapshot.QuotaFailures);
             if (consent.Card != GrokBotConsent.Card.None)
@@ -2072,7 +2105,8 @@ public sealed partial class DashboardView : UserControl
             // An error only colours the detail line and the badge: the core
             // returns the last-good windows with a transient error stamped on
             // them, and those still draw (macOS AgentLimitsCard.swift:771-787);
-            // with nothing cached there are no windows and no bars.
+            // with nothing cached there are no windows, and the placeholder
+            // rows below keep the card's shape.
             //
             // Chart layout draws each window's recorded quota history as a
             // curve instead of a bar. WindowCardText.Tabs — the same fold the
@@ -2084,6 +2118,14 @@ public sealed partial class DashboardView : UserControl
             // plain index zip against the same windows lines each tab up with
             // the window it belongs to.
             var windows = AgentLimitsText.BarWindows(agent);
+            if (windows.Count == 0)
+            {
+                // macOS draws the placeholder rows for a card with no windows,
+                // errored or not, so the card keeps its shape.
+                AddPlaceholderRows(section, id, classic, placeholderValue);
+                continue;
+            }
+
             // The same tabs feed the trend, which is information rather than a
             // density option, so it appears in every layout and on every
             // surface — macOS passes the curves to the client tab's card too
@@ -2104,6 +2146,27 @@ public sealed partial class DashboardView : UserControl
         }
 
         return panel;
+    }
+
+    /// <summary>macOS <c>placeholderRow</c> :1277-1296: the window label, an
+    /// empty bar, and "No data" / "Checking…" (beside the label in Classic,
+    /// under the bar otherwise).</summary>
+    private static void AddPlaceholderRows(StackPanel section, string clientId, bool classic, string value)
+    {
+        foreach (var label in LimitsPlaceholders.Labels.GetValueOrDefault(clientId) ?? ["Limit"])
+        {
+            var root = new StackPanel { Spacing = 3 };
+            root.Children.Add(Ui.Row(
+                Ui.Text(label.Localized(), 11, bold: true),
+                Ui.Text(classic ? value : "", 10, 0.5)));
+            root.Children.Add(GaugeBar(0, 100, null, null, false));
+            if (!classic)
+            {
+                root.Children.Add(Ui.Text(value, 10, 0.5));
+            }
+
+            section.Children.Add(root);
+        }
     }
 
     // A grant the core accepted over a consent card; its card and exits live

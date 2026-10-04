@@ -266,7 +266,7 @@ public sealed partial class DashboardView
         // Off by the master switch: not drawn here either (macOS QuotaView.swift:57).
         if (OverviewCards.ShowsLimitsCard(OverviewCards.LimitsEnabled(AppSettings.Store)))
         {
-            stack.Children.Add(Ui.Card("Agent limits".Localized(), BuildLimits(snapshot)));
+            stack.Children.Add(Ui.Card("Agent limits".Localized(), BuildLimits(snapshot, requested: _selectedClients)));
         }
 
         return stack;
