@@ -1995,6 +1995,7 @@ fn grokbot_outcome(
             snapshot: AgentUsageSnapshot {
                 account_key: None,
                 merge_scope: None,
+                agy_login_marker: None,
                 client_id: "grok-bot".to_string(),
                 source: "oauth".to_string(),
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
