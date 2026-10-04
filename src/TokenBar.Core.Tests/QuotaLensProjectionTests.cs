@@ -780,7 +780,33 @@ public class QuotaLensProjectionTests
         Assert.Equal("grok", client.Owner);
         Assert.Equal("grok", client.Selected!.Id.ProviderId);
         Assert.False(client.LocalUsageUnattributed);
-        Assert.Equal("grok-bot", QuotaLensProjection.WindowCardOwner([], Agents(Agent("grok-bot", Window("grok-bot|weekly.v1", "Weekly", "weekly.v1"))), "grok"));
+        Assert.Equal("grok-bot", QuotaLensProjection.WindowCardOwner(Agents(Agent("grok-bot", Window("grok-bot|weekly.v1", "Weekly", "weekly.v1"))), "grok"));
+    }
+
+    // macOS WindowCardGate.clients (WindowCardLoader.swift:625-639) with the
+    // PopoverView.swift:151-165 inputs. (i) Grok Build has local records and only
+    // Grok Bot reports windows: grok is a card client (present slice), so it owns
+    // the card - the old "owner has no windows tab" rule picked grok-bot.
+    [Fact]
+    public void GrokBuildPresentLocallyOwnsTheTabWhenOnlyTheBotReports()
+    {
+        var botOnly = Agents(Agent("grok-bot", Window("grok-bot|weekly.v1", "Weekly", "weekly.v1")));
+        Assert.Equal("grok", QuotaLensProjection.WindowCardOwner(botOnly, "grok", present: ["grok"]));
+        // (ii) control: no local records, no grok quota - the Bot's card.
+        Assert.Equal("grok-bot", QuotaLensProjection.WindowCardOwner(botOnly, "grok", present: []));
+        Assert.Equal("grok-bot", QuotaLensProjection.WindowCardOwner(botOnly, "grok", present: ["codex"]));
+    }
+
+    // (iii) A limits-hidden Bot is not picked by the fallback; Windows has no
+    // "no window card" path, so the tab falls back to its owner (macOS draws
+    // none: remaining difference).
+    [Fact]
+    public void ALimitsHiddenBotIsNotPickedByTheFallback()
+    {
+        var botOnly = Agents(Agent("grok-bot", Window("grok-bot|weekly.v1", "Weekly", "weekly.v1")));
+        var hidden = new HashSet<string> { "grok-bot" };
+        Assert.Equal("grok", QuotaLensProjection.WindowCardOwner(botOnly, "grok", present: [], limitsHidden: hidden));
+        Assert.Equal("grok-bot", QuotaLensProjection.WindowCardOwner(botOnly, "grok", present: [], limitsHidden: new HashSet<string>()));
     }
 
     // Control: the Antigravity group's other member, antigravity-cli, is
@@ -792,10 +818,10 @@ public class QuotaLensProjectionTests
         var withWindows = Agents(Agent("antigravity", Window("antigravity|session.v1", "Session", "session.v1")));
         var noWindows = Agents(Agent("antigravity"), Agent("codex", Window("codex|weekly.v1", "Weekly", "weekly.v1")));
 
-        Assert.Equal("antigravity", QuotaLensProjection.WindowCardOwner([], withWindows, "antigravity"));
-        Assert.Equal("antigravity", QuotaLensProjection.WindowCardOwner([], withWindows, "antigravity-cli"));
-        Assert.Equal("antigravity", QuotaLensProjection.WindowCardOwner([], noWindows, "antigravity"));
-        Assert.Equal("codex", QuotaLensProjection.WindowCardOwner([], noWindows, "codex"));
+        Assert.Equal("antigravity", QuotaLensProjection.WindowCardOwner(withWindows, "antigravity"));
+        Assert.Equal("antigravity", QuotaLensProjection.WindowCardOwner(withWindows, "antigravity-cli"));
+        Assert.Equal("antigravity", QuotaLensProjection.WindowCardOwner(noWindows, "antigravity"));
+        Assert.Equal("codex", QuotaLensProjection.WindowCardOwner(noWindows, "codex"));
 
         var client = GrokTab(withWindows, [], tab: "antigravity");
         Assert.Equal("antigravity", client.Owner);

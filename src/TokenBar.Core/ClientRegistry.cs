@@ -364,11 +364,49 @@ public static class ClientRegistry
     /// quota card and vice versa; limits-hidden stays member-specific (each
     /// group member keeps its own quota card under the shared
     /// tab).</summary>
-    public static IReadOnlySet<string> QuotaExcludedClients(SettingsStore store)
+    public static IReadOnlySet<string> QuotaExcludedClients(SettingsStore store) =>
+        QuotaExcludedClients(HiddenClients(store), HiddenLimitsClients(store));
+
+    /// <summary>The same set from raw hidden sets (macOS
+    /// <c>quotaExcludedClients(tabHidden:limitsHidden:)</c>,
+    /// ClientRegistry.swift :206-210): only tab visibility is group-wide.</summary>
+    public static IReadOnlySet<string> QuotaExcludedClients(
+        IReadOnlySet<string> tabHidden, IReadOnlySet<string> limitsHidden)
     {
-        var excluded = new HashSet<string>(HiddenTabClients(store), StringComparer.Ordinal);
-        excluded.UnionWith(HiddenLimitsClients(store));
+        var excluded = new HashSet<string>(HiddenTabClients(tabHidden), StringComparer.Ordinal);
+        excluded.UnionWith(limitsHidden);
         return excluded;
+    }
+
+    /// <summary>The clients the model builds quota window cards for (macOS
+    /// <c>quotaClients(present:quotaIds:tabHidden:orderRaw:)</c>,
+    /// ClientRegistry.swift :255-263, without the display ordering, which does
+    /// not change membership): every member of each present client's tab slice
+    /// plus the payload's configured quota ids, minus tab-hidden, deduped.</summary>
+    public static IReadOnlyList<string> QuotaClients(
+        IReadOnlyList<string> present, IReadOnlyList<string> quotaIds, IReadOnlySet<string> tabHidden)
+    {
+        var hidden = HiddenTabClients(tabHidden);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        return [.. present.SelectMany(TabSlice).Concat(quotaIds).Where(id => !hidden.Contains(id) && seen.Add(id))];
+    }
+
+    /// <summary>The client whose window card a tab draws, or null for none
+    /// (macOS <c>WindowCardGate.clients</c> card half,
+    /// WindowCardLoader.swift :625-639): none when the tab itself is
+    /// <paramref name="excluded"/>; the tab when it is a card client; else the
+    /// first slice member that is a card client and not excluded.</summary>
+    public static string? WindowCardClient(
+        string tab, IReadOnlyList<string> quotaClients, IReadOnlySet<string> excluded)
+    {
+        if (excluded.Contains(tab))
+        {
+            return null;
+        }
+
+        return quotaClients.Contains(tab)
+            ? tab
+            : TabSlice(tab).FirstOrDefault(id => quotaClients.Contains(id) && !excluded.Contains(id));
     }
 
     /// <summary>The superset of client ids that can show a row in the multi-agent
@@ -386,7 +424,11 @@ public static class ClientRegistry
         var quotaSet = new HashSet<string>(quotaIds);
         bool Known(string id) => placeholders.Contains(id) || quotaSet.Contains(id);
         var seen = new HashSet<string>();
-        return present.Where(Known).Concat(quotaIds).Where(id => seen.Add(id)).ToList();
+        // flatMap(tabSlice), as macOS (ClientRegistry.swift :299-316): a grouped
+        // tab is one id in `present` and several rows on screen. With Grok
+        // Build present and Grok Bot signed out, the card draws the Bot's
+        // placeholder, so Settings must offer a grok-bot toggle too.
+        return present.SelectMany(TabSlice).Where(Known).Concat(quotaIds).Where(id => seen.Add(id)).ToList();
     }
 
     /// <summary>Sorts <paramref name="ids"/> by the user's saved tab order

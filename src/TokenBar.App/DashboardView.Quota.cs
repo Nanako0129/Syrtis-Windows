@@ -240,7 +240,11 @@ public sealed partial class DashboardView
                     WindowCardText.AccountKeyPrefix + ClientRegistry.QuotaOwner(_activeClientTab)),
                 // Year-independent: the card's scan covers quota history,
                 // not the selected year (LocalRecordClients).
-                LocalRecordClients.Union(AppSettings.Store, snapshot.Graph.Summary.Clients)),
+                LocalRecordClients.Union(AppSettings.Store, snapshot.Graph.Summary.Clients),
+                // The window-card owner's inputs (macOS PopoverView.quotaGate).
+                (_selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet)).PresentClients,
+                ClientRegistry.HiddenClients(AppSettings.Store),
+                ClientRegistry.HiddenLimitsClients(AppSettings.Store)),
             snapshot.AccountWindowUsage);
 
         // A client tab asks about one subscription, so it gets that

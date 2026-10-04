@@ -357,6 +357,20 @@ public class AgentLimitsTextTests
         }
     }
 
+    // G's report (b), macOS ClientRegistry.swift:299-316: Grok Build present
+    // locally, Grok Bot signed out and without a snapshot - the card draws the
+    // Bot's placeholder, so Settings must offer a grok-bot toggle. The tab id
+    // "grok" alone (unexpanded `present`) offered none.
+    [Fact]
+    public void SettingsOffersAGrokBotToggleWhenOnlyGrokBuildIsPresent()
+    {
+        Assert.Equal(["grok", "grok-bot"],
+            ClientRegistry.KnownLimitsClients(["grok"], [], LimitsPlaceholders.Clients));
+        // Control: an id that is neither a placeholder client nor in the payload stays out.
+        Assert.Equal(["grok", "grok-bot"],
+            ClientRegistry.KnownLimitsClients(["grok", "foo"], [], LimitsPlaceholders.Clients));
+    }
+
     [Fact]
     public void SettingsOffersAToggleForEveryKnownPresentClient()
     {
