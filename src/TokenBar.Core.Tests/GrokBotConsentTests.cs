@@ -388,6 +388,52 @@ public class GrokBotConsentTests : IDisposable
         Assert.Equal(GrokBotConsent.TextFor(recorded), after.Text);
     }
 
+    // One WaitingState serves every card in BuildLimits' loop; another
+    // client's card between two Grok Bot decisions must not touch the record.
+    [Theory]
+    [InlineData(GrokBotConsent.Card.Ask)]
+    [InlineData(GrokBotConsent.Card.Declined)]
+    public void AnotherClientsCardKeepsTheRecord(GrokBotConsent.Card recorded)
+    {
+        var shown = new AgentUsagePayload("now", []);
+        var waiting = GrantedOver(shown, recorded);
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.None, Waiting: false),
+            waiting.Decide(Snapshot("claude", "oauth"), true, shown, 2));
+        Assert.Equal(
+            new GrokBotConsent.Prompt(recorded, Waiting: true),
+            waiting.Decide(Marked, true, shown, 2));
+    }
+
+    // The loop's real shape: cards on both sides of Grok Bot, rendered
+    // twice (the grant's Changed re-render, then the next one). Grok Bot's
+    // card each pass equals a state that saw Grok Bot alone; the Settings
+    // switch then keeps the card drawn (not the Declined fallback).
+    [Theory]
+    [InlineData(GrokBotConsent.Card.Ask)]
+    [InlineData(GrokBotConsent.Card.Declined)]
+    public void LimitsLoopOrderGivesGrokBotTheSameCardAsAlone(GrokBotConsent.Card recorded)
+    {
+        var shown = new AgentUsagePayload("now", []);
+        var alone = GrantedOver(shown, recorded);
+        var looped = GrantedOver(shown, recorded);
+        for (var pass = 0; pass < 2; pass++)
+        {
+            looped.Decide(Snapshot("claude", "oauth"), true, shown, 2);
+            Assert.Equal(alone.Decide(Marked, true, shown, 2), looped.Decide(Marked, true, shown, 2));
+            looped.Decide(Snapshot("codex", "oauth"), true, shown, 2);
+        }
+
+        var ask = new GrokBotConsent.WaitingState();
+        ask.Decide(Snapshot("claude", "oauth"), null, shown, 2);
+        ask.Decide(Marked, null, shown, 2);
+        ask.Decide(Snapshot("codex", "oauth"), null, shown, 2);
+        ask.GrantedElsewhere();
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.Ask, Waiting: true),
+            ask.Decide(Marked, true, shown, 2));
+    }
+
     [Fact]
     public void ARealPayloadClearsTheRecord()
     {

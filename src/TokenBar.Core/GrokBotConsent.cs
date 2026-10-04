@@ -151,7 +151,9 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     /// so without these exits the button could stay disabled. The record
     /// clears when the stored answer is no longer yes (the normal
     /// <see cref="CardFor"/> decision, Declined, then applies) or when a
-    /// snapshot is not a consent snapshot (<see cref="Card.None"/>).</summary>
+    /// Grok Bot snapshot is not a consent snapshot (<see cref="Card.None"/>);
+    /// other clients' cards, decided through the same state in the limits
+    /// loop, leave it untouched.</summary>
     public sealed class WaitingState
     {
         private (Card Card, object? Over, int Failures)? _grant;
@@ -178,6 +180,13 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
             var card = CardFor(agent, stored);
             if (card == Card.None)
             {
+                // One state serves every card in the limits loop: only Grok
+                // Bot's own snapshot may clear its record.
+                if (agent.ClientId != "grok-bot")
+                {
+                    return new(Card.None, false);
+                }
+
                 _grant = null;
                 _shown = null;
                 return new(Card.None, false);
