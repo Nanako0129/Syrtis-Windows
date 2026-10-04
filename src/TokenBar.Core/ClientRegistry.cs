@@ -383,9 +383,12 @@ public static class ClientRegistry
     /// ClientRegistry.swift :255-263, without the display ordering, which does
     /// not change membership): every member of each present client's tab slice
     /// plus the payload's configured quota ids, minus tab-hidden, deduped.
-    /// A present MEMBER id is folded to its tab first (macOS
-    /// <c>tabClients</c>' memberToTabId, ClientRegistry.swift :248-252):
-    /// macOS <c>tabSlice</c> takes a tab id, and Antigravity's local usage
+    /// A present MEMBER id is folded to its tab first (the memberToTabId
+    /// mapping of macOS <c>tabClients</c>, ClientRegistry.swift :247-251).
+    /// This is a deliberate deviation: macOS <c>quotaClients</c> does NOT
+    /// fold, it passes the raw presentClients straight to <c>tabSlice</c>;
+    /// do not remove the fold to "restore parity". <c>tabSlice</c> takes a
+    /// tab id, and Antigravity's local usage
     /// is recorded under <c>antigravity-cli</c>, whose own slice would leave
     /// out the <c>antigravity</c> owner and move the tab's window card off
     /// its stored history until a payload names antigravity configured
