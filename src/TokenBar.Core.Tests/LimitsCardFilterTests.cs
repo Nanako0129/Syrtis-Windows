@@ -130,8 +130,9 @@ public sealed class LimitsCardFilterTests
         Assert.False(Hides([], Antigravity, hidden, attempted: false));
         Assert.True(Hides([], Antigravity, hidden, attempted: true));
         Assert.False(Hides(agents, Antigravity, None, attempted: true)); // control: antigravity has a card
-        // An extra account on a hidden member keeps the card past the attempt.
-        Assert.False(Hides([Card("antigravity", "acct")], Antigravity, hidden, attempted: true));
+        // An extra account alone does not make antigravity known() (no primary
+        // snapshot, no placeholder), so past the attempt nothing is drawn.
+        Assert.True(Hides([Card("antigravity", "acct")], Antigravity, hidden, attempted: true));
     }
 
     /// <summary>Single-client tab with no snapshot (any fetch outcome): not
