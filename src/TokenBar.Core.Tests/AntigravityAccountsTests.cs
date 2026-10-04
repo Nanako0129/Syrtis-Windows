@@ -241,7 +241,7 @@ public class AntigravityAccountsTests
     public static TheoryData<string> GuardCases() => new()
     {
         "noCurrentKey", "noMarker", "markerPresent", "markerMismatch",
-        "primaryError", "sourceNotAgy", "noCapturedSnapshot",
+        "sourceNotAgy", "noCapturedSnapshot",
     };
 
     [Fact]
@@ -275,10 +275,48 @@ public class AntigravityAccountsTests
                 "markerMismatch" => "M2",
                 _ => "M1",
             },
-            error: failing == "primaryError" ? "paused" : null);
+            error: null);
         var payload = Payload(primary, Captured(failing == "noCapturedSnapshot" ? KeyB : KeyA));
 
         Assert.Same(payload, AntigravityDedup.Apply(payload, key, marker));
+    }
+
+    [Fact]
+    public void MergedPrimaryTakesTheCapturedPlanWhenItHasNone()
+    {
+        var noPlan = Primary() with { Identity = new AgentIdentity("primary@example.com") };
+        var captured = Captured() with { Identity = new AgentIdentity("a@example.com", "Google AI Pro") };
+
+        var card = Assert.Single(AntigravityDedup.Apply(Payload(noPlan, captured), KeyA, "M1").Agents);
+        Assert.Equal("Google AI Pro", card.Identity?.Plan);
+    }
+
+    [Fact]
+    public void AHealthyCapturedAccountStandsInForAnErroredPrimary()
+    {
+        var captured = Captured() with { Identity = new AgentIdentity("a@example.com", "Google AI Pro") };
+        var merged = AntigravityDedup.Apply(Payload(Primary(error: "timeout"), captured), KeyA, "M1");
+
+        var card = Assert.Single(merged.Agents);
+        Assert.Null(card.AccountKey);
+        Assert.Null(card.Error);
+        Assert.Equal("a@example.com", card.Identity?.Email);
+        Assert.Equal("Google AI Pro", card.Identity?.Plan);
+        Assert.Equal(captured.Windows, card.Windows);
+        Assert.Equal(KeyA, card.HistoryAccountKey);
+        Assert.Equal("scope-a", card.HistoryReadScope?.Scope);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AnErroredPrimaryStaysWhenTheCapturedAccountCannotStandIn(bool capturedErrored)
+    {
+        var payload = Payload(
+            Primary(error: "timeout"),
+            capturedErrored ? Captured(error: "refresh_rejected") : Captured(windows: false));
+
+        Assert.Same(payload, AntigravityDedup.Apply(payload, KeyA, "M1"));
     }
 
     // ---- 5. history adoption --------------------------------------------------
@@ -995,6 +1033,15 @@ public class AntigravityAccountsTests
             Assert.DoesNotContain(EmailA, line);
             Assert.DoesNotContain("primary@example.com", line);
             Assert.DoesNotContain(KeyA, line);
+
+            // Promoted (errored primary, healthy captured): same shape, same rule.
+            var promoted = AntigravityDedup.Apply(
+                Payload(Primary(error: "timeout"), Captured(KeyA)), KeyA, "M1");
+            var stand = promoted.Agents[0];
+            Assert.Equal(EmailA, stand.Identity!.Email);
+            var standLine = Tooltip(stand, promoted);
+            Assert.DoesNotContain(EmailA, standLine);
+            Assert.DoesNotContain(KeyA, standLine);
         });
     }
 

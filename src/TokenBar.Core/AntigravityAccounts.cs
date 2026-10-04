@@ -239,9 +239,12 @@ public static class AntigravityFetch
 /// agy's current account is known, it is also a captured account and would be
 /// drawn twice. This drops the captured card and labels the primary with its
 /// email ONLY when all hold: <c>currentKey</c> set; its marker set and not
-/// <c>"present"</c>; the primary Antigravity snapshot (no account key) came
-/// from the agy route, was fetched under that same marker and has no error; a
-/// captured snapshot carries that key. Otherwise both are shown.
+/// <c>"present"</c>; a captured snapshot carries that key; the primary
+/// Antigravity snapshot (no account key) has no error and came from the agy
+/// route, fetched under that same marker. Otherwise both are shown, except an
+/// ERRORED primary: a captured card with windows and no error replaces it,
+/// promoted to the primary slot (<see cref="PromotedToPrimary"/>). The merged
+/// primary takes the captured plan when it has none.
 /// <para>
 /// The primary keeps its own windows and values. When the captured snapshot
 /// has no error and has windows, the merged primary adopts its pace status,
@@ -270,29 +273,56 @@ public static class AntigravityDedup
             return payload;
         }
 
-        var primary = agents[primaryIndex];
-        if (primary.Source != "agy" || primary.AgyLoginMarker != currentMarker || primary.Error is not null)
-        {
-            return payload;
-        }
-
         var capturedIndex = agents.FindIndex(a => a.ClientId == ClientId && a.AccountKey == currentKey);
         if (capturedIndex < 0)
         {
             return payload;
         }
 
+        var primary = agents[primaryIndex];
         var captured = agents[capturedIndex];
+        if (primary.Error is not null)
+        {
+            // An errored primary (e.g. agy timed out): the healthy captured
+            // account is agy's current one and stands in for it.
+            if (captured.Error is not null || captured.Windows.Count == 0)
+            {
+                return payload;
+            }
+
+            agents[primaryIndex] = PromotedToPrimary(captured);
+            agents.RemoveAt(capturedIndex);
+            return payload with { Agents = agents };
+        }
+
+        if (primary.Source != "agy" || primary.AgyLoginMarker != currentMarker)
+        {
+            return payload;
+        }
+
         var merged = primary;
         if (captured.Identity?.Email is { } email)
         {
-            merged = merged with { Identity = new AgentIdentity(email, primary.Identity?.Plan) };
+            // The agy route carries no plan; the captured snapshot is the same
+            // account (marker-bound above), so its plan labels the primary too.
+            merged = merged with { Identity = new AgentIdentity(email, primary.Identity?.Plan ?? captured.Identity?.Plan) };
         }
 
         agents[primaryIndex] = AdoptingHistory(merged, captured);
         agents.RemoveAt(capturedIndex);
         return payload with { Agents = agents };
     }
+
+    /// <summary>The captured account standing in for an errored primary: the
+    /// primary slot (no account key), its own identity and windows, curves
+    /// still read under its own key and scope (macOS
+    /// <c>promotedToPrimary</c>).</summary>
+    public static AgentUsageSnapshot PromotedToPrimary(AgentUsageSnapshot captured) => captured with
+    {
+        AccountKey = null,
+        HistoryAccountKey = captured.AccountKey,
+        HistoryAccountScope = captured.HistoryScope,
+    };
 
     /// <summary><paramref name="primary"/> with <paramref name="captured"/>'s
     /// pace per matching card id and its history identity, only when the
