@@ -408,6 +408,53 @@ fn a_nested_account_is_counted_in_its_own_window_only() {
     );
 }
 
+/// The two halves of the exclusion each catch a case the other misses,
+/// because the registries are set by separate calls and can disagree: the
+/// inner account known only as a config directory (no roots yet), or only by
+/// its roots (no config-dir entry). The outer window must drop it either way.
+#[test]
+fn a_nested_account_known_to_one_registry_is_still_excluded() {
+    let Some(root) = child_root() else {
+        return run_in_child(
+            "a_nested_account_known_to_one_registry_is_still_excluded",
+            "nested-one-registry",
+        );
+    };
+    let outer = root.join("work-d");
+    let inner = outer.join(".claude");
+    write_session(&outer, "outer", 7_000);
+    write_session(&inner, "inner", 3_000);
+    let outer_text = outer.display().to_string();
+    let outer_roots = vec![outer.join("projects"), outer.join("transcripts")];
+    let inner_roots = vec![inner.join("projects"), inner.join("transcripts")];
+
+    // Config dir only: the inner account has no registered root.
+    crate::apply_config_dirs_for_test(vec![outer_text.clone(), inner.display().to_string()]);
+    crate::apply_scan_roots_for_test(std::collections::BTreeMap::from([(
+        "claude".to_string(),
+        outer_roots.clone(),
+    )]))
+    .unwrap();
+    assert_eq!(
+        claude_lane_output(&call_window(Some(&outer_text), WINDOW_FROM, WINDOW_UNTIL)),
+        7_000,
+        "a nested account known only as a config directory reached the outer window"
+    );
+
+    // Roots only: the inner account is not a configured directory.
+    crate::apply_config_dirs_for_test(vec![outer_text.clone()]);
+    crate::apply_scan_roots_for_test(std::collections::BTreeMap::from([(
+        "claude".to_string(),
+        outer_roots.into_iter().chain(inner_roots).collect(),
+    )]))
+    .unwrap();
+    assert_eq!(
+        claude_lane_output(&call_window(Some(&outer_text), WINDOW_FROM, WINDOW_UNTIL)),
+        7_000,
+        "a nested account known only by its roots reached the outer window"
+    );
+}
+
 /// Control: accounts that do not nest scan exactly what an account window
 /// scanned before the exclusion existed (its own directory as home, its own
 /// roots, no exclusion), message for message.
