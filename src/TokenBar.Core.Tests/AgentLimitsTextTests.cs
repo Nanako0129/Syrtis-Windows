@@ -57,6 +57,11 @@ public class AgentLimitsTextTests
     }
 
     // ---- Bars under an error (macOS AgentLimitsCard.swift:771-787) ---------
+    //
+    // These pin BarWindows, the one place the card decides which windows to
+    // draw: an "error skips the bars" mutant there fails the first test.
+    // DashboardView.BuildLimits is WinUI and no test project compiles it, so
+    // a `continue` reintroduced in the view itself would not be caught here.
 
     // A transient failure after a success: the core hands back the last-good
     // windows with the error stamped on them. The card keeps the bars under
