@@ -4918,8 +4918,8 @@ fn windows_claude_token_with(
 
 /// One string value, read raw: REG_SZ or REG_EXPAND_SZ with `RRF_NOEXPAND`, so
 /// no other environment value is expanded into it. Not found = `Absent`; any
-/// other failure, a value over the environment limit (32 767 WCHARs plus the
-/// terminating NUL, i.e. (32 767 + 1) * 2 bytes), or a value still growing
+/// other failure, a value over the 32 767-WCHAR environment limit, or a value
+/// still growing
 /// after three tries = `RegistryReadError`.
 #[cfg(windows)]
 fn read_string_value(
@@ -4931,7 +4931,11 @@ fn read_string_value(
     use windows_sys::Win32::System::Registry::{
         RegGetValueW, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
     };
-    const MAX_BYTES: u32 = (32_767 + 1) * 2;
+    // The 32 767-WCHAR environment limit plus two NULs: RegGetValueW's size
+    // query leaves room for a terminator it may append after the stored one.
+    // Measured on 188: with (32 767 + 1) * 2 a 32 767-WCHAR REG_SZ (stored
+    // with its NUL) was refused; the test below pins 32 767 read, 32 768 not.
+    const MAX_BYTES: u32 = (32_767 + 2) * 2;
     let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
     let subkey: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
     let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
@@ -13247,7 +13251,7 @@ mod tests {
         }
         assert_eq!(key.read(None, "number"), Err(RegistryReadError));
 
-        // The cap is the 32 767-WCHAR environment limit plus the NUL.
+        // The cap is the 32 767-WCHAR environment limit (see MAX_BYTES).
         key.set("at-limit", REG_SZ, &"x".repeat(32_767));
         key.set("over-limit", REG_SZ, &"x".repeat(32_768));
         assert_eq!(key.read(None, "at-limit"), Ok(value(&"x".repeat(32_767))));
