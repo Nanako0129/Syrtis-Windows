@@ -240,7 +240,11 @@ public sealed partial class DashboardView
                     WindowCardText.AccountKeyPrefix + ClientRegistry.QuotaOwner(_activeClientTab)),
                 // Year-independent: the card's scan covers quota history,
                 // not the selected year (LocalRecordClients).
-                LocalRecordClients.Union(AppSettings.Store, snapshot.Graph.Summary.Clients)),
+                LocalRecordClients.Union(AppSettings.Store, snapshot.Graph.Summary.Clients),
+                // The window-card owner's inputs (macOS PopoverView.quotaGate).
+                (_selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet)).PresentClients,
+                ClientRegistry.HiddenClients(AppSettings.Store),
+                ClientRegistry.HiddenLimitsClients(AppSettings.Store)),
             snapshot.AccountWindowUsage);
 
         // A client tab asks about one subscription, so it gets that
@@ -266,7 +270,7 @@ public sealed partial class DashboardView
         // Off by the master switch: not drawn here either (macOS QuotaView.swift:57).
         if (OverviewCards.ShowsLimitsCard(OverviewCards.LimitsEnabled(AppSettings.Store)))
         {
-            stack.Children.Add(Ui.Card("Agent limits".Localized(), BuildLimits(snapshot)));
+            stack.Children.Add(Ui.Card("Agent limits".Localized(), BuildLimits(snapshot, requested: _selectedClients)));
         }
 
         return stack;
@@ -551,8 +555,9 @@ public sealed partial class DashboardView
         // to this client. A second implementation of "where does the allowance
         // stand right now" would be free to disagree with the first.
         // Off by the master switch: a client tab drops the card too (macOS QuotaView.swift:116).
-        // Switched off for this client (and no extra account): no card, not a
-        // card claiming the data is still loading (LimitsCardFilter.HidesClientCard).
+        // Switched off for this client (and no extra account), or answered with
+        // nothing to draw: no card, not one claiming the data is still loading
+        // (LimitsCardFilter.HidesClientCard, macOS AgentLimitsCard.swift:526-530).
         // Same client set as the Overview lens (OverviewScope.LimitsClients):
         // client.Owner can be grok-bot, whose TabSlice lacks grok.
         var singleClient = OverviewScope.SingleClient(_activeClientTab)!;
@@ -561,7 +566,8 @@ public sealed partial class DashboardView
             && !LimitsCardFilter.HidesClientCard(
                 snapshot.Quota?.Agents ?? [],
                 members,
-                ClientRegistry.HiddenLimitsClients(AppSettings.Store)))
+                ClientRegistry.HiddenLimitsClients(AppSettings.Store),
+                snapshot.QuotaAttempted))
         {
             stack.Children.Add(Ui.Card(
                 // macOS QuotaView.swift:72: tabDisplayName(singleClient).

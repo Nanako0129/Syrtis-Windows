@@ -36,6 +36,9 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
 
     private readonly object _gate = new();
 
+    // The payload the core holds from this process; null = nothing installed.
+    private string? _lastInstalled;
+
     /// <summary>The production setter over the FFI.</summary>
     public static Action<string> NativeSetter { get; } = json => TbCore.SetKeychainConsent(json);
 
@@ -47,14 +50,41 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     /// the next launch. Serialized under one lock so the last click wins in
     /// both the settings file and the core. The core is told first: if the
     /// call throws, nothing is persisted and the exception reaches the caller,
-    /// so the stored answer never claims a state the core is not in.</summary>
+    /// so the stored answer never claims a state the core is not in.
+    /// <para>What the core holds is tracked in-process (<c>_lastInstalled</c>,
+    /// macOS <c>lastInstalledPayload</c>), never inferred from
+    /// <see cref="Stored"/>: a denial with nothing installed is a no-op (no
+    /// core call), and <see cref="QuotaEpoch.Signal"/> fires only when the
+    /// setter succeeded and the installed grant changed, so both quota
+    /// pollers refetch with the new grant.</para></summary>
     public void Answer(bool granted)
     {
+        var changed = false;
         lock (_gate)
         {
-            setConsent(granted ? GrantedPayload : DeniedPayload);
+            var payload = granted ? GrantedPayload : DeniedPayload;
+            if (granted || _lastInstalled is not null)
+            {
+                changed = Install(payload);
+            }
+
             store.SetBool(StorageKey, granted);
         }
+
+        if (changed)
+        {
+            QuotaEpoch.Signal();
+        }
+    }
+
+    // Caller holds _gate. Calls the setter; records and reports a change only
+    // when it succeeded.
+    private bool Install(string payload)
+    {
+        var changed = payload != _lastInstalled;
+        setConsent(payload);
+        _lastInstalled = payload;
+        return changed;
     }
 
     /// <summary>Settings' "Use Grok Bot's sign-in" switch turned off (Q6-2),
@@ -71,7 +101,10 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     /// <summary>Launch: re-install a stored yes. Anything else is already what
     /// the empty registry does. Never throws — a failure here must not take
     /// down the first fetch; the grant is then not installed and the card
-    /// asks again.</summary>
+    /// asks again. Records the install (a later Withdraw must signal) but
+    /// does not signal: it runs as the coordinator's RunBeforeFirstFetch hook,
+    /// before the first fetch, so no payload predates it, and a signal here
+    /// would discard that first payload and force a second core run.</summary>
     public void ApplyIfGranted()
     {
         lock (_gate)
@@ -83,7 +116,7 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
 
             try
             {
-                setConsent(GrantedPayload);
+                Install(GrantedPayload);
             }
             catch (Exception)
             {
@@ -146,15 +179,17 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     /// Waiting ("Waiting…", Allow and Not now disabled) holds only while the
     /// same payload object is shown and no quota fetch has failed since the
     /// grant; either exit ends Waiting and re-enables the buttons, never the
-    /// text. The refresh after a grant is best effort and may wait for the
-    /// next poll (macOS guarantees a refetch; Windows aligns in slice W6c),
-    /// so without these exits the button could stay disabled. The record
+    /// text. A grant that changes what the core holds signals
+    /// <see cref="QuotaEpoch"/>, which wakes both quota pollers and discards
+    /// any payload built before it, so the next payload is built after the
+    /// grant; the exits remain for a refresh that fails or brings another
+    /// consent payload, so the button never latches disabled. The record
     /// clears when the stored answer is no longer yes (the normal
     /// <see cref="CardFor"/> decision, Declined, then applies) or when a
     /// Grok Bot snapshot is not a consent snapshot (<see cref="Card.None"/>);
     /// other clients' cards, decided through the same state in the limits
-    /// loop, leave it untouched, and so does a fetch with no Grok Bot
-    /// snapshot at all (the record waits for Grok Bot's next one).</summary>
+    /// loop, leave it untouched. A payload with no Grok Bot snapshot at all
+    /// ends it too, through <see cref="Observe"/>.</summary>
     public sealed class WaitingState
     {
         private (Card Card, object? Over, int Failures)? _grant;
@@ -173,6 +208,27 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
         /// record, so Allow's own grant is not re-recorded.</summary>
         public void GrantedElsewhere() =>
             _grant ??= _shown ?? (Card.Declined, null, -1);
+
+        /// <summary>Called once per render with the quota payload: a payload
+        /// that EXISTS and holds no Grok Bot snapshot at all (signed out, so the
+        /// card is not on screen for anyone) ends the record, so a later consent
+        /// snapshot under a stored yes decides afresh (<see cref="CardFor"/>)
+        /// instead of replaying the stale card. macOS keeps this state in the
+        /// card's own view (<c>granting</c> / <c>consentDeclined</c>,
+        /// AgentLimitsCard.swift:84-88, re-seeded by <c>.task(id: source)</c>
+        /// :957-960), which dies when the card is not drawn. A null payload
+        /// (loading) changes nothing, and neither does a hidden Grok Bot card or
+        /// another client's card: the payload still holds the snapshot, and
+        /// <see cref="Decide"/> for other clients never touches the record
+        /// (#190).</summary>
+        public void Observe(AgentUsagePayload? payload)
+        {
+            if (payload is not null && !payload.Agents.Any(agent => agent.ClientId == "grok-bot"))
+            {
+                _grant = null;
+                _shown = null;
+            }
+        }
 
         /// <summary>The card for <paramref name="agent"/>: the recorded card
         /// while the stored answer is yes, else <see cref="CardFor"/>.</summary>

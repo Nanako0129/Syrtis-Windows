@@ -22,7 +22,11 @@ public static class AccountLabel
     /// client whose directory name is the same (case-insensitive), both widen
     /// to "&lt;parent&gt;\&lt;name&gt;", further up only while still equal.
     /// Without a payload (the summary lines carry none) the bare directory
-    /// name is used.</summary>
+    /// name is used.
+    /// <para>A captured Antigravity account is labelled with its email, so
+    /// this is for surfaces the user opens (menus, cards, windows). A surface
+    /// a passer-by can read (the tray tooltip) must use
+    /// <see cref="OfPublic"/>.</para></summary>
     public static string Of(AccountIdentity account, AgentUsagePayload? payload = null, bool full = false)
     {
         if (account.AccountKey is null)
@@ -35,6 +39,16 @@ public static class AccountLabel
         if (account.AccountKey == ClaudeDesktopKey)
         {
             return "Claude Desktop";
+        }
+
+        if (account.ClientId == AntigravityClientId)
+        {
+            // Never the key: it is derived from the Google account id. A key
+            // the registry no longer holds (removed while an older payload is
+            // still on screen) gets the generic label (macOS accountLabel).
+            return AntigravityLabel(account.AccountKey) is { } label
+                ? $"{ClientRegistry.ShortName(account.ClientId)} · {label}"
+                : "Antigravity account".Localized();
         }
 
         var others = (payload?.Agents ?? [])
@@ -58,9 +72,36 @@ public static class AccountLabel
         Of(agent.Account, payload, full);
 
     /// <summary>The full path for a config-dir account's tooltip; null for
-    /// the primary and for Desktop (nothing more to say).</summary>
+    /// the primary, for Desktop and for a captured Antigravity account
+    /// (nothing more to say, and its key must not be shown).</summary>
     public static string? Detail(AccountIdentity account) =>
-        account.AccountKey is { } key && key != ClaudeDesktopKey ? key : null;
+        account.AccountKey is { } key && key != ClaudeDesktopKey && account.ClientId != AntigravityClientId
+            ? key
+            : null;
+
+    public const string AntigravityClientId = "antigravity";
+
+    /// <summary>A captured Antigravity account's label (its email) by key,
+    /// from the app's account list; null when the key is not listed. Set once
+    /// at launch (<c>AntigravityAccounts.Label</c>).</summary>
+    public static Func<string, string?> AntigravityLabel { get; set; } = _ => null;
+
+    /// <summary>A captured Antigravity account's 1-based position in the
+    /// app's account list, by key; null when the key is not listed. Set once
+    /// at launch beside <see cref="AntigravityLabel"/>.</summary>
+    public static Func<string, int?> AntigravityOrdinal { get; set; } = _ => null;
+
+    /// <summary>The label for surfaces a passer-by can read (the tray
+    /// tooltip): <see cref="Of"/> except that a captured Antigravity account
+    /// is "Antigravity account {n}" (its list position) instead of its email,
+    /// and an unlisted one the generic "Antigravity account". Never the email
+    /// or the key.</summary>
+    public static string OfPublic(AccountIdentity account, AgentUsagePayload? payload = null) =>
+        account.AccountKey is { } key && account.ClientId == AntigravityClientId
+            ? AntigravityOrdinal(key) is { } n
+                ? "Antigravity account {0}".Localized(n)
+                : "Antigravity account".Localized()
+            : Of(account, payload);
 
     // Either separator: the key is a Windows path, but this must not depend
     // on the OS the tests run on. A key that is all separators keeps itself.

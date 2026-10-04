@@ -14,13 +14,14 @@ public sealed record QuotaPick(AgentUsageSnapshot Agent, UsageWindow Window)
     public string ClientId => Agent.ClientId;
     public string? AccountKey => Agent.Account.AccountKey;
 
-    /// <summary>The tray tooltip's quota line. Names the account through
-    /// <see cref="AccountLabel"/> only: the account email, which this pick's
-    /// snapshot carries, is shown on the Agent-limits card and nowhere a
-    /// passer-by can read it off the taskbar.</summary>
+    /// <summary>The tray tooltip's quota line. Menus and cards may show an
+    /// account's email; the tooltip may not, since a passer-by can read it off
+    /// the taskbar. So it names the account through
+    /// <see cref="AccountLabel.OfPublic"/>: a captured Antigravity account is
+    /// "Antigravity account {n}", every other kind as <see cref="AccountLabel.Of"/>.</summary>
     public string TooltipLine(AgentUsagePayload? quota) =>
         "{0} {1} {2}% left".Localized(
-            AccountLabel.Of(AccountIdentity.Of(ClientId, AccountKey), quota),
+            AccountLabel.OfPublic(AccountIdentity.Of(ClientId, AccountKey), quota),
             Window.Label.Localized(),
             Math.Clamp(Window.RemainingPercent, 0, 100)
                 .ToString("F0", System.Globalization.CultureInfo.CurrentCulture));

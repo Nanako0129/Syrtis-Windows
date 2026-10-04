@@ -26,7 +26,7 @@ public sealed class DashboardModel
     // (a CI/test target) that can wedge a lane permanently "in flight".
     private int _slowInFlight;
     private int _fastInFlight;
-    private int _quotaInFlight;
+    private readonly QuotaPoller _quotaPoller;
     // Latest quota fetch, kept outside the snapshot so a fetch that lands
     // before the first graph parse isn't lost — the first snapshot seeds
     // from it (quota is usually done in ~1s, the cold parse in seconds).
@@ -246,6 +246,11 @@ public sealed class DashboardModel
     {
         _dispatcher = dispatcher;
         _graphCoordinator = graphCoordinator;
+        _quotaPoller = new QuotaPoller(
+            async () => await AgentUsageFetchCoordinator.Shared.FetchAsync().ConfigureAwait(false),
+            action => _dispatcher.TryEnqueue(() => action()),
+            ApplyQuota,
+            log: ex => DevLog.Write($"agentUsage refresh failed: {ex.Message}"));
         _graphCoordinator.Started += OnGraphStarted;
         _graphCoordinator.Published += OnGraphPublished;
         _graphCoordinator.Completed += OnGraphCompleted;
@@ -258,7 +263,16 @@ public sealed class DashboardModel
         {
             roots.Pushed += OnClaudeRootsPushed;
         }
+
+        AntigravityAccounts.Changed += OnAntigravityAccountsChanged;
     }
+
+    /// <summary>A changed captured-account list reached the core, or agy's
+    /// current account changed: refetch the quota so the cards and the dedup
+    /// follow now rather than at the next tick. A fetch already in flight
+    /// absorbs this (the shared coordinator and QuotaPoller coalesce), and
+    /// the next tick catches up.</summary>
+    private void OnAntigravityAccountsChanged() => _dispatcher.TryEnqueue(RefreshQuota);
 
     /// <summary>The native setters already dropped every scan cache and the
     /// removed accounts' state; ask again so an added account's card and usage
@@ -761,6 +775,7 @@ public sealed class DashboardModel
     public void Dispose()
     {
         Stop();
+        _quotaPoller.Dispose();
         _graphState.Dispose();
         _pendingModelRequestId = null;
         _pendingModel = null;
@@ -771,6 +786,8 @@ public sealed class DashboardModel
         {
             roots.Pushed -= OnClaudeRootsPushed;
         }
+
+        AntigravityAccounts.Changed -= OnAntigravityAccountsChanged;
     }
 
     private void RefreshSlow()
@@ -1075,87 +1092,76 @@ public sealed class DashboardModel
         }
     }
 
-    /// <summary>After the Grok Bot grant reached the core: a best-effort
-    /// quota refresh. Dropped while this lane's own fetch is in flight (as
-    /// every other RefreshQuota call is); and when not dropped, its FetchAsync
-    /// can still join a fetch the tray started before the grant. Either way
-    /// the payload can predate the grant, and the grant waits for the next
-    /// poll. macOS guarantees a
-    /// refetch here (GrokBotKeychainConsent.swift: throttle invalidate plus
-    /// the RegistryChange epoch); Windows aligns in slice W6c.</summary>
-    public void RefreshQuotaNow() => RefreshQuota();
-
     /// <summary>The OAuth quota lane, macOS pollAgentUsage parity: fully
     /// independent of the parse lane so a slow provider (the fetch can hang
     /// for ~30s per agent) never delays the first paint, never holds the
     /// EcoQoS boost through a network wait, and never blocks the next
-    /// graph tick behind <c>_slowInFlight</c>.</summary>
-    private void RefreshQuota()
+    /// graph tick behind <c>_slowInFlight</c>. The cycle (in-flight flag,
+    /// epoch check, rerun, wake on a consent change) lives in
+    /// <see cref="QuotaPoller"/>; <see cref="ApplyQuota"/> is its only writer.</summary>
+    private void RefreshQuota() => _quotaPoller.Request();
+
+    // Runs on the dispatcher, only for a payload the poller found current.
+    // The baseline sources (_latestQuota, _quotaAttempted) are written here,
+    // so they hold a payload that was current when written; a signal after
+    // this can still reach CreateBaseline with it before the rerun lands
+    // (bounded: the rerun's payload replaces it).
+    private void ApplyQuota(AgentUsagePayload? quota)
     {
-        if (Interlocked.Exchange(ref _quotaInFlight, 1) == 1)
+        // Recorded before publishing, and outside the snapshot: the
+        // publish below is dropped entirely if the graph lane has not
+        // seeded Current yet, and this is the only thing that survives
+        // that window. The payload is written BEFORE the flag, and
+        // CreateBaseline reads the flag before the payload (both
+        // fields are volatile, so the order holds): a baseline taken
+        // between the two writes must never see "attempted" without
+        // the quota, because LazyLaneFold.Outcome(QuotaAttempted,
+        // Quota) reads exactly that pair as a failed fetch, and a
+        // fetch that succeeded would render as failed for a frame.
+        // QuotaPoller checked the epoch for this call; Publish is one more
+        // dispatcher hop, so it re-checks there: a consent answer in between
+        // must not see this pre-answer payload (or failure) published.
+        // Re-reading Current here (not the poller's captured epoch) is
+        // exact only because every Signal comes from the UI thread
+        // (GrokBotConsent.Answer from the card and Settings).
+        var epoch = QuotaEpoch.Current;
+        bool StillCurrent() => QuotaEpoch.Current == epoch;
+        var accountsChanged = false;
+        var failures = 0;
+        if (quota is not null)
         {
-            return;
+            accountsChanged = !ClaudeExtraRoots.AttributableAccountKeys(quota)
+                .SequenceEqual(ClaudeExtraRoots.AttributableAccountKeys(_latestQuota));
+            _latestQuota = quota;
+        }
+        else
+        {
+            // Counter before the flag, like the payload: a baseline
+            // that sees "attempted" also sees this failure counted.
+            failures = Interlocked.Increment(ref _quotaFailures);
         }
 
-        _ = Task.Run(() =>
+        _quotaAttempted = true;
+        if (quota is not null)
         {
-            try
+            Publish(s => s with { Quota = quota, QuotaAttempted = true }, graph: null, StillCurrent);
+            // An extra Claude account appeared or went: its window
+            // scan keys off these cards, so fetch it now rather than
+            // after the next graph publication.
+            if (accountsChanged)
             {
-                var quota = TryFetch(
-                    () => AgentUsageFetchCoordinator.Shared.FetchAsync().GetAwaiter().GetResult(),
-                    "agentUsage");
-                // Recorded before publishing, and outside the snapshot: the
-                // publish below is dropped entirely if the graph lane has not
-                // seeded Current yet, and this is the only thing that survives
-                // that window. The payload is written BEFORE the flag, and
-                // CreateBaseline reads the flag before the payload (both
-                // fields are volatile, so the order holds): a baseline taken
-                // between the two writes must never see "attempted" without
-                // the quota, because LazyLaneFold.Outcome(QuotaAttempted,
-                // Quota) reads exactly that pair as a failed fetch, and a
-                // fetch that succeeded would render as failed for a frame.
-                var accountsChanged = false;
-                var failures = 0;
-                if (quota is not null)
-                {
-                    accountsChanged = !ClaudeExtraRoots.AttributableAccountKeys(quota)
-                        .SequenceEqual(ClaudeExtraRoots.AttributableAccountKeys(_latestQuota));
-                    _latestQuota = quota;
-                }
-                else
-                {
-                    // Counter before the flag, like the payload: a baseline
-                    // that sees "attempted" also sees this failure counted.
-                    failures = Interlocked.Increment(ref _quotaFailures);
-                }
-
-                _quotaAttempted = true;
-                if (quota is not null)
-                {
-                    Publish(s => s with { Quota = quota, QuotaAttempted = true }, graph: null);
-                    // An extra Claude account appeared or went: its window
-                    // scan keys off these cards, so fetch it now rather than
-                    // after the next graph publication.
-                    if (accountsChanged)
-                    {
-                        RequestLazyRefresh();
-                    }
-                }
-                else
-                {
-                    // Publish the completion even though there is nothing to
-                    // show. Without this the failure is silent in exactly the
-                    // way that matters: Quota stays null, and a surface that
-                    // reads null as "not yet" waits forever for an answer that
-                    // already came back.
-                    Publish(s => s with { QuotaAttempted = true, QuotaFailures = failures }, graph: null);
-                }
+                RequestLazyRefresh();
             }
-            finally
-            {
-                Volatile.Write(ref _quotaInFlight, 0);
-            }
-        });
+        }
+        else
+        {
+            // Publish the completion even though there is nothing to
+            // show. Without this the failure is silent in exactly the
+            // way that matters: Quota stays null, and a surface that
+            // reads null as "not yet" waits forever for an answer that
+            // already came back.
+            Publish(s => s with { QuotaAttempted = true, QuotaFailures = failures }, graph: null, StillCurrent);
+        }
     }
 
     private static T? TryFetch<T>(Func<T> fetch, string label) where T : class
@@ -1217,7 +1223,7 @@ public sealed class DashboardModel
     /// one path and forgotten on the other.</para></summary>
     private Snapshot CreateBaseline(UsagePayload graph)
     {
-        // Flag first, payload second — the mirror of RefreshQuota's write
+        // Flag first, payload second — the mirror of ApplyQuota's write
         // order; see the comment there.
         var attempted = _quotaAttempted;
         var quota = _latestQuota;

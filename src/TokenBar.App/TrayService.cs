@@ -87,6 +87,9 @@ public sealed class TrayService : IDisposable
         {
             UpdateIcon();
             RebuildMenu(); // quota percentages in the source picker move
+            // An open Settings follows the feed's quota (its Quota source and
+            // client rows), as macOS Settings observes the shared payload.
+            SettingsWindow.OnQuotaMaybeChanged();
             // Every accepted, cost-authoritative graph republishes (macOS
             // AppDelegate.swift :573-576). Changed also fires for trace/quota
             // ticks (same graph instance) and for LocalFirst graphs (unpriced);

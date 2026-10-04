@@ -57,13 +57,26 @@ public class GrokBotConsentTests : IDisposable
         Assert.Equal(["""{"grok-bot":true}"""], _calls);
     }
 
+    // W6c: "nothing installed in this process" makes a denial a no-op for the
+    // core (macOS guard granted || hadInstalled); the stored answer still sticks.
     [Fact]
-    public void NotNowPersistsFalseAndClearsTheCore()
+    public void NotNowWithNothingInstalledPersistsFalseAndLeavesTheCoreAlone()
     {
         var store = Store();
         Consent(store).Answer(false);
         Assert.False(store.GetNullableBool(GrokBotConsent.StorageKey));
-        Assert.Equal(["{}"], _calls);
+        Assert.Empty(_calls);
+    }
+
+    [Fact]
+    public void NotNowAfterAnInstalledGrantClearsTheCore()
+    {
+        var store = Store();
+        var consent = Consent(store);
+        consent.Answer(true);
+        consent.Answer(false);
+        Assert.False(store.GetNullableBool(GrokBotConsent.StorageKey));
+        Assert.Equal(["""{"grok-bot":true}""", "{}"], _calls);
     }
 
     // Q6-2: the Settings switch. Persisting alone would leave the core reading
@@ -139,6 +152,138 @@ public class GrokBotConsentTests : IDisposable
         var coordinator = new AgentUsageFetchCoordinator(() => payload);
         coordinator.RunBeforeFirstFetch(consent.ApplyIfGranted);
         Assert.Same(payload, await coordinator.FetchAsync());
+    }
+
+    // W6c 6': Signal iff the setter succeeded and the installed grant changed.
+    private int CountSignals(Action act)
+    {
+        var signals = 0;
+        void Count() => Interlocked.Increment(ref signals);
+        QuotaEpoch.Changed += Count;
+        try
+        {
+            act();
+        }
+        finally
+        {
+            QuotaEpoch.Changed -= Count;
+        }
+
+        return signals;
+    }
+
+    [Fact]
+    public void SignalsOnGrantFromNothingNotOnRepeatAndOnRevokeOfAnInstalledGrant()
+    {
+        var consent = Consent(Store());
+        var before = QuotaEpoch.Current;
+        Assert.Equal(1, CountSignals(() => consent.Answer(true)));
+        Assert.Equal(before + 1, QuotaEpoch.Current);
+        Assert.Equal(0, CountSignals(() => consent.Answer(true)));
+        Assert.Equal(1, CountSignals(() => consent.Answer(false)));
+        Assert.Equal(0, CountSignals(() => consent.Answer(false)));
+        // A repeat is re-sent (idempotent in the core) but signals nothing.
+        Assert.Equal(["""{"grok-bot":true}""", """{"grok-bot":true}""", "{}", "{}"], _calls);
+    }
+
+    [Fact]
+    public void DenialWithNothingInstalledMakesNoCoreCallAndNoSignal()
+    {
+        var consent = Consent(Store());
+        Assert.Equal(0, CountSignals(() => consent.Answer(false)));
+        Assert.Empty(_calls);
+    }
+
+    // The yes carried over from the last session and installed at launch, then
+    // switched off: the decision rests on what was installed, not on Stored.
+    // The launch install itself does not signal (it precedes every fetch).
+    [Fact]
+    public void LaunchInstallThenWithdrawSignals()
+    {
+        var store = Store();
+        store.SetBool(GrokBotConsent.StorageKey, true);
+        var consent = Consent(store);
+        Assert.Equal(0, CountSignals(consent.ApplyIfGranted));
+        Assert.Equal(1, CountSignals(consent.Withdraw));
+        Assert.Equal(["""{"grok-bot":true}""", "{}"], _calls);
+    }
+
+    // Launch with a stored yes, wired as App does: the install is the
+    // coordinator's RunBeforeFirstFetch hook. The first payload is built after
+    // it, so a poller that requested before the hook ran applies it, and the
+    // core runs once.
+    [Fact]
+    public async Task LaunchWithAStoredYesFetchesOnceAndAppliesTheFirstPayload()
+    {
+        var store = Store();
+        store.SetBool(GrokBotConsent.StorageKey, true);
+        var consent = Consent(store);
+        var runs = 0;
+        var coordinator = new AgentUsageFetchCoordinator(() =>
+        {
+            Interlocked.Increment(ref runs);
+            return new AgentUsagePayload("now", []);
+        });
+        coordinator.RunBeforeFirstFetch(consent.ApplyIfGranted);
+        var posted = new List<Action>();
+        var applied = 0;
+        using var poller = new QuotaPoller(
+            async () => await coordinator.FetchAsync(),
+            action => { lock (posted) { posted.Add(action); } },
+            _ => applied++);
+        poller.Request();
+        for (var i = 0; i < 400; i++)
+        {
+            lock (posted)
+            {
+                if (posted.Count >= 1)
+                {
+                    break;
+                }
+            }
+
+            await Task.Delay(10);
+        }
+
+        // Settle: a (wrong) rerun would start its second run here.
+        await Task.Delay(200);
+        Action[] batch;
+        lock (posted)
+        {
+            batch = [.. posted];
+        }
+
+        foreach (var action in batch)
+        {
+            action();
+        }
+
+        Assert.Equal(1, Volatile.Read(ref runs));
+        Assert.Equal(1, applied);
+        Assert.Equal(["""{"grok-bot":true}"""], _calls);
+    }
+
+    // A launch install that failed, then Allow: Stored is already yes, but the
+    // core holds nothing, so the grant must be sent and signalled.
+    [Fact]
+    public void FailedLaunchInstallThenAllowCallsTheSetterAndSignals()
+    {
+        var store = Store();
+        store.SetBool(GrokBotConsent.StorageKey, true);
+        var fail = true;
+        var consent = new GrokBotConsent(store, json =>
+        {
+            if (fail)
+            {
+                throw new TbCoreException("boom");
+            }
+
+            _calls.Add(json);
+        });
+        Assert.Equal(0, CountSignals(consent.ApplyIfGranted));
+        fail = false;
+        Assert.Equal(1, CountSignals(() => consent.Answer(true)));
+        Assert.Equal(["""{"grok-bot":true}"""], _calls);
     }
 
     private static AgentUsageSnapshot Snapshot(string clientId, string source) =>
@@ -402,6 +547,38 @@ public class GrokBotConsentTests : IDisposable
             waiting.Decide(Snapshot("claude", "oauth"), true, shown, 2));
         Assert.Equal(
             new GrokBotConsent.Prompt(recorded, Waiting: true),
+            waiting.Decide(Marked, true, shown, 2));
+    }
+
+    // W6b gap (c), macOS AgentLimitsCard.swift:84-88 / :957-960 (state dies with
+    // the card): a payload that exists and has no Grok Bot snapshot (signed out)
+    // ends the record, so a later consent snapshot under a stored yes decides
+    // afresh. Declined is recorded so the stale card is distinguishable.
+    [Fact]
+    public void APayloadWithoutGrokBotEndsTheRecord()
+    {
+        var shown = new AgentUsagePayload("now", []);
+        var waiting = GrantedOver(shown, GrokBotConsent.Card.Declined);
+        var signedOut = new AgentUsagePayload("later", [Snapshot("claude", "oauth")]);
+        waiting.Observe(signedOut);
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.Ask, Waiting: false),
+            waiting.Decide(Marked, true, new AgentUsagePayload("again", []), 2));
+    }
+
+    // Controls: no payload yet, or a payload that still holds a Grok Bot
+    // snapshot (its card hidden, or the consent snapshot itself), keeps the
+    // record (#190: another client's card or a hidden one is not a sign-out).
+    [Fact]
+    public void ANullPayloadOrOneWithGrokBotKeepsTheRecord()
+    {
+        var shown = new AgentUsagePayload("now", []);
+        var waiting = GrantedOver(shown, GrokBotConsent.Card.Declined);
+        waiting.Observe(null);
+        waiting.Observe(new AgentUsagePayload("later", [Snapshot("claude", "oauth"), Marked]));
+        waiting.Observe(new AgentUsagePayload("later", [Snapshot("grok-bot", "oauth")]));
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.Declined, Waiting: true),
             waiting.Decide(Marked, true, shown, 2));
     }
 

@@ -24,62 +24,68 @@ public static class LimitsCardFilter
         IReadOnlySet<string> tabHidden,
         IReadOnlySet<string> limitsHidden) =>
         [.. agents.Where(agent =>
-            (clientIds is null ? !tabHidden.Contains(agent.ClientId) : clientIds.Contains(agent.ClientId))
-            && !(agent.Account.AccountKey is null && limitsHidden.Contains(agent.ClientId)))];
+            (clientIds is null || clientIds.Contains(agent.ClientId))
+            && !Hides(agent.ClientId, agent.Account.AccountKey is null,
+                multiClient: clientIds is null, tabHidden, limitsHidden))];
+
+    /// <summary>The one hide rule for a card, snapshot or placeholder
+    /// (<see cref="LimitsPlaceholders.Rows"/> asks it too, so the two cannot
+    /// drift): the limits toggle hides a PRIMARY card everywhere; a hidden tab
+    /// hides every card of that client on the multi-client card only.</summary>
+    public static bool Hides(
+        string clientId, bool isPrimary, bool multiClient,
+        IReadOnlySet<string> tabHidden, IReadOnlySet<string> limitsHidden) =>
+        (isPrimary && limitsHidden.Contains(clientId))
+        || (multiClient && tabHidden.Contains(clientId));
 
     /// <summary>Whether a client tab draws no Agent-limits card at all: the
-    /// ONE rule both call sites (Overview lens, Quota lens) ask.
-    /// <para>macOS procedure (AgentLimitsCard.swift): a restricted card lists
-    /// <c>clients.filter(known)</c> (<c>baseClients</c> :444-447), where
-    /// <c>known(id)</c> is <c>placeholderRows[id] != nil || snapshots[primary(id)]
-    /// != nil</c> (:437-439; <c>placeholderRows</c> :228-234); the per-member
-    /// limits toggle then drops hidden primaries, except that an extra account
-    /// always stays (<c>expandedWithExtraAccounts</c>). The card is not drawn
-    /// when <c>allRestrictedClientsHidden</c> (:502-510: every member hidden and
-    /// none with an extra account) or when <c>restrict, visibleClients.isEmpty,
-    /// usageAttempted</c> (:529); a card with no rows yet and no answer waits
-    /// (:547), and a known client with no snapshot draws placeholder rows
-    /// (:784-787). An empty client list hides nothing (:502-504).</para>
-    /// <para>Windows has no macOS known() (placeholder rows or a snapshot,
-    /// :437-439), so this rule is an interim one chosen to leave every tab that
-    /// existed before the Grok group exactly as main's #181: the members
-    /// considered are those with at least one snapshot in
-    /// <paramref name="agents"/>; if none has one (loading, failed, not signed
-    /// in), the tab's quota owner (<c>clientIds[0]</c>, the first member of
-    /// <see cref="ClientRegistry.TabSlice"/>) stands in. The card is hidden iff
-    /// every considered member is limits-hidden and none has an extra account.
-    /// A single-client tab is therefore main's rule exactly, and the Antigravity
-    /// tab hides with antigravity switched off whatever antigravity-cli does
-    /// (it has no snapshot and no Settings switch).</para>
-    /// <para>Known differences from macOS (not a complete list; reviewed against
-    /// AgentLimitsCard.swift): placeholder rows (:228-234, drawn :784-787) for a
-    /// codex/claude/gemini/grok member with no snapshot, and grok-bot's
-    /// sign-in/loading line (:763-769) — Windows draws neither, so such a member
-    /// is simply absent, and a tab with no visible member shows "No quota data
-    /// yet." or could-not-check; the :529 branch (no card once answered with
-    /// nothing visible); on the Grok tab before any snapshot, Windows follows
-    /// the owner (grok) alone, while macOS keeps the card for an unhidden
-    /// grok-bot; the opencode tab's routed subscriptions (:421-436); and a
-    /// member with only an extra-account snapshot, which macOS's known()
-    /// excludes. Align all of these by switching the considered set to the
-    /// Core known() from the placeholder-rows slice (G3b-2) once it merges.</para>
-    /// <para>Read from the setting plus the payload, not from an empty
-    /// <see cref="Visible"/> list, which is also empty before the first payload;
-    /// that card must keep its loading state.</para></summary>
+    /// ONE rule both call sites (Overview lens, Quota lens) ask. Ported from
+    /// macOS AgentLimitsCard.swift <c>body</c> (:526-530): the card is not
+    /// drawn when
+    /// <list type="bullet">
+    /// <item><c>allRestrictedClientsHidden</c> (:502-510): the list is
+    /// non-empty, every client in it is limits-hidden, and none has an extra
+    /// account (an extra account is exempt from the hide, so its row still
+    /// renders); decided from settings alone, so a switched-off card goes at
+    /// once instead of waiting on the network; or</item>
+    /// <item><c>restrict, visibleClients.isEmpty, usageAttempted</c> (:529):
+    /// once the quota fetch has been attempted, a card with nothing to draw
+    /// (no visible snapshot row and no placeholder row) is not drawn. Before
+    /// the attempt it waits and shows its loading state (:547). "Nothing to
+    /// draw" is computed from the pieces the card draws with
+    /// (<see cref="Visible"/> + <see cref="LimitsPlaceholders.Rows"/>, which
+    /// ports <c>baseClients</c> :444-447, <c>known</c> :437-439 and the
+    /// placeholders :784-787), so the card and this decision cannot disagree.</item>
+    /// </list>
+    /// An empty client list hides nothing (:502-504). Remaining difference from
+    /// macOS: the opencode tab's routed subscriptions (:421-436, built from
+    /// <c>opencodeCardClients</c>) — Windows has no opencode view, so that tab
+    /// lists only its own slice and draws no routed-subscription cards.</summary>
+    /// <param name="attempted">The quota fetch has completed once, successfully
+    /// or not (<c>DashboardModel.Snapshot.QuotaAttempted</c>; macOS
+    /// <c>usageAttempted</c>).</param>
     public static bool HidesClientCard(
         IReadOnlyList<AgentUsageSnapshot> agents,
         IReadOnlyList<string> clientIds,
-        IReadOnlySet<string> limitsHidden)
+        IReadOnlySet<string> limitsHidden,
+        bool attempted)
     {
         if (clientIds.Count == 0)
         {
             return false;
         }
 
-        var withSnapshot = clientIds.Where(id => agents.Any(agent => agent.ClientId == id)).ToList();
-        IReadOnlyList<string> members = withSnapshot.Count > 0 ? withSnapshot : [clientIds[0]];
-        return members.All(id =>
-                limitsHidden.Contains(id)
-                && !agents.Any(agent => agent.ClientId == id && agent.Account.AccountKey is not null));
+        if (clientIds.All(limitsHidden.Contains)
+            && !agents.Any(agent => clientIds.Contains(agent.ClientId) && agent.Account.AccountKey is not null))
+        {
+            return true;
+        }
+
+        // A client tab is never the multi-client card, so tab-hidden is moot.
+        IReadOnlySet<string> noTabHidden = new HashSet<string>();
+        return attempted
+            && LimitsPlaceholders.Rows(
+                Visible(agents, clientIds, noTabHidden, limitsHidden),
+                agents, clientIds, multiClient: false, noTabHidden, limitsHidden).Count == 0;
     }
 }
