@@ -120,8 +120,10 @@ public class AntigravityAccountsTests
 
     /// <summary>The production shape of a failed primary: an error card
     /// carries neither the agy source nor a login marker.</summary>
-    private static AgentUsageSnapshot ErroredPrimary() => new(
-        "antigravity", "oauth", "2026-10-04T00:00:00Z", [],
+    private static AgentUsageSnapshot ErroredPrimary(bool lastGood = false) => new(
+        "antigravity", "oauth", "2026-10-04T00:00:00Z",
+        lastGood ? [Window("antigravity.weekly", 60)] : [],
+        Identity: lastGood ? new AgentIdentity("x@example.com") : null,
         Error: "timeout", HistoryScope: new AccountScopeStatus(Error: "noTrustedEvidence"));
 
     private static AgentUsageSnapshot Captured(
@@ -132,12 +134,6 @@ public class AntigravityAccountsTests
             Error: error,
             HistoryScope: new AccountScopeStatus(Scope: "scope-a"),
             AccountKey: key);
-
-    /// <summary><see cref="AntigravityDedup.Apply"/> with a confirmation that
-    /// agrees unless a test supplies its own.</summary>
-    private static AgentUsagePayload Dedup(
-        AgentUsagePayload payload, string? key, string? marker, string? fetchMarker, Func<bool>? confirm = null) =>
-        AntigravityDedup.Apply(payload, key, marker, fetchMarker, confirm ?? (() => true));
 
     private static AgentUsagePayload Payload(params AgentUsageSnapshot[] agents) => new("2026-10-04T00:00:00Z", agents);
 
@@ -253,19 +249,19 @@ public class AntigravityAccountsTests
     public static TheoryData<string> GuardCases() => new()
     {
         "noCurrentKey", "noMarker", "markerPresent", "markerMismatch",
-        "sourceNotAgy", "noCapturedSnapshot",
+        "primaryError", "sourceNotAgy", "noCapturedSnapshot",
     };
 
     [Fact]
     public void DedupMergesWhenEveryGuardHolds()
     {
-        var merged = Dedup(Payload(Primary(), Captured()), KeyA, "M1", null);
+        var merged = AntigravityDedup.Apply(Payload(Primary(), Captured()), KeyA, "M1");
 
         var card = Assert.Single(merged.Agents);
         Assert.Null(card.AccountKey);
         Assert.Equal("a@example.com", card.Identity?.Email);
         Assert.Equal("Pro", card.Identity?.Plan);
-        Assert.Equal(merged, Dedup(merged, KeyA, "M1", null)); // idempotent
+        Assert.Equal(merged, AntigravityDedup.Apply(merged, KeyA, "M1")); // idempotent
     }
 
     [Theory]
@@ -287,10 +283,20 @@ public class AntigravityAccountsTests
                 "markerMismatch" => "M2",
                 _ => "M1",
             },
-            error: null);
+            error: failing == "primaryError" ? "paused" : null);
         var payload = Payload(primary, Captured(failing == "noCapturedSnapshot" ? KeyB : KeyA));
 
-        Assert.Same(payload, Dedup(payload, key, marker, null));
+        Assert.Same(payload, AntigravityDedup.Apply(payload, key, marker));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)] // the core's cached last-good card, error attached
+    public void AnErroredPrimaryIsNeverReplacedOrMerged(bool lastGood)
+    {
+        var payload = Payload(ErroredPrimary(lastGood), Captured());
+
+        Assert.Same(payload, AntigravityDedup.Apply(payload, KeyA, "M1"));
     }
 
     [Fact]
@@ -299,7 +305,7 @@ public class AntigravityAccountsTests
         var noPlan = Primary() with { Identity = new AgentIdentity("primary@example.com") };
         var captured = Captured() with { Identity = new AgentIdentity("a@example.com", "Google AI Pro") };
 
-        var card = Assert.Single(Dedup(Payload(noPlan, captured), KeyA, "M1", null).Agents);
+        var card = Assert.Single(AntigravityDedup.Apply(Payload(noPlan, captured), KeyA, "M1").Agents);
         Assert.Equal("Google AI Pro", card.Identity?.Plan);
     }
 
@@ -309,215 +315,9 @@ public class AntigravityAccountsTests
         var noPlan = Primary() with { Identity = new AgentIdentity("primary@example.com") };
         var captured = Captured() with { Identity = new AgentIdentity(null, "Google AI Pro") };
 
-        var card = Assert.Single(Dedup(Payload(noPlan, captured), KeyA, "M1", null).Agents);
+        var card = Assert.Single(AntigravityDedup.Apply(Payload(noPlan, captured), KeyA, "M1").Agents);
         Assert.Equal("Google AI Pro", card.Identity?.Plan);
         Assert.Equal("primary@example.com", card.Identity?.Email);
-    }
-
-    [Fact]
-    public void AHealthyCapturedAccountStandsInForAnErroredPrimary()
-    {
-        var captured = Captured() with { Identity = new AgentIdentity("a@example.com", "Google AI Pro") };
-        var merged = Dedup(Payload(ErroredPrimary(), captured), KeyA, "M1", "M1");
-
-        var card = Assert.Single(merged.Agents);
-        Assert.Null(card.AccountKey);
-        Assert.Null(card.Error);
-        Assert.Equal("a@example.com", card.Identity?.Email);
-        Assert.Equal("Google AI Pro", card.Identity?.Plan);
-        Assert.Equal(captured.Windows, card.Windows);
-        Assert.Equal(KeyA, card.HistoryAccountKey);
-        Assert.Equal("scope-a", card.HistoryReadScope?.Scope);
-    }
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void AnErroredPrimaryStaysWhenTheCapturedAccountCannotStandIn(bool capturedErrored)
-    {
-        var payload = Payload(
-            ErroredPrimary(),
-            capturedErrored ? Captured(error: "refresh_rejected") : Captured(windows: false));
-
-        Assert.Same(payload, Dedup(payload, KeyA, "M1", "M1"));
-    }
-
-    [Theory]
-    [InlineData("M1", true)]
-    [InlineData("M2", false)] // this fetch saw another login than Current's
-    [InlineData(null, false)] // toggle off, or the marker read failed
-    public void PromotionNeedsThisFetchsMarkerToEqualCurrents(string? fetchMarker, bool promoted)
-    {
-        var payload = Payload(ErroredPrimary(), Captured());
-        var result = Dedup(payload, KeyA, "M1", fetchMarker);
-
-        if (promoted)
-        {
-            var card = Assert.Single(result.Agents);
-            Assert.Null(card.Error);
-            Assert.Null(card.AccountKey);
-            Assert.Equal("a@example.com", card.Identity?.Email);
-            Assert.Equal(KeyA, card.HistoryAccountKey);
-        }
-        else
-        {
-            Assert.Same(payload, result);
-        }
-    }
-
-    [Fact]
-    public void AnErroredPrimaryThatCarriesLastGoodDataIsNeverReplaced()
-    {
-        var lastGood = ErroredPrimary() with
-        {
-            Windows = [Window("antigravity.weekly", 60)],
-            Identity = new AgentIdentity("x@example.com"),
-        };
-        var payload = Payload(lastGood, Captured());
-
-        Assert.Same(payload, Dedup(payload, KeyA, "M1", "M1"));
-    }
-
-    [Fact]
-    public async Task ThroughTheFetchStepAMatchingMarkerPromotesTheCapturedAccount()
-    {
-        var (capture, _, _) = await ArmedForPromotion("M1", "M1");
-
-        var result = AntigravityFetch.Run(() => Payload(ErroredPrimary(), Captured()), null, capture);
-
-        var card = Assert.Single(result.Agents);
-        Assert.Null(card.AccountKey);
-        Assert.Null(card.Error);
-        Assert.Equal("a@example.com", card.Identity?.Email);
-        Assert.Equal(KeyA, card.HistoryAccountKey);
-    }
-
-    [Fact]
-    public async Task ALoginChangeDuringTheFetchKeepsTheErrorCard()
-    {
-        var (capture, _, _) = await ArmedForPromotion("M1", "M2");
-        var payload = Payload(ErroredPrimary(), Captured());
-
-        var result = AntigravityFetch.Run(() => payload, null, capture);
-
-        Assert.Same(payload, result);
-    }
-
-    private static int MarkerReads(FakeIo io) => io.Calls.Count(c => c == "marker");
-
-    [Fact]
-    public async Task ThePostFetchReadHappensOnlyWhenAPromotionIsAboutToLand()
-    {
-        var (capture, io, _) = await ArmedForPromotion("M1", "M1");
-        var armed = MarkerReads(io);
-        AntigravityFetch.Run(() => Payload(ErroredPrimary(), Captured()), null, capture);
-        Assert.Equal(2, MarkerReads(io) - armed); // pre-fetch and post-fetch
-
-        foreach (var payload in new[]
-        {
-            Payload(Primary(), Captured()), // merge path
-            Payload(ErroredPrimary() with { Windows = [Window("antigravity.weekly", 60)] }, Captured()), // last-good
-            Payload(ErroredPrimary()), // no captured card
-        })
-        {
-            (capture, io, _) = await ArmedForPromotion("M1", "M1");
-            armed = MarkerReads(io);
-            AntigravityFetch.Run(() => payload, null, capture);
-            Assert.Equal(1, MarkerReads(io) - armed);
-        }
-    }
-
-    [Fact]
-    public async Task APostFetchReadThatFailsKeepsTheErrorCard()
-    {
-        var (capture, io, _) = await ArmedForPromotion("M1", "M1");
-        io.FailingMarkerReads.Add(MarkerReads(io) + 2);
-        var payload = Payload(ErroredPrimary(), Captured());
-
-        Assert.Same(payload, AntigravityFetch.Run(() => payload, null, capture));
-    }
-
-    [Fact]
-    public async Task TurningAutomaticCaptureOffDuringTheFetchMakesNoPostReadAndNoPromotion()
-    {
-        var (capture, io, store) = await ArmedForPromotion("M1", "M1");
-        var armed = MarkerReads(io);
-        var payload = Payload(ErroredPrimary(), Captured());
-
-        var result = AntigravityFetch.Run(
-            () => { store.SetBool(AntigravityAutoCapture.EnabledKey, false); return payload; }, null, capture);
-
-        Assert.Same(payload, result);
-        Assert.Equal(1, MarkerReads(io) - armed);
-    }
-
-    [Fact]
-    public async Task ACurrentThatChangesDuringTheFetchIsNotPromoted()
-    {
-        var (capture, _, _) = await ArmedForPromotion("M1", "M1");
-        var payload = Payload(ErroredPrimary(), Captured());
-
-        var result = AntigravityFetch.Run(
-            () => { capture.Remove(KeyA).GetAwaiter().GetResult(); return payload; }, null, capture);
-
-        Assert.Same(payload, result);
-    }
-
-    [Fact]
-    public void TheConfirmationIsNeverAskedOnTheMergePath()
-    {
-        var asked = 0;
-        Dedup(Payload(Primary(), Captured()), KeyA, "M1", "M1", () => { asked++; return true; });
-        Assert.Equal(0, asked);
-    }
-
-    /// <summary>Current = (KeyA, M1) from an automatic poll that also records
-    /// M1 as the last attempted marker (so the fetch's own read of M1 neither
-    /// clears Current nor starts a racing re-capture); then the next marker
-    /// reads are <paramref name="before"/> (the pre-fetch read) and
-    /// <paramref name="after"/> (the post-fetch read).</summary>
-    private static async Task<(AntigravityAutoCapture Capture, FakeIo Io, SettingsStore Store)> ArmedForPromotion(string before, string after)
-    {
-        var store = TempStore();
-        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
-        var io = new FakeIo();
-        var capture = new AntigravityAutoCapture(io.Io, store);
-        await capture.Poll();
-        Assert.Equal(KeyA, capture.Current.Key);
-        Assert.Equal("M1", capture.Current.Marker);
-        io.Markers.Enqueue(before);
-        io.Markers.Enqueue(after);
-        return (capture, io, store);
-    }
-
-    [Theory]
-    [InlineData("noCurrentKey")]
-    [InlineData("noMarker")]
-    [InlineData("markerPresent")]
-    [InlineData("noCapturedSnapshot")]
-    public void AnErroredPrimaryStaysWhenAnEarlyGuardFails(string failing)
-    {
-        var key = failing == "noCurrentKey" ? null : KeyA;
-        var marker = failing switch { "noMarker" => null, "markerPresent" => "present", _ => "M1" };
-        var payload = Payload(ErroredPrimary(), Captured(failing == "noCapturedSnapshot" ? KeyB : KeyA));
-
-        Assert.Same(payload, Dedup(payload, key, marker, marker));
-    }
-
-    [Fact]
-    public async Task WithAutomaticCaptureOffAnErroredPrimaryIsNeverPromoted()
-    {
-        var store = TempStore();
-        var io = new FakeIo();
-        io.Markers.Enqueue("M1");
-        var capture = new AntigravityAutoCapture(io.Io, store); // toggle off
-        await capture.ManualCapture();
-        Assert.Equal(KeyA, capture.Current.Key);
-
-        var payload = Payload(ErroredPrimary(), Captured());
-        var result = AntigravityFetch.Run(() => payload, null, capture);
-
-        Assert.Same(payload, result);
     }
 
     // ---- 5. history adoption --------------------------------------------------
@@ -544,7 +344,7 @@ public class AntigravityAccountsTests
     [Fact]
     public void AMergedCardWithAnErroredCapturedCardKeepsItsOwnHistory()
     {
-        var merged = Dedup(Payload(Primary(), Captured(error: "refresh_rejected")), KeyA, "M1", null);
+        var merged = AntigravityDedup.Apply(Payload(Primary(), Captured(error: "refresh_rejected")), KeyA, "M1");
 
         var card = Assert.Single(merged.Agents);
         Assert.Null(card.HistoryAccountKey);
@@ -562,7 +362,7 @@ public class AntigravityAccountsTests
             new("antigravity", "scope-other", "weekly.v1", [Sample(90)]),
             new("antigravity", "scope-a", "weekly.v1", [Sample(30)]),
         ];
-        var merged = Dedup(Payload(Primary(), Captured()), KeyA, "M1", null);
+        var merged = AntigravityDedup.Apply(Payload(Primary(), Captured()), KeyA, "M1");
 
         var tab = Assert.Single(WindowCardText.Tabs(history, merged, "antigravity"));
         Assert.Equal("scope-a", tab.Id.AccountScope);
@@ -910,7 +710,7 @@ public class AntigravityAccountsTests
         Assert.Null(store.GetString(AntigravityAutoCapture.CurrentKey));
     }
 
-    /// <summary>The same window on the fetch path: ReadMarkerForFetch's marker
+    /// <summary>The same window on the fetch path: PrepareForFetch's marker
     /// read blocks, the toggle goes off, the read returns a new marker, and
     /// the poll it starts captures nothing.</summary>
     [Fact]
@@ -922,11 +722,11 @@ public class AntigravityAccountsTests
         io.Markers.Enqueue("M2");
         var capture = new AntigravityAutoCapture(io.Io, store, markerTimeout: TimeSpan.FromSeconds(10));
 
-        var prepare = capture.ReadMarkerForFetch();
+        var prepare = capture.PrepareForFetch();
         Assert.Same(io.BlockedReadStarted.Task, await Task.WhenAny(io.BlockedReadStarted.Task, Task.Delay(TimeSpan.FromSeconds(5))));
         await capture.SetEnabled(false);
         io.BlockedReadGate.Set();
-        if ((await prepare).Poll is { } poll)
+        if (await prepare is { } poll)
         {
             await poll;
         }
@@ -964,11 +764,11 @@ public class AntigravityAccountsTests
         var store = TempStore();
         store.SetBool(AntigravityAutoCapture.EnabledKey, true);
         var capture = new AntigravityAutoCapture(new FakeIo().Io, store);
-        await (await capture.ReadMarkerForFetch()).Poll!; // attempts M1 once
+        await (await capture.PrepareForFetch())!; // attempts M1 once
 
         var raised = 0;
         capture.StateChanged += () => Interlocked.Increment(ref raised);
-        await (await capture.ReadMarkerForFetch()).Poll!;
+        await (await capture.PrepareForFetch())!;
 
         Assert.Equal(0, raised);
     }
@@ -1227,22 +1027,13 @@ public class AntigravityAccountsTests
             Assert.DoesNotContain("primary@example.com", Tooltip(unmerged, plain));
 
             // Merged: Apply copies the captured account's email onto the primary.
-            var merged = Dedup(plain, KeyA, "M1", null);
+            var merged = AntigravityDedup.Apply(plain, KeyA, "M1");
             var primary = merged.Agents[0];
             Assert.Equal(EmailA, primary.Identity!.Email);
             var line = Tooltip(primary, merged);
             Assert.DoesNotContain(EmailA, line);
             Assert.DoesNotContain("primary@example.com", line);
             Assert.DoesNotContain(KeyA, line);
-
-            // Promoted (errored primary, healthy captured): same shape, same rule.
-            var promoted = Dedup(
-                Payload(ErroredPrimary(), Captured(KeyA)), KeyA, "M1", "M1");
-            var stand = promoted.Agents[0];
-            Assert.Equal(EmailA, stand.Identity!.Email);
-            var standLine = Tooltip(stand, promoted);
-            Assert.DoesNotContain(EmailA, standLine);
-            Assert.DoesNotContain(KeyA, standLine);
         });
     }
 

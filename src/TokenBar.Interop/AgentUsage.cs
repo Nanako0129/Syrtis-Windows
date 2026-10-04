@@ -787,9 +787,9 @@ public sealed record AgentUsageSnapshot(
 {
     /// <summary>C#-only, never decoded: the captured Antigravity account whose
     /// recorded history this card answers from. Set only by Antigravity dedup
-    /// when it merges the agy-route primary with that account, or promotes
-    /// that account over an errored primary (then <see cref="AccountKey"/> is
-    /// null too; macOS <c>historyAccountKey</c>).</summary>
+    /// when it merges the agy-route primary with that account (macOS
+    /// <c>historyAccountKey</c>). Every identity and key stays on
+    /// <see cref="AccountKey"/>.</summary>
     [JsonIgnore]
     public string? HistoryAccountKey { get; init; }
 

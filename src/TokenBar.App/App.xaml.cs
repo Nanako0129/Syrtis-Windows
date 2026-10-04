@@ -725,7 +725,7 @@ public partial class App : Application
         Core.AccountLabel.AntigravityLabel = key => Core.AntigravityAccounts.Label(store, key);
         Core.AccountLabel.AntigravityOrdinal = key => Core.AntigravityAccounts.Ordinal(store, key);
         // A change that lands while the shared fetch is in flight (the capture
-        // ReadMarkerForFetch started finishing during that same fetch) owes one
+        // PrepareForFetch started finishing during that same fetch) owes one
         // more fetch; the consumers' own refresh would be dropped by their
         // in-flight guard.
         Core.AntigravityAccounts.Changed += Core.AgentUsageFetchCoordinator.Shared.RequestFollowUp;

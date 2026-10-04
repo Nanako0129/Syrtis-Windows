@@ -11,7 +11,7 @@ namespace TokenBar.Core;
 /// "unavailable" state.
 /// <para>
 /// Trigger: before each quota fetch, <see cref="AntigravityFetch"/> awaits
-/// <see cref="ReadMarkerForFetch"/> when the toggle is on. <see cref="Poll"/>
+/// <see cref="PrepareForFetch"/> when the toggle is on. <see cref="Poll"/>
 /// reads agy's login marker (attributes only, no secret) and, when it differs
 /// from the last marker attempted, runs ONE automatic capture in the core. The
 /// marker is recorded before the attempt, so a failure is not retried until
@@ -56,12 +56,8 @@ public sealed class AntigravityAutoCapture
     public const string EnabledKey = "tokenbar.antigravity.autoCapture";
 
     /// <summary><c>{"key","marker"}</c>: a hash and a FILETIME, no secret.
-    /// Safe to restore without re-reading agy's login: dedup's merge requires
-    /// the primary fetched under that marker; its promotion of a captured
-    /// account over an errored primary requires this fetch's own marker read
-    /// to equal it, a re-read after the fetch (only while automatic capture is
-    /// on) to still equal it, Current unchanged meanwhile, and the errored
-    /// primary to carry no windows.</summary>
+    /// Safe to restore without re-reading agy's login, because dedup also
+    /// requires the primary card to have been fetched under that marker.</summary>
     public const string CurrentKey = "tokenbar.antigravity.currentAgy";
 
     /// <summary>The error code recorded for a failure that carried no core
@@ -185,7 +181,7 @@ public sealed class AntigravityAutoCapture
         bool changed;
         lock (_gate)
         {
-            // The commit point every capture passes (ReadMarkerForFetch's poll,
+            // The commit point every capture passes (PrepareForFetch's poll,
             // SetEnabled(true), ManualCapture's resume, an owed poll): with
             // the toggle off it starts nothing, checked under the gate after
             // the marker read, so turning automatic capture off during that
@@ -303,40 +299,18 @@ public sealed class AntigravityAutoCapture
         await PollIfOwed().ConfigureAwait(false);
     }
 
-    /// <summary>One more bounded marker read, for the fetch to confirm after
-    /// <c>fetch()</c> that agy's login did not change meanwhile. It reads
-    /// agy's credential, so it is gated like every other read: only while
-    /// automatic capture is on and not paused, checked under the gate right
-    /// before the read; otherwise null, as for a failed or timed-out read. No
-    /// state is touched.</summary>
-    public string? ReadMarkerAfterFetch()
-    {
-        lock (_gate)
-        {
-            if (_paused || !IsEnabled)
-            {
-                return null;
-            }
-        }
-
-        return TryMarker().GetAwaiter().GetResult();
-    }
-
     /// <summary>Before a quota fetch: read agy's login marker and, when it
     /// differs from the last attempt, forget the current account NOW, so the
     /// fetch that follows a login change is never drawn as the previous
     /// account. The capture attempt is returned, not awaited, so the fetch
-    /// never waits on Google. Never throws. Also returns the marker it read
-    /// (null: paused, another marker read already holds the checking state, or
-    /// the read failed or timed out), so the fetch can tell dedup which login
-    /// this fetch observed.</summary>
-    public async Task<(string? Marker, Task? Poll)> ReadMarkerForFetch()
+    /// never waits on Google. Never throws.</summary>
+    public async Task<Task?> PrepareForFetch()
     {
         lock (_gate)
         {
             if (_paused || _checking)
             {
-                return (null, null);
+                return null;
             }
 
             _checking = true;
@@ -365,7 +339,7 @@ public sealed class AntigravityAutoCapture
 
         if (marker is null)
         {
-            return (null, null);
+            return null;
         }
 
         // No notification: Busy, Paused and the error did not change, so
@@ -380,7 +354,7 @@ public sealed class AntigravityAutoCapture
             CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
-        return (marker, poll);
+        return poll;
     }
 
     /// <summary>Run the poll a busy or checking moment refused. It captures

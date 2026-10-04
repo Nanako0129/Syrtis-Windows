@@ -208,11 +208,7 @@ public sealed class AntigravityAccountsInstaller(
 /// the stored list first, so the first fetch of a launch already carries the
 /// captured cards; when automatic capture is on, run its pre-fetch step (the
 /// capture attempt it starts is not awaited, so the fetch never waits on
-/// Google); then apply <see cref="AntigravityDedup"/> to the result. A
-/// captured account replaces an errored primary only when this fetch's marker
-/// read equals Current's, a re-read after the fetch (made only while automatic
-/// capture is on and not paused) still equals it, Current is unchanged
-/// meanwhile, and the errored primary carries no windows.
+/// Google); then apply <see cref="AntigravityDedup"/> to the result.
 /// </summary>
 public static class AntigravityFetch
 {
@@ -222,11 +218,9 @@ public static class AntigravityFetch
         AntigravityAutoCapture? capture)
     {
         installer?.InstallForFetch();
-        string? fetchMarker = null;
         if (capture is { IsEnabled: true })
         {
-            // The poll it starts is not awaited; only the marker read is.
-            fetchMarker = capture.ReadMarkerForFetch().GetAwaiter().GetResult().Marker;
+            _ = capture.PrepareForFetch().GetAwaiter().GetResult();
         }
 
         var payload = fetch();
@@ -236,8 +230,7 @@ public static class AntigravityFetch
         }
 
         var (key, marker) = capture.Current;
-        return AntigravityDedup.Apply(payload, key, marker, fetchMarker, () =>
-            capture.Current == (key, marker) && capture.ReadMarkerAfterFetch() == fetchMarker);
+        return AntigravityDedup.Apply(payload, key, marker);
     }
 }
 
@@ -246,24 +239,12 @@ public static class AntigravityFetch
 /// agy's current account is known, it is also a captured account and would be
 /// drawn twice. This drops the captured card and labels the primary with its
 /// email ONLY when all hold: <c>currentKey</c> set; its marker set and not
-/// <c>"present"</c>; a captured snapshot carries that key; the primary
-/// Antigravity snapshot (no account key) has no error and came from the agy
-/// route, fetched under that same marker. Otherwise both are shown, except an
-/// ERRORED primary: a captured card with windows and no error replaces it,
-/// promoted to the primary slot (<see cref="PromotedToPrimary"/>), only when
-/// <c>fetchMarker</c> (the marker read during this fetch; null when automatic
-/// capture is off or paused, the read failed or timed out, or another marker
-/// read held the capture's checking state during the fetch) equals
-/// <c>currentMarker</c>, <c>confirmPromotion</c> (asked only on this branch,
-/// after every other guard; the fetch uses it to check that Current is
-/// unchanged and that a marker re-read after the fetch, made only while
-/// automatic capture is on, still equals the pre-fetch one) returns true, and
-/// that errored primary has no windows (an errored card with windows is
-/// cached last-good data and stays).
-/// The merged
-/// primary takes the captured plan when it has none.
+/// <c>"present"</c>; the primary Antigravity snapshot (no account key) came
+/// from the agy route, was fetched under that same marker and has no error; a
+/// captured snapshot carries that key. Otherwise both are shown.
 /// <para>
-/// The primary keeps its own windows and values. When the captured snapshot
+/// The primary keeps its own windows and values, and takes the captured
+/// plan when it has none. When the captured snapshot
 /// has no error and has windows, the merged primary adopts its pace status,
 /// historical pace and duration per matching card id and records it as
 /// <see cref="AgentUsageSnapshot.HistoryAccountKey"/>, so every stored-series
@@ -276,12 +257,7 @@ public static class AntigravityDedup
 {
     public const string ClientId = AccountLabel.AntigravityClientId;
 
-    public static AgentUsagePayload Apply(
-        AgentUsagePayload payload,
-        string? currentKey,
-        string? currentMarker,
-        string? fetchMarker,
-        Func<bool> confirmPromotion)
+    public static AgentUsagePayload Apply(AgentUsagePayload payload, string? currentKey, string? currentMarker)
     {
         if (currentKey is null || currentMarker is null || currentMarker == "present")
         {
@@ -295,48 +271,19 @@ public static class AntigravityDedup
             return payload;
         }
 
+        var primary = agents[primaryIndex];
+        if (primary.Source != "agy" || primary.AgyLoginMarker != currentMarker || primary.Error is not null)
+        {
+            return payload;
+        }
+
         var capturedIndex = agents.FindIndex(a => a.ClientId == ClientId && a.AccountKey == currentKey);
         if (capturedIndex < 0)
         {
             return payload;
         }
 
-        var primary = agents[primaryIndex];
         var captured = agents[capturedIndex];
-        if (primary.Error is not null)
-        {
-            // An errored primary (e.g. agy timed out): the healthy captured
-            // account is agy's current one and stands in for it. An errored
-            // card does not say which route it came from or under which login,
-            // so (stricter than macOS) this needs the marker read during THIS
-            // fetch to equal the one Current is bound to: toggle off or a
-            // failed read (null) keeps the error card. Also stricter: only an
-            // EMPTY error snapshot is replaced; an errored card that still
-            // carries windows is the core's cached last-good data, possibly
-            // another account's, and stays as it is.
-            if (fetchMarker is null || fetchMarker != currentMarker || primary.Windows.Count != 0
-                || captured.Error is not null || captured.Windows.Count == 0)
-            {
-                return payload;
-            }
-
-            // Asked only here, after every other guard: the fetch re-checks
-            // that nothing moved while it ran.
-            if (!confirmPromotion())
-            {
-                return payload;
-            }
-
-            agents[primaryIndex] = PromotedToPrimary(captured);
-            agents.RemoveAt(capturedIndex);
-            return payload with { Agents = agents };
-        }
-
-        if (primary.Source != "agy" || primary.AgyLoginMarker != currentMarker)
-        {
-            return payload;
-        }
-
         var merged = primary;
         // Email and plan are chosen independently. The agy route carries no
         // plan; the captured snapshot is the same account (marker-bound
@@ -352,17 +299,6 @@ public static class AntigravityDedup
         agents.RemoveAt(capturedIndex);
         return payload with { Agents = agents };
     }
-
-    /// <summary>The captured account standing in for an errored primary: the
-    /// primary slot (no account key), its own identity and windows, curves
-    /// still read under its own key and scope (macOS
-    /// <c>promotedToPrimary</c>).</summary>
-    public static AgentUsageSnapshot PromotedToPrimary(AgentUsageSnapshot captured) => captured with
-    {
-        AccountKey = null,
-        HistoryAccountKey = captured.AccountKey,
-        HistoryAccountScope = captured.HistoryScope,
-    };
 
     /// <summary><paramref name="primary"/> with <paramref name="captured"/>'s
     /// pace per matching card id and its history identity, only when the
