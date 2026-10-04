@@ -406,17 +406,23 @@ public class AntigravityAccountsTests
 
     // ---- parity rules of the state machine (mac SW:267-415) -------------------
 
-    /// <summary>An attempt that lands while the toggle is off (an owed poll
-    /// finishing after the toggle was turned off) adds the account but never
-    /// binds it as agy's current account.</summary>
+    /// <summary>An attempt that lands after the toggle went off (turned off
+    /// while the native call ran) adds the account but never binds it as
+    /// agy's current account.</summary>
     [Fact]
-    public async Task AnAttemptWhileTheToggleIsOffNeverBinds()
+    public async Task AnAttemptThatLandsAfterTheToggleWentOffNeverBinds()
     {
         var store = TempStore();
-        var io = new FakeIo();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        var gate = new ManualResetEventSlim(false);
+        var io = new FakeIo { AutoGate = gate };
         var capture = new AntigravityAutoCapture(io.Io, store);
 
-        await capture.Poll();
+        var attempt = capture.Poll();
+        Assert.Same(io.AutoStarted.Task, await Task.WhenAny(io.AutoStarted.Task, Task.Delay(TimeSpan.FromSeconds(5))));
+        await capture.SetEnabled(false);
+        gate.Set();
+        await attempt;
 
         Assert.Contains("auto", io.Calls);
         Assert.Equal([new AntigravityAccount(KeyA, "a@example.com")], AntigravityAccounts.Load(store));
@@ -636,10 +642,65 @@ public class AntigravityAccountsTests
         Assert.Null(store.GetString(AntigravityAutoCapture.CurrentKey));
     }
 
+    /// <summary>The owed poll's own marker read blocks; the toggle goes off
+    /// meanwhile and the read returns a NEW marker: Poll's commit point
+    /// starts nothing (one native auto-capture call in total).</summary>
+    [Fact]
+    public async Task AnOwedPollWhoseMarkerReadOutlastsTheToggleCapturesNothing()
+    {
+        var store = TempStore();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        var gate = new ManualResetEventSlim(false);
+        var io = new FakeIo { AutoGate = gate, BlockedRead = 3 };
+        io.Markers.Enqueue("M1"); // the attempt
+        io.Markers.Enqueue("MX"); // its re-read: moved, so nothing binds
+        io.Markers.Enqueue("M2"); // the owed poll's read: a new login
+        var capture = new AntigravityAutoCapture(io.Io, store, markerTimeout: TimeSpan.FromSeconds(10));
+
+        var attempt = capture.Poll();
+        Assert.Same(io.AutoStarted.Task, await Task.WhenAny(io.AutoStarted.Task, Task.Delay(TimeSpan.FromSeconds(5))));
+        await capture.Poll(); // refused while busy: owed
+        gate.Set();
+        Assert.Same(io.BlockedReadStarted.Task, await Task.WhenAny(io.BlockedReadStarted.Task, Task.Delay(TimeSpan.FromSeconds(5))));
+        await capture.SetEnabled(false);
+        io.BlockedReadGate.Set();
+        await attempt;
+
+        Assert.Equal(1, io.Calls.Count(c => c == "auto"));
+        Assert.Null(capture.Current.Key);
+        Assert.Null(store.GetString(AntigravityAutoCapture.CurrentKey));
+    }
+
+    /// <summary>The same window on the fetch path: PrepareForFetch's marker
+    /// read blocks, the toggle goes off, the read returns a new marker, and
+    /// the poll it starts captures nothing.</summary>
+    [Fact]
+    public async Task APreFetchMarkerReadThatOutlastsTheToggleCapturesNothing()
+    {
+        var store = TempStore();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        var io = new FakeIo { BlockedRead = 1 };
+        io.Markers.Enqueue("M2");
+        var capture = new AntigravityAutoCapture(io.Io, store, markerTimeout: TimeSpan.FromSeconds(10));
+
+        var prepare = capture.PrepareForFetch();
+        Assert.Same(io.BlockedReadStarted.Task, await Task.WhenAny(io.BlockedReadStarted.Task, Task.Delay(TimeSpan.FromSeconds(5))));
+        await capture.SetEnabled(false);
+        io.BlockedReadGate.Set();
+        if (await prepare is { } poll)
+        {
+            await poll;
+        }
+
+        Assert.DoesNotContain("auto", io.Calls);
+        Assert.Null(capture.Current.Key);
+    }
+
     [Fact]
     public async Task AThrowingInstallerOrSubscriberNeverLeavesItBusy()
     {
         var store = TempStore();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
         var io = new FakeIo { InstallError = new InvalidOperationException() };
         io.Markers.Enqueue("M1");
         io.Markers.Enqueue("M2");

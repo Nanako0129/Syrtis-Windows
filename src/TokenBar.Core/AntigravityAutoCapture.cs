@@ -25,7 +25,9 @@ namespace TokenBar.Core;
 /// (before the attempt) and on a pause, and set by a <c>captured</c> /
 /// <c>unchanged</c> attempt. A successful manual Capture sets it whether or not
 /// the toggle is on, when agy's marker did not change during the capture.
-/// Turning the toggle off keeps it; Remove of that account clears it. It is
+/// Turning the toggle off keeps it; Remove of that account clears it. A
+/// capture attempt already in flight when the toggle goes off cleared it
+/// before it started, and nothing re-binds it (macOS the same). It is
 /// persisted (<see cref="CurrentKey"/>) across relaunch.
 /// </para>
 /// <para>
@@ -173,6 +175,16 @@ public sealed class AntigravityAutoCapture
         bool changed;
         lock (_gate)
         {
+            // The commit point every capture passes (PrepareForFetch's poll,
+            // SetEnabled(true), ManualCapture's resume, an owed poll): with
+            // the toggle off it starts nothing, checked under the gate after
+            // the marker read, so turning automatic capture off during that
+            // read (up to the marker timeout) cannot let a capture run.
+            if (!IsEnabled)
+            {
+                return;
+            }
+
             if (marker is null || marker == _lastAttemptedMarker || _busy)
             {
                 changed = false;
@@ -246,17 +258,17 @@ public sealed class AntigravityAutoCapture
                     var after = await TryMarker().ConfigureAwait(false);
                     lock (_gate)
                     {
-                        if (!IsEnabled)
+                        // Off since the attempt: neither bind nor retry.
+                        if (IsEnabled)
                         {
-                            // Off since the attempt: neither bind nor retry.
-                        }
-                        else if (after == marker)
-                        {
-                            changed = SetCurrentLocked(key, marker);
-                        }
-                        else if (after is null)
-                        {
-                            _lastAttemptedMarker = null;
+                            if (after == marker)
+                            {
+                                changed = SetCurrentLocked(key, marker);
+                            }
+                            else if (after is null)
+                            {
+                                _lastAttemptedMarker = null;
+                            }
                         }
                     }
                 }
@@ -340,12 +352,10 @@ public sealed class AntigravityAutoCapture
         return poll;
     }
 
-    /// <summary>Run the poll a busy or checking moment refused, but only
-    /// while automatic capture is on: a poll owed during an attempt must not
-    /// capture after the user turned the toggle off (macOS 065df148). The
-    /// check is here, not in <see cref="Poll"/>, because SetEnabled(true) and
-    /// ManualCapture's resume call Poll themselves, each already gated on the
-    /// toggle; PrepareForFetch's poll is gated by AntigravityFetch.</summary>
+    /// <summary>Run the poll a busy or checking moment refused. It captures
+    /// nothing while the toggle is off: Poll itself refuses to start a
+    /// capture then, checked under the gate at its commit point (macOS
+    /// 065df148).</summary>
     private async Task PollIfOwed()
     {
         lock (_gate)
@@ -356,10 +366,6 @@ public sealed class AntigravityAutoCapture
             }
 
             _pollAgain = false;
-            if (!IsEnabled)
-            {
-                return;
-            }
         }
 
         await Poll().ConfigureAwait(false);
@@ -371,9 +377,11 @@ public sealed class AntigravityAutoCapture
     /// Settings turns it on only through <see cref="TurnOn"/>.</summary>
     public async Task SetEnabled(bool on)
     {
-        _store.SetBool(EnabledKey, on);
         lock (_gate)
         {
+            // Under the gate, so the in-lock toggle checks (Poll's commit
+            // point, the post-re-read bind) are ordered with this write.
+            _store.SetBool(EnabledKey, on);
             _paused = false;
             if (on)
             {
