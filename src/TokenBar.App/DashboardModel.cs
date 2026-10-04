@@ -54,6 +54,12 @@ public sealed class DashboardModel
     private volatile List<string> _knownYears = [];
     private volatile UsagePayload? _allTimeGraph;
     private GraphRequestId? _snapshotRequestId;
+
+    /// <summary>The last graph request whose completion the UI thread has
+    /// applied. A restored snapshot published for it after that point (the
+    /// restore runs beside the live pipeline and can land after a failed
+    /// live pass completed) is marked failed on arrival.</summary>
+    private GraphRequestId? _settledRequestId;
     private GraphRequestId? _pendingModelRequestId;
     private ModelReport? _pendingModel;
 
@@ -209,6 +215,12 @@ public sealed class DashboardModel
 
     public bool Refreshing => _refreshing;
 
+    /// <summary>A graph request is running, whoever started it (initial
+    /// load, the 60 s poll, a year switch, a manual refresh). The header
+    /// control spins and is disabled for all of them (macOS
+    /// <c>backgroundRefresh</c>).</summary>
+    public bool GraphInFlight => Volatile.Read(ref _slowInFlight) == 1;
+
     /// <summary>Manual refresh (the header button; macOS refresh()): forces
     /// a full log re-read. No-op while one is already running.</summary>
     public void RefreshForce()
@@ -237,6 +249,35 @@ public sealed class DashboardModel
         {
             Current = _lastSnapshot;
         }
+
+        if (ClaudeExtraRoots.Shared is { } roots)
+        {
+            roots.Pushed += OnClaudeRootsPushed;
+        }
+    }
+
+    /// <summary>The native setters already dropped every scan cache and the
+    /// removed accounts' state; ask again so an added account's card and usage
+    /// appear, and a removed one's disappear, without waiting for the next
+    /// 60 s tick. Forced: a graph request already in flight was scanned with
+    /// the old roots and must not absorb this one, and a new generation also
+    /// stops that scan's snapshot write. With the flyout closed the force
+    /// waits for <see cref="Start"/>. A launch push its readers waited for is
+    /// skipped (<see cref="ClaudeExtraRoots.ReadersAlreadyWaited"/>).</summary>
+    private void OnClaudeRootsPushed(ClaudeRootsPush push)
+    {
+        if (ClaudeExtraRoots.ReadersAlreadyWaited(push))
+        {
+            return;
+        }
+
+        _dispatcher.TryEnqueue(() =>
+        {
+            Volatile.Write(ref _forceRequested, 1);
+            RefreshSlow();
+            RefreshQuota();
+            RequestLazyRefresh();
+        });
     }
 
     public Snapshot? Current { get; private set; }
@@ -256,6 +297,12 @@ public sealed class DashboardModel
         /// came from; null once a live pass has published (macOS
         /// <c>restoredSnapshot</c>).</summary>
         public DateTimeOffset? RestoredAt { get; init; }
+
+        /// <summary>The live pass for the restored graph on screen settled
+        /// without replacing it, so nothing is running to fix stale data
+        /// (macOS <c>restoredSnapshot.failed</c>). Cleared with
+        /// <see cref="RestoredAt"/> by the next graph publication.</summary>
+        public bool RestoreFailed { get; init; }
 
         // Lazily-loaded lenses (macOS ensureData parity): fetched on first
         // visit, then refreshed by the slow lane like everything else.
@@ -364,6 +411,14 @@ public sealed class DashboardModel
         /// the export is expensive enough (macOS's own probe: 67s over 15
         /// days) that it must never be called with an unbounded range.</summary>
         public Interop.WindowUsage? WindowUsage { get; init; }
+
+        /// <summary>Each extra Claude account's own window usage
+        /// (<c>tb_window_usage(accountKey)</c>), by account key, from the same
+        /// bounded fetch as <see cref="WindowUsage"/>. Only successful scans
+        /// are present: an account missing here stays unattributed (spec rule
+        /// 6). A failed rescan keeps the account's prior rows.</summary>
+        public IReadOnlyDictionary<string, Interop.WindowUsage> AccountWindowUsage { get; init; } =
+            new Dictionary<string, Interop.WindowUsage>();
 
         /// <summary>Whether the window-usage READ has finished, whatever it
         /// returned — the same fact-about-the-request as
@@ -511,6 +566,7 @@ public sealed class DashboardModel
         // 5d-1's export scans the whole local corpus when its cache is cold,
         // which macOS's own probe measured at 67s over 15 days.
         Interop.WindowUsage? usage = null;
+        IReadOnlyDictionary<string, Interop.WindowUsage>? accountUsage = null;
         if (windowUsage)
         {
             var forBound = history ?? Current?.QuotaHistory ?? [];
@@ -524,11 +580,10 @@ public sealed class DashboardModel
                 // like the quota-history read above — the same reason the
                 // hourly/agents fetch above it boosts.
                 using var boost = ProcessPower.Boost();
-                usage = TryFetch(
-                    () => TbCore.WindowUsage(
-                        QuotaEquivalenceFold.BoundFromMs(forBound, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
-                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
-                    "windowUsage");
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var fromMs = QuotaEquivalenceFold.BoundFromMs(forBound, now);
+                usage = TryFetch(() => TbCore.WindowUsage(fromMs, now), "windowUsage");
+                accountUsage = FetchAccountWindows(fromMs, now, Current?.AccountWindowUsage);
             }
         }
 
@@ -568,9 +623,41 @@ public sealed class DashboardModel
                 // Same failed-read and same completion rules as QuotaHistory,
                 // immediately above, and for the same reason.
                 WindowUsage = usage ?? s.WindowUsage,
+                AccountWindowUsage = accountUsage ?? s.AccountWindowUsage,
                 WindowUsageAttempted = windowUsage || s.WindowUsageAttempted,
             };
         }, graph: null, stillValid: () => SelectionStillValid(year, generation));
+    }
+
+    /// <summary>One window per extra Claude account on the latest quota
+    /// cards, keyed only by what the registry reported
+    /// (<see cref="ClaudeExtraRoots.AttributableAccountKeys"/>). A failed scan
+    /// keeps that account's prior rows; an account no longer on the cards is
+    /// dropped.</summary>
+    // ponytail: one account after another, at most 8 scans (the registry's cap); run them
+    // in parallel or only for the shown card if a many-account setup is slow.
+    private IReadOnlyDictionary<string, Interop.WindowUsage> FetchAccountWindows(
+        long fromMs, long untilMs, IReadOnlyDictionary<string, Interop.WindowUsage>? prior)
+    {
+        var result = new Dictionary<string, Interop.WindowUsage>(StringComparer.Ordinal);
+        foreach (var key in ClaudeExtraRoots.AttributableAccountKeys(_latestQuota))
+        {
+            try
+            {
+                result[key] = TbCore.WindowUsage(key, fromMs, untilMs);
+            }
+            catch (Exception ex)
+            {
+                // Type only: the key is a directory path (review R6).
+                DevLog.Write($"accountWindowUsage refresh failed: {ex.GetType().Name}");
+                if (prior is not null && prior.TryGetValue(key, out var kept))
+                {
+                    result[key] = kept;
+                }
+            }
+        }
+
+        return result;
     }
 
     private bool SelectionStillValid(string? year, long generation)
@@ -641,6 +728,13 @@ public sealed class DashboardModel
         _slowTimer.Start();
         _fastTimer!.Start();
         AttachGraph(_year);
+        // Extra Claude roots changed while the flyout was closed: the
+        // retained graph predates them.
+        if (Volatile.Read(ref _forceRequested) == 1)
+        {
+            RefreshSlow();
+        }
+
         RefreshQuota();
         RefreshFast();
     }
@@ -662,6 +756,10 @@ public sealed class DashboardModel
         _graphCoordinator.Started -= OnGraphStarted;
         _graphCoordinator.Published -= OnGraphPublished;
         _graphCoordinator.Completed -= OnGraphCompleted;
+        if (ClaudeExtraRoots.Shared is { } roots)
+        {
+            roots.Pushed -= OnClaudeRootsPushed;
+        }
     }
 
     private void RefreshSlow()
@@ -691,6 +789,11 @@ public sealed class DashboardModel
         if (!attachment.InFlight)
         {
             Volatile.Write(ref _slowInFlight, 0);
+            // A request that finished while the dashboard was not polling
+            // (the tray started it) never reached OnGraphCompleted here; if
+            // its only publication is the restore, replaying it below must
+            // apply it as failed.
+            _settledRequestId = attachment.RequestId;
         }
 
         if (attachment.Latest is { } latest)
@@ -850,6 +953,8 @@ public sealed class DashboardModel
                 CostAuthoritative = _graphState.CostAuthoritative,
                 FetchedAt = DateTimeOffset.Now,
                 RestoredAt = publication.RestoredFrom,
+                RestoreFailed = publication.RestoredFrom is not null
+                    && _settledRequestId == publication.RequestId,
             };
             _lastSnapshot = Current;
             Updated?.Invoke();
@@ -925,8 +1030,28 @@ public sealed class DashboardModel
         else if (decision.ClearRefreshing)
         {
             _refreshing = false;
-            _ = _dispatcher.TryEnqueue(() => Updated?.Invoke());
         }
+
+        // Always repaint on a settled request: the header spinner follows
+        // GraphInFlight, and a live pass that ended without replacing a
+        // restored graph marks it failed (macOS restoredSnapshot.failed).
+        // Queued behind the live pipeline's own publications, so Current
+        // already reflects any live graph it published. The restore is a
+        // separate task and can publish after this; `_settledRequestId`
+        // makes that late restore arrive already marked failed.
+        var requestId = completion.RequestId;
+        _ = _dispatcher.TryEnqueue(() =>
+        {
+            _settledRequestId = requestId;
+            if (_graphState.IsCurrent(requestId)
+                && Current is { RestoredAt: not null, RestoreFailed: false } restored)
+            {
+                Current = restored with { RestoreFailed = true };
+                _lastSnapshot = Current;
+            }
+
+            Updated?.Invoke();
+        });
     }
 
     private void RememberYears(UsagePayload graph)
@@ -968,8 +1093,11 @@ public sealed class DashboardModel
                 // the quota, because LazyLaneFold.Outcome(QuotaAttempted,
                 // Quota) reads exactly that pair as a failed fetch, and a
                 // fetch that succeeded would render as failed for a frame.
+                var accountsChanged = false;
                 if (quota is not null)
                 {
+                    accountsChanged = !ClaudeExtraRoots.AttributableAccountKeys(quota)
+                        .SequenceEqual(ClaudeExtraRoots.AttributableAccountKeys(_latestQuota));
                     _latestQuota = quota;
                 }
 
@@ -977,6 +1105,13 @@ public sealed class DashboardModel
                 if (quota is not null)
                 {
                     Publish(s => s with { Quota = quota, QuotaAttempted = true }, graph: null);
+                    // An extra Claude account appeared or went: its window
+                    // scan keys off these cards, so fetch it now rather than
+                    // after the next graph publication.
+                    if (accountsChanged)
+                    {
+                        RequestLazyRefresh();
+                    }
                 }
                 else
                 {
@@ -1021,7 +1156,7 @@ public sealed class DashboardModel
             try
             {
                 var rate = TbCore.TokensPerMin();
-                var trace = TbCore.UsageTrace(600);
+                var trace = TbCore.UsageTrace(TraceCollapse.WindowSecs);
                 Publish(s => s with { TokensPerMin = rate, Trace = trace }, graph: null);
             }
             catch (Exception ex)

@@ -96,6 +96,9 @@
          TrayService, App and SettingsWindow compile under no test project, so
          left there these would be rules nothing can assert against. -->
     <Compile Include="..\TokenBar.App\DiscordPresenceWiring.cs" Link="DiscordPresenceWiring.cs" />
+    <!-- Extra Claude accounts' Settings copy and reason mapping, for the same
+         reason: SettingsWindow.cs compiles under no test project. -->
+    <Compile Include="..\TokenBar.App\ClaudeAccountsCopy.cs" Link="ClaudeAccountsCopy.cs" />
     <!-- Syrtis.Installer's boundary logic, pulled in for the same reason as
          the App sources above: none of these five files references
          System.Windows.Forms, so they compile as-is under net10. Deliberately

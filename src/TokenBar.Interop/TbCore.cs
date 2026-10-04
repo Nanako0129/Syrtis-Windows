@@ -151,10 +151,40 @@ public static class TbCore
     /// cache is keyed by account and <c>fromMs</c>; <c>untilMs</c> is not
     /// quantised and is not part of the key. See <c>ctb.h</c>'s <c>tb_window_usage</c>
     /// for the cache shape this is built on. Always the primary Claude
-    /// account (<c>accountKey</c> NULL); an extra account's window is not
-    /// requested until its Settings slice exists.</summary>
+    /// account (<c>accountKey</c> NULL).</summary>
     public static WindowUsage WindowUsage(long fromMs, long untilMs) =>
-        Unwrap<WindowUsage>(NativeMethods.tb_window_usage(null, fromMs, untilMs));
+        WindowUsage(null, fromMs, untilMs);
+
+    /// <summary><see cref="WindowUsage(long, long)"/> for one Claude account:
+    /// <paramref name="accountKey"/> null is the primary (its window excludes
+    /// every extra account's roots); otherwise an extra config directory
+    /// exactly as the registry reports it on its <c>tb_agent_usage</c> card.
+    /// A key with no registered roots is an error, never an empty window.</summary>
+    public static WindowUsage WindowUsage(string? accountKey, long fromMs, long untilMs) =>
+        Unwrap<WindowUsage>(NativeMethods.tb_window_usage(accountKey, fromMs, untilMs));
+
+    /// <summary>Full-replace the extra Claude config directories
+    /// (<c>CLAUDE_CONFIG_DIR</c> accounts) with <paramref name="directories"/>.
+    /// Rejections come back by index with a fixed reason code; the input is
+    /// never echoed, so neither the result nor an error carries a path.</summary>
+    public static RootsResult SetClaudeConfigDirs(IReadOnlyList<string> directories) =>
+        Unwrap<RootsResult>(NativeMethods.tb_set_claude_config_dirs(
+            JsonSerializer.Serialize(directories, JsonOpts)));
+
+    /// <summary>Whether appending <paramref name="candidate"/> to the saved
+    /// list <paramref name="existing"/> would add a working extra Claude
+    /// account: null, or the fixed reason code the registries would give.
+    /// Changes no registry and touches no filesystem.</summary>
+    public static string? ValidateClaudeConfigDir(string candidate, IReadOnlyList<string> existing) =>
+        Unwrap<ClaudeConfigDirCheck>(NativeMethods.tb_validate_claude_config_dir(
+            JsonSerializer.Serialize(new { candidate, existing }, JsonOpts))).Reason;
+
+    /// <summary>Full-replace the extra Claude scan roots (each account's
+    /// <c>projects</c> and <c>transcripts</c>). The next report scans them and
+    /// <see cref="SourceContextId"/> changes with them.</summary>
+    public static RootsResult SetExtraClaudeScanPaths(IReadOnlyList<string> roots) =>
+        Unwrap<RootsResult>(NativeMethods.tb_set_extra_scan_paths(
+            JsonSerializer.Serialize(new Dictionary<string, IReadOnlyList<string>> { ["claude"] = roots }, JsonOpts)));
 
     /// <summary>
     /// Decodes the standard FFI envelope, returning the payload or throwing

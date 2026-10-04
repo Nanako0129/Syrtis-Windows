@@ -8,7 +8,13 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
     private readonly object _gate = new();
     private Task<AgentUsagePayload>? _inFlight;
 
-    public static AgentUsageFetchCoordinator Shared { get; } = new(TbCore.AgentUsage);
+    // Waits for the launch push so the first fetch already carries the extra
+    // Claude accounts' cards.
+    public static AgentUsageFetchCoordinator Shared { get; } = new(() =>
+    {
+        ClaudeExtraRoots.AwaitLaunch();
+        return TbCore.AgentUsage();
+    });
 
     public Task<AgentUsagePayload> FetchAsync()
     {
