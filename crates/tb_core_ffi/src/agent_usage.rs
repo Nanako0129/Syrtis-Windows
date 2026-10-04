@@ -14138,28 +14138,39 @@ mod tests {
     }
 
     /// The Antigravity grouped buckets, from the captured-account summary
-    /// parser through `enrich_snapshot_with`, with the real duration engine as
-    /// the `record` seam (no store). A started weekly bucket keeps its contract;
-    /// an unused one (a rolling reset, even 1 s of skew) must be learned, not
-    /// turned into InvalidEvidence; the agy route's unverified scope clears it.
+    /// parser through `enrich_snapshot_with` into a REAL history store rooted
+    /// in a temp dir. The unused 5h bucket (fraction 1, reset = server now +
+    /// 5h) must end `learningDuration` with the local clock 1 s slow, accurate
+    /// and 1 s fast (the case a clock-only guard missed), and write nothing to
+    /// the store; the in-use weekly bucket keeps its contract. The agy route's
+    /// unverified scope still clears the duration.
     #[test]
-    fn antigravity_window_duration_survives_enrich_only_for_started_cycles() {
-        use crate::agent_quota_duration::{resolve_duration, DurationResolution};
+    fn antigravity_unused_bucket_learns_through_a_real_store_at_any_clock() {
         let scope = TestRefreshScope::new("stage4", "agy-window-duration");
         let account_scope = scope
             .resolve_current("antigravity", "agy", b"agy-marker")
             .unwrap();
-        let now_dt = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
-        let now = now_dt.timestamp();
-        let rfc = |offset: i64| (now_dt + chrono::Duration::seconds(offset)).to_rfc3339();
+        let history_scope = scope.resolve_history("antigravity", None).unwrap();
+        let history_path = scope
+            .root()
+            .join(crate::agent_quota_history::HISTORY_FILE_NAME);
+        let server_now = 1_700_000_000_i64;
+        let rfc = |offset: i64| {
+            Utc.timestamp_opt(server_now + offset, 0)
+                .single()
+                .unwrap()
+                .to_rfc3339()
+        };
         let body = serde_json::json!({ "groups": [{ "displayName": "G", "buckets": [
-            { "bucketId": "started", "displayName": "Weekly", "remainingFraction": 0.5,
+            { "bucketId": "used", "displayName": "Weekly", "remainingFraction": 0.5,
               "resetTime": rfc(86_400), "window": "weekly" },
             { "bucketId": "unused", "displayName": "5h", "remainingFraction": 1,
-              "resetTime": rfc(5 * 3_600 + 1), "window": "5h" }
+              "resetTime": rfc(5 * 3_600), "window": "5h" }
         ]}]})
         .to_string();
-        let snapshot_with = |account_scope: Result<AccountScope, AccountScopeError>| {
+        let snapshot_at = |local: DateTime<Utc>,
+                           account_scope: Result<AccountScope, AccountScopeError>,
+                           history_scope: Result<HistoryScope, AccountScopeError>| {
             AgentUsageSnapshot {
                 account_key: None,
                 merge_scope: None,
@@ -14167,62 +14178,71 @@ mod tests {
                 source: "fixture".to_string(),
                 updated_at: String::new(),
                 identity: None,
-                history_scope: Ok(HistoryScope::for_test("agy")),
+                history_scope,
                 account_scope,
-                windows: agent_antigravity::windows_from_quota_summary(&body, now_dt),
+                windows: agent_antigravity::windows_from_quota_summary(&body, local),
                 credits: None,
                 error: None,
                 transport_diagnostic: None,
             }
         };
-        let engine = |_: &[SeriesKey], observations: &[QuotaObservation], now: i64| {
-            Ok(observations
-                .iter()
-                .map(|o| {
-                    Ok(
-                        match resolve_duration(now, o.reset_at, o.provider, o.contract, None) {
-                            DurationResolution::Ready {
-                                duration_seconds,
-                                source,
-                            } => (
-                                HistoryOutcome::Ready {
-                                    duration_seconds,
-                                    source,
-                                    sampled: false,
-                                },
-                                None,
-                                0,
-                            ),
-                            DurationResolution::LearningDuration => {
-                                (HistoryOutcome::LearningDuration, None, 0)
-                            }
-                            DurationResolution::Unavailable(reason) => {
-                                (HistoryOutcome::Unavailable(reason), None, 0)
-                            }
-                        },
-                    )
-                })
-                .collect())
-        };
 
-        // Captured account (verified scope).
-        let mut captured = snapshot_with(Ok(account_scope));
-        enrich_snapshot_with(&mut captured, now, engine);
-        let started = &captured.windows[0];
-        assert_eq!(started.duration_seconds, Some(604_800));
-        assert_eq!(started.duration_source, Some(DurationSource::Contract));
-        assert_eq!(started.pace_status.reason, None);
-        let unused = &captured.windows[1];
-        assert_eq!(unused.duration_seconds, None);
-        assert!(matches!(
-            unused.pace_status.state,
-            PaceState::LearningDuration
-        ));
-        assert_eq!(unused.pace_status.reason, None);
+        for skew in [-1_i64, 0, 1] {
+            let local = Utc.timestamp_opt(server_now + skew, 0).single().unwrap();
+            let mut captured = snapshot_at(
+                local,
+                Ok(account_scope.clone()),
+                Ok(history_scope.clone()),
+            );
+            enrich_snapshot_with(&mut captured, local.timestamp(), |active, obs, now| {
+                crate::agent_quota_history::record_observations_at_path_and_evaluate(
+                    active,
+                    obs,
+                    now,
+                    &history_path,
+                )
+            });
+            let used = &captured.windows[0];
+            assert_eq!(used.duration_seconds, Some(604_800), "skew {skew}s");
+            assert_eq!(
+                used.duration_source,
+                Some(DurationSource::Contract),
+                "skew {skew}s"
+            );
+            let unused = &captured.windows[1];
+            assert_eq!(unused.duration_seconds, None, "skew {skew}s");
+            assert!(
+                matches!(unused.pace_status.state, PaceState::LearningDuration),
+                "skew {skew}s: {:?}",
+                unused.pace_status
+            );
+            assert_eq!(unused.pace_status.reason, None, "skew {skew}s");
+        }
+        // The store holds nothing for the unused bucket: no sample, no cycle.
+        let unused_key = SeriesKey::new(
+            "antigravity".to_string(),
+            &history_scope,
+            "agy.unused.v1",
+        );
+        let stored = crate::agent_quota_history::read_series_at_path(
+            &unused_key,
+            &history_path,
+            server_now,
+        )
+        .unwrap();
+        assert!(
+            stored.as_ref().is_none_or(|s| s.samples.is_empty()),
+            "unused bucket wrote to the store: {stored:?}"
+        );
 
         // The agy route has no trusted account evidence: cleared, as before.
-        let mut agy = snapshot_with(Err(AccountScopeError::NoTrustedEvidence));
-        enrich_snapshot_with(&mut agy, now, engine);
+        let local = Utc.timestamp_opt(server_now, 0).single().unwrap();
+        let mut agy = snapshot_at(
+            local,
+            Err(AccountScopeError::NoTrustedEvidence),
+            Ok(history_scope.clone()),
+        );
+        enrich_snapshot_with(&mut agy, local.timestamp(), |_, _, _| Ok(vec![]));
         for window in &agy.windows {
             assert_eq!(window.duration_seconds, None);
             assert_eq!(window.pace_status.reason.as_deref(), Some("accountScope"));
