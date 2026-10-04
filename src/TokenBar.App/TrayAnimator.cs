@@ -151,22 +151,6 @@ internal sealed class TrayAnimator : IDisposable
         TimeSpan.FromMilliseconds(TrayAnimationSpeed.IntervalMilliseconds(
             rate, AnimationPaces.Current(AppSettings.Store)));
 
-    /// <summary>One frame file letterboxed onto the 32x32 canvas a tray frame
-    /// HICON is made from. Shared with <c>--dump-tray-icons</c>, so the dump
-    /// sees exactly what the tray is handed.</summary>
-    internal static System.Drawing.Bitmap ComposeFrame(string file)
-    {
-        using var raw = new System.Drawing.Bitmap(file);
-        var canvas = new System.Drawing.Bitmap(32, 32);
-        using var g = System.Drawing.Graphics.FromImage(canvas);
-        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-        var scale = Math.Min(32.0 / raw.Width, 32.0 / raw.Height);
-        var w = (float)(raw.Width * scale);
-        var h = (float)(raw.Height * scale);
-        g.DrawImage(raw, (32 - w) / 2, (32 - h) / 2, w, h);
-        return canvas;
-    }
-
     /// <summary>Frames land as 32x32 letterboxed HICONs (parrot is 48x36),
     /// composed once and cached for the process lifetime.</summary>
     private List<System.Drawing.Icon> FramesFor(string key)
@@ -186,7 +170,17 @@ internal sealed class TrayAnimator : IDisposable
         {
             foreach (var file in Directory.GetFiles(dir, "frame-*.png").OrderBy(f => f))
             {
-                using var canvas = ComposeFrame(file);
+                using var raw = new System.Drawing.Bitmap(file);
+                using var canvas = new System.Drawing.Bitmap(32, 32);
+                using (var g = System.Drawing.Graphics.FromImage(canvas))
+                {
+                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    var scale = Math.Min(32.0 / raw.Width, 32.0 / raw.Height);
+                    var w = (float)(raw.Width * scale);
+                    var h = (float)(raw.Height * scale);
+                    g.DrawImage(raw, (32 - w) / 2, (32 - h) / 2, w, h);
+                }
+
                 composed.Add(System.Drawing.Icon.FromHandle(TrayIconHandle.From(canvas)));
             }
         }
