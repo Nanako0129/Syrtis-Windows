@@ -277,7 +277,10 @@ public sealed partial class SettingsWindow : Window
                 // returns the page to the top.
                 if (key.StartsWith(UsageAttributionKeyPrefix, StringComparison.Ordinal))
                 {
-                    _pages["attribution"] = BuildAttributionPage(AppSettings.Store);
+                    // keepSeen: building the page can write suggestions, which
+                    // lands here; resetting the seen targets would let two
+                    // clients appearing in turn rebuild the page every poll.
+                    _pages["attribution"] = BuildAttributionPage(AppSettings.Store, keepSeen: true);
                     if (_selectedTag == "attribution")
                     {
                         ShowPage(_selectedTag);
