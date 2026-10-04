@@ -17,6 +17,14 @@ namespace TokenBar.App;
 /// </summary>
 internal static class AttributionOnboardingCard
 {
+    /// <summary>Whether window history explains its zero rows: only when the
+    /// window's equivalence is Undeclared, since every row below then reads
+    /// 0 / $0.00 and looks like a quiet window rather than a missing setting
+    /// (macOS QuotaHistoryCard.swift:600-608). An account whose local usage
+    /// can't be attributed at all already says that instead.</summary>
+    internal static bool ShowsHistoryZeroNote(WindowEquivalence.Row equivalence, bool localUsageUnattributed) =>
+        !localUsageUnattributed && equivalence is WindowEquivalence.Row.Undeclared;
+
     internal const string DismissedKey = "tokenbar.usage.attribution.onboardingDismissed";
 
     /// <summary>Proposal lines beyond this fold into "and N more" rather than
@@ -49,6 +57,13 @@ internal static class AttributionOnboardingCard
         internal const string NotNow = "Not now";
 
         internal const string SetUpManually = "Set up manually…";
+
+        /// <summary>Under window history whose rows are unattributed
+        /// (macOS AttributionOnboardingCard.swift:39-40).</summary>
+        internal const string HistoryZeroNote =
+            "The tokens and amounts below stay at 0 until usage is attributed to this subscription.";
+
+        internal const string SetUpLink = "Set up usage attribution…";
 
         internal const string ApplySuggestions = "Apply suggestions";
     }

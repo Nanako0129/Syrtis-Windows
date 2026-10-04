@@ -275,6 +275,28 @@ public class AgentLimitsTextTests
         Assert.True(LimitsPlaceholders.Known("copilot", [Who("copilot")]));
     }
 
+    // A grouped client tab asks for all its members (macOS restrict mode,
+    // clients.filter(known)): with Grok Build signed in and Grok Bot not, the
+    // Grok tab draws Grok Bot's placeholder beside Grok Build's card.
+    [Fact]
+    public void AGroupedTabsMemberWithoutASnapshotGetsItsPlaceholder()
+    {
+        Assert.Equal(["grok", "grok-bot?"],
+            Placeholders([Who("grok")], ["grok", "grok-bot"], multiClient: false));
+    }
+
+    // INTERIM, to be changed by the known() follow-up (W5-7): with grok
+    // switched off and no snapshot at all, main's HidesClientCard follows the
+    // tab's owner alone and drops the whole Grok tab card, so Grok Bot's
+    // placeholder from Rows is never drawn. macOS keeps the card for an
+    // unhidden grok-bot; aligning HidesClientCard with
+    // LimitsPlaceholders.Known flips this assertion.
+    [Fact]
+    public void Interim_PendingKnownFollowUp_GroupedTabHiddenOwnerHidesTheCardBeforeAnySnapshot()
+    {
+        Assert.True(LimitsCardFilter.HidesClientCard([], ["grok", "grok-bot"], new HashSet<string> { "grok" }));
+    }
+
     [Fact]
     public void SettingsOffersAToggleForEveryKnownPresentClient()
     {
