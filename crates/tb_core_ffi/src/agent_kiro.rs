@@ -29,7 +29,9 @@
 //! billing date, not a fixed calendar month), so the pace lifecycle learns the
 //! duration (learning-duration), exactly as OpenCode Go does.
 
-use crate::agent_account_scope::{AccountScope, AccountScopeError};
+use crate::agent_account_scope::{
+    AccountScope, AccountScopeError, AuthoritativeIdKind, HistoryScope,
+};
 use crate::agent_usage::{
     clean_plan, provider_http_client_builder, read_response_body, request_after_verified_binding,
     AgentIdentity, ProviderCacheBinding, ProviderFetchFailure, ResponseReadFailure,
@@ -80,6 +82,10 @@ struct UsageBreakdown {
 /// The account-scope resolver `fetch` binds the credential with.
 pub(crate) type ResolveCredential =
     dyn Fn(&str, &str, &str, &[u8]) -> Result<AccountScope, AccountScopeError>;
+
+/// The history-scope resolver every provider's deps take (Kiro, Grok Bot).
+pub(crate) type ResolveHistoryScope =
+    dyn Fn(&str, Option<(AuthoritativeIdKind, &str)>) -> Result<HistoryScope, AccountScopeError>;
 
 /// Takes no `now`: it reads the clock after the response arrives, because the
 /// reset validation below is a comparison against the present.

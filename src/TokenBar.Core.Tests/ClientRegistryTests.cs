@@ -320,7 +320,7 @@ public class ClientRegistryTests : IDisposable
     }
 
     [Fact]
-    public void TabSliceAndLabelIdentifyOnlyTheAntigravityGroup()
+    public void TabSliceAndLabelIdentifyTheAntigravityGroup()
     {
         Assert.Equal(["antigravity", "antigravity-cli"], ClientRegistry.TabSlice("antigravity"));
         Assert.Equal(["claude"], ClientRegistry.TabSlice("claude"));
@@ -328,6 +328,31 @@ public class ClientRegistryTests : IDisposable
         Assert.Equal("Claude", ClientRegistry.TabLabel("claude")); // ShortName fallback
         Assert.Equal("Antigravity", ClientRegistry.TabDisplayName("antigravity"));
         Assert.Equal("Claude Code", ClientRegistry.TabDisplayName("claude")); // full Style name
+    }
+
+    // W6a: Grok Build (local usage) and Grok Bot (weekly quota only) share
+    // one "Grok Build & Bot" tab, as on macOS; grok-bot keeps its own style.
+    [Fact]
+    public void GrokBuildAndBotShareOneTab()
+    {
+        Assert.Equal(["grok", "grok-bot"], ClientRegistry.TabSlice("grok"));
+        Assert.Equal("Grok Build & Bot", ClientRegistry.TabLabel("grok"));
+        Assert.Equal("Grok Build & Bot", ClientRegistry.TabDisplayName("grok"));
+        Assert.Equal(new ClientStyle("grok-bot", "Grok Bot", "#000000"), ClientRegistry.Style("grok-bot"));
+        Assert.Equal(
+            ["claude", "grok"],
+            ClientRegistry.TabClients(present: ["claude"], quotaIds: ["grok-bot"]));
+    }
+
+    [Fact]
+    public void HidingTheGrokTabHidesGrokBotToo()
+    {
+        Assert.Equal(
+            new HashSet<string> { "grok", "grok-bot" },
+            ClientRegistry.HiddenTabClients(new HashSet<string> { "grok" }));
+        var store = NewStore();
+        store.SetString(ClientRegistry.TabHiddenKey, "grok");
+        Assert.Contains("grok-bot", ClientRegistry.QuotaExcludedClients(store));
     }
 
     [Fact]
