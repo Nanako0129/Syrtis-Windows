@@ -101,10 +101,12 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     /// <summary>Launch: re-install a stored yes. Anything else is already what
     /// the empty registry does. Never throws — a failure here must not take
     /// down the first fetch; the grant is then not installed and the card
-    /// asks again.</summary>
+    /// asks again. Records the install (a later Withdraw must signal) but
+    /// does not signal: it runs as the coordinator's RunBeforeFirstFetch hook,
+    /// before the first fetch, so no payload predates it, and a signal here
+    /// would discard that first payload and force a second core run.</summary>
     public void ApplyIfGranted()
     {
-        var changed = false;
         lock (_gate)
         {
             if (Stored != true)
@@ -114,17 +116,12 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
 
             try
             {
-                changed = Install(GrantedPayload);
+                Install(GrantedPayload);
             }
             catch (Exception)
             {
                 // Fail closed: the grant is simply not installed.
             }
-        }
-
-        if (changed)
-        {
-            QuotaEpoch.Signal();
         }
     }
 

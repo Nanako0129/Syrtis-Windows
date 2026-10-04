@@ -196,15 +196,62 @@ public class GrokBotConsentTests : IDisposable
 
     // The yes carried over from the last session and installed at launch, then
     // switched off: the decision rests on what was installed, not on Stored.
+    // The launch install itself does not signal (it precedes every fetch).
     [Fact]
     public void LaunchInstallThenWithdrawSignals()
     {
         var store = Store();
         store.SetBool(GrokBotConsent.StorageKey, true);
         var consent = Consent(store);
-        Assert.Equal(1, CountSignals(consent.ApplyIfGranted));
+        Assert.Equal(0, CountSignals(consent.ApplyIfGranted));
         Assert.Equal(1, CountSignals(consent.Withdraw));
         Assert.Equal(["""{"grok-bot":true}""", "{}"], _calls);
+    }
+
+    // Launch with a stored yes, wired as App does: the install is the
+    // coordinator's RunBeforeFirstFetch hook. The first payload is built after
+    // it, so a poller that requested before the hook ran applies it, and the
+    // core runs once.
+    [Fact]
+    public async Task LaunchWithAStoredYesFetchesOnceAndAppliesTheFirstPayload()
+    {
+        var store = Store();
+        store.SetBool(GrokBotConsent.StorageKey, true);
+        var consent = Consent(store);
+        var runs = 0;
+        var coordinator = new AgentUsageFetchCoordinator(() =>
+        {
+            Interlocked.Increment(ref runs);
+            return new AgentUsagePayload("now", []);
+        });
+        coordinator.RunBeforeFirstFetch(consent.ApplyIfGranted);
+        var posted = new List<Action>();
+        var applied = 0;
+        using var poller = new QuotaPoller(
+            async () => await coordinator.FetchAsync(),
+            action => { lock (posted) { posted.Add(action); } },
+            _ => applied++);
+        poller.Request();
+        for (var i = 0; i < 400 && Volatile.Read(ref runs) < 1; i++)
+        {
+            await Task.Delay(10);
+        }
+
+        await Task.Delay(200);
+        Action[] batch;
+        lock (posted)
+        {
+            batch = [.. posted];
+        }
+
+        foreach (var action in batch)
+        {
+            action();
+        }
+
+        Assert.Equal(1, Volatile.Read(ref runs));
+        Assert.Equal(1, applied);
+        Assert.Equal(["""{"grok-bot":true}"""], _calls);
     }
 
     // A launch install that failed, then Allow: Stored is already yes, but the

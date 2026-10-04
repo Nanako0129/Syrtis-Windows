@@ -1105,6 +1105,11 @@ public sealed class DashboardModel
         // the quota, because LazyLaneFold.Outcome(QuotaAttempted,
         // Quota) reads exactly that pair as a failed fetch, and a
         // fetch that succeeded would render as failed for a frame.
+        // QuotaPoller checked the epoch for this call; Publish is one more
+        // dispatcher hop, so it re-checks there: a consent answer in between
+        // must not see this pre-answer payload (or failure) published.
+        var epoch = QuotaEpoch.Current;
+        bool StillCurrent() => QuotaEpoch.Current == epoch;
         var accountsChanged = false;
         var failures = 0;
         if (quota is not null)
@@ -1123,7 +1128,7 @@ public sealed class DashboardModel
         _quotaAttempted = true;
         if (quota is not null)
         {
-            Publish(s => s with { Quota = quota, QuotaAttempted = true }, graph: null);
+            Publish(s => s with { Quota = quota, QuotaAttempted = true }, graph: null, StillCurrent);
             // An extra Claude account appeared or went: its window
             // scan keys off these cards, so fetch it now rather than
             // after the next graph publication.
@@ -1139,7 +1144,7 @@ public sealed class DashboardModel
             // way that matters: Quota stays null, and a surface that
             // reads null as "not yet" waits forever for an answer that
             // already came back.
-            Publish(s => s with { QuotaAttempted = true, QuotaFailures = failures }, graph: null);
+            Publish(s => s with { QuotaAttempted = true, QuotaFailures = failures }, graph: null, StillCurrent);
         }
     }
 
@@ -1202,7 +1207,7 @@ public sealed class DashboardModel
     /// one path and forgotten on the other.</para></summary>
     private Snapshot CreateBaseline(UsagePayload graph)
     {
-        // Flag first, payload second — the mirror of RefreshQuota's write
+        // Flag first, payload second — the mirror of ApplyQuota's write
         // order; see the comment there.
         var attempted = _quotaAttempted;
         var quota = _latestQuota;
