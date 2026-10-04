@@ -1588,6 +1588,11 @@ async fn run_with(fetchers: &Fetchers, publication_generation: u64) -> AgentUsag
     if let Some(grok) = grok {
         agents.push(grok);
     }
+    // Grok Bot right after Grok Build, as macOS's QUOTA_PROVIDERS orders them;
+    // it only appears when a Cursor login or a Grok Bot install is present.
+    if let Some(grok_bot) = grok_bot {
+        agents.push(grok_bot);
+    }
     // Kiro only appears when its IDE token file is present.
     if let Some(kiro) = kiro {
         agents.push(kiro);
@@ -1595,10 +1600,6 @@ async fn run_with(fetchers: &Fetchers, publication_generation: u64) -> AgentUsag
     // OpenCode Go only appears when opencode's auth.json holds an `opencode-go` key.
     if let Some(opencode_go) = opencode_go {
         agents.push(opencode_go);
-    }
-    // Grok Bot only appears when a Cursor login or a Grok Bot install is present.
-    if let Some(grok_bot) = grok_bot {
-        agents.push(grok_bot);
     }
     AgentUsagePayload {
         generated_at,
@@ -15245,9 +15246,9 @@ mod kiro_tests {
                 "antigravity",
                 "copilot",
                 "grok",
+                "grok-bot",
                 "kiro",
-                "opencode",
-                "grok-bot"
+                "opencode"
             ]
         );
         assert_eq!(payload.opencode_subscriptions, ["StubSubscription"]);
