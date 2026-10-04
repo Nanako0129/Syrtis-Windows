@@ -1015,6 +1015,11 @@ impl UsageWindow {
     }
 
     #[cfg(test)]
+    pub(crate) fn duration_seconds_for_test(&self) -> Option<i64> {
+        self.duration_seconds
+    }
+
+    #[cfg(test)]
     pub(crate) fn remaining_for_test(&self) -> f64 {
         self.remaining_percent
     }

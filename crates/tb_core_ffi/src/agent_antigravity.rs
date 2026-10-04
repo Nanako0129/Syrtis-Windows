@@ -20,6 +20,7 @@ use crate::agent_account_scope::{
     self, AccountScope, AccountScopeError, AuthoritativeIdKind, HistoryScope, RefreshCheckpoint,
     RefreshScopeTransaction,
 };
+use crate::agent_quota_duration::DurationEvidence;
 use crate::agent_usage::{
     clean_plan, parse_datetime, percent_encode, provider_http_client_builder, read_response_body,
     request_after_verified_binding, AgentIdentity, ProviderCacheBinding, ProviderFetchFailure,
@@ -1002,6 +1003,9 @@ struct AgyUsageGroup {
 struct AgyUsageBucket {
     id: Option<String>,
     name: Option<String>,
+    /// The bucket's window, as agy `/usage` and `retrieveUserQuotaSummary`
+    /// both state it: "weekly" or "5h" (measured on macOS, 2026-10-02/03).
+    window: Option<String>,
     #[serde(rename = "remaining_fraction")]
     remaining_fraction: Option<f64>,
     #[serde(rename = "reset_time")]
@@ -1019,6 +1023,33 @@ struct ModelCandidate {
 
 fn valid_remaining_fraction(fraction: f64) -> bool {
     fraction.is_finite() && (0.0..=1.0).contains(&fraction)
+}
+
+/// The window length a grouped Antigravity bucket declares in its `window`
+/// field. Without it the duration has to be learned over several resets.
+/// Unknown values stay unknown and are learned as before.
+fn agy_window_duration(window: Option<&str>) -> Option<DurationEvidence> {
+    match window?.trim() {
+        "weekly" => Some(DurationEvidence::contract(7 * 86_400)),
+        "5h" => Some(DurationEvidence::contract(5 * 3_600)),
+        _ => None,
+    }
+}
+
+/// A grouped bucket (agy `/usage` or `retrieveUserQuotaSummary`): card id and
+/// window key `agy.<bucketId>.v1`, with the declared window as a contract
+/// duration.
+fn agy_bucket_window(
+    label: String,
+    fraction: f64,
+    reset: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    card_id: String,
+    window: Option<&str>,
+) -> Option<UsageWindow> {
+    UsageWindow::try_from_provider_fraction(label, fraction, reset, now).map(|usage| {
+        usage.with_identity(card_id.clone(), Some(card_id), None, agy_window_duration(window))
+    })
 }
 
 fn quota_window(
@@ -1079,9 +1110,14 @@ fn parse_agy_usage(body: &[u8], now: DateTime<Utc>) -> Result<Fetched, String> {
                 .map(|name| format!("{group_name} · {name}"))
                 .unwrap_or_else(|| format!("{group_name} · Limit"));
             let card_id = format!("agy.{id}.v1");
-            if let Some(window) =
-                quota_window(label, fraction, reset, now, card_id.clone(), Some(card_id))
-            {
+            if let Some(window) = agy_bucket_window(
+                label,
+                fraction,
+                reset,
+                now,
+                card_id,
+                bucket.window.as_deref(),
+            ) {
                 windows.push(window);
             }
         }
@@ -2848,8 +2884,6 @@ async fn fetch_quota_summary(
     (!windows.is_empty()).then_some(windows)
 }
 
-/// The bucket's declared `window` ("weekly", "5h") is not read: a declared
-/// duration is a separate change (W7c).
 fn windows_from_quota_summary(body: &str, now: DateTime<Utc>) -> Vec<UsageWindow> {
     let Ok(response) = serde_json::from_str::<Value>(body) else {
         return Vec::new();
@@ -2883,9 +2917,14 @@ fn windows_from_quota_summary(body: &str, now: DateTime<Utc>) -> Vec<UsageWindow
                 non_empty_str(bucket, "displayName").unwrap_or("Limit")
             );
             let card_id = format!("agy.{id}.v1");
-            if let Some(window) =
-                quota_window(label, fraction, reset, now, card_id.clone(), Some(card_id))
-            {
+            if let Some(window) = agy_bucket_window(
+                label,
+                fraction,
+                reset,
+                now,
+                card_id,
+                bucket.get("window").and_then(Value::as_str),
+            ) {
                 windows.push(window);
             }
         }
@@ -5266,6 +5305,39 @@ mod tests {
         assert_eq!(wire["cardId"], "agy.gemini-5h.v1");
         let third_wire = serde_json::to_value(&fetched.windows[2]).unwrap();
         assert_eq!(third_wire["cardId"], "agy.3p-weekly.v1");
+        // Control: the same fixture without the `window` field leaves the
+        // duration to be learned, as before.
+        let without = std::str::from_utf8(AGY_WINDOWS_USAGE)
+            .unwrap()
+            .replace(r#""window": "weekly", "#, "")
+            .replace(r#""window": "5h", "#, "");
+        assert!(!without.contains(r#""window""#));
+        let fetched = parse_agy_usage(without.as_bytes(), agy_now()).unwrap();
+        assert!(fetched
+            .windows
+            .iter()
+            .all(|w| w.duration_seconds_for_test().is_none()));
+    }
+
+    #[test]
+    fn agy_usage_window_field_sets_the_duration() {
+        let now = DateTime::parse_from_rfc3339("2026-10-03T06:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // agy 1.2.16 `/usage` shape, measured on macOS 2026-10-03.
+        let body = br#"{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[
+            {"name":"Gemini Models","buckets":[
+              {"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.8456,"reset_time":"2026-10-08T18:46:28Z"},
+              {"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.9389,"reset_time":"2026-10-03T07:43:34Z"},
+              {"id":"odd","name":"Odd Limit Remaining","window":"monthly","remaining_fraction":1,"reset_time":"2026-10-30T00:00:00Z"}
+            ]}]}}}"#;
+        let fetched = parse_agy_usage(body, now).unwrap();
+        let durations: Vec<Option<i64>> = fetched
+            .windows
+            .iter()
+            .map(|w| w.duration_seconds_for_test())
+            .collect();
+        assert_eq!(durations, [Some(7 * 86_400), Some(5 * 3_600), None]);
     }
 
     #[test]
@@ -6966,12 +7038,12 @@ mod captured_account_tests {
         // The same buckets as agy's `/usage` JSON on Windows.
         let agy = json!({ "status": "SUCCESS", "command": { "name": "usage", "data": { "groups": [
             { "name": "Gemini Models", "buckets": [
-                { "id": "gemini-weekly", "name": "Weekly Limit Remaining",
+                { "id": "gemini-weekly", "name": "Weekly Limit Remaining", "window": "weekly",
                   "remaining_fraction": 0.968718, "reset_time": "2026-10-08T18:46:28Z" },
-                { "id": "gemini-5h", "name": "Five Hour Limit Remaining",
+                { "id": "gemini-5h", "name": "Five Hour Limit Remaining", "window": "5h",
                   "remaining_fraction": 0.8799, "reset_time": "2026-10-02T11:20:43Z" } ] },
             { "name": "Claude and GPT models", "buckets": [
-                { "id": "3p-weekly", "name": "Weekly Limit Remaining",
+                { "id": "3p-weekly", "name": "Weekly Limit Remaining", "window": "weekly",
                   "remaining_fraction": 1.0, "reset_time": "2026-10-09T07:58:14Z" } ] }
         ] } } });
         let agy_windows = parse_agy_usage(agy.to_string().as_bytes(), now)
@@ -6990,6 +7062,12 @@ mod captured_account_tests {
             windows[1].pace_window_key_for_test(),
             Some("agy.gemini-5h.v1")
         );
+        // The declared window becomes the duration.
+        let durations: Vec<Option<i64>> = windows
+            .iter()
+            .map(|w| w.duration_seconds_for_test())
+            .collect();
+        assert_eq!(durations, [Some(7 * 86_400), Some(5 * 3_600), Some(7 * 86_400)]);
         assert!(windows_from_quota_summary("not json", now).is_empty());
         assert!(windows_from_quota_summary("{}", now).is_empty());
     }
