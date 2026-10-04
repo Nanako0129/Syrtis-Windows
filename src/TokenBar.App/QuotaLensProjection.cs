@@ -418,15 +418,13 @@ public static class QuotaLensProjection
     /// "Grok Build &amp; Bot" tab), else the owner. At most one card per tab,
     /// as macOS: with both members reporting, the owner's card is drawn and
     /// the other's windows stay on the limits card and the all-agent lens.
-    /// Since syrtis #471 (b5583fad) macOS also falls back to another member
-    /// (<c>WindowCardGate.clients</c>, WindowCardLoader.swift:625-639), but
-    /// on a different test: it falls back only when the tab id is not a card
-    /// client, and <c>ClientRegistry.quotaClients</c> (ClientRegistry.swift:255-264)
-    /// counts grok as one whenever it has local records or appears in the
-    /// quota payload. Windows falls back whenever the owner has no window tab, and
-    /// ignores the hidden set here. So the two pick different owners whenever
-    /// grok is a card client without windows while the Bot has them (e.g.
-    /// Grok Build records but only the Bot reporting): macOS keys the card on
+    /// Since syrtis #471 (b5583fad) macOS also falls back to another member,
+    /// by a different rule: macOS <c>WindowCardGate.clients</c>
+    /// (WindowCardLoader.swift:625-639) falls back when the tab id is not one
+    /// of its card clients (<c>ClientRegistry.quotaClients</c>); Windows falls
+    /// back when the owner has no window tab, and ignores the hidden set. The
+    /// two can pick different owners, for example with Grok Build local
+    /// records but only the Bot reporting windows: macOS keys the card on
     /// grok, Windows on grok-bot. Antigravity's other member,
     /// antigravity-cli, is never a quota provider, so that tab is
     /// unchanged.</summary>
