@@ -2065,21 +2065,21 @@ public sealed partial class DashboardView : UserControl
                 section.Children.Add(line);
             }
 
-            if (agent.Error is not null)
-            {
-                continue;
-            }
-
+            // An error only colours the detail line and the badge: the core
+            // returns the last-good windows with a transient error stamped on
+            // them, and those still draw (macOS AgentLimitsCard.swift:771-787);
+            // with nothing cached there are no windows and no bars.
+            //
             // Chart layout draws each window's recorded quota history as a
             // curve instead of a bar. WindowCardText.Tabs — the same fold the
             // Session-window card already resolves its own samples through —
             // returns one WindowCardTab per live window in agent's own order
-            // when the client has live windows to enumerate (guaranteed here:
-            // snapshot.Quota is non-null inside this loop and agent.Error was
-            // just checked null above, so WindowCardText.LiveWindowsUnavailable
-            // cannot be true), so a plain index zip against UniqueCardWindows
-            // lines each tab up with the window it belongs to.
-            var windows = agent.UniqueCardWindows;
+            // whenever the agent has windows (snapshot.Quota is non-null inside
+            // this loop, and WindowCardText.LiveWindowsUnavailable needs an
+            // empty window list, so it is false whenever this loop draws), so a
+            // plain index zip against the same windows lines each tab up with
+            // the window it belongs to.
+            var windows = AgentLimitsText.BarWindows(agent);
             // The same tabs feed the trend, which is information rather than a
             // density option, so it appears in every layout and on every
             // surface — macOS passes the curves to the client tab's card too

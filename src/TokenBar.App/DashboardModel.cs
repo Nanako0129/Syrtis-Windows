@@ -263,7 +263,16 @@ public sealed class DashboardModel
         {
             roots.Pushed += OnClaudeRootsPushed;
         }
+
+        AntigravityAccounts.Changed += OnAntigravityAccountsChanged;
     }
+
+    /// <summary>A changed captured-account list reached the core, or agy's
+    /// current account changed: refetch the quota so the cards and the dedup
+    /// follow now rather than at the next tick. A fetch already in flight
+    /// absorbs this (the shared coordinator and QuotaPoller coalesce), and
+    /// the next tick catches up.</summary>
+    private void OnAntigravityAccountsChanged() => _dispatcher.TryEnqueue(RefreshQuota);
 
     /// <summary>The native setters already dropped every scan cache and the
     /// removed accounts' state; ask again so an added account's card and usage
@@ -777,6 +786,8 @@ public sealed class DashboardModel
         {
             roots.Pushed -= OnClaudeRootsPushed;
         }
+
+        AntigravityAccounts.Changed -= OnAntigravityAccountsChanged;
     }
 
     private void RefreshSlow()

@@ -125,7 +125,20 @@ public sealed class TrayFeed : IDisposable
             }
         };
         AppSettings.Store.Changed += _onStoreChanged;
+        AntigravityAccounts.Changed += OnAntigravityAccountsChanged;
     }
+
+    /// <summary>A changed captured-account list reached the core, or agy's
+    /// current account changed: refetch the quota now, as DashboardModel does
+    /// (macOS RegistryChange wakes both pollers). A fetch already in flight
+    /// absorbs this (QuotaPoller and the shared coordinator coalesce).</summary>
+    private void OnAntigravityAccountsChanged() => _dispatcher.TryEnqueue(() =>
+    {
+        if (!_disposed)
+        {
+            RefreshQuota();
+        }
+    });
 
     /// <summary>Stop polling and unsubscribe so the feed can't raise Changed
     /// into a disposed tray icon after shutdown.</summary>
@@ -140,6 +153,7 @@ public sealed class TrayFeed : IDisposable
         _fast.Stop();
         _slow.Stop();
         AppSettings.Store.Changed -= _onStoreChanged;
+        AntigravityAccounts.Changed -= OnAntigravityAccountsChanged;
     }
 
     private void RefreshFast()
