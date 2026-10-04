@@ -60,6 +60,78 @@ internal static class TrayIconGallery
             bmp.Save(Path.Combine(dir, $"title-8-stale-{(dark ? "dark" : "light")}.png"));
         }
 
+        DumpBlackInk(dir);
         DevLog.Write($"tray icon gallery dumped to {dir} (titles: {string.Join(' ', titles)})");
     }
+
+    /// <summary>Frame 0 of each animated style, both themes, through the
+    /// tray's own path (TrayAnimator.ComposeFrame, then TrayIconHandle.From),
+    /// counting visible pixels and visible pure-black ones at each step:
+    /// the composed canvas, the canvas after the lift, and the HICON read
+    /// back (Icon.ToBitmap). Written to black-ink.txt with the PNGs.</summary>
+    private static void DumpBlackInk(string dir)
+    {
+        var report = new List<string> { "per step: visible pixels / visible pure-black pixels (darkest visible pixel's max channel)" };
+        foreach (var (name, light) in new[]
+        {
+            ("sand0", "anim-sand0-light"), ("sand0", "anim-sand0"),
+            ("cat2", "anim-cat2-light"), ("cat2", "anim-cat2"),
+            ("parrot", "anim-parrot-light"), ("parrot", "anim-parrot"),
+        })
+        {
+            var file = Path.Combine(AppContext.BaseDirectory, "Assets", light, "frame-000.png");
+            if (!File.Exists(file))
+            {
+                report.Add($"{light}: missing {file}");
+                continue;
+            }
+
+            using var canvas = TrayAnimator.ComposeFrame(file);
+            var composed = Count(canvas);
+            canvas.Save(Path.Combine(dir, $"ink-{light}-composed.png"));
+            var hicon = TrayIconHandle.From(canvas);
+            var lifted = Count(canvas);
+            canvas.Save(Path.Combine(dir, $"ink-{light}-lifted.png"));
+            string readBack;
+            using (var icon = System.Drawing.Icon.FromHandle(hicon))
+            using (var back = icon.ToBitmap())
+            {
+                readBack = Count(back);
+                back.Save(Path.Combine(dir, $"ink-{light}-hicon.png"));
+            }
+
+            _ = DestroyIcon(hicon);
+            report.Add($"{light} [{canvas.PixelFormat}]: composed {composed}; lifted {lifted}; hicon {readBack}");
+        }
+
+        File.WriteAllLines(Path.Combine(dir, "black-ink.txt"), report);
+    }
+
+    private static string Count(System.Drawing.Bitmap bitmap)
+    {
+        int visible = 0, black = 0, minRgb = 255;
+        for (var y = 0; y < bitmap.Height; y++)
+        {
+            for (var x = 0; x < bitmap.Width; x++)
+            {
+                var c = bitmap.GetPixel(x, y);
+                if (c.A == 0)
+                {
+                    continue;
+                }
+
+                visible++;
+                minRgb = Math.Min(minRgb, Math.Max(c.R, Math.Max(c.G, c.B)));
+                if (c.R == 0 && c.G == 0 && c.B == 0)
+                {
+                    black++;
+                }
+            }
+        }
+
+        return $"{visible}/{black} (min {minRgb})";
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool DestroyIcon(nint hIcon);
 }
