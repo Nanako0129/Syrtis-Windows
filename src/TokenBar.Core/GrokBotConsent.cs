@@ -188,8 +188,8 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     /// <see cref="CardFor"/> decision, Declined, then applies) or when a
     /// Grok Bot snapshot is not a consent snapshot (<see cref="Card.None"/>);
     /// other clients' cards, decided through the same state in the limits
-    /// loop, leave it untouched, and so does a fetch with no Grok Bot
-    /// snapshot at all (the record waits for Grok Bot's next one).</summary>
+    /// loop, leave it untouched. A payload with no Grok Bot snapshot at all
+    /// ends it too, through <see cref="Observe"/>.</summary>
     public sealed class WaitingState
     {
         private (Card Card, object? Over, int Failures)? _grant;
@@ -208,6 +208,27 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
         /// record, so Allow's own grant is not re-recorded.</summary>
         public void GrantedElsewhere() =>
             _grant ??= _shown ?? (Card.Declined, null, -1);
+
+        /// <summary>Called once per render with the quota payload: a payload
+        /// that EXISTS and holds no Grok Bot snapshot at all (signed out, so the
+        /// card is not on screen for anyone) ends the record, so a later consent
+        /// snapshot under a stored yes decides afresh (<see cref="CardFor"/>)
+        /// instead of replaying the stale card. macOS keeps this state in the
+        /// card's own view (<c>granting</c> / <c>consentDeclined</c>,
+        /// AgentLimitsCard.swift:84-88, re-seeded by <c>.task(id: source)</c>
+        /// :957-960), which dies when the card is not drawn. A null payload
+        /// (loading) changes nothing, and neither does a hidden Grok Bot card or
+        /// another client's card: the payload still holds the snapshot, and
+        /// <see cref="Decide"/> for other clients never touches the record
+        /// (#190).</summary>
+        public void Observe(AgentUsagePayload? payload)
+        {
+            if (payload is not null && !payload.Agents.Any(agent => agent.ClientId == "grok-bot"))
+            {
+                _grant = null;
+                _shown = null;
+            }
+        }
 
         /// <summary>The card for <paramref name="agent"/>: the recorded card
         /// while the stored answer is yes, else <see cref="CardFor"/>.</summary>

@@ -61,6 +61,10 @@ public static class QuotaLensProjection
     /// that decides which tabs are quota-only. Null means unknown and keeps
     /// the pre-rule behaviour (tests and callers without a graph). See
     /// <see cref="TabHasNoLocalRecords"/>.</param>
+    /// <param name="PresentClients">The year-scoped present clients (macOS
+    /// <c>stats.presentClients</c>), with <paramref name="TabHidden"/> and
+    /// <paramref name="LimitsHidden"/> (raw saved sets) the inputs of
+    /// <see cref="WindowCardOwner"/>. Null reads as empty.</param>
     /// <param name="HistoryShownCount">How many history rows the reader has
     /// grown the card to. Not a display-only toggle despite looking like one:
     /// it decides which cycles are folded, and the ≈ line and the usage bar's
@@ -73,7 +77,10 @@ public static class QuotaLensProjection
         string? HistoryShownWindow = null,
         int HistoryShownCount = WindowHistoryText.VisibleRows,
         string? WindowCardAccount = null,
-        IReadOnlyCollection<string>? LocalUsageClients = null);
+        IReadOnlyCollection<string>? LocalUsageClients = null,
+        IReadOnlyList<string>? PresentClients = null,
+        IReadOnlySet<string>? TabHidden = null,
+        IReadOnlySet<string>? LimitsHidden = null);
 
     /// <summary>Everything the Quota lens's seven sites decided, assembled
     /// once. <see cref="Client"/> is null exactly when <see cref="Selection.ActiveClientTab"/>
@@ -315,9 +322,10 @@ public static class QuotaLensProjection
     {
         // Every subscription-facing lookup below is keyed by the quota OWNER,
         // not the raw client id — antigravity-cli spends the antigravity
-        // subscription — or, on a grouped tab whose owner has no windows, by
-        // the member that does (WindowCardOwner).
-        var owner = WindowCardOwner(history, quota, clientId);
+        // subscription — or, on a grouped tab whose owner is not a card
+        // client (a Grok Bot-only install), by the member that is
+        // (WindowCardOwner).
+        var owner = WindowCardOwner(quota, clientId, selection.PresentClients, selection.TabHidden, selection.LimitsHidden);
         // One card per client: the primary when it has windows, else the
         // first other account that does (Desktop-only users).
         var account = WindowCardText.WindowCardAccount(quota, owner, selection.WindowCardAccount);
@@ -334,8 +342,10 @@ public static class QuotaLensProjection
             accountWindowUsage?.TryGetValue(account, out accountUsage);
         }
 
-        // A member other than the tab's own owner (grok-bot) carries no local
-        // usage, so its card reads none — macOS gives that tab no scan.
+        // The card moved to another member only when the owner is not a card
+        // client, i.e. has no local records in the tab and no configured
+        // quota (a Grok Bot-only install): the tab has no local usage to
+        // read, and macOS gives it no scan.
         var unattributed = (account is not null && accountUsage is null)
             || owner != ClientRegistry.QuotaOwner(clientId)
             || TabHasNoLocalRecords(clientId, selection.LocalUsageClients, confirmed.Records);
@@ -412,29 +422,31 @@ public static class QuotaLensProjection
     }
 
     /// <summary>The tab-group member whose window card, history and account
-    /// pills a client tab draws: the tab's quota owner when it has a tab to
-    /// show, else the first other member of its <see cref="ClientRegistry.TabSlice"/>
-    /// that has (a Grok Bot-only user gets the grok-bot weekly window on the
-    /// "Grok Build &amp; Bot" tab), else the owner. At most one card per tab,
-    /// as macOS: with both members reporting, the owner's card is drawn and
-    /// the other's windows stay on the limits card and the all-agent lens.
-    /// Since syrtis #471 (b5583fad) macOS also falls back to another member,
-    /// by a different rule: macOS <c>WindowCardGate.clients</c>
-    /// (WindowCardLoader.swift:625-639) falls back when the tab id is not one
-    /// of its card clients (<c>ClientRegistry.quotaClients</c>); Windows falls
-    /// back when the owner has no window tab, and ignores the hidden set. The
-    /// two can pick different owners, for example with Grok Build local
-    /// records but only the Bot reporting windows: macOS keys the card on
-    /// grok, Windows on grok-bot. Antigravity's other member,
-    /// antigravity-cli, is never a quota provider, so that tab is
-    /// unchanged.</summary>
+    /// pills a client tab draws. Ported from macOS
+    /// <c>WindowCardGate.clients</c> (WindowCardLoader.swift:625-639) with its
+    /// inputs from PopoverView.swift:151-165: the card clients are
+    /// <see cref="ClientRegistry.QuotaClients"/> (present clients' slices plus
+    /// the payload's configured ids, minus tab-hidden); the tab's quota owner
+    /// draws when it is one, else the first slice member that is and is not
+    /// excluded (<see cref="ClientRegistry.QuotaExcludedClients(IReadOnlySet{string}, IReadOnlySet{string})"/>).
+    /// A Grok Bot-only user gets the grok-bot window on the "Grok Build &amp; Bot"
+    /// tab; with Grok Build present locally the card is keyed on grok even
+    /// when only the Bot reports windows. At most one card per tab.
+    /// Remaining difference: macOS draws no card at all when the tab itself is
+    /// excluded (limits-hidden owner, <c>guard !excluded.contains(tab)</c>) or
+    /// no member qualifies; Windows has no "no window card" path on the client
+    /// tab, so those cases still fall back to the owner.</summary>
     internal static string WindowCardOwner(
-        IReadOnlyList<QuotaHistorySeries>? history, AgentUsagePayload? quota, string clientId)
+        AgentUsagePayload? quota, string clientId,
+        IReadOnlyList<string>? present = null,
+        IReadOnlySet<string>? tabHidden = null, IReadOnlySet<string>? limitsHidden = null)
     {
         var owner = ClientRegistry.QuotaOwner(clientId);
-        bool HasTabs(string id) =>
-            WindowCardText.Tabs(history, quota, id, WindowCardText.WindowCardAccount(quota, id)).Count > 0;
-        return HasTabs(owner) ? owner : ClientRegistry.TabSlice(owner).FirstOrDefault(HasTabs) ?? owner;
+        var hidden = tabHidden ?? new HashSet<string>();
+        return ClientRegistry.WindowCardClient(
+            owner,
+            ClientRegistry.QuotaClients(present ?? [], quota?.ConfiguredClientIds ?? [], hidden),
+            ClientRegistry.QuotaExcludedClients(hidden, limitsHidden ?? new HashSet<string>())) ?? owner;
     }
 
     /// <summary>True only when presence is KNOWN and no member of the tab group
