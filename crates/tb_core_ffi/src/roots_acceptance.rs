@@ -474,6 +474,16 @@ fn unrelated_accounts_scan_exactly_what_they_did_before() {
         let text = dir.display().to_string();
         let window = call_window(Some(&text), WINDOW_FROM, WINDOW_UNTIL);
         assert_eq!(claude_lane_output(&window), expected);
+        // Not just the same messages: the same scope, with no exclusion.
+        let scoped = crate::window_usage::scoped_context_for_test(
+            &crate::LocalSourceContext::process().unwrap(),
+            &Some(text.clone()),
+        )
+        .unwrap();
+        assert!(
+            scoped.resolved().scanner_settings().excluded_scan_paths.is_empty(),
+            "an unrelated account was excluded from {text}"
+        );
         let before = crate::LocalSourceContext::derived(
             tokscale_core::ResolvedLocalSourceContext::capture(
                 Some(dir.to_path_buf()),

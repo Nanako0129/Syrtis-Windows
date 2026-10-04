@@ -228,23 +228,24 @@ fn scoped_context(
             if own.is_empty() {
                 return Err(NO_REGISTERED_ROOTS.to_string());
             }
-            // Every other account is excluded, as the primary excludes them
-            // all: this window is captured with `dir` as home, and the engine
-            // scans `<home>/.claude/projects`, `<home>/.claude/transcripts`,
+            // Every other account nested under this one is excluded. This
+            // window is captured with `dir` as home, and the engine scans
+            // `<home>/.claude/projects`, `<home>/.claude/transcripts`,
             // `.cc-mirror` variants and cowork trees under it on its own, so
             // an account nested at `<dir>\.claude` was counted here and in
-            // its own window (#175 deferred). An account whose directory
-            // contains this one is not excluded: its prefix would remove this
-            // account's own files. Nothing to exclude → no exclusion, so an
-            // account with no nested neighbour scans exactly what it did.
-            let me = account_identity(dir);
-            let contains_me = |path: &str| {
-                let other = account_identity(path);
-                other == me || me.starts_with(&format!("{other}\\"))
-            };
+            // its own window (#175 deferred). Only paths under `dir` can be
+            // reached from this scope, so only those are listed: an unrelated
+            // account adds nothing, and an account that contains this one
+            // (an ancestor) is never listed, which would remove this
+            // account's own files. Compared on the folded form; a nested
+            // account registered under another spelling of its folder (a
+            // junction, `subst` drive, 8.3 name) is not recognised, so it
+            // stays counted twice, as before this fix, rather than hidden.
+            let under_me = format!("{}\\", account_identity(dir));
+            let is_nested = |path: &str| account_identity(path).starts_with(&under_me);
             let mut excluded: Vec<std::path::PathBuf> = config_dirs
                 .iter()
-                .filter(|other| !contains_me(other))
+                .filter(|other| is_nested(other))
                 .map(std::path::PathBuf::from)
                 .collect();
             excluded.extend(
@@ -252,7 +253,7 @@ fn scoped_context(
                     .get(CLAUDE)
                     .into_iter()
                     .flatten()
-                    .filter(|root| !own.contains(root) && !contains_me(&root.to_string_lossy()))
+                    .filter(|root| !own.contains(root) && is_nested(&root.to_string_lossy()))
                     .cloned(),
             );
             let mut excluded_scan_paths = std::collections::BTreeMap::new();
