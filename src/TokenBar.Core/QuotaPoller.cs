@@ -1,3 +1,5 @@
+using TokenBar.Interop;
+
 namespace TokenBar.Core;
 
 /// <summary>One quota consumer's whole poll cycle (the dashboard, the tray):
