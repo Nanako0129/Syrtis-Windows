@@ -239,10 +239,18 @@ public sealed class AntigravityAutoCapture
                     //   refresh token equals agy's; if Google ever rotated it
                     //   at capture, each retry is a full refresh plus a write
                     //   (rotation has not been observed).
+                    // The toggle is checked again after the re-read (up to
+                    // the marker timeout): turned off meanwhile, nothing is
+                    // bound or persisted and the retry is not armed; the
+                    // account stays in the list (macOS 215df805).
                     var after = await TryMarker().ConfigureAwait(false);
                     lock (_gate)
                     {
-                        if (after == marker)
+                        if (!IsEnabled)
+                        {
+                            // Off since the attempt: neither bind nor retry.
+                        }
+                        else if (after == marker)
                         {
                             changed = SetCurrentLocked(key, marker);
                         }

@@ -36,6 +36,9 @@ public class AntigravityAccountsTests
         public ManualResetEventSlim? AutoGate;
         public ManualResetEventSlim? MarkerGate;
         public HashSet<int> FailingMarkerReads = [];
+        public int BlockedRead;
+        public readonly TaskCompletionSource BlockedReadStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly ManualResetEventSlim BlockedReadGate = new(false);
         private int _markerReads;
 
         public AntigravityAutoCapture.Io Io => new(
@@ -43,7 +46,14 @@ public class AntigravityAccountsTests
             {
                 Calls.Enqueue("marker");
                 MarkerGate?.Wait(TimeSpan.FromSeconds(10));
-                if (FailingMarkerReads.Contains(Interlocked.Increment(ref _markerReads)))
+                var read = Interlocked.Increment(ref _markerReads);
+                if (read == BlockedRead)
+                {
+                    BlockedReadStarted.TrySetResult();
+                    BlockedReadGate.Wait(TimeSpan.FromSeconds(10));
+                }
+
+                if (FailingMarkerReads.Contains(read))
                 {
                     throw new TbCoreException("marker_unavailable");
                 }
@@ -565,6 +575,31 @@ public class AntigravityAccountsTests
         io.AutoResult = () => new AntigravityAutoCaptureResult("unchanged", KeyA, "a@example.com");
         await capture.Poll();
         Assert.Equal((KeyA, "M1"), capture.Current);
+    }
+
+    /// <summary>The toggle turned off while the post-attempt marker re-read
+    /// runs: the re-read then returns the same marker, yet nothing is bound
+    /// or persisted, the retry is not armed, and the account stays listed
+    /// (macOS 215df805).</summary>
+    [Fact]
+    public async Task TurningTheToggleOffDuringTheReReadBindsNothing()
+    {
+        var store = TempStore();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        // A bound longer than the test's own wait, so the read is not timed out.
+        var io = new FakeIo { BlockedRead = 2 };
+        var capture = new AntigravityAutoCapture(io.Io, store, markerTimeout: TimeSpan.FromSeconds(10));
+
+        var poll = capture.Poll();
+        Assert.Same(io.BlockedReadStarted.Task, await Task.WhenAny(io.BlockedReadStarted.Task, Task.Delay(TimeSpan.FromSeconds(5))));
+        await capture.SetEnabled(false);
+        io.BlockedReadGate.Set();
+        await poll;
+
+        Assert.Null(capture.Current.Key);
+        Assert.Null(store.GetString(AntigravityAutoCapture.CurrentKey));
+        Assert.Equal("M1", capture.LastAttemptedMarker);
+        Assert.Equal([new AntigravityAccount(KeyA, "a@example.com")], AntigravityAccounts.Load(store));
     }
 
     [Fact]
