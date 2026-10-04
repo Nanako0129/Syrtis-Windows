@@ -34,6 +34,7 @@ public class AntigravityAccountsTests
         public Exception? RemoveError;
         public Exception? InstallError;
         public ManualResetEventSlim? AutoGate;
+        public readonly TaskCompletionSource AutoStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public ManualResetEventSlim? MarkerGate;
         public HashSet<int> FailingMarkerReads = [];
         public int BlockedRead;
@@ -71,6 +72,7 @@ public class AntigravityAccountsTests
             AutoCapture: removed =>
             {
                 Calls.Enqueue("auto");
+                AutoStarted.TrySetResult();
                 AutoGate?.Wait(TimeSpan.FromSeconds(10));
                 return AutoResult();
             },
@@ -600,6 +602,38 @@ public class AntigravityAccountsTests
         Assert.Null(store.GetString(AntigravityAutoCapture.CurrentKey));
         Assert.Equal("M1", capture.LastAttemptedMarker);
         Assert.Equal([new AntigravityAccount(KeyA, "a@example.com")], AntigravityAccounts.Load(store));
+    }
+
+    /// <summary>macOS 065df148: a poll owed during an attempt (refused while
+    /// busy) does not run once the toggle is off. The re-read fails while
+    /// still on (arming the retry), and the toggle goes off just after the
+    /// attempt's busy section ends, before the owed poll would run.</summary>
+    [Fact]
+    public async Task AnOwedPollDoesNotCaptureAfterTheToggleWentOff()
+    {
+        var store = TempStore();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        var gate = new ManualResetEventSlim(false);
+        var io = new FakeIo { AutoGate = gate, FailingMarkerReads = [2] };
+        var capture = new AntigravityAutoCapture(io.Io, store);
+
+        var attempt = capture.Poll();
+        Assert.Same(io.AutoStarted.Task, await Task.WhenAny(io.AutoStarted.Task, Task.Delay(TimeSpan.FromSeconds(5))));
+        await capture.Poll(); // refused while busy: owed
+        // The production toggle writes this key first (SetEnabled(false)).
+        capture.StateChanged += () =>
+        {
+            if (!capture.Busy)
+            {
+                store.SetBool(AntigravityAutoCapture.EnabledKey, false);
+            }
+        };
+        gate.Set();
+        await attempt;
+
+        Assert.Equal(1, io.Calls.Count(c => c == "auto"));
+        Assert.Null(capture.Current.Key);
+        Assert.Null(store.GetString(AntigravityAutoCapture.CurrentKey));
     }
 
     [Fact]

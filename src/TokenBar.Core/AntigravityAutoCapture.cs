@@ -340,6 +340,12 @@ public sealed class AntigravityAutoCapture
         return poll;
     }
 
+    /// <summary>Run the poll a busy or checking moment refused, but only
+    /// while automatic capture is on: a poll owed during an attempt must not
+    /// capture after the user turned the toggle off (macOS 065df148). The
+    /// check is here, not in <see cref="Poll"/>, because SetEnabled(true) and
+    /// ManualCapture's resume call Poll themselves, each already gated on the
+    /// toggle; PrepareForFetch's poll is gated by AntigravityFetch.</summary>
     private async Task PollIfOwed()
     {
         lock (_gate)
@@ -350,6 +356,10 @@ public sealed class AntigravityAutoCapture
             }
 
             _pollAgain = false;
+            if (!IsEnabled)
+            {
+                return;
+            }
         }
 
         await Poll().ConfigureAwait(false);
