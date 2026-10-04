@@ -259,6 +259,8 @@ public class GrokBotConsentTests : IDisposable
         Assert.Contains("Cursor IDE sign-in instead, if there is one, and sends it only to cursor.com", hint);
         Assert.Contains("Choosing Allow on the Grok Bot card turns this on too", hint);
         Assert.Contains("without encryption", hint);
+        // The stored HMAC is disclosed here, since the card only says no copy is kept.
+        Assert.Contains("only a one-way fingerprint to tell accounts apart", hint);
         // sand-secrets.json is read every refresh to learn whether Grok Bot is
         // signed in; the hint must not claim it is untouched before Allow.
         Assert.Contains("still checks Grok Bot's sign-in file", hint);

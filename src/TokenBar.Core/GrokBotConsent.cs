@@ -254,7 +254,8 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
         public const string SettingsHint =
             "When on, Syrtis unlocks Grok Bot's saved sign-in each time it refreshes — "
             + "including sign-ins Grok Bot saved without encryption — and sends it only to "
-            + "api2.cursor.sh. Choosing Allow on the Grok Bot card turns this on too. When "
+            + "api2.cursor.sh. Syrtis keeps no copy of it, only a one-way fingerprint to "
+            + "tell accounts apart. Choosing Allow on the Grok Bot card turns this on too. When "
             + "off, Syrtis still checks Grok Bot's sign-in file each refresh to see whether "
             + "it is signed in, but does not unlock or send the sign-in. Turning this off "
             + "takes effect from the next refresh; a refresh already under way may finish. "
