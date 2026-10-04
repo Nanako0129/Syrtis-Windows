@@ -58,4 +58,16 @@ public class TabDragTests
     public void PresentTabsIncludeQuotaOnlySourcesAndFoldRawIds() =>
         Assert.Equal(["claude", "copilot"],
             ClientRegistry.PresentTabs(["claude-code", "claude"], ["copilot"]));
+
+    // A client tab's hover text is macOS's .help, translated as macOS does.
+    [Theory]
+    [InlineData("strings-zh-Hant.json", "拖曳可調整順序")]
+    [InlineData("strings-zh-Hans.json", "拖动以调整顺序")]
+    public void TabHoverTextIsTheMacDragHint(string table, string translation)
+    {
+        Assert.Equal("Drag to reorder", ClientRegistry.TabDragHint);
+        var entries = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(
+            File.ReadAllText(Path.Combine(AppContext.BaseDirectory, table)))!;
+        Assert.Equal(translation, entries[ClientRegistry.TabDragHint]);
+    }
 }

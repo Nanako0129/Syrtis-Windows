@@ -1023,7 +1023,7 @@ public sealed partial class DashboardView : UserControl
         };
         if (id != ClientRegistry.OverviewTab)
         {
-            HoverTip.Attach(button, () => ClientRegistry.Style(id).DisplayName);
+            HoverTip.Attach(button, () => ClientRegistry.TabDragHint.Localized());
             AttachTabDrag(button, id);
         }
 
