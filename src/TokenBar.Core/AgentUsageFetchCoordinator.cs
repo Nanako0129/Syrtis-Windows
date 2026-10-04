@@ -25,18 +25,23 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
     /// surface asked for it, so a consumer that did not ask (the tray feed,
     /// when the flyout polled) still holds the newest payload instead of one
     /// up to a slow tick old. Raised on the fetch thread, before the chain
-    /// completes and before the in-flight slot clears. Within one epoch
-    /// payloads are raised in fetch order; a fetch chained for a newer epoch
-    /// may start first, but the payload raised before it carries the older
-    /// epoch and is discarded. A handler's <see cref="FetchAsync"/> joins the
-    /// chain being raised for, and its <see cref="RequestFollowUp"/> is
-    /// honoured by that chain (up to the follow-up cap; the payload that
-    /// follow-up fetches is raised too). A throwing handler is caught and
-    /// logged by exception type: it neither fails the fetch nor pins the slot.
-    /// Not raised for a failed fetch. A handler must marshal to its own
-    /// thread. Carries the <see cref="QuotaEpoch"/> the fetch was requested
-    /// at: a handler must discard a payload whose epoch is no longer current,
-    /// as <see cref="QuotaPoller"/> does.</summary>
+    /// completes and before the in-flight slot clears, so within one epoch
+    /// payloads are raised in fetch order (a chain for a newer epoch is
+    /// chained after the older one's task and so starts only after its raise).
+    /// Handlers therefore delay every awaiter of the chain: they must return
+    /// quickly, marshalling their work to their own thread, and must never
+    /// block on <see cref="FetchAsync"/> or the chain's task (that deadlocks
+    /// the chain and pins the slot). Calling <see cref="FetchAsync"/> without
+    /// waiting is fine: at the same epoch, while no newer-epoch chain is in
+    /// flight, it joins the chain being raised for. A handler's
+    /// <see cref="RequestFollowUp"/> is honoured by that chain (up to the
+    /// follow-up cap; the payload that follow-up fetches is raised too). Each
+    /// handler runs in its own try/catch: a throwing one is logged by
+    /// exception type and neither fails the fetch, pins the slot nor starves
+    /// the other handlers. Not raised for a failed fetch. Carries the
+    /// <see cref="QuotaEpoch"/> the fetch was requested at: a handler must
+    /// discard a payload whose epoch is no longer current, as
+    /// <see cref="QuotaPoller"/> does.</summary>
     public event Action<AgentUsagePayload, long>? Fetched;
 
     /// <summary>Where a throwing <see cref="Fetched"/> handler is logged (the
@@ -205,14 +210,18 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
 
     private void Raise(AgentUsagePayload payload, long epoch)
     {
-        try
+        foreach (var handler in Fetched?.GetInvocationList() ?? [])
         {
-            Fetched?.Invoke(payload, epoch);
-        }
-        catch (Exception ex)
-        {
-            // A handler's failure must not fail the fetch or pin the slot.
-            Log($"agentUsage fetched handler failed: {ex.GetType().Name}");
+            try
+            {
+                ((Action<AgentUsagePayload, long>)handler)(payload, epoch);
+            }
+            catch (Exception ex)
+            {
+                // A handler's failure must not fail the fetch, pin the slot or
+                // starve the other handlers.
+                Log($"agentUsage fetched handler failed: {ex.GetType().Name}");
+            }
         }
     }
 

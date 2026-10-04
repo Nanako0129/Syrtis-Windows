@@ -327,10 +327,12 @@ public sealed class TrayFeed : IDisposable
     private void RefreshQuota() => _quotaPoller.Request();
 
     // Dispatcher side of the quota poll. Applied only for a payload fetched
-    // at the current epoch (QuotaPoller); a null is a failed fetch.
+    // at the current epoch (QuotaPoller); a null is a failed fetch. A payload
+    // already applied (Fetched delivers it before the poller's own await
+    // resumes, or the other way round) is applied once, whichever path wins.
     private void ApplyQuota(AgentUsagePayload? quota)
     {
-        if (_disposed || quota is null)
+        if (_disposed || quota is null || ReferenceEquals(Quota, quota))
         {
             return;
         }
