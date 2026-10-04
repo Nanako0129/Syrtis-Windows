@@ -247,4 +247,44 @@ public class GrokBotConsentTests : IDisposable
         Assert.Contains("only checks whether Grok Bot is signed in", GrokBotConsent.Copy.Explanation);
         Assert.Contains("still checks Grok Bot's sign-in file", GrokBotConsent.Copy.SettingsHint);
     }
+
+    // The Allow button's Waiting state. The refresh after Allow is best effort,
+    // so each exit is what keeps the button from latching disabled. Every test
+    // first shows Waiting holding (stored yes, same payload, no new failure),
+    // so a state that never waits cannot pass.
+    private static GrokBotConsent.WaitingState GrantedOver(AgentUsagePayload shown)
+    {
+        var waiting = new GrokBotConsent.WaitingState();
+        waiting.Granted(shown, failedFetches: 2);
+        Assert.True(waiting.IsWaiting(true, shown, 2));
+        return waiting;
+    }
+
+    [Fact]
+    public void NotNowDuringWaitingLeavesAllowEnabledOnTheDeclinedCard()
+    {
+        var shown = new AgentUsagePayload("now", []);
+        var waiting = GrantedOver(shown);
+        Assert.False(waiting.IsWaiting(false, shown, 2));
+        Assert.Equal(
+            GrokBotConsent.Card.Declined,
+            GrokBotConsent.CardFor(Snapshot("grok-bot", "keychain-consent"), false));
+        // Ended, not paused: a later yes over the same payload is not Waiting.
+        Assert.False(waiting.IsWaiting(true, shown, 2));
+    }
+
+    [Fact]
+    public void FailedFetchEndsWaiting()
+    {
+        var shown = new AgentUsagePayload("now", []);
+        var waiting = GrantedOver(shown);
+        Assert.False(waiting.IsWaiting(true, shown, 3));
+    }
+
+    [Fact]
+    public void NewPayloadEndsWaiting()
+    {
+        var waiting = GrantedOver(new AgentUsagePayload("now", []));
+        Assert.False(waiting.IsWaiting(true, new AgentUsagePayload("now", []), 2));
+    }
 }

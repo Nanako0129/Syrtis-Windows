@@ -8,7 +8,6 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
     private readonly object _gate = new();
     private Task<AgentUsagePayload>? _inFlight;
     private Action? _beforeFirstFetch;
-    private long _generation;
 
     public static AgentUsageFetchCoordinator Shared { get; } = new(TbCore.AgentUsage);
 
@@ -25,29 +24,6 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
             _beforeFirstFetch = action;
         }
     }
-
-    /// <summary>Read before <see cref="FetchAsync"/>; pass to
-    /// <see cref="IsCurrent"/> before publishing what it returns.</summary>
-    public long Generation => Interlocked.Read(ref _generation);
-
-    /// <summary>The core's inputs changed (the Grok Bot grant): the next
-    /// <see cref="FetchAsync"/> starts a new fetch instead of joining one that
-    /// began before this call, and every fetch begun before it fails
-    /// <see cref="IsCurrent"/>, so its payload is discarded rather than
-    /// published (macOS GrokBotKeychainConsent.apply's epoch signal).</summary>
-    public void Invalidate()
-    {
-        lock (_gate)
-        {
-            _generation++;
-            _inFlight = null;
-        }
-    }
-
-    /// <summary>False when <see cref="Invalidate"/> ran after
-    /// <paramref name="generation"/> was read: the payload was (or may have
-    /// been) built from the old inputs and must not be published.</summary>
-    public bool IsCurrent(long generation) => Generation == generation;
 
     public Task<AgentUsagePayload> FetchAsync()
     {

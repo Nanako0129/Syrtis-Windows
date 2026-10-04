@@ -117,6 +117,41 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
             ? answer == false ? Card.Declined : Card.Ask
             : Card.None;
 
+    /// <summary>The Allow button's "Waiting…" (macOS "Waiting for macOS…").
+    /// Set when Allow's setter succeeded over the payload the card showed;
+    /// every card build asks <see cref="IsWaiting"/>, which ends it for good
+    /// when the stored answer is no longer yes (Not now, Settings off), a
+    /// different payload is shown, or a quota fetch has failed since the
+    /// grant. The refresh after Allow is best effort and may wait for the next
+    /// poll (macOS guarantees a refetch; Windows aligns in slice W6c), so
+    /// without these exits the button could stay disabled.</summary>
+    public sealed class WaitingState
+    {
+        private bool _waiting;
+        private object? _over;
+        private int _failuresAtGrant;
+
+        public void Granted(object? shownPayload, int failedFetches)
+        {
+            _waiting = true;
+            _over = shownPayload;
+            _failuresAtGrant = failedFetches;
+        }
+
+        public bool IsWaiting(bool? stored, object? shownPayload, int failedFetches)
+        {
+            if (stored != true
+                || !ReferenceEquals(shownPayload, _over)
+                || failedFetches != _failuresAtGrant)
+            {
+                _waiting = false;
+                _over = null;
+            }
+
+            return _waiting;
+        }
+    }
+
     /// <summary>The card's line for <paramref name="card"/> (English source;
     /// localize at the view). Every consent card keeps an enabled Allow.</summary>
     public static string TextFor(Card card) => card switch
@@ -144,8 +179,8 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
 
         public const string Declined = "Syrtis isn't reading your Grok Bot limits.";
 
-        /// <summary>The Allow button after a grant the core accepted, until the
-        /// next quota payload rebuilds the card (macOS "Waiting for macOS…").</summary>
+        /// <summary>The Allow button after a grant the core accepted, until
+        /// <see cref="WaitingState"/> ends it (macOS "Waiting for macOS…").</summary>
         public const string Waiting = "Waiting…";
 
         public const string Allow = "Allow";

@@ -44,6 +44,10 @@ public sealed class DashboardModel
     /// the baseline below.</para></summary>
     private volatile bool _quotaAttempted;
 
+    /// <summary>How many quota fetches have thrown, seeded into the baseline
+    /// like <see cref="_quotaAttempted"/>. Snapshot.QuotaFailures.</summary>
+    private int _quotaFailures;
+
     // Year filter for every lens (macOS DashboardModel.year); null = all
     // time. Fetch lanes capture it per pass and drop slices fetched for a
     // stale filter, so a late old-year payload can never overwrite the new
@@ -320,6 +324,13 @@ public sealed class DashboardModel
         /// payload before ever consulting this.</para></summary>
         public WindowEquivalence.FetchOutcome QuotaOutcome =>
             LazyLaneFold.Outcome(QuotaAttempted, Quota);
+
+        /// <summary>Count of quota fetches that threw. A failed retry keeps
+        /// <see cref="Quota"/> (retained data wins), so neither the payload
+        /// nor <see cref="QuotaOutcome"/> changes; this is the only sign one
+        /// completed. The Grok Bot card's Waiting state ends on it
+        /// (GrokBotConsent.WaitingState).</summary>
+        public int QuotaFailures { get; init; }
 
         /// <summary>The persisted quota curves, for the Quota lens's two
         /// cards. A third lazy lens, read straight from the store — it does not
@@ -933,26 +944,22 @@ public sealed class DashboardModel
         }
     }
 
-    /// <summary>After the Grok Bot grant reached the core: a fresh quota
-    /// fetch now, even while one is in flight (macOS
-    /// GrokBotKeychainConsent.apply). Invalidate makes the shared coordinator
-    /// start a new core fetch instead of handing back one begun before the
-    /// grant, and makes every such older fetch, here and in the tray, discard
-    /// its payload instead of publishing it. Forced once, not queued.</summary>
-    public void RefreshQuotaNow()
-    {
-        AgentUsageFetchCoordinator.Shared.Invalidate();
-        RefreshQuota(force: true);
-    }
+    /// <summary>After the Grok Bot grant reached the core: a best-effort
+    /// quota refresh. Dropped while one is in flight (as every other
+    /// RefreshQuota call is), and that in-flight fetch may have begun before
+    /// the grant, so the grant can wait for the next poll. macOS guarantees a
+    /// refetch here (GrokBotKeychainConsent.swift: throttle invalidate plus
+    /// the RegistryChange epoch); Windows aligns in slice W6c.</summary>
+    public void RefreshQuotaNow() => RefreshQuota();
 
     /// <summary>The OAuth quota lane, macOS pollAgentUsage parity: fully
     /// independent of the parse lane so a slow provider (the fetch can hang
     /// for ~30s per agent) never delays the first paint, never holds the
     /// EcoQoS boost through a network wait, and never blocks the next
     /// graph tick behind <c>_slowInFlight</c>.</summary>
-    private void RefreshQuota(bool force = false)
+    private void RefreshQuota()
     {
-        if (Interlocked.Exchange(ref _quotaInFlight, 1) == 1 && !force)
+        if (Interlocked.Exchange(ref _quotaInFlight, 1) == 1)
         {
             return;
         }
@@ -961,15 +968,9 @@ public sealed class DashboardModel
         {
             try
             {
-                var generation = AgentUsageFetchCoordinator.Shared.Generation;
                 var quota = TryFetch(
                     () => AgentUsageFetchCoordinator.Shared.FetchAsync().GetAwaiter().GetResult(),
                     "agentUsage");
-                if (!AgentUsageFetchCoordinator.Shared.IsCurrent(generation))
-                {
-                    return; // Begun before the grant; the forced fetch publishes.
-                }
-
                 // Recorded before publishing, and outside the snapshot: the
                 // publish below is dropped entirely if the graph lane has not
                 // seeded Current yet, and this is the only thing that survives
@@ -997,7 +998,8 @@ public sealed class DashboardModel
                     // way that matters: Quota stays null, and a surface that
                     // reads null as "not yet" waits forever for an answer that
                     // already came back.
-                    Publish(s => s with { QuotaAttempted = true }, graph: null);
+                    var failures = Interlocked.Increment(ref _quotaFailures);
+                    Publish(s => s with { QuotaAttempted = true, QuotaFailures = failures }, graph: null);
                 }
             }
             finally
@@ -1073,6 +1075,7 @@ public sealed class DashboardModel
         return new(graph, null, quota, 0, [], DateTimeOffset.Now, _graphState.CostAuthoritative)
         {
             QuotaAttempted = attempted,
+            QuotaFailures = Volatile.Read(ref _quotaFailures),
         };
     }
 
