@@ -91,7 +91,7 @@ public static class QuotaLensData
             {
                 var multi = _multi.Contains(agent.ClientId);
                 var account = agent.Account;
-                if (multi && agent.HistoryScope?.Scope is null)
+                if (multi && agent.HistoryReadScope?.Scope is null)
                 {
                     continue;
                 }
@@ -106,7 +106,7 @@ public static class QuotaLensData
                     if (multi)
                     {
                         _byScope.TryAdd(
-                            (agent.ClientId, agent.HistoryScope!.Scope!, key),
+                            (agent.ClientId, agent.HistoryReadScope!.Scope!, key),
                             account.AccountKey is null
                                 ? window.Label
                                 // The window part is localized here, where it

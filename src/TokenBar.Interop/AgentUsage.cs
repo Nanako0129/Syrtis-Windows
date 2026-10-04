@@ -779,8 +779,33 @@ public sealed record AgentUsageSnapshot(
     /// account. Absent from an older core's payload, which only ever
     /// publishes the primary. Read it through <see cref="Account"/>, never
     /// compare it raw: null and "" both mean primary.</summary>
-    string? AccountKey = null) : IJsonOnDeserialized
+    string? AccountKey = null,
+    /// <summary>Antigravity primary on the agy route only: agy's login marker
+    /// read just before this card was fetched. Display-only (Antigravity
+    /// dedup); absent everywhere else.</summary>
+    string? AgyLoginMarker = null) : IJsonOnDeserialized
 {
+    /// <summary>C#-only, never decoded: the captured Antigravity account whose
+    /// recorded history this card answers from. Set only by Antigravity dedup
+    /// when it merges the agy-route primary with that account (macOS
+    /// <c>historyAccountKey</c>). Every identity and key stays on
+    /// <see cref="AccountKey"/>.</summary>
+    [JsonIgnore]
+    public string? HistoryAccountKey { get; init; }
+
+    /// <summary>C#-only: the history scope of <see cref="HistoryAccountKey"/>'s
+    /// own card, carried over because dedup drops that card.</summary>
+    [JsonIgnore]
+    public AccountScopeStatus? HistoryAccountScope { get; init; }
+
+    /// <summary>The scope every stored-series read for this card joins on: the
+    /// adopted account's when merged, else <see cref="HistoryScope"/>. Port of
+    /// macOS <c>historyReadAccountKey</c>: Windows joins stored series to a
+    /// card by history scope, not by account key, so the read is routed by
+    /// the adopted account's scope.</summary>
+    [JsonIgnore]
+    public AccountScopeStatus? HistoryReadScope => HistoryAccountKey is null ? HistoryScope : HistoryAccountScope;
+
     /// <summary>The identity of this card — a pair, never an encoded string
     /// (mirrors the core's <c>account_key_component</c>: null and "" are the
     /// primary, anything else, whitespace included, is a distinct
