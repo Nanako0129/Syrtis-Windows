@@ -549,6 +549,11 @@ public static class ClientRegistry
     /// stays a click (macOS DragGesture minimumDistance: 4).</summary>
     public const double TabDragThreshold = 4;
 
+    /// <summary>A client tab's hover text (macOS DashboardTabs.swift:70,
+    /// <c>.help("Drag to reorder")</c>). Overview, which does not drag, has
+    /// none, as on macOS.</summary>
+    public const string TabDragHint = "Drag to reorder";
+
     public static bool IsTabDrag(double dx, double dy) =>
         dx * dx + dy * dy >= TabDragThreshold * TabDragThreshold;
 

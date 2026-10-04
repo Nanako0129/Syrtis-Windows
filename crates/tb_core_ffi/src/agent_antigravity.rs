@@ -62,6 +62,9 @@ pub(crate) struct Fetched {
     pub history_scope: Result<HistoryScope, AccountScopeError>,
     pub cache_binding: Option<ProviderCacheBinding>,
     pub windows: Vec<UsageWindow>,
+    /// Set only by the agy route (`fetch_agy_cli_gated`): the login marker of
+    /// agy's credential as read BEFORE the run. `None` on every other route.
+    pub agy_login_marker: Option<String>,
 }
 
 #[derive(Debug)]
@@ -360,8 +363,11 @@ where
         Ok(stdout) => (parse_agy_usage(&stdout, now).ok(), false),
     };
     match parsed {
-        Some(fetched) => {
+        Some(mut fetched) => {
             latch.set(None);
+            // The PRE-run value: agy may switch logins during the run, and a
+            // card fetched under one login must never carry the next one's.
+            fetched.agy_login_marker = agy_login_marker(Ok(Some(before)));
             Ok(fetched)
         }
         None => {
@@ -464,15 +470,28 @@ async fn oauth_endpoint_resolves() -> bool {
     }
 }
 
+/// Turns off agy's own auto-update for the runs Syrtis starts (#204).
+///
+/// On a run whose update check is due (agy throttles it to once per 15
+/// minutes), agy spawns `agy --bg-updater`, which can start further agy
+/// children of its own. Those get a fresh console rather than the windowless
+/// one `CREATE_NO_WINDOW` gave this run, and on Windows 11 with Windows
+/// Terminal as the default terminal that console is handed to Terminal: a
+/// visible window that takes the foreground (reproduced on 188, agy 1.2.16).
+/// With this variable agy logs "Auto-update disabled via environment variable"
+/// and starts no updater. The value is `true`: `1` was measured NOT to disable
+/// it. agy run by the user in a terminal still updates itself.
+#[cfg(windows)]
+const AGY_DISABLE_AUTO_UPDATE: (&str, &str) = ("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+
+/// The `agy --print /usage` command Syrtis runs, without spawning it.
 /// Direct spawn, no shell and no Job Object (measured: a native exe whose only
 /// child is conhost; a job could also kill a browser agy started). The working
 /// directory is agy's own bin directory, not whatever Syrtis inherited.
 #[cfg(windows)]
-async fn run_agy_cli(executable: PathBuf) -> Result<Vec<u8>, AgyRunFailure> {
-    use tokio::io::AsyncReadExt as _;
-
-    let bin_dir = executable.parent().ok_or(AgyRunFailure::NotStarted)?;
-    let mut child = tokio::process::Command::new(&executable)
+fn agy_command(executable: &Path, bin_dir: &Path) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(executable);
+    command
         .args([
             "--print",
             "/usage",
@@ -482,11 +501,21 @@ async fn run_agy_cli(executable: PathBuf) -> Result<Vec<u8>, AgyRunFailure> {
             "30s",
         ])
         .current_dir(bin_dir)
+        .env(AGY_DISABLE_AUTO_UPDATE.0, AGY_DISABLE_AUTO_UPDATE.1)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    command
+}
+
+#[cfg(windows)]
+async fn run_agy_cli(executable: PathBuf) -> Result<Vec<u8>, AgyRunFailure> {
+    use tokio::io::AsyncReadExt as _;
+
+    let bin_dir = executable.parent().ok_or(AgyRunFailure::NotStarted)?;
+    let mut child = agy_command(&executable, bin_dir)
         .spawn()
         .map_err(|_| AgyRunFailure::NotStarted)?;
     // `child` moves into the future, so a timeout or an early return drops it
@@ -1068,6 +1097,7 @@ fn parse_agy_usage(body: &[u8], now: DateTime<Utc>) -> Result<Fetched, String> {
         history_scope: Err(AccountScopeError::NoTrustedEvidence),
         cache_binding: None,
         windows,
+        agy_login_marker: None,
     })
 }
 
@@ -1186,6 +1216,7 @@ fn parse_user_status(body: &str, now: DateTime<Utc>) -> Result<Fetched, String> 
         history_scope: Err(AccountScopeError::NoTrustedEvidence),
         cache_binding: None,
         windows,
+        agy_login_marker: None,
     })
 }
 
@@ -1273,6 +1304,7 @@ impl RemoteContext {
             history_scope,
             cache_binding: self.cache_binding,
             windows,
+            agy_login_marker: None,
         }
     }
 }
@@ -3622,7 +3654,7 @@ async fn auto_capture_with<I: CapturedIo>(
 /// The one place agy's `LastWritten` becomes a login marker: the FILETIME as a
 /// decimal string, `"absent"` when agy has no credential, `None` when it could
 /// not be read (the caller does nothing that poll). `tb_antigravity_login_marker`
-/// returns it, and the agy snapshot's marker (W7b) must come from here too.
+/// returns it, and so does the agy route's card (`fetch_agy_cli_gated`).
 pub(crate) fn agy_login_marker(
     last_written: Result<Option<u64>, CredentialUnreadable>,
 ) -> Option<String> {
@@ -3727,6 +3759,28 @@ pub(crate) async fn fetch_captured(
 mod tests {
     use super::*;
     use crate::agent_account_scope::test_support::TestRefreshScope;
+
+    /// #204: the agy run Syrtis starts must disable agy's auto-update, with
+    /// the value agy actually honours (`true`; `1` was measured not to work).
+    /// (`CREATE_NO_WINDOW` is not readable back from a `Command`.)
+    #[cfg(windows)]
+    #[test]
+    fn the_agy_run_disables_agys_auto_update() {
+        let command = agy_command(
+            Path::new(r"C:\agy\bin\agy.exe"),
+            Path::new(r"C:\agy\bin"),
+        );
+        let envs: Vec<_> = command.as_std().get_envs().collect();
+        assert!(
+            envs.contains(&(
+                std::ffi::OsStr::new("AGY_CLI_DISABLE_AUTO_UPDATE"),
+                Some(std::ffi::OsStr::new("true"))
+            )),
+            "agy would start its updater (and a Terminal window): {envs:?}"
+        );
+        let args: Vec<_> = command.as_std().get_args().collect();
+        assert_eq!(args, ["--print", "/usage", "--output-format", "json", "--print-timeout", "30s"]);
+    }
 
     /// An **absent** credential file must report the marker verbatim.
     ///
@@ -4572,6 +4626,7 @@ mod tests {
             history_scope: Err(AccountScopeError::NoTrustedEvidence),
             cache_binding: None,
             windows: Vec::new(),
+            agy_login_marker: None,
         }
     }
 
@@ -5244,7 +5299,7 @@ mod tests {
     /// Counting fakes for one gated poll. `last_written` is what the credential
     /// read returns (`None` = absent); `unreadable` makes the read fail.
     #[derive(Default)]
-    struct AgyFakes {
+    pub(super) struct AgyFakes {
         last_written: std::cell::Cell<Option<u64>>,
         unreadable: std::cell::Cell<bool>,
         resolves: std::cell::Cell<bool>,
@@ -5254,7 +5309,7 @@ mod tests {
     }
 
     impl AgyFakes {
-        fn signed_in(last_written: u64) -> Self {
+        pub(super) fn signed_in(last_written: u64) -> Self {
             let fakes = Self::default();
             fakes.last_written.set(Some(last_written));
             fakes.resolves.set(true);
@@ -5295,7 +5350,7 @@ mod tests {
             .await
         }
 
-        async fn poll_with(
+        pub(super) async fn poll_with(
             &self,
             latch: &AgyLatch,
             run: impl FnOnce() -> Result<Vec<u8>, AgyRunFailure>,
@@ -5305,8 +5360,24 @@ mod tests {
         }
     }
 
-    fn agy_success() -> Result<Vec<u8>, AgyRunFailure> {
+    pub(super) fn agy_success() -> Result<Vec<u8>, AgyRunFailure> {
         Ok(AGY_WINDOWS_USAGE.to_vec())
+    }
+
+    /// The card carries the marker of the login it was fetched under: agy's
+    /// credential as read BEFORE the run, not as the run left it.
+    #[tokio::test]
+    async fn agy_card_carries_the_login_marker_read_before_the_run() {
+        let fakes = AgyFakes::signed_in(1);
+        let fetched = fakes
+            .poll_with(&AgyLatch::new(), || {
+                fakes.last_written.set(Some(2));
+                agy_success()
+            })
+            .await
+            .expect("a parsed run is a card");
+        assert_eq!(fetched.agy_login_marker.as_deref(), Some("1"));
+        assert_eq!(fetched.agy_login_marker, agy_login_marker(Ok(Some(1))));
     }
 
     #[tokio::test]
@@ -5909,6 +5980,7 @@ pub(crate) mod captured_test_support {
                 history_scope,
                 cache_binding: Some(ProviderCacheBinding::primary(account_scope)),
                 windows: vec![window],
+                agy_login_marker: None,
             })
         }
     }
@@ -6833,10 +6905,10 @@ mod captured_account_tests {
 
     /// Acceptance 9. The FFI marker (`login_marker_with`, which
     /// `tb_antigravity_login_marker` calls through `SystemCapturedIo`) and
-    /// `agy_login_marker` are one function. W7b: add the agy snapshot's
-    /// stamped marker to the same byte-equality assertion here.
-    #[test]
-    fn agy_login_marker_is_one_function_for_every_path() {
+    /// `agy_login_marker` are one function, and so is the marker the agy
+    /// route stamps on its card (`fetch_agy_cli_gated`).
+    #[tokio::test]
+    async fn agy_login_marker_is_one_function_for_every_path() {
         const FILETIME: u64 = 134_037_498_000_000_000;
         let mut io = FakeIo::new("marker");
         io.agy_last_written = Ok(Some(FILETIME));
@@ -6857,6 +6929,16 @@ mod captured_account_tests {
             "the marker reads no blob"
         );
         assert_eq!(io.network_calls(), 0);
+
+        // The agy route, driven through its seam with the same `LastWritten`.
+        io.agy_last_written = Ok(Some(FILETIME));
+        let fakes = super::tests::AgyFakes::signed_in(FILETIME);
+        let card = fakes
+            .poll_with(&AgyLatch::new(), super::tests::agy_success)
+            .await
+            .expect("a parsed run is a card");
+        assert_eq!(card.agy_login_marker, function);
+        assert_eq!(card.agy_login_marker, login_marker_with(&io));
     }
 
     #[test]

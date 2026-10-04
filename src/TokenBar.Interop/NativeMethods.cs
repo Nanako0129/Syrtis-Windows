@@ -66,6 +66,24 @@ internal static partial class NativeMethods
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial nint tb_validate_claude_config_dir(string json);
 
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_set_keychain_consent(string json);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_set_antigravity_accounts(string json);
+
+    [LibraryImport(Lib)]
+    internal static partial nint tb_antigravity_capture();
+
+    [LibraryImport(Lib)]
+    internal static partial nint tb_antigravity_login_marker();
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_antigravity_auto_capture(string removedKeysJson);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_antigravity_remove(string key);
+
     [LibraryImport(Lib)]
     internal static partial void tb_free(nint ptr);
 }

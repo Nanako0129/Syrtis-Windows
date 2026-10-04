@@ -261,6 +261,22 @@ fn scoped_context(
                     .filter(|root| !own.contains(root) && is_nested(&root.to_string_lossy()))
                     .cloned(),
             );
+            // The registries compare folded strings, but the engine resolves
+            // exclusion prefixes with `canonicalize` before matching
+            // (`retain_unexcluded_scan_tasks`). A "nested" account that is an
+            // alias of this one (`<dir>\.claude` as a junction back to
+            // `dir`) would then exclude this account's own roots and empty its
+            // window. Drop any exclusion that covers one of our own roots,
+            // compared the way the engine compares. Erring here double counts
+            // an aliased neighbour; erring the other way hid real usage.
+            let resolve = |path: &std::path::Path| {
+                std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+            };
+            let own_resolved: Vec<std::path::PathBuf> = own.iter().map(|root| resolve(root)).collect();
+            excluded.retain(|path| {
+                let prefix = resolve(path);
+                !own_resolved.iter().any(|root| root.starts_with(&prefix))
+            });
             let mut excluded_scan_paths = std::collections::BTreeMap::new();
             if !excluded.is_empty() {
                 excluded_scan_paths.insert(CLAUDE.to_string(), excluded);

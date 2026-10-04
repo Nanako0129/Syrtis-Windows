@@ -73,6 +73,14 @@ public sealed class GraphRequestCoordinator
     /// numbers (marked as such) or nothing.</summary>
     internal static readonly TimeSpan SnapshotMaxAge = TimeSpan.FromDays(90);
 
+    /// <summary>How far in the future a snapshot's capture time may sit and
+    /// still be restored: one hour, as macOS (<c>SnapshotStore.futureSkewAllowance</c>,
+    /// SnapshotStore.swift:80, checked at :286). A capture time ahead of the
+    /// clock is a clock or tamper artifact; refusing every one of them would let a small
+    /// backward clock correction cost the next cold start its snapshot,
+    /// while anything past an hour is still refused.</summary>
+    internal static readonly TimeSpan FutureSkewAllowance = TimeSpan.FromHours(1);
+
     private sealed class QueryState(GraphQuery query)
     {
         public GraphQuery Query { get; } = query;
@@ -536,7 +544,7 @@ public sealed class GraphRequestCoordinator
         {
             var now = _utcNow().ToUniversalTime();
             var age = now - capturedAt.ToUniversalTime();
-            if (age < TimeSpan.Zero || age > SnapshotMaxAge)
+            if (age <= -FutureSkewAllowance || age > SnapshotMaxAge)
             {
                 return;
             }

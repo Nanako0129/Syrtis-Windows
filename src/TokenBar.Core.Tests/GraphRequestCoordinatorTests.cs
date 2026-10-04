@@ -718,12 +718,16 @@ public class GraphRequestCoordinatorTests
 
     /// <summary>A cold start the next day shows the last run's graph, marked
     /// with its capture time, instead of nothing (macOS keeps 90 days; the old
-    /// 30-minute limit dropped it). The live stages still follow, unmarked.</summary>
-    [Fact]
-    public async Task DayOldSnapshotIsRestoredAndMarkedWithItsCaptureTime()
+    /// 30-minute limit dropped it). The live stages still follow, unmarked.
+    /// A capture time up to an hour ahead of the clock is restored too, as
+    /// macOS's futureSkewAllowance allows (-25 h and +30 min below).</summary>
+    [Theory]
+    [InlineData(-25 * 60)]
+    [InlineData(30)]
+    public async Task SnapshotIsRestoredAndMarkedWithItsCaptureTime(int capturedMinutesFromNow)
     {
         var now = DateTimeOffset.UtcNow;
-        var capturedAt = now.AddHours(-25);
+        var capturedAt = now.AddMinutes(capturedMinutesFromNow);
         var completion = new TaskCompletionSource<GraphRequestCompletion>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         // The live local stage is held until the snapshot has published: a
@@ -906,7 +910,8 @@ public class GraphRequestCoordinatorTests
         foreach (var capturedAt in new[]
         {
             now - GraphRequestCoordinator.SnapshotMaxAge - TimeSpan.FromMinutes(1),
-            now.AddMinutes(1),
+            // Past macOS's one-hour future skew allowance.
+            now.AddHours(2),
         })
         {
             // The live local stage waits until the snapshot has been read and

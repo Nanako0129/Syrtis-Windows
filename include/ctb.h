@@ -167,6 +167,17 @@ char *tb_set_claude_config_dirs(const char *json);
 // registry and touches no filesystem; the input is never echoed.
 char *tb_validate_claude_config_dir(const char *json);
 
+// Replace the registry of credential reads the user has agreed to with
+// {"<client>":true|false} (only "grok-bot"); {} clears every grant. In-memory,
+// empty at launch: the caller re-applies the stored answer before the first
+// tb_agent_usage. Without a grant the grok-bot card has source
+// "keychain-consent" and the Grok Bot desktop login is not read (Windows shows
+// no OS prompt; this is the only gate). Success data:
+// {"grantedCount":N,"rejectedCount":M}. Errors are fixed codes (nullPayload,
+// invalidUtf8, invalidJson); the input is never echoed. On error nothing
+// changed.
+char *tb_set_keychain_consent(const char *json);
+
 // Replace the registry of captured Antigravity accounts with
 // [{"key":"<64 lowercase hex>","label":"..."}]; [] clears it. Each entry
 // becomes its own Antigravity card (accountKey = key) after the primary on
