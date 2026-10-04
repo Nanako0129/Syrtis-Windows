@@ -4786,9 +4786,10 @@ fn claude_direct_env_token() -> Option<String> {
 /// tell a deliberate override from a withdrawn token. The trade-off is that a
 /// token set only in a shell's temporary environment is not used.
 ///
-/// The `EnvRoot` → (HKEY, subkey) mapping lives in `env_location`, which a
-/// read-only Windows test exercises against values Windows always has; the
-/// rest is in `windows_claude_token_with` and `read_string_value`.
+/// The `EnvRoot` → (HKEY, subkey) mapping lives in `env_location`, pinned by
+/// a read-only Windows test (the exact user key, which must exist, and the
+/// machine key's `OS` value); the rest is in `windows_claude_token_with` and
+/// `read_string_value`.
 #[cfg(windows)]
 fn claude_direct_env_token() -> Option<String> {
     static LAST: Mutex<EnvCache> = Mutex::new(EnvCache::EMPTY);
@@ -4918,9 +4919,8 @@ fn windows_claude_token_with(
 
 /// One string value, read raw: REG_SZ or REG_EXPAND_SZ with `RRF_NOEXPAND`, so
 /// no other environment value is expanded into it. Not found = `Absent`; any
-/// other failure, a value over the 32 767-WCHAR environment limit, or a value
-/// still growing
-/// after three tries = `RegistryReadError`.
+/// other failure, a value longer than `MAX_UNITS` UTF-16 units, or a value
+/// still growing after three tries = `RegistryReadError`.
 #[cfg(windows)]
 fn read_string_value(
     root: windows_sys::Win32::System::Registry::HKEY,
@@ -4931,10 +4931,13 @@ fn read_string_value(
     use windows_sys::Win32::System::Registry::{
         RegGetValueW, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
     };
-    // The 32 767-WCHAR environment limit plus two NULs: RegGetValueW's size
-    // query leaves room for a terminator it may append after the stored one.
-    // Measured on 188: with (32 767 + 1) * 2 a 32 767-WCHAR REG_SZ (stored
-    // with its NUL) was refused; the test below pins 32 767 read, 32 768 not.
+    // A sanity bound, not the platform's exact environment limit (a setup-token
+    // is ~100 units): the decoded text is checked against MAX_UNITS, so the
+    // answer does not depend on whether a NUL was stored. MAX_BYTES only bounds
+    // the allocation and must leave room for the stored NUL and the one
+    // RegGetValueW's size query adds (measured on 188: a 32 767-unit REG_SZ
+    // stored with its NUL needs more than (32 767 + 1) * 2 bytes).
+    const MAX_UNITS: usize = 32_767;
     const MAX_BYTES: u32 = (32_767 + 2) * 2;
     let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
     let subkey: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
@@ -4978,6 +4981,9 @@ fn read_string_value(
             ERROR_SUCCESS => {
                 let written = &buffer[..(size as usize / 2).min(buffer.len())];
                 let text = written.split(|&unit| unit == 0).next().unwrap_or(&[]);
+                if text.len() > MAX_UNITS {
+                    return Err(RegistryReadError);
+                }
                 return String::from_utf16(text)
                     .map(Lookup::Value)
                     .map_err(|_| RegistryReadError);
@@ -13256,18 +13262,37 @@ mod tests {
         key.set("over-limit", REG_SZ, &"x".repeat(32_768));
         assert_eq!(key.read(None, "at-limit"), Ok(value(&"x".repeat(32_767))));
         assert_eq!(key.read(None, "over-limit"), Err(RegistryReadError));
+        // Stored without a terminator, the same over-long text is still
+        // refused: the decoded length decides, not the byte count.
+        let name: Vec<u16> = "over-unterminated".encode_utf16().chain(Some(0)).collect();
+        let data: Vec<u16> = "x".repeat(32_768).encode_utf16().collect();
+        // SAFETY: both buffers are live and sized as passed.
+        unsafe {
+            windows_sys::Win32::System::Registry::RegSetValueExW(
+                key.handle,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                data.as_ptr().cast(),
+                (data.len() * 2) as u32,
+            );
+        }
+        assert_eq!(key.read(None, "over-unterminated"), Err(RegistryReadError));
     }
 
-    /// `env_location` points at the real environment keys: read-only, and
-    /// only values Windows always has (never the token).
+    /// `env_location` points at the real environment keys. Read-only; never
+    /// reads the token.
     #[cfg(windows)]
     #[test]
     fn env_location_reads_the_user_and_machine_environments() {
         use windows_sys::Win32::Foundation::ERROR_SUCCESS;
         use windows_sys::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, KEY_READ};
-        // User: the key exists (every loaded profile has HKCU\Environment) and
-        // it is not the machine key, which is the only one carrying OS.
+        use windows_sys::Win32::System::Registry::HKEY_CURRENT_USER;
+        // User: exactly HKCU\Environment (the key any loaded profile has; no
+        // value there is guaranteed, so the mapping itself is asserted), the
+        // key opens, and it is not the machine key, the only one carrying OS.
         let (hkey, subkey) = env_location(EnvRoot::User);
+        assert_eq!((hkey, subkey), (HKEY_CURRENT_USER, "Environment"));
         let wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
         let mut handle = std::ptr::null_mut();
         // SAFETY: `wide` is NUL-terminated; `handle` is closed right after.
