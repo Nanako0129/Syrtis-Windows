@@ -32,12 +32,15 @@ public class AntigravityAccountsTests
         public Func<AntigravityAutoCaptureResult> AutoResult =
             () => new AntigravityAutoCaptureResult("captured", KeyA, "a@example.com");
         public Exception? RemoveError;
+        public Exception? InstallError;
         public ManualResetEventSlim? AutoGate;
+        public ManualResetEventSlim? MarkerGate;
 
         public AntigravityAutoCapture.Io Io => new(
             Marker: () =>
             {
                 Calls.Enqueue("marker");
+                MarkerGate?.Wait(TimeSpan.FromSeconds(10));
                 lock (Markers)
                 {
                     if (Markers.Count > 0)
@@ -67,7 +70,14 @@ public class AntigravityAccountsTests
                     throw error;
                 }
             },
-            Install: () => Calls.Enqueue("install"));
+            Install: () =>
+            {
+                Calls.Enqueue("install");
+                if (InstallError is { } error)
+                {
+                    throw error;
+                }
+            });
     }
 
     private static UsageWindow Window(string cardId, double remaining, PaceStatus? pace = null, HistoricalPace? historical = null) =>
@@ -179,7 +189,8 @@ public class AntigravityAccountsTests
 
         Assert.True(on);
         Assert.True(capture.IsEnabled);
-        Assert.Equal(["confirm", "confirm", "marker", "auto", "install"], io.Calls.ToList());
+        // The second "marker" is the re-read before binding.
+        Assert.Equal(["confirm", "confirm", "marker", "auto", "install", "marker"], io.Calls.ToList());
     }
 
     // ---- 3. toggle off (R7-1) -------------------------------------------------
@@ -452,6 +463,105 @@ public class AntigravityAccountsTests
         Assert.Equal(2, attempts); // the resumed poll re-attempted the same marker
         Assert.Equal("M1", capture.LastAttemptedMarker);
         Assert.Equal((KeyA, "M1"), capture.Current);
+    }
+
+    // ---- review fixes (f404f05..9c57337 /code-review) ------------------------
+
+    /// <summary>An automatic attempt binds only when agy's marker is the same
+    /// after the attempt as when it started (stricter than macOS SW:306).</summary>
+    [Theory]
+    [InlineData("M1", "M1", true)]
+    [InlineData("M1", "M2", false)]
+    public async Task AnAttemptBindsOnlyIfTheMarkerHeldDuringIt(string before, string after, bool bound)
+    {
+        var store = TempStore();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        var io = new FakeIo();
+        io.Markers.Enqueue(before);
+        io.Markers.Enqueue(after);
+        var capture = new AntigravityAutoCapture(io.Io, store);
+
+        await capture.Poll();
+
+        Assert.Equal([new AntigravityAccount(KeyA, "a@example.com")], AntigravityAccounts.Load(store));
+        Assert.Null(capture.LastErrorCode);
+        if (bound)
+        {
+            Assert.Equal((KeyA, before), capture.Current);
+        }
+        else
+        {
+            Assert.Null(capture.Current.Key);
+        }
+    }
+
+    [Fact]
+    public async Task AThrowingInstallerOrSubscriberNeverLeavesItBusy()
+    {
+        var store = TempStore();
+        var io = new FakeIo { InstallError = new InvalidOperationException() };
+        io.Markers.Enqueue("M1");
+        io.Markers.Enqueue("M2");
+        var capture = new AntigravityAutoCapture(io.Io, store);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => capture.Poll());
+        Assert.False(capture.Busy);
+
+        io.InstallError = null;
+        await capture.Poll();
+        Assert.Equal(2, io.Calls.Count(c => c == "auto"));
+
+        capture.StateChanged += () => throw new InvalidOperationException();
+        await capture.ManualCapture();
+        Assert.False(capture.Busy);
+        Assert.Equal(KeyA, capture.Current.Key);
+    }
+
+    [Fact]
+    public async Task APreFetchThatChangesNothingRaisesNoStateChanged()
+    {
+        var store = TempStore();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        var capture = new AntigravityAutoCapture(new FakeIo().Io, store);
+        await (await capture.PrepareForFetch())!; // attempts M1 once
+
+        var raised = 0;
+        capture.StateChanged += () => Interlocked.Increment(ref raised);
+        await (await capture.PrepareForFetch())!;
+
+        Assert.Equal(0, raised);
+    }
+
+    [Fact]
+    public async Task AStalledMarkerReadNeitherHoldsTheFetchNorCaptures()
+    {
+        var store = TempStore();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        var gate = new ManualResetEventSlim(false);
+        var io = new FakeIo { MarkerGate = gate };
+        var capture = new AntigravityAutoCapture(io.Io, store, markerTimeout: TimeSpan.FromMilliseconds(200));
+
+        var run = Task.Run(() => AntigravityFetch.Run(
+            () => { io.Calls.Enqueue("fetch"); return Payload(Primary()); }, null, capture));
+
+        Assert.Same(run, await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(3))));
+        Assert.Contains("fetch", io.Calls);
+        Assert.DoesNotContain("auto", io.Calls);
+        gate.Set();
+    }
+
+    [Theory]
+    [InlineData("FFI returned NULL", AntigravityAutoCapture.UnexpectedError)]
+    [InlineData("FFI envelope missing boolean 'ok'", AntigravityAutoCapture.UnexpectedError)]
+    [InlineData("account_mismatch", "account_mismatch")]
+    public async Task OnlyAKnownCoreCodeIsRecordedAsTheError(string message, string recorded)
+    {
+        var io = new FakeIo { CaptureResult = () => throw new TbCoreException(message) };
+        var capture = new AntigravityAutoCapture(io.Io, TempStore());
+
+        await capture.ManualCapture();
+
+        Assert.Equal(recorded, capture.LastErrorCode);
     }
 
     // ---- 8. remove ------------------------------------------------------------

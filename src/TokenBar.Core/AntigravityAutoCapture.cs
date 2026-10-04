@@ -65,6 +65,7 @@ public sealed class AntigravityAutoCapture
     private readonly Io _io;
     private readonly SettingsStore _store;
     private readonly Action<string> _log;
+    private readonly TimeSpan _markerTimeout;
     private string? _lastAttemptedMarker;
     private string? _currentKey;
     private string? _currentMarker;
@@ -78,11 +79,20 @@ public sealed class AntigravityAutoCapture
     /// redraws). On any thread; handlers must not block.</summary>
     public event Action? StateChanged;
 
-    public AntigravityAutoCapture(Io io, SettingsStore store, Action<string>? log = null)
+    /// <summary>How long a marker read may take before this poll treats it
+    /// as "no marker" (macOS AGY_MARKER_TIMEOUT, 3 s). The read is one
+    /// CredReadW of agy's entry and normally takes milliseconds; the bound
+    /// keeps a stalled Credential Manager from holding the shared quota fetch.
+    /// A timed-out read keeps its thread-pool thread until it returns.</summary>
+    public static readonly TimeSpan MarkerTimeout = TimeSpan.FromSeconds(3);
+
+    public AntigravityAutoCapture(
+        Io io, SettingsStore store, Action<string>? log = null, TimeSpan? markerTimeout = null)
     {
         _io = io;
         _store = store;
         _log = log ?? (_ => { });
+        _markerTimeout = markerTimeout ?? MarkerTimeout;
         try
         {
             if (store.GetString(CurrentKey) is { Length: > 0 } raw
@@ -147,10 +157,16 @@ public sealed class AntigravityAutoCapture
 
         if (marker is null)
         {
-            marker = await TryMarker().ConfigureAwait(false);
-            lock (_gate)
+            try
             {
-                _checking = false;
+                marker = await TryMarker().ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_gate)
+                {
+                    _checking = false;
+                }
             }
         }
 
@@ -179,49 +195,67 @@ public sealed class AntigravityAutoCapture
             return;
         }
 
-        Notify(changed);
+        var cleared = changed;
         changed = false;
-        var removed = AntigravityAccounts.RemovedKeys(_store);
-        AntigravityAutoCaptureResult? outcome = null;
-        string? code = null;
         try
         {
-            outcome = await Task.Run(() => _io.AutoCapture(removed)).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            code = CodeOf(ex);
-            _log($"antigravity auto-capture failed: {ex.GetType().Name}");
-        }
+            Notify(cleared);
+            var removed = AntigravityAccounts.RemovedKeys(_store);
+            AntigravityAutoCaptureResult? outcome = null;
+            string? code = null;
+            try
+            {
+                outcome = await Task.Run(() => _io.AutoCapture(removed)).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                code = CodeOf(ex);
+                _log($"antigravity auto-capture failed: {ex.GetType().Name}");
+            }
 
-        if (outcome is { Status: ("captured" or "unchanged") and var status, Key: { } key, Label: { } label })
-        {
-            AntigravityAccounts.Mutate(_store, _io.Install, accounts =>
-                // `unchanged` keeps a label already listed; only a fresh
-                // capture refreshes it.
-                status == "unchanged" && accounts.Any(a => a.Key == key)
-                    ? accounts
-                    : AntigravityAccounts.Adding(new AntigravityAccount(key, label), accounts));
-            if (IsEnabled)
+            if (outcome is { Status: ("captured" or "unchanged") and var status, Key: { } key, Label: { } label })
+            {
+                AntigravityAccounts.Mutate(_store, _io.Install, accounts =>
+                    // `unchanged` keeps a label already listed; only a fresh
+                    // capture refreshes it.
+                    status == "unchanged" && accounts.Any(a => a.Key == key)
+                        ? accounts
+                        : AntigravityAccounts.Adding(new AntigravityAccount(key, label), accounts));
+                if (IsEnabled)
+                {
+                    // Bound only if agy's marker did not move during the
+                    // attempt, as ManualCapture: the key is the account agy
+                    // was signed into when the core read it, and a sign-in
+                    // that landed meanwhile would label the next login's card
+                    // with this one's email. Stricter than macOS (SW:306
+                    // binds to the pre-attempt marker unconditionally). A
+                    // moved marker leaves it unbound; the next fetch sees the
+                    // new marker and attempts again.
+                    var after = await TryMarker().ConfigureAwait(false);
+                    lock (_gate)
+                    {
+                        if (after == marker)
+                        {
+                            changed = SetCurrentLocked(key, marker);
+                        }
+                    }
+                }
+            }
+            else if (code == "paused")
             {
                 lock (_gate)
                 {
-                    changed = SetCurrentLocked(key, marker);
+                    _paused = true;
+                    changed = ClearCurrentLocked();
                 }
             }
         }
-        else if (code == "paused")
+        finally
         {
             lock (_gate)
             {
-                _paused = true;
-                changed = ClearCurrentLocked();
+                _busy = false;
             }
-        }
-
-        lock (_gate)
-        {
-            _busy = false;
         }
 
         Notify(changed);
@@ -245,14 +279,24 @@ public sealed class AntigravityAutoCapture
             _checking = true;
         }
 
-        var marker = await TryMarker().ConfigureAwait(false);
-        var changed = false;
+        string? marker;
+        try
+        {
+            marker = await TryMarker().ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                _checking = false;
+            }
+        }
+
         lock (_gate)
         {
-            _checking = false;
             if (marker is not null && marker != _lastAttemptedMarker)
             {
-                changed = ClearCurrentLocked();
+                ClearCurrentLocked();
             }
         }
 
@@ -261,8 +305,19 @@ public sealed class AntigravityAutoCapture
             return null;
         }
 
-        Notify(changed);
-        return Task.Run(() => Poll(marker));
+        // No notification: Busy, Paused and the error did not change, so
+        // Settings has nothing to redraw, and the fetch that called this is
+        // itself the refresh a cleared binding needs (it applies dedup after
+        // this, to a payload every consumer receives), so no poller is woken.
+
+        var poll = Task.Run(() => Poll(marker));
+        // Discarded by the fetch: observe a fault here, type only.
+        _ = poll.ContinueWith(
+            done => _log($"antigravity auto-capture poll failed: {done.Exception?.InnerException?.GetType().Name}"),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+        return poll;
     }
 
     private async Task PollIfOwed()
@@ -334,53 +389,59 @@ public sealed class AntigravityAutoCapture
             _errorCode = null;
         }
 
-        Notify(false);
-        // The marker before AND after: the Settings steps say to sign agy back
-        // in right after pressing Capture, and a sign-in that lands while the
-        // capture runs would otherwise bind this key to the NEXT login's
-        // marker. Bound only if equal.
-        var before = await TryMarker().ConfigureAwait(false);
-        AntigravityAccount? captured = null;
-        try
-        {
-            captured = await Task.Run(_io.Capture).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _log($"antigravity capture failed: {ex.GetType().Name}");
-            lock (_gate)
-            {
-                _errorCode = CodeOf(ex);
-            }
-        }
-
         var changed = false;
         var resume = false;
-        if (captured is not null)
+        try
         {
-            AntigravityAccounts.Mutate(_store, _io.Install, accounts => AntigravityAccounts.Adding(captured, accounts));
-            AntigravityAccounts.SaveRemovedKeys(
-                _store, [.. AntigravityAccounts.RemovedKeys(_store).Where(k => k != captured.Key)]);
-            // The button is the consent, whether or not automatic capture is
-            // on; when agy signs in elsewhere the marker moves and dedup stops.
-            var after = await TryMarker().ConfigureAwait(false);
-            lock (_gate)
+            Notify(false);
+            // The marker before AND after: the Settings steps say to sign agy
+            // back in right after pressing Capture, and a sign-in that lands
+            // while the capture runs would otherwise bind this key to the NEXT
+            // login's marker. Bound only if equal.
+            var before = await TryMarker().ConfigureAwait(false);
+            AntigravityAccount? captured = null;
+            try
             {
-                changed = before is not null && before == after
-                    ? SetCurrentLocked(captured.Key, after)
-                    : ClearCurrentLocked();
-                if (_paused)
+                captured = await Task.Run(_io.Capture).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _log($"antigravity capture failed: {ex.GetType().Name}");
+                lock (_gate)
                 {
-                    _paused = false;
-                    _lastAttemptedMarker = null;
-                    resume = IsEnabled;
+                    _errorCode = CodeOf(ex);
+                }
+            }
+
+            if (captured is not null)
+            {
+                AntigravityAccounts.Mutate(_store, _io.Install, accounts => AntigravityAccounts.Adding(captured, accounts));
+                AntigravityAccounts.SaveRemovedKeys(
+                    _store, [.. AntigravityAccounts.RemovedKeys(_store).Where(k => k != captured.Key)]);
+                // The button is the consent, whether or not automatic capture
+                // is on; when agy signs in elsewhere the marker moves and
+                // dedup stops.
+                var after = await TryMarker().ConfigureAwait(false);
+                lock (_gate)
+                {
+                    changed = before is not null && before == after
+                        ? SetCurrentLocked(captured.Key, after)
+                        : ClearCurrentLocked();
+                    if (_paused)
+                    {
+                        _paused = false;
+                        _lastAttemptedMarker = null;
+                        resume = IsEnabled;
+                    }
                 }
             }
         }
-
-        lock (_gate)
+        finally
         {
-            _busy = false;
+            lock (_gate)
+            {
+                _busy = false;
+            }
         }
 
         Notify(changed);
@@ -408,52 +469,57 @@ public sealed class AntigravityAutoCapture
             _errorCode = null;
         }
 
-        Notify(false);
-        string? code = null;
+        var changed = false;
         try
         {
-            await Task.Run(() => _io.Remove(key)).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            code = CodeOf(ex);
-            _log($"antigravity remove failed: {ex.GetType().Name}");
-        }
-
-        var changed = false;
-        // An invalid key has no Credential Manager entry and no card (the core
-        // registry rejects it): dropping the row is all that is left.
-        if (code is null or "invalid_key")
-        {
-            AntigravityAccounts.Mutate(_store, _io.Install, accounts => [.. accounts.Where(a => a.Key != key)]);
-            lock (_gate)
+            Notify(false);
+            string? code = null;
+            try
             {
-                if (_currentKey == key)
+                await Task.Run(() => _io.Remove(key)).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                code = CodeOf(ex);
+                _log($"antigravity remove failed: {ex.GetType().Name}");
+            }
+
+            // An invalid key has no Credential Manager entry and no card (the
+            // core registry rejects it): dropping the row is all that is left.
+            if (code is null or "invalid_key")
+            {
+                AntigravityAccounts.Mutate(_store, _io.Install, accounts => [.. accounts.Where(a => a.Key != key)]);
+                lock (_gate)
                 {
-                    changed = ClearCurrentLocked();
+                    if (_currentKey == key)
+                    {
+                        changed = ClearCurrentLocked();
+                    }
+                }
+
+                if (IsEnabled)
+                {
+                    var removed = AntigravityAccounts.RemovedKeys(_store);
+                    if (!removed.Contains(key))
+                    {
+                        AntigravityAccounts.SaveRemovedKeys(_store, [.. removed, key]);
+                    }
                 }
             }
-
-            if (IsEnabled)
+            else
             {
-                var removed = AntigravityAccounts.RemovedKeys(_store);
-                if (!removed.Contains(key))
+                lock (_gate)
                 {
-                    AntigravityAccounts.SaveRemovedKeys(_store, [.. removed, key]);
+                    _errorCode = code;
                 }
             }
         }
-        else
+        finally
         {
             lock (_gate)
             {
-                _errorCode = code;
+                _busy = false;
             }
-        }
-
-        lock (_gate)
-        {
-            _busy = false;
         }
 
         Notify(changed);
@@ -491,21 +557,44 @@ public sealed class AntigravityAutoCapture
     }
 
     /// <summary>Settings redraws; when agy's current account changed, the
-    /// pollers refetch so the dedup follows now, not a cycle later.</summary>
+    /// pollers refetch so the dedup follows now, not a cycle later.
+    /// A throwing subscriber is logged (type only) and does not stop the
+    /// operation that notified.</summary>
     private void Notify(bool currentChanged)
-    {
-        StateChanged?.Invoke();
-        if (currentChanged)
-        {
-            AntigravityAccounts.RaiseChanged();
-        }
-    }
-
-    private async Task<string?> TryMarker()
     {
         try
         {
-            return await Task.Run(_io.Marker).ConfigureAwait(false);
+            StateChanged?.Invoke();
+            if (currentChanged)
+            {
+                AntigravityAccounts.RaiseChanged();
+            }
+        }
+        catch (Exception ex)
+        {
+            _log($"antigravity state subscriber failed: {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>agy's marker, or null when the read failed or took longer than
+    /// the marker timeout (this poll then does nothing, as macOS's None).</summary>
+    private async Task<string?> TryMarker()
+    {
+        var read = Task.Run(_io.Marker);
+        try
+        {
+            if (await Task.WhenAny(read, Task.Delay(_markerTimeout)).ConfigureAwait(false) != read)
+            {
+                _log("antigravity marker timed out");
+                _ = read.ContinueWith(
+                    static done => _ = done.Exception,
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+                return null;
+            }
+
+            return await read.ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -514,7 +603,23 @@ public sealed class AntigravityAutoCapture
         }
     }
 
-    /// <summary>The core's fixed code, or <see cref="UnexpectedError"/> for
-    /// anything else (a missing DLL, a malformed envelope).</summary>
-    private static string CodeOf(Exception ex) => ex is TbCoreException core ? core.Message : UnexpectedError;
+    /// <summary>Every fixed code ctb.h lists for tb_antigravity_capture,
+    /// tb_antigravity_auto_capture, tb_antigravity_remove and
+    /// tb_antigravity_login_marker.</summary>
+    private static readonly HashSet<string> CoreCodes =
+    [
+        "agy_not_signed_in", "agy_login_unreadable", "agy_login_missing_identity",
+        "oauth_client_not_found", "oauth_client_rejected", "refresh_rejected",
+        "refresh_unreachable", "account_mismatch", "invalid_credential_format",
+        "keychain_write_failed", "keychain_delete_failed", "invalid_key",
+        "not_signed_in", "paused", "invalid_removed_keys", "marker_unavailable",
+    ];
+
+    /// <summary>The core's code when the failure is a TbCoreException whose
+    /// message is one of <see cref="CoreCodes"/>; <see cref="UnexpectedError"/>
+    /// for everything else: any other exception type, and a TbCoreException
+    /// carrying free text (a NULL return, malformed JSON or UTF-8, a missing
+    /// envelope field, a caught panic).</summary>
+    private static string CodeOf(Exception ex) =>
+        ex is TbCoreException core && CoreCodes.Contains(core.Message) ? core.Message : UnexpectedError;
 }

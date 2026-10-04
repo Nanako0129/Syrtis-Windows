@@ -722,6 +722,11 @@ public partial class App : Application
             store,
             DevLog.Write);
         Core.AccountLabel.AntigravityLabel = key => Core.AntigravityAccounts.Label(store, key);
+        // A change that lands while the shared fetch is in flight (the capture
+        // PrepareForFetch started finishing during that same fetch) owes one
+        // more fetch; the consumers' own refresh would be dropped by their
+        // in-flight guard.
+        Core.AntigravityAccounts.Changed += Core.AgentUsageFetchCoordinator.Shared.RequestFollowUp;
     }
 
     private static void StartClaudeExtraRoots()

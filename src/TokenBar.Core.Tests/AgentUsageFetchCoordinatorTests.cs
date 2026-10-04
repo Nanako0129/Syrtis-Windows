@@ -34,6 +34,41 @@ public class AgentUsageFetchCoordinatorTests
         Assert.Equal(2, Volatile.Read(ref calls));
     }
 
+    /// <summary>A follow-up requested while a fetch is in flight makes that
+    /// task fetch exactly once more (two requests still owe one), and its
+    /// callers get the newer payload; with nothing in flight it owes nothing.</summary>
+    [Fact]
+    public async Task AFollowUpRequestedDuringAFetchRunsExactlyOnceMore()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        var coordinator = new AgentUsageFetchCoordinator(() =>
+        {
+            var n = Interlocked.Increment(ref calls);
+            if (n == 1)
+            {
+                started.TrySetResult();
+                release.Task.GetAwaiter().GetResult();
+            }
+
+            return new AgentUsagePayload(n.ToString(), []);
+        });
+
+        var first = coordinator.FetchAsync();
+        await started.Task;
+        coordinator.RequestFollowUp();
+        coordinator.RequestFollowUp();
+        release.SetResult();
+
+        Assert.Equal("2", (await first).GeneratedAt);
+        Assert.Equal(2, Volatile.Read(ref calls));
+
+        coordinator.RequestFollowUp(); // nothing in flight: owes nothing
+        Assert.Equal("3", (await coordinator.FetchAsync()).GeneratedAt);
+        Assert.Equal(3, Volatile.Read(ref calls));
+    }
+
     [Fact]
     public async Task FailedFetchIsNotCached()
     {
