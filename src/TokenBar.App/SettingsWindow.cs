@@ -342,10 +342,11 @@ public sealed partial class SettingsWindow : Window
     /// were last built from (<see cref="QuotaSourceChoices"/>).</summary>
     private IReadOnlySet<string>? _menuBarQuotaChoices;
 
-    /// <summary>The unavailable-selection row's label the menu-bar page was
-    /// built with: "—" before any payload becomes "Unavailable selection"
-    /// once one arrives without the pick, which offers no new choice.</summary>
-    private string? _menuBarUnavailableLabel;
+    /// <summary>Whether the menu-bar page was built before any quota: an
+    /// explicit pick then reads "—", and the first payload must relabel it
+    /// even when it offers no new choice (the picked agent errored). Once,
+    /// so a flapping agent never rebuilds the page under the user.</summary>
+    private bool _menuBarBuiltWithoutQuota;
     private string? _dashboardQuotaKey;
 
     /// <summary>Whether the attribution page was built before any quota
@@ -377,7 +378,7 @@ public sealed partial class SettingsWindow : Window
         var store = AppSettings.Store;
         var shownRebuilt = false;
         if (QuotaSourceChoices.OffersNewChoice(window._menuBarQuotaChoices, payload)
-            || UnavailableQuotaRow(payload)?.Label != window._menuBarUnavailableLabel)
+            || (window._menuBarBuiltWithoutQuota && payload is not null))
         {
             window._pages["menubar"] = window.BuildMenuBarPage(store);
             shownRebuilt |= window._selectedTag == "menubar";
@@ -562,8 +563,8 @@ public sealed partial class SettingsWindow : Window
             payload, persistedSelection);
         var choices = QuotaSourceChoices.Of(payload).ToList();
         _menuBarQuotaChoices = QuotaSourceChoices.Selections(payload);
-        var unavailable = UnavailableQuotaRow(payload);
-        _menuBarUnavailableLabel = unavailable?.Label;
+        var unavailable = QuotaSourceChoices.Unavailable(payload, selection);
+        _menuBarBuiltWithoutQuota = payload is null;
         if (unavailable is { } row)
         {
             choices.Add(row);
@@ -580,12 +581,6 @@ public sealed partial class SettingsWindow : Window
 
         return panel;
     }
-
-    private static (string Selection, string Label)? UnavailableQuotaRow(AgentUsagePayload? payload) =>
-        QuotaSourceChoices.Unavailable(payload, QuotaSelectionPolicy.EffectiveSelection(
-            payload,
-            AppSettings.Store.GetString("tokenbar.quota.source", QuotaResolver.Auto)
-                ?? QuotaResolver.Auto));
 
     // ── Dashboard page: Agent limits, Client tabs, Live trace, Flyout size ──
     private StackPanel BuildDashboardPage(SettingsStore store)
