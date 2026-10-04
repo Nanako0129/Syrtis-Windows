@@ -554,13 +554,19 @@ public sealed partial class SettingsWindow : Window
         var payload = _quota();
         var selection = QuotaSelectionPolicy.EffectiveSelection(
             payload, persistedSelection);
-        var choices = QuotaSourceChoices.Of(payload);
+        var choices = QuotaSourceChoices.Of(payload).ToList();
         _menuBarQuotaChoices = QuotaSourceChoices.Selections(payload);
+        var unavailable = QuotaSourceChoices.Unavailable(payload, selection);
+        if (unavailable is { } row)
+        {
+            choices.Add(row);
+        }
 
         var quotaGroup = new StackPanel { Spacing = 8 };
         quotaGroup.Children.Add(RadioGroup(
             "quota.source", choices, selection,
-            raw => store.SetString("tokenbar.quota.source", raw)));
+            raw => store.SetString("tokenbar.quota.source", raw),
+            disabledRaw: unavailable?.Selection));
         quotaGroup.Children.Add(Hint(
             "Feeds the gauge icon and the Quota left tray mode.".Localized()));
         panel.Children.Add(Section("Quota source".Localized(), quotaGroup));
@@ -1955,7 +1961,7 @@ public sealed partial class SettingsWindow : Window
 
     private static StackPanel RadioGroup(
         string group, IEnumerable<(string Raw, string Label)> options,
-        string current, Action<string> pick)
+        string current, Action<string> pick, string? disabledRaw = null)
     {
         var stack = new StackPanel { Spacing = 2 };
         foreach (var (raw, label) in options)
@@ -1965,6 +1971,7 @@ public sealed partial class SettingsWindow : Window
                 Content = label,
                 GroupName = group,
                 IsChecked = raw == current,
+                IsEnabled = raw != disabledRaw,
                 FontSize = 12,
                 MinHeight = 28,
                 Padding = new Thickness(6, 0, 0, 0),

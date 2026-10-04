@@ -65,6 +65,36 @@ public class QuotaSourceChoicesTests
         Assert.False(QuotaSourceChoices.OffersNewChoice(built, Payload(Codex, Copilot)));
     }
 
+    // The user picked a Copilot window, then Copilot errored (its last-good
+    // lived only in memory, gone after a restart): the list used to drop it
+    // with nothing checked. It now stays as a disabled row, which the radio
+    // group checks because it is the current selection.
+    [Fact]
+    public void AnUnavailableSelectionStaysListedDisabled()
+    {
+        const string failedCopilot =
+            """{"clientId":"copilot","source":"oauth","updatedAt":"2026-10-05T00:00:00Z","windows":[],"error":"blocked"}""";
+        var payload = Payload(Codex, failedCopilot);
+        var selection = QuotaSelectionPolicy.EffectiveSelection(
+            payload, QuotaResolver.Selection("copilot", "premium.v1"));
+
+        Assert.DoesNotContain(selection, QuotaSourceChoices.Selections(payload));
+        var row = QuotaSourceChoices.Unavailable(payload, selection);
+        Assert.Equal(selection, row?.Selection);
+        Assert.Equal($"{ClientRegistry.Style("copilot").DisplayName} · Unavailable selection", row?.Label);
+    }
+
+    [Fact]
+    public void AnOfferedOrAutoSelectionHasNoUnavailableRow()
+    {
+        var payload = Payload(Codex, Copilot);
+
+        Assert.Null(QuotaSourceChoices.Unavailable(payload, QuotaResolver.Auto));
+        Assert.Null(QuotaSourceChoices.Unavailable(null, QuotaResolver.Auto));
+        Assert.Null(QuotaSourceChoices.Unavailable(
+            payload, QuotaResolver.Selection("copilot", "premium.v1")));
+    }
+
     [Fact]
     public void TheDashboardKeyChangesWhenANewAgentReports() =>
         Assert.NotEqual(

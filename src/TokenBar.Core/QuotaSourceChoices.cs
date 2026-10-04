@@ -29,6 +29,27 @@ public static class QuotaSourceChoices
         return choices;
     }
 
+    /// <summary>The persisted selection as a disabled, checked row when the
+    /// payload does not offer it (its agent errored or is gone, e.g. a
+    /// last-good that lived only in memory before a restart), so the user can
+    /// still see what is selected. Null for Auto or an offered selection. The
+    /// persisted value is never rewritten. Port of macOS SettingsPanel
+    /// (availableClientIds + [selected], "Unavailable selection").</summary>
+    public static (string Selection, string Label)? Unavailable(
+        AgentUsagePayload? payload, string selection)
+    {
+        if (selection == QuotaResolver.Auto
+            || Of(payload).Any(choice => choice.Selection == selection))
+        {
+            return null;
+        }
+
+        var separator = selection.IndexOf('|');
+        var clientId = separator < 0 ? selection : selection[..separator];
+        return (selection,
+            $"{ClientRegistry.Style(clientId).DisplayName} · {"Unavailable selection".Localized()}");
+    }
+
     /// <summary>The selection keys a payload offers.</summary>
     public static IReadOnlySet<string> Selections(AgentUsagePayload? payload) =>
         Of(payload).Select(choice => choice.Selection).ToHashSet(StringComparer.Ordinal);
