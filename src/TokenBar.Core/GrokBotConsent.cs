@@ -183,7 +183,14 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
         /// <see cref="WaitingState"/> ends it (macOS "Waiting for macOS…").</summary>
         public const string Waiting = "Waiting…";
 
-        public const string Allow = "Allow";
+        /// <summary>The Allow button's table key, rendered with
+        /// <c>LocalizedKey(AllowEnglish)</c>. Not the bare "Allow" key: that
+        /// one is the status badge (<c>AgentLimitsText.SetupBadgeKey</c>), a
+        /// state ("待授權") where this is an action ("允許"), and one key
+        /// cannot carry both (macOS <c>consent.action.allow</c>).</summary>
+        public const string Allow = "consent.action.allow";
+
+        public const string AllowEnglish = "Allow";
 
         public const string NotNow = "Not now";
 

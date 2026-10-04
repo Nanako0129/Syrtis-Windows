@@ -47,16 +47,6 @@ public static class RefreshTip
     /// with a refresh still running is not tinted.</summary>
     public static bool ShowsStaleRestore(DateTimeOffset? restoredAt, bool restoreFailed) =>
         restoredAt is not null && restoreFailed;
-
-    /// <summary>The footer's "updated …". A restored snapshot can be up to 90
-    /// days old, so it reads as an age ("updated 1d ago") rather than a bare
-    /// time of day that would pass for today; live data keeps the clock
-    /// time.</summary>
-    public static string Footer(
-        DateTimeOffset? restoredAt, DateTimeOffset fetchedAt, DateTimeOffset now) =>
-        "updated {0}".Localized(restoredAt is { } at
-            ? Format.RelativeTime((ulong)Math.Max(0, at.ToUnixTimeSeconds()), now)
-            : fetchedAt.ToString("HH:mm:ss", System.Globalization.CultureInfo.CurrentCulture));
 }
 
 public static class GraphResumePolicy
@@ -104,9 +94,16 @@ public static class LazyLaneActivation
         bool Hourly, bool Agents, bool QuotaHistory, bool WindowUsage);
 
     /// <summary>Quota's card and its window-usage export open together, the
-    /// same pairing <c>DashboardView.SwitchTo</c> already fetches together.</summary>
+    /// same pairing <c>DashboardView.SwitchTo</c> already fetches together.
+    /// Overview wants the quota history too: its Agent-limits card draws the
+    /// recent-trend arrow (and, in the Chart layout, the sparkline) from those
+    /// curves. macOS refreshes the curves with every quota card refresh,
+    /// whichever lens is open (DashboardModel.swift, windowCurves); without
+    /// this the Overview card showed arrows only after a Quota visit had left
+    /// history behind in the snapshot.</summary>
     public static Wanted For(AppView view) => view switch
     {
+        AppView.Overview => new Wanted(false, false, true, false),
         AppView.Hourly => new Wanted(true, false, false, false),
         AppView.Agents => new Wanted(false, true, false, false),
         AppView.Quota => new Wanted(false, false, true, true),

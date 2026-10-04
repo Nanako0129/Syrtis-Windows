@@ -208,6 +208,21 @@ public class GrokBotConsentTests : IDisposable
         }
     }
 
+    // The badge on a consent card names a state ("待授權"), the button an
+    // action ("允許"). Sharing the bare "Allow" key, one table entry would
+    // overwrite the other (seen when merging main's badge into #190).
+    [Fact]
+    public void AllowButtonAndAllowBadgeAreDifferentKeys()
+    {
+        var badge = AgentLimitsText.SetupBadgeKey(Snapshot("grok-bot", "keychain-consent"));
+        foreach (var table in new[] { "strings-zh-Hant.json", "strings-zh-Hans.json" })
+        {
+            var entries = JsonSerializer.Deserialize<Dictionary<string, string>>(
+                File.ReadAllText(Path.Combine(AppContext.BaseDirectory, table)))!;
+            Assert.NotEqual(entries[badge!], entries[GrokBotConsent.Copy.Allow]);
+        }
+    }
+
     // The real export through the P/Invoke: both payloads the store sends are
     // accepted, and an error envelope surfaces as an exception (which is what
     // keeps Answer from persisting a state the core never took). Needs the

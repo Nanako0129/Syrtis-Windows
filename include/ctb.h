@@ -178,6 +178,42 @@ char *tb_validate_claude_config_dir(const char *json);
 // changed.
 char *tb_set_keychain_consent(const char *json);
 
+// Replace the registry of captured Antigravity accounts with
+// [{"key":"<64 lowercase hex>","label":"..."}]; [] clears it. Each entry
+// becomes its own Antigravity card (accountKey = key) after the primary on
+// the next tb_agent_usage. Success data: {"registeredCount":N,"rejected":
+// [{"index":i,"reason":"..."}]}; malformed JSON is invalid_accounts_json and
+// changes nothing. Holds no secret.
+char *tb_set_antigravity_accounts(const char *json);
+
+// Copy agy's current Google login (Credential Manager gemini:antigravity,
+// read only) into a Syrtis generic credential
+// com.nyanako.tokenbar.antigravity-account:<key> (persist local machine),
+// after one refresh at Google with the client named by its aud. Starts no
+// process. Success data: {"key","label"}. Errors are fixed codes
+// (agy_not_signed_in, agy_login_unreadable, agy_login_missing_identity,
+// oauth_client_not_found, oauth_client_rejected, refresh_rejected,
+// refresh_unreachable, account_mismatch, invalid_credential_format,
+// keychain_write_failed). Blocking (network). Does not register the account.
+char *tb_antigravity_capture(void);
+
+// agy's login marker: {"marker":"<LastWritten FILETIME, decimal>"} or
+// {"marker":"absent"}; an unreadable credential is marker_unavailable.
+char *tb_antigravity_login_marker(void);
+
+// One automatic capture. removed_keys_json is ["<64 hex>",...]; a listed
+// account is skipped before any request. Success data:
+// {"status":"captured"|"unchanged","key","label"} or
+// {"status":"skipped_removed"}. Errors: the capture codes (except
+// agy_not_signed_in), not_signed_in, paused, invalid_removed_keys.
+char *tb_antigravity_auto_capture(const char *removed_keys_json);
+
+// Delete one captured account's credential and cached access token. key must
+// be 64 lowercase hex, else invalid_key before any Credential Manager call.
+// Already gone counts as removed; never revokes at Google. Success data:
+// {"removed":true}; errors invalid_key, keychain_delete_failed.
+char *tb_antigravity_remove(const char *key);
+
 // Release a string returned by any tb_* entry point.
 void tb_free(char *p);
 
