@@ -4017,9 +4017,9 @@ fn load_codex_credentials_from(auth_path: &Path) -> Result<CodexCredentials, Str
 /// Names only what Windows reads: the Keychain item and the login-shell
 /// harvest are macOS-only and are stubs here
 /// (`load_claude_raw_token_from_keychain`, `harvest_shell_env_token_uncached`).
-/// The environment variable is read when the process starts, hence the
-/// reopen.
-const CLAUDE_UNCONFIGURED_ERROR: &str = "Claude OAuth credentials not found. Run `claude` to authenticate, or, to use a setup-token, set CLAUDE_CODE_OAUTH_TOKEN as a user environment variable, then quit Syrtis and reopen it from the Start menu.";
+/// The variable is read from the registry on every fetch
+/// (`claude_direct_env_token`), so no reopen is needed.
+const CLAUDE_UNCONFIGURED_ERROR: &str = "Claude OAuth credentials not found. Run `claude` to authenticate, or, to use a setup-token, set CLAUDE_CODE_OAUTH_TOKEN as a user environment variable.";
 const CLAUDE_CREDENTIALS_LOAD_ERROR: &str = "Claude credentials could not be loaded.";
 
 /// Full-login credentials: structured `claudeAiOauth` blobs (Keychain
@@ -4090,7 +4090,8 @@ fn resolve_stored_claude_login(raw: &str, source: ClaudeCredentialSource) -> Cla
 }
 
 /// `CLAUDE_CODE_OAUTH_TOKEN` as Claude Code itself resolves it: this process's
-/// own environment (covers `launchctl setenv` / terminal launch), then a
+/// own environment (covers `launchctl setenv` / terminal launch; on Windows the
+/// live user/machine registry values instead, see `claude_direct_env_token`), then a
 /// login-shell harvest of the user's `~/.zshrc` (so a plain export a
 /// Finder-launched GUI app never inherits is still found). Per Claude Code's
 /// auth precedence this outranks a stored subscription `/login`.
@@ -4773,14 +4774,172 @@ fn claude_credentials_from_access_token(token: ResolvedClaudeToken) -> ClaudeCre
 
 /// C — `CLAUDE_CODE_OAUTH_TOKEN` from this process's own environment (covers
 /// `launchctl setenv` and terminal-launched runs).
+#[cfg(not(windows))]
 fn claude_direct_env_token() -> Option<String> {
     claude_token_from_lookup(|key| std::env::var(key).ok())
 }
 
+/// C on Windows — `CLAUDE_CODE_OAUTH_TOKEN` from the live registry, read on
+/// every fetch, so a token saved (or removed) while Syrtis runs takes effect
+/// at the next refresh. The process environment is never consulted: after
+/// Syrtis's own update restart it is the old process's block, so it cannot
+/// tell a deliberate override from a withdrawn token. The trade-off is that a
+/// token set only in a shell's temporary environment is not used.
+///
+/// The two-arm `EnvRoot` → (HKEY, subkey) mapping below is the one piece no
+/// hermetic test reaches (it would mean writing HKCU\Environment or HKLM); it
+/// is covered only by the on-device check. Everything else is in
+/// `windows_claude_token_with` and `read_string_value`, which are tested.
+#[cfg(windows)]
+fn claude_direct_env_token() -> Option<String> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    static LAST_GOOD: Mutex<Option<String>> = Mutex::new(None);
+    windows_claude_token_with(
+        |root| match root {
+            EnvRoot::User => {
+                read_string_value(HKEY_CURRENT_USER, "Environment", "CLAUDE_CODE_OAUTH_TOKEN")
+            }
+            EnvRoot::System => read_string_value(
+                HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ),
+        },
+        &LAST_GOOD,
+    )
+}
+
+#[cfg_attr(windows, allow(dead_code))]
 fn claude_token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
     lookup("CLAUDE_CODE_OAUTH_TOKEN")
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+        .as_deref()
+        .and_then(normalise_claude_token)
+}
+
+/// Trim; empty means none.
+fn normalise_claude_token(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// Where Windows keeps environment variables: the user's (HKCU\Environment)
+/// and the machine's (HKLM ...\Session Manager\Environment).
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnvRoot {
+    User,
+    System,
+}
+
+/// A registry value that was read: absent (key or value not found), or its
+/// raw text.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+enum Lookup {
+    Absent,
+    Value(String),
+}
+
+/// Any registry read failure other than "not found". Deliberately carries no
+/// data, so a value can never travel inside an error or be formatted into one.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+struct RegistryReadError;
+
+/// Explorer's rule: a user value that EXISTS wins, even when it is empty (no
+/// fall-through to the machine value); otherwise the machine value.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn compose_user_system(user: Lookup, system: Lookup) -> Option<String> {
+    match (user, system) {
+        (Lookup::Value(user), _) => normalise_claude_token(&user),
+        (Lookup::Absent, Lookup::Value(system)) => normalise_claude_token(&system),
+        (Lookup::Absent, Lookup::Absent) => None,
+    }
+}
+
+/// The whole Windows rule, platform-independent so it is tested everywhere:
+/// read both locations, compose, and on any read failure return the last
+/// successful composition (none before the first) rather than flapping to
+/// "unconfigured". Never touches the process environment.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_claude_token_with(
+    read: impl Fn(EnvRoot) -> Result<Lookup, RegistryReadError>,
+    last: &Mutex<Option<String>>,
+) -> Option<String> {
+    let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let (Ok(user), Ok(system)) = (read(EnvRoot::User), read(EnvRoot::System)) {
+        *last = compose_user_system(user, system);
+    }
+    last.clone()
+}
+
+/// One string value, read raw: REG_SZ or REG_EXPAND_SZ with `RRF_NOEXPAND`, so
+/// no other environment value is expanded into it. Not found = `Absent`; any
+/// other failure, a value over the 32 767-WCHAR environment limit, or a value
+/// still growing after three tries = `RegistryReadError`.
+#[cfg(windows)]
+fn read_string_value(
+    root: windows_sys::Win32::System::Registry::HKEY,
+    subkey: &str,
+    name: &str,
+) -> Result<Lookup, RegistryReadError> {
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS};
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    };
+    const MAX_BYTES: u32 = 32_767 * 2;
+    let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
+    let subkey: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
+    let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    for _ in 0..3 {
+        let mut needed: u32 = 0;
+        // SAFETY: both strings are NUL-terminated and outlive the call; a null
+        // data pointer asks only for the size.
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                subkey.as_ptr(),
+                name.as_ptr(),
+                flags,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut needed,
+            )
+        };
+        if status == ERROR_FILE_NOT_FOUND {
+            return Ok(Lookup::Absent);
+        }
+        if status != ERROR_SUCCESS || needed > MAX_BYTES {
+            return Err(RegistryReadError);
+        }
+        let mut buffer = vec![0u16; (needed as usize).div_ceil(2).max(1)];
+        let mut size = (buffer.len() * 2) as u32;
+        // SAFETY: `buffer` holds `size` bytes and outlives the call.
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                subkey.as_ptr(),
+                name.as_ptr(),
+                flags,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        match status {
+            ERROR_SUCCESS => {
+                let written = &buffer[..(size as usize / 2).min(buffer.len())];
+                let text = written.split(|&unit| unit == 0).next().unwrap_or(&[]);
+                return String::from_utf16(text)
+                    .map(Lookup::Value)
+                    .map_err(|_| RegistryReadError);
+            }
+            ERROR_MORE_DATA => continue,
+            ERROR_FILE_NOT_FOUND => return Ok(Lookup::Absent),
+            _ => return Err(RegistryReadError),
+        }
+    }
+    Err(RegistryReadError)
 }
 
 /// Cache for the shell-harvested token — harvesting spawns a full interactive
@@ -7397,6 +7556,9 @@ mod tests {
         assert!(!display.contains("Keychain"), "{display}");
         assert!(display.contains("CLAUDE_CODE_OAUTH_TOKEN"), "{display}");
         assert!(display.contains("user environment variable"), "{display}");
+        // The variable is read live from the registry; no restart to ask for.
+        assert!(!display.contains("Start menu"), "{display}");
+        assert!(!display.contains("reopen"), "{display}");
     }
 
     #[tokio::test]
@@ -8880,6 +9042,9 @@ mod tests {
         let dir_text = dir.to_str().unwrap().to_string();
 
         // Primary-only credential sources set in the environment are ignored.
+        let _env = PROCESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let saved: Vec<(&str, Option<std::ffi::OsString>)> =
             ["TOKENBAR_CLAUDE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]
                 .into_iter()
@@ -12758,6 +12923,261 @@ mod tests {
         assert_eq!(token.as_deref(), Some("sk-ant-oat01-test"));
         assert!(claude_token_from_lookup(|_| None).is_none());
         assert!(claude_token_from_lookup(|_| Some("   ".to_string())).is_none());
+    }
+
+    /// Serialises tests that set process environment variables.
+    static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn value(text: &str) -> Lookup {
+        Lookup::Value(text.to_string())
+    }
+
+    /// Explorer's composition: an existing user value wins, even an empty one.
+    #[test]
+    fn the_user_value_wins_and_an_empty_one_does_not_fall_through() {
+        assert_eq!(
+            compose_user_system(value("user-fixture"), value("system-fixture")).as_deref(),
+            Some("user-fixture")
+        );
+        assert_eq!(
+            compose_user_system(value(""), value("system-fixture")),
+            None
+        );
+        assert_eq!(
+            compose_user_system(value("   "), value("system-fixture")),
+            None
+        );
+        assert_eq!(
+            compose_user_system(Lookup::Absent, value("system-fixture")).as_deref(),
+            Some("system-fixture")
+        );
+        assert_eq!(compose_user_system(Lookup::Absent, Lookup::Absent), None);
+        assert_eq!(
+            compose_user_system(value("  user-fixture \t"), Lookup::Absent).as_deref(),
+            Some("user-fixture")
+        );
+        assert_eq!(compose_user_system(Lookup::Absent, value(" ")), None);
+    }
+
+    /// Scripted registry: each call to `windows_claude_token_with` consumes one
+    /// (user, system) pair.
+    fn scripted_rule(
+        steps: Vec<(
+            Result<Lookup, RegistryReadError>,
+            Result<Lookup, RegistryReadError>,
+        )>,
+    ) -> Vec<Option<String>> {
+        let last = Mutex::new(None);
+        steps
+            .into_iter()
+            .map(|(user, system)| {
+                let user = std::cell::RefCell::new(Some(user));
+                let system = std::cell::RefCell::new(Some(system));
+                windows_claude_token_with(
+                    |root| match root {
+                        EnvRoot::User => user.borrow_mut().take().unwrap(),
+                        EnvRoot::System => system.borrow_mut().take().unwrap(),
+                    },
+                    &last,
+                )
+            })
+            .collect()
+    }
+
+    /// A token saved or removed while Syrtis runs takes effect on the next
+    /// read; a read failure keeps the last good answer instead of flapping.
+    #[test]
+    fn the_windows_rule_follows_the_registry_and_keeps_the_last_good_on_error() {
+        let a = || Ok(value("fixture-a"));
+        let b = || Ok(value("fixture-b"));
+        let absent = || Ok(Lookup::Absent);
+        let error = || Err(RegistryReadError);
+        let some = |text: &str| Some(text.to_string());
+
+        // Set while running.
+        assert_eq!(
+            scripted_rule(vec![(absent(), absent()), (a(), absent())]),
+            vec![None, some("fixture-a")]
+        );
+        // Removed while running.
+        assert_eq!(
+            scripted_rule(vec![(a(), absent()), (absent(), absent())]),
+            vec![some("fixture-a"), None]
+        );
+        // Replaced.
+        assert_eq!(
+            scripted_rule(vec![(a(), absent()), (b(), absent())]),
+            vec![some("fixture-a"), some("fixture-b")]
+        );
+        // A failure on either side retains the last good composition.
+        assert_eq!(
+            scripted_rule(vec![(a(), absent()), (error(), absent()), (a(), error())]),
+            vec![some("fixture-a"), some("fixture-a"), some("fixture-a")]
+        );
+        // A failure before any success is none.
+        assert_eq!(scripted_rule(vec![(error(), a())]), vec![None]);
+        // The user location is the user's, not the machine's.
+        assert_eq!(
+            scripted_rule(vec![(Ok(value("U")), Ok(value("S")))]),
+            vec![some("U")]
+        );
+        assert_eq!(
+            scripted_rule(vec![(absent(), Ok(value("S")))]),
+            vec![some("S")]
+        );
+    }
+
+    /// Security F1: on Windows the process environment is never consulted,
+    /// because after an update restart it is the old process's block and
+    /// would resend a token the user removed.
+    #[test]
+    fn the_windows_rule_never_reads_the_process_environment() {
+        const SENTINEL: &str = "process-env-sentinel-not-a-token";
+        let _env = PROCESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let saved = std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN");
+        std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", SENTINEL);
+        let results = std::panic::catch_unwind(|| {
+            [
+                scripted_rule(vec![(Ok(Lookup::Absent), Ok(Lookup::Absent))]),
+                scripted_rule(vec![(Ok(value("user-fixture")), Ok(Lookup::Absent))]),
+                scripted_rule(vec![(Ok(Lookup::Absent), Ok(value("system-fixture")))]),
+                scripted_rule(vec![(Ok(value("")), Ok(Lookup::Absent))]),
+            ]
+        });
+        match saved {
+            Some(saved) => std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", saved),
+            None => std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN"),
+        }
+        let [neither, user, system, empty_user] = results.unwrap();
+        assert_eq!(neither, vec![None]);
+        assert_eq!(user, vec![Some("user-fixture".to_string())]);
+        assert_eq!(system, vec![Some("system-fixture".to_string())]);
+        assert_eq!(empty_user, vec![None]);
+    }
+
+    /// A throwaway `HKCU\Software\TokenBarTest-<pid>-<n>` key, deleted with
+    /// everything under it when dropped (also on panic). Tests never touch a
+    /// real environment key.
+    #[cfg(windows)]
+    struct TestRegistryKey {
+        subkey: String,
+        handle: windows_sys::Win32::System::Registry::HKEY,
+    }
+
+    #[cfg(windows)]
+    impl TestRegistryKey {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+            use windows_sys::Win32::System::Registry::{
+                RegCreateKeyExW, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_OPTION_VOLATILE,
+            };
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let subkey = format!(
+                r"Software\TokenBarTest-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
+            let wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
+            let mut handle = std::ptr::null_mut();
+            // SAFETY: `wide` is NUL-terminated; `handle` receives the new key.
+            let status = unsafe {
+                RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    wide.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                    REG_OPTION_VOLATILE,
+                    KEY_ALL_ACCESS,
+                    std::ptr::null(),
+                    &mut handle,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(status, ERROR_SUCCESS, "create {subkey}");
+            Self { subkey, handle }
+        }
+
+        fn set(&self, name: &str, kind: u32, text: &str) {
+            use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+            use windows_sys::Win32::System::Registry::RegSetValueExW;
+            let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+            let data: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+            // SAFETY: both buffers are live and sized as passed.
+            let status = unsafe {
+                RegSetValueExW(
+                    self.handle,
+                    name.as_ptr(),
+                    0,
+                    kind,
+                    data.as_ptr().cast(),
+                    (data.len() * 2) as u32,
+                )
+            };
+            assert_eq!(status, ERROR_SUCCESS);
+        }
+
+        fn read(&self, child: Option<&str>, name: &str) -> Result<Lookup, RegistryReadError> {
+            let subkey = match child {
+                Some(child) => format!(r"{}\{child}", self.subkey),
+                None => self.subkey.clone(),
+            };
+            read_string_value(
+                windows_sys::Win32::System::Registry::HKEY_CURRENT_USER,
+                &subkey,
+                name,
+            )
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TestRegistryKey {
+        fn drop(&mut self) {
+            use windows_sys::Win32::System::Registry::{
+                RegCloseKey, RegDeleteTreeW, HKEY_CURRENT_USER,
+            };
+            let wide: Vec<u16> = self.subkey.encode_utf16().chain(Some(0)).collect();
+            // SAFETY: `handle` came from RegCreateKeyExW; `wide` is NUL-terminated.
+            unsafe {
+                RegCloseKey(self.handle);
+                RegDeleteTreeW(HKEY_CURRENT_USER, wide.as_ptr());
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_string_value_reads_strings_raw_and_reports_missing_as_absent() {
+        use windows_sys::Win32::System::Registry::{REG_DWORD, REG_EXPAND_SZ, REG_SZ};
+        let key = TestRegistryKey::new();
+        key.set("plain", REG_SZ, "registry-fixture");
+        key.set("expandable", REG_EXPAND_SZ, "%SystemRoot%x");
+        key.set("empty", REG_SZ, "");
+
+        assert_eq!(key.read(None, "plain"), Ok(value("registry-fixture")));
+        // RRF_NOEXPAND: used literally, nothing expanded into it.
+        assert_eq!(key.read(None, "expandable"), Ok(value("%SystemRoot%x")));
+        assert_eq!(key.read(None, "empty"), Ok(value("")));
+        assert_eq!(key.read(None, "missing"), Ok(Lookup::Absent));
+        assert_eq!(key.read(Some("missing-key"), "plain"), Ok(Lookup::Absent));
+
+        // A value of another type is a failure, not an absence.
+        let name: Vec<u16> = "number".encode_utf16().chain(Some(0)).collect();
+        let data: u32 = 7;
+        // SAFETY: `data` is a live u32 passed with its size.
+        unsafe {
+            windows_sys::Win32::System::Registry::RegSetValueExW(
+                key.handle,
+                name.as_ptr(),
+                0,
+                REG_DWORD,
+                (&data as *const u32).cast(),
+                4,
+            );
+        }
+        assert_eq!(key.read(None, "number"), Err(RegistryReadError));
     }
 
     #[test]

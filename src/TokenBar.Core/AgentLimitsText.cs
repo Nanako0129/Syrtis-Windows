@@ -193,16 +193,17 @@ public static class AgentLimitsText
         {
             List<LimitsSetupPart> parts =
             [
-                new("Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from its environment. Save the token as a user environment variable with this PowerShell command, then quit Syrtis and reopen it from the Start menu. The token is stored unencrypted in your Windows user environment."
+                new("Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from its environment. Save the token as a user environment variable with this PowerShell command. The token is stored unencrypted in your Windows user environment."
                     .Localized(), IsCommand: false),
                 new(ClaudeSetupCommand, IsCommand: true),
             ];
-            // One entry with {0} where the command goes: English says "and
-            // reopen Syrtis" after it, Chinese folds that into the sentence
-            // before it, and a pair of keys could not leave either side empty.
+            // One entry with {0} where the command goes, so a language can
+            // place words after it; a pair of keys could not leave either side
+            // empty. Nothing follows it today: the token is read live, so
+            // there is no reopen to ask for.
             // Text, command, text: a translation that lost its {0} still
             // shows the command, after the whole sentence.
-            var removal = "The claude CLI reads this variable too and prefers it over /login. To stop using it, run:{0}and reopen Syrtis."
+            var removal = "The claude CLI reads this variable too and prefers it over /login. To stop using it, run:{0}"
                 .Localized().Split("{0}", 2);
             parts.Add(new(removal[0].Trim(), IsCommand: false));
             parts.Add(new(ClaudeRemoveCommand, IsCommand: true));
