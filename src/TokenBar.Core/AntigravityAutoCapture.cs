@@ -11,7 +11,7 @@ namespace TokenBar.Core;
 /// "unavailable" state.
 /// <para>
 /// Trigger: before each quota fetch, <see cref="AntigravityFetch"/> awaits
-/// <see cref="PrepareForFetch"/> when the toggle is on. <see cref="Poll"/>
+/// <see cref="ReadMarkerForFetch"/> when the toggle is on. <see cref="Poll"/>
 /// reads agy's login marker (attributes only, no secret) and, when it differs
 /// from the last marker attempted, runs ONE automatic capture in the core. The
 /// marker is recorded before the attempt, so a failure is not retried until
@@ -183,7 +183,7 @@ public sealed class AntigravityAutoCapture
         bool changed;
         lock (_gate)
         {
-            // The commit point every capture passes (PrepareForFetch's poll,
+            // The commit point every capture passes (ReadMarkerForFetch's poll,
             // SetEnabled(true), ManualCapture's resume, an owed poll): with
             // the toggle off it starts nothing, checked under the gate after
             // the marker read, so turning automatic capture off during that
@@ -301,16 +301,20 @@ public sealed class AntigravityAutoCapture
         await PollIfOwed().ConfigureAwait(false);
     }
 
+    /// <summary>One more bounded marker read (null: failed or timed out), for
+    /// the fetch to confirm after <c>fetch()</c> that agy's login did not
+    /// change meanwhile. No state is touched.</summary>
+    public string? ReadMarkerNow() => TryMarker().GetAwaiter().GetResult();
+
     /// <summary>Before a quota fetch: read agy's login marker and, when it
     /// differs from the last attempt, forget the current account NOW, so the
     /// fetch that follows a login change is never drawn as the previous
     /// account. The capture attempt is returned, not awaited, so the fetch
     /// never waits on Google. Never throws.</summary>
-    public async Task<Task?> PrepareForFetch() => (await ReadMarkerForFetch().ConfigureAwait(false)).Poll;
-
-    /// <summary><see cref="PrepareForFetch"/> that also returns the marker it
-    /// read (null: paused, already checking, or the read failed or timed out),
-    /// so the fetch can tell dedup which login this fetch observed.</summary>
+    /// <summary>Also returns the marker it read (null: paused, another marker
+    /// read already holds the checking state, or the read failed or timed
+    /// out), so the fetch can tell dedup which login this fetch
+    /// observed.</summary>
     public async Task<(string? Marker, Task? Poll)> ReadMarkerForFetch()
     {
         lock (_gate)
