@@ -523,5 +523,6 @@
   "Recently: runs out": "近期：會用完",
   "{0} used": "已用 {0}",
   "{0} less left": "剩餘少 {0}",
-  "{0} more left": "剩餘多 {0}"
+  "{0} more left": "剩餘多 {0}",
+  "Drag to reorder": "拖曳可調整順序"
 }
