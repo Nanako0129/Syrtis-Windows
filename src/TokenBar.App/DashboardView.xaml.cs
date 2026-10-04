@@ -163,8 +163,9 @@ public sealed partial class DashboardView : UserControl
                     if (AppSettings.GrokBotConsent.Stored == true)
                     {
                         // A yes from the Settings switch keeps the card that
-                        // was showing (Declined stays one line); after the
-                        // card's own Allow this is a no-op.
+                        // was showing (Declined stays one line), or the
+                        // one line if none was; after the card's own Allow
+                        // this is a no-op.
                         _grokBotWaiting.GrantedElsewhere();
                         _model?.RefreshQuotaNow();
                     }
@@ -2111,9 +2112,9 @@ public sealed partial class DashboardView : UserControl
     /// sign-in — DPAPI never asks — so it states what is read and where it
     /// goes. After "Not now" it collapses to one line and keeps Allow: a
     /// decline has to be reversible where it was made. A grant keeps the card
-    /// it was made on until it ends (GrokBotConsent.WaitingState); a stored
-    /// yes the core has not acted on after that shows the full card again,
-    /// Allow kept to re-send it (macOS parity).</summary>
+    /// it was made on while the answer stays yes (GrokBotConsent.WaitingState);
+    /// once Waiting ends, Allow is enabled again to re-send it. A stored yes
+    /// with no grant recorded shows the full card (macOS parity).</summary>
     private FrameworkElement BuildGrokBotConsent(
         GrokBotConsent.Prompt prompt, AgentUsagePayload? shownQuota, int failedFetches)
     {

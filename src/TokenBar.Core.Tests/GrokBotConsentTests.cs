@@ -330,57 +330,84 @@ public class GrokBotConsentTests : IDisposable
     }
 
     [Fact]
-    public void GrantElsewhereWithNoConsentCardShownDoesNotWait()
+    public void SettingsSwitchOnWithNoConsentCardDrawnRecordsTheDeclinedLine()
     {
-        var shown = new AgentUsagePayload("now", []);
         var waiting = new GrokBotConsent.WaitingState();
         waiting.GrantedElsewhere();
-        Assert.Equal(
-            new GrokBotConsent.Prompt(GrokBotConsent.Card.Ask, Waiting: false),
-            waiting.Decide(Marked, true, shown, 2));
-        Assert.Equal(
-            new GrokBotConsent.Prompt(GrokBotConsent.Card.None, Waiting: false),
-            waiting.Decide(Snapshot("grok-bot", "oauth"), true, shown, 2));
+        // A consent snapshot under the yes (a fetch begun before it): the one
+        // line, not the disclosure the user already answered; Allow enabled
+        // to re-send, since there was no payload to wait on.
+        var after = waiting.Decide(Marked, true, new AgentUsagePayload("now", []), 2);
+        Assert.Equal(new GrokBotConsent.Prompt(GrokBotConsent.Card.Declined, Waiting: false), after);
+        Assert.Equal(GrokBotConsent.Copy.Declined, after.Text);
     }
 
+    // Reachable through the Settings switch: it stays enabled while the card
+    // waits, and turning it off ends the grant.
     [Theory]
     [InlineData(GrokBotConsent.Card.Ask)]
     [InlineData(GrokBotConsent.Card.Declined)]
-    public void NotNowDuringWaitingEndsWaitingAndShowsTheDeclinedCard(GrokBotConsent.Card recorded)
+    public void SettingsSwitchOffDuringWaitingEndsTheGrantAndShowsTheDeclinedCard(GrokBotConsent.Card recorded)
     {
         var shown = new AgentUsagePayload("now", []);
         var waiting = GrantedOver(shown, recorded);
         Assert.Equal(
             new GrokBotConsent.Prompt(GrokBotConsent.Card.Declined, Waiting: false),
             waiting.Decide(Marked, false, shown, 2));
-        // Ended, not paused: a later yes over the same payload is the normal
-        // decision (Ask, Allow kept to re-send), not Waiting.
+        // Cleared, not paused: a later yes over the same payload is the normal
+        // decision (Ask, Allow kept to re-send), not the recorded card.
         Assert.Equal(
             new GrokBotConsent.Prompt(GrokBotConsent.Card.Ask, Waiting: false),
             waiting.Decide(Marked, true, shown, 2));
     }
 
+    // Scenario A: Allow, then the fetch fails. Waiting ends; the text does not.
     [Theory]
     [InlineData(GrokBotConsent.Card.Ask)]
     [InlineData(GrokBotConsent.Card.Declined)]
-    public void FailedFetchEndsWaiting(GrokBotConsent.Card recorded)
+    public void FailedFetchEndsWaitingAndKeepsTheText(GrokBotConsent.Card recorded)
     {
         var shown = new AgentUsagePayload("now", []);
         var waiting = GrantedOver(shown, recorded);
-        Assert.Equal(
-            new GrokBotConsent.Prompt(GrokBotConsent.Card.Ask, Waiting: false),
-            waiting.Decide(Marked, true, shown, 3));
+        var after = waiting.Decide(Marked, true, shown, 3);
+        Assert.Equal(new GrokBotConsent.Prompt(recorded, Waiting: false), after);
+        Assert.Equal(GrokBotConsent.TextFor(recorded), after.Text);
+        Assert.Equal(recorded == GrokBotConsent.Card.Ask, after.ShowsNotNow && after.NotNowEnabled);
     }
 
+    // Scenario B: the refresh joined a fetch begun before the grant and
+    // brought a new consent payload. Waiting ends; the text does not.
     [Theory]
     [InlineData(GrokBotConsent.Card.Ask)]
     [InlineData(GrokBotConsent.Card.Declined)]
-    public void NewPayloadEndsWaiting(GrokBotConsent.Card recorded)
+    public void NewConsentPayloadEndsWaitingAndKeepsTheText(GrokBotConsent.Card recorded)
     {
         var waiting = GrantedOver(new AgentUsagePayload("now", []), recorded);
+        var after = waiting.Decide(Marked, true, new AgentUsagePayload("now", []), 2);
+        Assert.Equal(new GrokBotConsent.Prompt(recorded, Waiting: false), after);
+        Assert.Equal(GrokBotConsent.TextFor(recorded), after.Text);
+    }
+
+    [Fact]
+    public void ARealPayloadClearsTheRecord()
+    {
+        var shown = new AgentUsagePayload("now", []);
+        var waiting = GrantedOver(shown, GrokBotConsent.Card.Declined);
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.None, Waiting: false),
+            waiting.Decide(Snapshot("grok-bot", "oauth"), true, shown, 2));
+        // No record left: a later consent snapshot under the yes is the normal
+        // decision, and the Settings switch then has no card drawn to keep.
         Assert.Equal(
             new GrokBotConsent.Prompt(GrokBotConsent.Card.Ask, Waiting: false),
-            waiting.Decide(Marked, true, new AgentUsagePayload("now", []), 2));
+            waiting.Decide(Marked, true, shown, 2));
+        var cleared = new GrokBotConsent.WaitingState();
+        cleared.Decide(Marked, null, shown, 2);
+        cleared.Decide(Snapshot("grok-bot", "oauth"), null, shown, 2);
+        cleared.GrantedElsewhere();
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.Declined, Waiting: false),
+            cleared.Decide(Marked, true, new AgentUsagePayload("now", []), 2));
     }
 
     [Fact]

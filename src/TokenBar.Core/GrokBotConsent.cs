@@ -135,74 +135,64 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
         public bool NotNowEnabled => !Waiting;
     }
 
-    /// <summary>The Allow button's "Waiting…" (macOS "Waiting for macOS…").
-    /// Set when a grant the core accepted lands over a consent card — Allow on
-    /// the card, or the Settings switch (<see cref="GrantedElsewhere"/>) — and
-    /// records the card that was showing. While it holds,
-    /// <see cref="Decide"/> keeps drawing that card, so a grant never brings
-    /// new text: Declined → Allow stays one line, Ask → Allow stays the
+    /// <summary>The grant record behind the consent card. A grant the core
+    /// accepted over a consent card — Allow on the card, or the Settings
+    /// switch (<see cref="GrantedElsewhere"/>) — records the card that was
+    /// showing, the payload it was drawn from and the failed-fetch count.
+    /// While the stored answer is yes and the snapshot is a consent snapshot,
+    /// the card is always the recorded one, so a grant never brings new
+    /// text: Declined → Allow stays one line, Ask → Allow stays the
     /// disclosure (macOS re-reads the text only when the payload changes).
-    /// Every decision asks IsWaiting, which ends it for good
-    /// when the stored answer is no longer yes (Not now, Settings off), a
-    /// different payload is shown, or a quota fetch has failed since the
-    /// grant; the normal <see cref="CardFor"/> decision then applies. The
-    /// refresh after a grant is best effort and may wait for the next poll
-    /// (macOS guarantees a refetch; Windows aligns in slice W6c), so without
-    /// these exits the button could stay disabled.</summary>
+    /// Waiting ("Waiting…", Allow and Not now disabled) holds only while the
+    /// same payload object is shown and no quota fetch has failed since the
+    /// grant; either exit ends Waiting and re-enables the buttons, never the
+    /// text. The refresh after a grant is best effort and may wait for the
+    /// next poll (macOS guarantees a refetch; Windows aligns in slice W6c),
+    /// so without these exits the button could stay disabled. The record
+    /// clears when the stored answer is no longer yes (the normal
+    /// <see cref="CardFor"/> decision, Declined, then applies) or when a
+    /// snapshot is not a consent snapshot (<see cref="Card.None"/>).</summary>
     public sealed class WaitingState
     {
-        private bool _waiting;
-        private object? _over;
-        private int _failuresAtGrant;
-        private Card _card;
+        private (Card Card, object? Over, int Failures)? _grant;
         private (Card Card, object? Over, int Failures)? _shown;
 
-        public void Granted(Card shownCard, object? shownPayload, int failedFetches)
-        {
-            _waiting = true;
-            _card = shownCard;
-            _over = shownPayload;
-            _failuresAtGrant = failedFetches;
-        }
+        public void Granted(Card shownCard, object? shownPayload, int failedFetches) =>
+            _grant = (shownCard, shownPayload, failedFetches);
 
         /// <summary>A yes that did not come from the card's Allow (the Settings
-        /// switch): wait over the consent card last decided, if one was. A
-        /// no-op while already waiting, so Allow's own grant is not
-        /// re-recorded.</summary>
-        public void GrantedElsewhere()
-        {
-            if (!_waiting && _shown is { } shown)
-            {
-                Granted(shown.Card, shown.Over, shown.Failures);
-            }
-        }
-
-        private bool IsWaiting(bool? stored, object? shownPayload, int failedFetches)
-        {
-            if (stored != true
-                || !ReferenceEquals(shownPayload, _over)
-                || failedFetches != _failuresAtGrant)
-            {
-                _waiting = false;
-                _over = null;
-            }
-
-            return _waiting;
-        }
+        /// switch): record the consent card on screen, if one is. With none
+        /// drawn yet, record <see cref="Card.Declined"/> without Waiting (no
+        /// payload to wait on; -1 matches no failure count), so a consent
+        /// snapshot that arrives under the yes shows the one line, not the
+        /// disclosure the user has already answered. A no-op over an existing
+        /// record, so Allow's own grant is not re-recorded.</summary>
+        public void GrantedElsewhere() =>
+            _grant ??= _shown ?? (Card.Declined, null, -1);
 
         /// <summary>The card for <paramref name="agent"/>: the recorded card
-        /// while IsWaiting holds, else <see cref="CardFor"/>.</summary>
+        /// while the stored answer is yes, else <see cref="CardFor"/>.</summary>
         public Prompt Decide(
             AgentUsageSnapshot agent, bool? stored, object? shownPayload, int failedFetches)
         {
             var card = CardFor(agent, stored);
             if (card == Card.None)
             {
+                _grant = null;
+                _shown = null;
                 return new(Card.None, false);
             }
 
-            var waiting = IsWaiting(stored, shownPayload, failedFetches);
-            var prompt = new Prompt(waiting ? _card : card, waiting);
+            if (stored != true)
+            {
+                _grant = null;
+            }
+
+            var prompt = _grant is { } grant
+                ? new Prompt(
+                    grant.Card,
+                    ReferenceEquals(shownPayload, grant.Over) && failedFetches == grant.Failures)
+                : new Prompt(card, false);
             _shown = (prompt.Card, shownPayload, failedFetches);
             return prompt;
         }
@@ -217,8 +207,9 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     };
 
     /// <summary>English source strings (the localization keys). Windows copy
-    /// per Plan W6.6/W6.7: no "Keychain", names the one destination, says how
-    /// to stop.</summary>
+    /// per Plan W6.6/W6.7: no "Keychain", names the one destination; how to
+    /// stop is in Settings (<see cref="SettingsHint"/>), not on the
+    /// card.</summary>
     public static class Copy
     {
         /// <summary>The pre-consent disclosure only: what is unlocked, that
