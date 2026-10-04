@@ -119,6 +119,19 @@ public sealed class SettingsStore
         }
     }
 
+    /// <summary>A stored bool, or null when the key is absent or not a bool —
+    /// the tri-state <see cref="GetBool"/> cannot express (UserDefaults
+    /// <c>object(forKey:) as? Bool</c>).</summary>
+    public bool? GetNullableBool(string key)
+    {
+        lock (_gate)
+        {
+            return _values.TryGetValue(key, out var v)
+                && v.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? v.GetBoolean() : null;
+        }
+    }
+
     public int GetInt(string key, int fallback)
     {
         lock (_gate)

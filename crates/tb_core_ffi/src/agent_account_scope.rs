@@ -1847,6 +1847,11 @@ pub(crate) mod test_support {
             fs::read(self.backend.directory.join(METADATA_FILE)).unwrap()
         }
 
+        /// `None` before anything has been resolved.
+        pub(crate) fn try_metadata_bytes(&self) -> Option<Vec<u8>> {
+            fs::read(self.backend.directory.join(METADATA_FILE)).ok()
+        }
+
         pub(crate) fn fail_metadata_save(&self) {
             self.backend.fail_fs(FsOperation::ReplaceFile);
         }
