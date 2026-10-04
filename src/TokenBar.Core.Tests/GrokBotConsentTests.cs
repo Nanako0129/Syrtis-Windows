@@ -182,7 +182,8 @@ public class GrokBotConsentTests : IDisposable
         Assert.Equal(0, CountSignals(() => consent.Answer(true)));
         Assert.Equal(1, CountSignals(() => consent.Answer(false)));
         Assert.Equal(0, CountSignals(() => consent.Answer(false)));
-        Assert.Equal(["""{"grok-bot":true}""", "{}"], _calls);
+        // A repeat is re-sent (idempotent in the core) but signals nothing.
+        Assert.Equal(["""{"grok-bot":true}""", """{"grok-bot":true}""", "{}", "{}"], _calls);
     }
 
     [Fact]
