@@ -14145,7 +14145,7 @@ mod tests {
     /// the store; the in-use weekly bucket keeps its contract. The agy route's
     /// unverified scope still clears the duration.
     #[test]
-    fn antigravity_unused_bucket_learns_through_a_real_store_at_any_clock() {
+    fn antigravity_unused_bucket_stays_learning_through_a_real_store_at_any_clock() {
         let scope = TestRefreshScope::new("stage4", "agy-window-duration");
         let account_scope = scope
             .resolve_current("antigravity", "agy", b"agy-marker")
