@@ -233,9 +233,12 @@ public sealed class AntigravityAutoCapture
                     //   fetch sees the new marker and attempts again.
                     // - Unreadable (the re-read failed or timed out): left
                     //   unbound and the attempted marker is forgotten, so the
-                    //   next fetch retries this marker (the core answers
-                    //   `unchanged` with no Google request and no write)
-                    //   instead of waiting for agy's login to change.
+                    //   next fetch retries this marker instead of waiting for
+                    //   agy's login to change. The core answers `unchanged`
+                    //   with no Google request and no write while its stored
+                    //   refresh token equals agy's; if Google ever rotated it
+                    //   at capture, each retry is a full refresh plus a write
+                    //   (rotation has not been observed).
                     var after = await TryMarker().ConfigureAwait(false);
                     lock (_gate)
                     {
