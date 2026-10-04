@@ -4638,6 +4638,14 @@ mod tests {
             .as_deref(),
             Some("Google AI Pro")
         );
+        assert_eq!(
+            resolve_remote_plan(&json!({
+                "planInfo":{"planType":"standard"},
+                "paidTier":{"name":"Google AI Pro"}
+            }))
+            .as_deref(),
+            Some("Google AI Pro")
+        );
         for blank in ["", "   "] {
             assert_eq!(
                 resolve_remote_plan(&json!({

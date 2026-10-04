@@ -123,7 +123,7 @@ public class AntigravityAccountsTests
     private static AgentUsageSnapshot ErroredPrimary(bool lastGood = false) => new(
         "antigravity", "oauth", "2026-10-04T00:00:00Z",
         lastGood ? [Window("antigravity.weekly", 60)] : [],
-        Identity: lastGood ? new AgentIdentity("x@example.com") : null,
+        Identity: lastGood ? new AgentIdentity(Plan: "Free") : null, // remote_identity(plan): no email
         Error: "timeout", HistoryScope: new AccountScopeStatus(Error: "noTrustedEvidence"));
 
     private static AgentUsageSnapshot Captured(

@@ -238,7 +238,7 @@ public static class AntigravityFetch
 /// One card for agy's current account (macOS <c>AntigravityDedup</c>). Once
 /// agy's current account is known, it is also a captured account and would be
 /// drawn twice. This drops the captured card and labels the primary with its
-/// email ONLY when all hold: <c>currentKey</c> set; its marker set and not
+/// email (captured ?? primary) and plan (primary ?? captured) ONLY when all hold: <c>currentKey</c> set; its marker set and not
 /// <c>"present"</c>; the primary Antigravity snapshot (no account key) came
 /// from the agy route, was fetched under that same marker and has no error; a
 /// captured snapshot carries that key. Otherwise both are shown.
@@ -290,7 +290,7 @@ public static class AntigravityDedup
         // above), so its plan labels the primary too, with or without an email.
         var email = captured.Identity?.Email ?? primary.Identity?.Email;
         var plan = primary.Identity?.Plan ?? captured.Identity?.Plan;
-        if (captured.Identity is not null && (email is not null || plan is not null))
+        if (email is not null || plan is not null)
         {
             merged = merged with { Identity = new AgentIdentity(email, plan) };
         }
