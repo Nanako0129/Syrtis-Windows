@@ -551,8 +551,9 @@ public sealed partial class DashboardView
         // to this client. A second implementation of "where does the allowance
         // stand right now" would be free to disagree with the first.
         // Off by the master switch: a client tab drops the card too (macOS QuotaView.swift:116).
-        // Switched off for this client (and no extra account): no card, not a
-        // card claiming the data is still loading (LimitsCardFilter.HidesClientCard).
+        // Switched off for this client (and no extra account), or answered with
+        // nothing to draw: no card, not one claiming the data is still loading
+        // (LimitsCardFilter.HidesClientCard, macOS AgentLimitsCard.swift:526-530).
         // Same client set as the Overview lens (OverviewScope.LimitsClients):
         // client.Owner can be grok-bot, whose TabSlice lacks grok.
         var singleClient = OverviewScope.SingleClient(_activeClientTab)!;
@@ -561,7 +562,8 @@ public sealed partial class DashboardView
             && !LimitsCardFilter.HidesClientCard(
                 snapshot.Quota?.Agents ?? [],
                 members,
-                ClientRegistry.HiddenLimitsClients(AppSettings.Store)))
+                ClientRegistry.HiddenLimitsClients(AppSettings.Store),
+                snapshot.QuotaAttempted))
         {
             stack.Children.Add(Ui.Card(
                 // macOS QuotaView.swift:72: tabDisplayName(singleClient).

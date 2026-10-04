@@ -1331,7 +1331,8 @@ public sealed partial class DashboardView : UserControl
                     && LimitsCardFilter.HidesClientCard(
                         snapshot.Quota?.Agents ?? [],
                         limitsClients,
-                        ClientRegistry.HiddenLimitsClients(AppSettings.Store))
+                        ClientRegistry.HiddenLimitsClients(AppSettings.Store),
+                        snapshot.QuotaAttempted)
                     ? null
                     : Ui.Card(
                         // macOS "%@ limits" over tabDisplayName(singleClient)
@@ -1969,7 +1970,8 @@ public sealed partial class DashboardView : UserControl
         // Overview with every card switched off while the payload has cards:
         // say so, not "No quota data yet" (macOS "No supported agents yet"
         // for an empty visible list). A client tab whose card is off draws no
-        // card at all (LimitsCardFilter.HidesClientCard, at the callers).
+        // card at all (LimitsCardFilter.HidesClientCard, at the callers: switched
+        // off, or answered with nothing to draw).
         var payloadHasCards = all.Count > 0;
         if (clientIds is null && payloadHasCards && rows.Count == 0)
         {
