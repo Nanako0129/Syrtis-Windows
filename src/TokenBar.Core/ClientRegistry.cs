@@ -474,11 +474,7 @@ public static class ClientRegistry
         IReadOnlyList<string> present, IReadOnlyList<string> quotaIds,
         string hiddenRaw, string orderRaw, string? activeTab)
     {
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        var canonicalPresent = present
-            .Select(CanonicalClient)
-            .Where(seen.Add)
-            .ToList();
+        var canonicalPresent = CanonicalDistinct(present);
         var tabPresent = TabClients(canonicalPresent, quotaIds);
         var display = DisplayClients(tabPresent, hiddenRaw, orderRaw);
         var requested = string.IsNullOrWhiteSpace(activeTab)
@@ -501,6 +497,60 @@ public static class ClientRegistry
             store.GetString(TabHiddenKey) ?? "",
             store.GetString(TabOrderKey) ?? "",
             store.GetString(ActiveTabKey));
+
+    private static List<string> CanonicalDistinct(IEnumerable<string> ids)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        return ids.Select(CanonicalClient).Where(seen.Add).ToList();
+    }
+
+    /// <summary>Every tab the present clients and configured quota sources
+    /// make, hidden ones included — the set a drag completes the saved order
+    /// with (macOS DashboardTabs.completeOrder's <c>presentClients</c>).</summary>
+    public static IReadOnlyList<string> PresentTabs(
+        IReadOnlyList<string> present, IReadOnlyList<string> quotaIds) =>
+        TabClients(CanonicalDistinct(present), quotaIds);
+
+    /// <summary>The saved tab order after moving <paramref name="from"/> onto
+    /// <paramref name="to"/> among <paramref name="visible"/> — the one rule
+    /// both the Settings ↑/↓ buttons and the dashboard tab drag write
+    /// through. The saved order is first completed with every present tab, so
+    /// a hidden tab keeps its implicit slot on the first move, then the visible
+    /// subset is reordered in place (<see cref="MergeReorder"/>). Legacy
+    /// member ids in the saved order fold to their tab id
+    /// (<see cref="TabOrder"/>) so they cannot drift to the end.</summary>
+    public static string MoveTab(
+        string orderRaw, IReadOnlyList<string> presentTabs, IReadOnlyList<string> visible,
+        string from, string to)
+    {
+        var order = TabOrder(orderRaw);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var full = order.Concat(OrderedClients(presentTabs, order)).Where(seen.Add).ToList();
+        return string.Join(',', MergeReorder(full, visible, from, to));
+    }
+
+    /// <summary>Which edge of the hovered tab a drag's drop line sits on:
+    /// +1 trailing (dragging right drops after the target), -1 leading, 0 none
+    /// — matching <see cref="Reorder"/>'s direction-aware insert (macOS
+    /// DashboardTabs.dropEdge).</summary>
+    public static int DropEdge(string? dragId, string? overId, string tabId, IReadOnlyList<string> tabs)
+    {
+        if (dragId is null || overId != tabId || dragId == tabId)
+        {
+            return 0;
+        }
+
+        var fromI = FirstIndex(tabs, dragId);
+        var toI = FirstIndex(tabs, tabId);
+        return fromI < 0 || toI < 0 ? 0 : fromI < toI ? 1 : -1;
+    }
+
+    /// <summary>A press becomes a drag only past this distance, so a click
+    /// stays a click (macOS DragGesture minimumDistance: 4).</summary>
+    public const double TabDragThreshold = 4;
+
+    public static bool IsTabDrag(double dx, double dy) =>
+        dx * dx + dy * dy >= TabDragThreshold * TabDragThreshold;
 
     /// <summary>Direction-aware reorder helper (drag down inserts after, up
     /// before). Mirrors the logic used in AgentLimitsCard.</summary>

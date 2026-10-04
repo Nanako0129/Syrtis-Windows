@@ -228,6 +228,43 @@ fn scoped_context(
             if own.is_empty() {
                 return Err(NO_REGISTERED_ROOTS.to_string());
             }
+            // Every other account nested under this one is excluded. This
+            // window is captured with `dir` as home, and the engine adds
+            // `<home>/.claude/projects`, `<home>/.claude/transcripts` and
+            // cowork trees under it on its own, so an account nested at
+            // `<dir>\.claude` was counted here and in its own window (#175
+            // deferred). Those routes all lie under `dir`. A `.cc-mirror`
+            // variant under `dir` may name a directory elsewhere, but its rows
+            // carry the client id `cc-mirror/<variant>`, and an account window
+            // asks for exactly `claude` (see `clients` in `compute`), which the
+            // engine matches per message, so they never reach this window
+            // (measured on 188: with no exclusion at all, a variant under D
+            // naming the unrelated account E adds nothing to D's window). So
+            // only paths under `dir` are listed: an unrelated account adds
+            // nothing, and an account that contains this one (an ancestor) is
+            // never listed, which would remove this account's own files. Compared on the folded form; a nested
+            // account registered under another spelling of its folder (a
+            // junction, `subst` drive, 8.3 name) is not recognised, so it
+            // stays counted twice, as before this fix, rather than hidden.
+            let under_me = format!("{}\\", account_identity(dir));
+            let is_nested = |path: &str| account_identity(path).starts_with(&under_me);
+            let mut excluded: Vec<std::path::PathBuf> = config_dirs
+                .iter()
+                .filter(|other| is_nested(other))
+                .map(std::path::PathBuf::from)
+                .collect();
+            excluded.extend(
+                registry
+                    .get(CLAUDE)
+                    .into_iter()
+                    .flatten()
+                    .filter(|root| !own.contains(root) && is_nested(&root.to_string_lossy()))
+                    .cloned(),
+            );
+            let mut excluded_scan_paths = std::collections::BTreeMap::new();
+            if !excluded.is_empty() {
+                excluded_scan_paths.insert(CLAUDE.to_string(), excluded);
+            }
             // `use_env_roots = false`: `TOKSCALE_EXTRA_DIRS` can name `claude:`
             // roots of its own and would pour another account's files into
             // this one's window (macOS `account_options`).
@@ -236,6 +273,7 @@ fn scoped_context(
                 false,
                 tokscale_core::ScannerSettings {
                     extra_scan_paths: std::collections::BTreeMap::from([(CLAUDE.to_string(), own)]),
+                    excluded_scan_paths,
                     ..Default::default()
                 },
             )
