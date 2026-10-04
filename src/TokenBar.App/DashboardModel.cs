@@ -1090,9 +1090,11 @@ public sealed class DashboardModel
     /// <see cref="QuotaPoller"/>; <see cref="ApplyQuota"/> is its only writer.</summary>
     private void RefreshQuota() => _quotaPoller.Request();
 
-    // Runs on the dispatcher, only for a payload fetched at the current
-    // epoch. Writes the baseline sources (_latestQuota, _quotaAttempted)
-    // here so a pre-change payload never reaches CreateBaseline either.
+    // Runs on the dispatcher, only for a payload the poller found current.
+    // The baseline sources (_latestQuota, _quotaAttempted) are written here,
+    // so they hold a payload that was current when written; a signal after
+    // this can still reach CreateBaseline with it before the rerun lands
+    // (bounded: the rerun's payload replaces it).
     private void ApplyQuota(AgentUsagePayload? quota)
     {
         // Recorded before publishing, and outside the snapshot: the
@@ -1108,6 +1110,9 @@ public sealed class DashboardModel
         // QuotaPoller checked the epoch for this call; Publish is one more
         // dispatcher hop, so it re-checks there: a consent answer in between
         // must not see this pre-answer payload (or failure) published.
+        // Re-reading Current here (not the poller's captured epoch) is
+        // exact only because every Signal comes from the UI thread
+        // (GrokBotConsent.Answer from the card and Settings).
         var epoch = QuotaEpoch.Current;
         bool StillCurrent() => QuotaEpoch.Current == epoch;
         var accountsChanged = false;

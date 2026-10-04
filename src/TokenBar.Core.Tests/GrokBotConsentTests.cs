@@ -232,11 +232,20 @@ public class GrokBotConsentTests : IDisposable
             action => { lock (posted) { posted.Add(action); } },
             _ => applied++);
         poller.Request();
-        for (var i = 0; i < 400 && Volatile.Read(ref runs) < 1; i++)
+        for (var i = 0; i < 400; i++)
         {
+            lock (posted)
+            {
+                if (posted.Count >= 1)
+                {
+                    break;
+                }
+            }
+
             await Task.Delay(10);
         }
 
+        // Settle: a (wrong) rerun would start its second run here.
         await Task.Delay(200);
         Action[] batch;
         lock (posted)
