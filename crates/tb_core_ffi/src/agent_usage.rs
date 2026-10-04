@@ -4786,27 +4786,33 @@ fn claude_direct_env_token() -> Option<String> {
 /// tell a deliberate override from a withdrawn token. The trade-off is that a
 /// token set only in a shell's temporary environment is not used.
 ///
-/// The two-arm `EnvRoot` → (HKEY, subkey) mapping below is the one piece no
-/// hermetic test reaches (it would mean writing HKCU\Environment or HKLM); it
-/// is covered only by the on-device check. Everything else is in
-/// `windows_claude_token_with` and `read_string_value`, which are tested.
+/// The `EnvRoot` → (HKEY, subkey) mapping lives in `env_location`, which a
+/// read-only Windows test exercises against values Windows always has; the
+/// rest is in `windows_claude_token_with` and `read_string_value`.
 #[cfg(windows)]
 fn claude_direct_env_token() -> Option<String> {
-    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
-    static LAST_GOOD: Mutex<Option<String>> = Mutex::new(None);
+    static LAST: Mutex<EnvCache> = Mutex::new(EnvCache::EMPTY);
     windows_claude_token_with(
-        |root| match root {
-            EnvRoot::User => {
-                read_string_value(HKEY_CURRENT_USER, "Environment", "CLAUDE_CODE_OAUTH_TOKEN")
-            }
-            EnvRoot::System => read_string_value(
-                HKEY_LOCAL_MACHINE,
-                r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-                "CLAUDE_CODE_OAUTH_TOKEN",
-            ),
+        |root| {
+            let (hkey, subkey) = env_location(root);
+            read_string_value(hkey, subkey, "CLAUDE_CODE_OAUTH_TOKEN")
         },
-        &LAST_GOOD,
+        &LAST,
     )
+}
+
+/// The registry key holding each environment: the user's (HKCU\Environment)
+/// and the machine's (HKLM ...\Session Manager\Environment).
+#[cfg(windows)]
+fn env_location(root: EnvRoot) -> (windows_sys::Win32::System::Registry::HKEY, &'static str) {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    match root {
+        EnvRoot::User => (HKEY_CURRENT_USER, "Environment"),
+        EnvRoot::System => (
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+    }
 }
 
 #[cfg_attr(windows, allow(dead_code))]
@@ -4834,10 +4840,35 @@ enum EnvRoot {
 /// A registry value that was read: absent (key or value not found), or its
 /// raw text.
 #[cfg_attr(not(windows), allow(dead_code))]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Lookup {
     Absent,
     Value(String),
+}
+
+/// Redacted: a value read here may be a credential.
+impl std::fmt::Debug for Lookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Lookup::Absent => f.write_str("Absent"),
+            Lookup::Value(_) => f.write_str("Value(<redacted>)"),
+        }
+    }
+}
+
+/// The last successful read of each location (`Absent` before the first).
+#[cfg_attr(not(windows), allow(dead_code))]
+struct EnvCache {
+    user: Lookup,
+    system: Lookup,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl EnvCache {
+    const EMPTY: Self = Self {
+        user: Lookup::Absent,
+        system: Lookup::Absent,
+    };
 }
 
 /// Any registry read failure other than "not found". Deliberately carries no
@@ -4858,25 +4889,34 @@ fn compose_user_system(user: Lookup, system: Lookup) -> Option<String> {
 }
 
 /// The whole Windows rule, platform-independent so it is tested everywhere:
-/// read both locations, compose, and on any read failure return the last
-/// successful composition (none before the first) rather than flapping to
-/// "unconfigured". Never touches the process environment.
+/// read both locations, then compose. Retention is per location: a failed read
+/// keeps that location's last successful value (`Absent` before the first)
+/// rather than flapping to "unconfigured", while the other location still
+/// follows the registry — a failing machine value neither blocks a good user
+/// value nor resends a user token that was removed. Reads happen outside the
+/// lock; the lock only swaps values. Never touches the process environment.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn windows_claude_token_with(
     read: impl Fn(EnvRoot) -> Result<Lookup, RegistryReadError>,
-    last: &Mutex<Option<String>>,
+    last: &Mutex<EnvCache>,
 ) -> Option<String> {
+    let user = read(EnvRoot::User);
+    let system = read(EnvRoot::System);
     let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let (Ok(user), Ok(system)) = (read(EnvRoot::User), read(EnvRoot::System)) {
-        *last = compose_user_system(user, system);
+    if let Ok(user) = user {
+        last.user = user;
     }
-    last.clone()
+    if let Ok(system) = system {
+        last.system = system;
+    }
+    compose_user_system(last.user.clone(), last.system.clone())
 }
 
 /// One string value, read raw: REG_SZ or REG_EXPAND_SZ with `RRF_NOEXPAND`, so
 /// no other environment value is expanded into it. Not found = `Absent`; any
-/// other failure, a value over the 32 767-WCHAR environment limit, or a value
-/// still growing after three tries = `RegistryReadError`.
+/// other failure, a value over the environment limit (32 767 WCHARs plus the
+/// terminating NUL, i.e. (32 767 + 1) * 2 bytes), or a value still growing
+/// after three tries = `RegistryReadError`.
 #[cfg(windows)]
 fn read_string_value(
     root: windows_sys::Win32::System::Registry::HKEY,
@@ -4887,7 +4927,7 @@ fn read_string_value(
     use windows_sys::Win32::System::Registry::{
         RegGetValueW, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
     };
-    const MAX_BYTES: u32 = 32_767 * 2;
+    const MAX_BYTES: u32 = (32_767 + 1) * 2;
     let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
     let subkey: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
     let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
@@ -9045,21 +9085,29 @@ mod tests {
         let _env = PROCESS_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+        // Restores the variables on drop, so a panic cannot leave them set.
+        struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (name, value) in self.0.drain(..) {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let restore = RestoreEnv(
             ["TOKENBAR_CLAUDE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]
                 .into_iter()
                 .map(|name| (name, std::env::var_os(name)))
-                .collect();
-        for (name, _) in &saved {
+                .collect(),
+        );
+        for (name, _) in &restore.0 {
             std::env::set_var(name, "env-token-must-not-be-used");
         }
         let loaded = load_claude_config_dir_credentials(&dir_text);
-        for (name, value) in saved {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
+        drop(restore);
 
         let credentials = loaded.unwrap();
         assert_eq!(credentials.access_token, "dir-access");
@@ -12967,7 +13015,7 @@ mod tests {
             Result<Lookup, RegistryReadError>,
         )>,
     ) -> Vec<Option<String>> {
-        let last = Mutex::new(None);
+        let last = Mutex::new(EnvCache::EMPTY);
         steps
             .into_iter()
             .map(|(user, system)| {
@@ -12985,7 +13033,8 @@ mod tests {
     }
 
     /// A token saved or removed while Syrtis runs takes effect on the next
-    /// read; a read failure keeps the last good answer instead of flapping.
+    /// read; a read failure keeps that location's last good value instead of
+    /// flapping, without freezing the other location.
     #[test]
     fn the_windows_rule_follows_the_registry_and_keeps_the_last_good_on_error() {
         let a = || Ok(value("fixture-a"));
@@ -13009,13 +13058,28 @@ mod tests {
             scripted_rule(vec![(a(), absent()), (b(), absent())]),
             vec![some("fixture-a"), some("fixture-b")]
         );
-        // A failure on either side retains the last good composition.
+        // A failure on either side retains that side's last good value.
         assert_eq!(
             scripted_rule(vec![(a(), absent()), (error(), absent()), (a(), error())]),
             vec![some("fixture-a"), some("fixture-a"), some("fixture-a")]
         );
-        // A failure before any success is none.
-        assert_eq!(scripted_rule(vec![(error(), a())]), vec![None]);
+        // A machine value that always fails does not block the user value...
+        assert_eq!(
+            scripted_rule(vec![(a(), error()), (a(), error())]),
+            vec![some("fixture-a"), some("fixture-a")]
+        );
+        // ...nor resend a user token removed while it fails.
+        assert_eq!(
+            scripted_rule(vec![(a(), error()), (absent(), error())]),
+            vec![some("fixture-a"), None]
+        );
+        assert_eq!(
+            scripted_rule(vec![(a(), absent()), (absent(), error())]),
+            vec![some("fixture-a"), None]
+        );
+        // A failure before any success is absent.
+        assert_eq!(scripted_rule(vec![(error(), error())]), vec![None]);
+        assert_eq!(scripted_rule(vec![(error(), a())]), vec![some("fixture-a")]);
         // The user location is the user's, not the machine's.
         assert_eq!(
             scripted_rule(vec![(Ok(value("U")), Ok(value("S")))]),
@@ -13178,6 +13242,33 @@ mod tests {
             );
         }
         assert_eq!(key.read(None, "number"), Err(RegistryReadError));
+    }
+
+    /// `env_location` points at the real environment keys: read-only, and
+    /// only values Windows always has (never the token).
+    #[cfg(windows)]
+    #[test]
+    fn env_location_reads_the_user_and_machine_environments() {
+        let (hkey, subkey) = env_location(EnvRoot::User);
+        match read_string_value(hkey, subkey, "TEMP") {
+            Ok(Lookup::Value(temp)) => assert!(!temp.is_empty()),
+            other => panic!("user TEMP: {other:?}"),
+        }
+        let (hkey, subkey) = env_location(EnvRoot::System);
+        assert_eq!(
+            read_string_value(hkey, subkey, "OS"),
+            Ok(value("Windows_NT"))
+        );
+    }
+
+    /// The Debug form never prints a value read from the registry.
+    #[test]
+    fn lookup_debug_redacts_the_value() {
+        assert_eq!(
+            format!("{:?}", value("secret-fixture")),
+            "Value(<redacted>)"
+        );
+        assert_eq!(format!("{:?}", Lookup::Absent), "Absent");
     }
 
     #[test]

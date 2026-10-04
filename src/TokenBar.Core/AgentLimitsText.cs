@@ -160,11 +160,13 @@ public static class AgentLimitsText
     }
 
     /// <summary>Saves a Claude setup-token as a user environment variable,
-    /// which is where Windows reads it (CLAUDE_CODE_OAUTH_TOKEN from the
-    /// process environment; the macOS Keychain item has no Windows
-    /// counterpart). <c>Read-Host</c> prompts for the token, so it never lands
-    /// on a command line or in shell history — the reason macOS ends its
-    /// <c>security</c> command with a bare <c>-w</c>.</summary>
+    /// which is where Windows reads it: CLAUDE_CODE_OAUTH_TOKEN from the user
+    /// (then machine) environment in the registry on every refresh
+    /// (claude_direct_env_token), not from the process environment; the macOS
+    /// Keychain item has no Windows counterpart. <c>Read-Host</c> prompts for
+    /// the token, so it never lands on a command line or in shell history —
+    /// the reason macOS ends its <c>security</c> command with a bare
+    /// <c>-w</c>.</summary>
     public const string ClaudeSetupCommand =
         "[Environment]::SetEnvironmentVariable('CLAUDE_CODE_OAUTH_TOKEN', (Read-Host 'Claude setup-token'), 'User')";
 
@@ -193,7 +195,7 @@ public static class AgentLimitsText
         {
             List<LimitsSetupPart> parts =
             [
-                new("Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from its environment. Save the token as a user environment variable with this PowerShell command. The token is stored unencrypted in your Windows user environment."
+                new("Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from your Windows user environment variables. Save the token as a user environment variable with this PowerShell command. The token is stored unencrypted in your Windows user environment."
                     .Localized(), IsCommand: false),
                 new(ClaudeSetupCommand, IsCommand: true),
             ];
