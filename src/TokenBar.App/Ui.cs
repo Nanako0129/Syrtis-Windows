@@ -45,6 +45,12 @@ public static class Ui
     // macOS: HStack(spacing: 6) between the title and its accessory.
     private const double CardTitleAccessoryGap = 6;
 
+    // Room kept for the accessory when the title is long: macOS shrinks both
+    // texts, so some of the account label always shows; without this the
+    // Auto title column could take the whole line and the label (and its
+    // tooltip) would vanish instead of trimming.
+    private const double CardAccessoryMinWidth = 48;
+
     /// <summary>A dashboard card, laid out as macOS <c>DashCard</c>: the title
     /// (and <paramref name="titleAccessory"/>) on the first line, the
     /// subtitle under it on its own line, wrapping, and
@@ -126,7 +132,8 @@ public static class Ui
             // whole card still trims with its ellipsis and hover tip instead
             // of being clipped.
             var line = new Microsoft.UI.Xaml.Controls.Grid { ColumnSpacing = CardTitleAccessoryGap };
-            line.SizeChanged += (_, e) => titleText.MaxWidth = e.NewSize.Width;
+            line.SizeChanged += (_, e) => titleText.MaxWidth =
+                Math.Max(0, e.NewSize.Width - CardTitleAccessoryGap - CardAccessoryMinWidth);
             line.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             line.ColumnDefinitions.Add(new ColumnDefinition
             {
@@ -148,7 +155,9 @@ public static class Ui
             left.Children.Add(line);
         }
 
-        if (subtitle is not null)
+        // An empty subtitle (a caller joining zero parts) is no subtitle: on
+        // its own line it would leave a blank line under the title.
+        if (!string.IsNullOrWhiteSpace(subtitle))
         {
             left.Children.Add(new TextBlock
             {
@@ -164,14 +173,13 @@ public static class Ui
         {
             // macOS aligns the trailing control on the title's first baseline,
             // so with a subtitle line it sits by the title, not between lines.
-            if (trailing is FrameworkElement end)
-            {
-                end.HorizontalAlignment = HorizontalAlignment.Right;
-                end.VerticalAlignment = subtitle is null ? VerticalAlignment.Center : VerticalAlignment.Top;
-            }
-
-            Microsoft.UI.Xaml.Controls.Grid.SetColumn((FrameworkElement)trailing, 1);
-            head.Children.Add(trailing);
+            var end = (FrameworkElement)trailing;
+            end.HorizontalAlignment = HorizontalAlignment.Right;
+            end.VerticalAlignment = string.IsNullOrWhiteSpace(subtitle)
+                ? VerticalAlignment.Center
+                : VerticalAlignment.Top;
+            Microsoft.UI.Xaml.Controls.Grid.SetColumn(end, 1);
+            head.Children.Add(end);
         }
 
         stack.Children.Add(head);
