@@ -36,6 +36,9 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
 
     private readonly object _gate = new();
 
+    // The payload the core holds from this process; null = nothing installed.
+    private string? _lastInstalled;
+
     /// <summary>The production setter over the FFI.</summary>
     public static Action<string> NativeSetter { get; } = json => TbCore.SetKeychainConsent(json);
 
@@ -47,14 +50,41 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     /// the next launch. Serialized under one lock so the last click wins in
     /// both the settings file and the core. The core is told first: if the
     /// call throws, nothing is persisted and the exception reaches the caller,
-    /// so the stored answer never claims a state the core is not in.</summary>
+    /// so the stored answer never claims a state the core is not in.
+    /// <para>What the core holds is tracked in-process (<c>_lastInstalled</c>,
+    /// macOS <c>lastInstalledPayload</c>), never inferred from
+    /// <see cref="Stored"/>: a denial with nothing installed is a no-op (no
+    /// core call), and <see cref="QuotaEpoch.Signal"/> fires only when the
+    /// setter succeeded and the installed grant changed, so both quota
+    /// pollers refetch with the new grant.</para></summary>
     public void Answer(bool granted)
     {
+        var changed = false;
         lock (_gate)
         {
-            setConsent(granted ? GrantedPayload : DeniedPayload);
+            var payload = granted ? GrantedPayload : DeniedPayload;
+            if (granted || _lastInstalled is not null)
+            {
+                changed = Install(payload);
+            }
+
             store.SetBool(StorageKey, granted);
         }
+
+        if (changed)
+        {
+            QuotaEpoch.Signal();
+        }
+    }
+
+    // Caller holds _gate. Calls the setter; records and reports a change only
+    // when it succeeded.
+    private bool Install(string payload)
+    {
+        var changed = payload != _lastInstalled;
+        setConsent(payload);
+        _lastInstalled = payload;
+        return changed;
     }
 
     /// <summary>Settings' "Use Grok Bot's sign-in" switch turned off (Q6-2),
@@ -74,6 +104,7 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     /// asks again.</summary>
     public void ApplyIfGranted()
     {
+        var changed = false;
         lock (_gate)
         {
             if (Stored != true)
@@ -83,12 +114,17 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
 
             try
             {
-                setConsent(GrantedPayload);
+                changed = Install(GrantedPayload);
             }
             catch (Exception)
             {
                 // Fail closed: the grant is simply not installed.
             }
+        }
+
+        if (changed)
+        {
+            QuotaEpoch.Signal();
         }
     }
 
@@ -146,9 +182,11 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     /// Waiting ("Waiting…", Allow and Not now disabled) holds only while the
     /// same payload object is shown and no quota fetch has failed since the
     /// grant; either exit ends Waiting and re-enables the buttons, never the
-    /// text. The refresh after a grant is best effort and may wait for the
-    /// next poll (macOS guarantees a refetch; Windows aligns in slice W6c),
-    /// so without these exits the button could stay disabled. The record
+    /// text. A grant that changes what the core holds signals
+    /// <see cref="QuotaEpoch"/>, which wakes both quota pollers and discards
+    /// any payload built before it, so the next payload is built after the
+    /// grant; the exits remain for a refresh that fails or brings another
+    /// consent payload, so the button never latches disabled. The record
     /// clears when the stored answer is no longer yes (the normal
     /// <see cref="CardFor"/> decision, Declined, then applies) or when a
     /// Grok Bot snapshot is not a consent snapshot (<see cref="Card.None"/>);

@@ -7,6 +7,7 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
 {
     private readonly object _gate = new();
     private Task<AgentUsagePayload>? _inFlight;
+    private long _inFlightEpoch;
     private Action? _beforeFirstFetch;
 
     // Waits for the launch push so the first fetch already carries the extra
@@ -31,23 +32,55 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
         }
     }
 
+    /// <summary>Single-flight and epoch-aware. A caller at the epoch the
+    /// in-flight fetch was requested at joins it. A caller that saw a newer
+    /// <see cref="QuotaEpoch"/> gets a fetch chained after it (never joined:
+    /// its payload may predate the change; never parallel: at most one fetch
+    /// delegate runs at a time), which then becomes the one later callers at
+    /// that epoch join.</summary>
     public Task<AgentUsagePayload> FetchAsync()
     {
         lock (_gate)
         {
+            var epoch = QuotaEpoch.Current;
+            Task<AgentUsagePayload> next;
             if (_inFlight is { } current)
             {
-                return current;
+                if (epoch <= _inFlightEpoch)
+                {
+                    return current;
+                }
+
+                next = current.ContinueWith(
+                    _ =>
+                    {
+                        Action? chainedBefore;
+                        lock (_gate)
+                        {
+                            chainedBefore = _beforeFirstFetch;
+                            _beforeFirstFetch = null;
+                        }
+
+                        chainedBefore?.Invoke();
+                        return fetch();
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.None,
+                    TaskScheduler.Default);
+            }
+            else
+            {
+                var before = _beforeFirstFetch;
+                _beforeFirstFetch = null;
+                next = Task.Run(() =>
+                {
+                    before?.Invoke();
+                    return fetch();
+                });
             }
 
-            var before = _beforeFirstFetch;
-            _beforeFirstFetch = null;
-            var next = Task.Run(() =>
-            {
-                before?.Invoke();
-                return fetch();
-            });
             _inFlight = next;
+            _inFlightEpoch = epoch;
             _ = next.ContinueWith(
                 completed =>
                 {
