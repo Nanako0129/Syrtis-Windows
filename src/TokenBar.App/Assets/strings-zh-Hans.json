@@ -510,5 +510,18 @@
   "last {0}m · {1}/m total": "最近 {0} 分钟 · 总计 {1}/分钟",
   "No local usage records in this range.": "此期间没有本地用量记录。",
   "The tokens and amounts below stay at 0 until usage is attributed to this subscription.": "用量归属到这个订阅之前，下面每一行的 token 与金额都会是 0。",
-  "Set up usage attribution…": "设置用量归属…"
+  "Set up usage attribution…": "设置用量归属…",
+  "Set up": "待设置",
+  "Allow": "待授权",
+  "Error": "错误",
+  "Live": "实时",
+  "No quota": "无额度",
+  "Recent consumption": "近期消耗",
+  "At this rate it runs out before reset · projected {0}% used": "按当前速度会在重置前用完 · 预计已用 {0}%",
+  "At this rate it reaches {0}% used by reset": "按当前速度，重置时将用到 {0}%",
+  "The pace line beside it compares you with your usual pattern instead.": "旁边的消耗节奏线用于和你的惯常用量模式比较，两者含义不同。",
+  "Recently: runs out": "近期：将会用完",
+  "{0} used": "已用 {0}",
+  "{0} less left": "预计少剩 {0}",
+  "{0} more left": "预计多剩 {0}"
 }

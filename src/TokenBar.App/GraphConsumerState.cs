@@ -94,9 +94,16 @@ public static class LazyLaneActivation
         bool Hourly, bool Agents, bool QuotaHistory, bool WindowUsage);
 
     /// <summary>Quota's card and its window-usage export open together, the
-    /// same pairing <c>DashboardView.SwitchTo</c> already fetches together.</summary>
+    /// same pairing <c>DashboardView.SwitchTo</c> already fetches together.
+    /// Overview wants the quota history too: its Agent-limits card draws the
+    /// recent-trend arrow (and, in the Chart layout, the sparkline) from those
+    /// curves. macOS refreshes the curves with every quota card refresh,
+    /// whichever lens is open (DashboardModel.swift, windowCurves); without
+    /// this the Overview card showed arrows only after a Quota visit had left
+    /// history behind in the snapshot.</summary>
     public static Wanted For(AppView view) => view switch
     {
+        AppView.Overview => new Wanted(false, false, true, false),
         AppView.Hourly => new Wanted(true, false, false, false),
         AppView.Agents => new Wanted(false, true, false, false),
         AppView.Quota => new Wanted(false, false, true, true),
