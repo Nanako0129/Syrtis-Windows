@@ -298,6 +298,17 @@ public class AntigravityAccountsTests
     }
 
     [Fact]
+    public void TheCapturedPlanIsTakenEvenWhenTheCapturedIdentityHasNoEmail()
+    {
+        var noPlan = Primary() with { Identity = new AgentIdentity("primary@example.com") };
+        var captured = Captured() with { Identity = new AgentIdentity(null, "Google AI Pro") };
+
+        var card = Assert.Single(AntigravityDedup.Apply(Payload(noPlan, captured), KeyA, "M1", null).Agents);
+        Assert.Equal("Google AI Pro", card.Identity?.Plan);
+        Assert.Equal("primary@example.com", card.Identity?.Email);
+    }
+
+    [Fact]
     public void AHealthyCapturedAccountStandsInForAnErroredPrimary()
     {
         var captured = Captured() with { Identity = new AgentIdentity("a@example.com", "Google AI Pro") };

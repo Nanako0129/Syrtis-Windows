@@ -332,11 +332,14 @@ public static class AntigravityDedup
         }
 
         var merged = primary;
-        if (captured.Identity?.Email is { } email)
+        // Email and plan are chosen independently. The agy route carries no
+        // plan; the captured snapshot is the same account (marker-bound
+        // above), so its plan labels the primary too, with or without an email.
+        var email = captured.Identity?.Email ?? primary.Identity?.Email;
+        var plan = primary.Identity?.Plan ?? captured.Identity?.Plan;
+        if (captured.Identity is not null && (email is not null || plan is not null))
         {
-            // The agy route carries no plan; the captured snapshot is the same
-            // account (marker-bound above), so its plan labels the primary too.
-            merged = merged with { Identity = new AgentIdentity(email, primary.Identity?.Plan ?? captured.Identity?.Plan) };
+            merged = merged with { Identity = new AgentIdentity(email, plan) };
         }
 
         agents[primaryIndex] = AdoptingHistory(merged, captured);
