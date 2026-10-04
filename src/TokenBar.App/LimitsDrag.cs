@@ -47,12 +47,12 @@ internal sealed class LimitsDrag
     private string? _dragId;
     private string? _overId;
 
-    public LimitsDrag(StackPanel panel, IReadOnlyList<AgentUsageSnapshot> orderedAgents)
+    public LimitsDrag(StackPanel panel, IReadOnlyList<LimitsRow> orderedRows)
     {
         _panel = panel;
         // A group's extra accounts sit as far apart as the cards themselves.
         _spacing = panel.Spacing;
-        _visible = [.. orderedAgents.Where(static a => a.Account.AccountKey is null).Select(static a => a.ClientId)];
+        _visible = [.. orderedRows.Where(static r => r.IsPrimary).Select(static r => r.ClientId)];
     }
 
     /// <summary>The element to add to the panel for this card, or null when
@@ -62,11 +62,11 @@ internal sealed class LimitsDrag
     /// dropped "below" Claude lands after Claude's extra accounts, and the
     /// line is drawn there. An extra whose primary is absent stands
     /// alone.</summary>
-    public FrameworkElement? Host(AgentUsageSnapshot agent, FrameworkElement section)
+    public FrameworkElement? Host(LimitsRow row, FrameworkElement section)
     {
-        if (agent.Account.AccountKey is not null)
+        if (!row.IsPrimary)
         {
-            if (_cards.TryGetValue(agent.ClientId, out var owner))
+            if (_cards.TryGetValue(row.ClientId, out var owner))
             {
                 owner.Group.Children.Add(section);
                 return null;
@@ -83,7 +83,7 @@ internal sealed class LimitsDrag
         var bottom = DropLine(VerticalAlignment.Bottom, new Thickness(0, 0, 0, -DropLineOffset));
         host.Children.Add(top);
         host.Children.Add(bottom);
-        _cards[agent.ClientId] = (host, group, top, bottom);
+        _cards[row.ClientId] = (host, group, top, bottom);
         return host;
     }
 

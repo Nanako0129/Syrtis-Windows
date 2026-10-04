@@ -562,5 +562,12 @@
   "Couldn't delete the copy from Windows Credential Manager.": "無法從 Windows 認證管理員刪除副本。",
   "Using a Claude `setup-token`? Syrtis reads `CLAUDE_CODE_OAUTH_TOKEN` from its environment. Save the token as a user environment variable with this PowerShell command, then quit Syrtis and reopen it from the Start menu. The token is stored unencrypted in your Windows user environment.": "使用 Claude 的 `setup-token`？Syrtis 會讀取環境變數 `CLAUDE_CODE_OAUTH_TOKEN`。請用下面的 PowerShell 指令把 token 存成使用者環境變數，再結束 Syrtis，從開始選單重新開啟。token 會以未加密的形式存在你的 Windows 使用者環境變數裡。",
   "Copy command": "複製指令",
-  "The claude CLI reads this variable too and prefers it over /login. To stop using it, run:{0}and reopen Syrtis.": "claude CLI 也會讀這個變數，而且優先於 /login。要停用時執行下面的指令，再重新開啟 Syrtis：{0}"
+  "The claude CLI reads this variable too and prefers it over /login. To stop using it, run:{0}and reopen Syrtis.": "claude CLI 也會讀這個變數，而且優先於 /login。要停用時執行下面的指令，再重新開啟 Syrtis：{0}",
+  "No data": "沒有資料",
+  "Checking…": "查詢中…",
+  "Limit": "額度",
+  "Pro": "Pro",
+  "Flash": "Flash",
+  "Loading Grok Bot limits…": "正在載入 Grok Bot 額度…",
+  "Sign in to Grok Bot on this PC, then refresh to see its weekly limits.": "在這台電腦登入 Grok Bot，再重新整理以查看每週額度。"
 }
