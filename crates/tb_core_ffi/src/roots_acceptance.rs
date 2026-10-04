@@ -353,6 +353,207 @@ fn a_config_dir_alone_never_reaches_the_primary_window() {
     );
 }
 
+/// Register `dirs` as extra accounts in both registries (config dir and its
+/// `projects` / `transcripts` roots) through the setters' commit paths.
+fn register_accounts(dirs: &[&Path]) {
+    crate::apply_config_dirs_for_test(dirs.iter().map(|dir| dir.display().to_string()).collect());
+    crate::apply_scan_roots_for_test(std::collections::BTreeMap::from([(
+        "claude".to_string(),
+        dirs.iter()
+            .flat_map(|dir| [dir.join("projects"), dir.join("transcripts")])
+            .collect(),
+    )]))
+    .unwrap();
+}
+
+/// #175 deferred item: an account nested at `<outer>\.claude` was counted in
+/// both windows. The outer window is captured with the outer directory as
+/// home, and the engine scans `<home>/.claude/projects` (Claude's declared
+/// root) on its own, which is the inner account. Each account's window is its
+/// own scope minus every other account. Totals keep every account.
+#[test]
+fn a_nested_account_is_counted_in_its_own_window_only() {
+    let Some(root) = child_root() else {
+        return run_in_child("a_nested_account_is_counted_in_its_own_window_only", "nested-account");
+    };
+    const PRIMARY: i64 = 1_000;
+    const OUTER: i64 = 7_000;
+    const INNER: i64 = 3_000;
+    write_session(&root.join(".claude"), "primary", PRIMARY);
+    let outer = root.join("work-d");
+    let inner = outer.join(".claude");
+    write_session(&outer, "outer", OUTER);
+    write_session(&inner, "inner", INNER);
+    register_accounts(&[&outer, &inner]);
+
+    let outer_text = outer.display().to_string();
+    let inner_text = inner.display().to_string();
+    assert_eq!(
+        claude_lane_output(&call_window(Some(&outer_text), WINDOW_FROM, WINDOW_UNTIL)),
+        OUTER,
+        "the outer account's window counted the nested account"
+    );
+    assert_eq!(
+        claude_lane_output(&call_window(Some(&inner_text), WINDOW_FROM, WINDOW_UNTIL)),
+        INNER
+    );
+    assert_eq!(
+        claude_lane_output(&call_window(None, WINDOW_FROM, WINDOW_UNTIL)),
+        PRIMARY
+    );
+    assert_eq!(
+        claude_lane_graph_output(&call_graph()),
+        PRIMARY + OUTER + INNER,
+        "totals keep every account once"
+    );
+}
+
+/// The two halves of the exclusion each catch a case the other misses,
+/// because the registries are set by separate calls and can disagree: the
+/// inner account known only as a config directory (no roots yet), or only by
+/// its roots (no config-dir entry). The outer window must drop it either way.
+#[test]
+fn a_nested_account_known_to_one_registry_is_still_excluded() {
+    let Some(root) = child_root() else {
+        return run_in_child(
+            "a_nested_account_known_to_one_registry_is_still_excluded",
+            "nested-one-registry",
+        );
+    };
+    let outer = root.join("work-d");
+    let inner = outer.join(".claude");
+    write_session(&outer, "outer", 7_000);
+    write_session(&inner, "inner", 3_000);
+    let outer_text = outer.display().to_string();
+    let outer_roots = vec![outer.join("projects"), outer.join("transcripts")];
+    let inner_roots = vec![inner.join("projects"), inner.join("transcripts")];
+
+    // Config dir only: the inner account has no registered root.
+    crate::apply_config_dirs_for_test(vec![outer_text.clone(), inner.display().to_string()]);
+    crate::apply_scan_roots_for_test(std::collections::BTreeMap::from([(
+        "claude".to_string(),
+        outer_roots.clone(),
+    )]))
+    .unwrap();
+    assert_eq!(
+        claude_lane_output(&call_window(Some(&outer_text), WINDOW_FROM, WINDOW_UNTIL)),
+        7_000,
+        "a nested account known only as a config directory reached the outer window"
+    );
+
+    // Roots only: the inner account is not a configured directory.
+    crate::apply_config_dirs_for_test(vec![outer_text.clone()]);
+    crate::apply_scan_roots_for_test(std::collections::BTreeMap::from([(
+        "claude".to_string(),
+        outer_roots.into_iter().chain(inner_roots).collect(),
+    )]))
+    .unwrap();
+    assert_eq!(
+        claude_lane_output(&call_window(Some(&outer_text), WINDOW_FROM, WINDOW_UNTIL)),
+        7_000,
+        "a nested account known only by its roots reached the outer window"
+    );
+}
+
+/// `<D>\\.claude` registered as its own account but actually a junction back to
+/// D (registries compare folded strings, so both are accepted). The engine
+/// canonicalizes exclusion prefixes, so excluding the "nested" account would
+/// exclude D's own roots and empty D's window. D must keep its own usage.
+#[cfg(windows)]
+#[test]
+fn a_nested_alias_of_the_account_itself_does_not_empty_its_window() {
+    let Some(root) = child_root() else {
+        return run_in_child(
+            "a_nested_alias_of_the_account_itself_does_not_empty_its_window",
+            "nested-alias",
+        );
+    };
+    let d = root.join("work-d");
+    write_session(&d, "d", 7_000);
+    let alias = d.join(".claude");
+    let cmd = std::env::var_os("SystemRoot")
+        .map(|system| std::path::PathBuf::from(system).join("System32").join("cmd.exe"))
+        .unwrap();
+    let made = std::process::Command::new(cmd)
+        .args(["/C", "mklink", "/J"])
+        .arg(&alias)
+        .arg(&d)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "mklink /J failed: {made:?}");
+    assert!(
+        alias.join("projects").is_dir(),
+        "fixture is inert: the junction does not resolve"
+    );
+    register_accounts(&[&d, &alias]);
+
+    assert_eq!(
+        claude_lane_output(&call_window(
+            Some(&d.display().to_string()),
+            WINDOW_FROM,
+            WINDOW_UNTIL
+        )),
+        7_000,
+        "an alias of the account itself excluded the account's own roots"
+    );
+}
+
+/// Control: accounts that do not nest scan exactly what an account window
+/// scanned before the exclusion existed (its own directory as home, its own
+/// roots, no exclusion), message for message.
+#[test]
+fn unrelated_accounts_scan_exactly_what_they_did_before() {
+    let Some(root) = child_root() else {
+        return run_in_child("unrelated_accounts_scan_exactly_what_they_did_before", "unrelated-accounts");
+    };
+    write_session(&root.join(".claude"), "primary", 1_000);
+    let d = root.join("work-d");
+    let e = root.join("work-e");
+    write_session(&d, "d", 7_000);
+    write_session(&e, "e", 2_000);
+    register_accounts(&[&d, &e]);
+
+    for (dir, expected) in [(&d, 7_000), (&e, 2_000)] {
+        let text = dir.display().to_string();
+        let window = call_window(Some(&text), WINDOW_FROM, WINDOW_UNTIL);
+        assert_eq!(claude_lane_output(&window), expected);
+        // Not just the same messages: the same scope, with no exclusion.
+        let scoped = crate::window_usage::scoped_context_for_test(
+            &crate::LocalSourceContext::process().unwrap(),
+            &Some(text.clone()),
+        )
+        .unwrap();
+        assert!(
+            scoped.resolved().scanner_settings().excluded_scan_paths.is_empty(),
+            "an unrelated account was excluded from {text}"
+        );
+        let before = crate::LocalSourceContext::derived(
+            tokscale_core::ResolvedLocalSourceContext::capture(
+                Some(dir.to_path_buf()),
+                false,
+                tokscale_core::ScannerSettings {
+                    extra_scan_paths: std::collections::BTreeMap::from([(
+                        "claude".to_string(),
+                        vec![dir.join("projects"), dir.join("transcripts")],
+                    )]),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+            generation(),
+        );
+        let reference = crate::window_usage::run(&before, WINDOW_FROM, WINDOW_UNTIL).unwrap();
+        assert_eq!(
+            window["data"]["messages"], reference["messages"],
+            "an unrelated account's window changed"
+        );
+        assert!(
+            !reference["messages"].as_array().unwrap().is_empty(),
+            "fixture is inert"
+        );
+    }
+}
+
 // ---- 4′: the gate, everywhere (empty setters still move the generation) --
 
 /// 4′(a): a window scan that took its context before a root change publishes

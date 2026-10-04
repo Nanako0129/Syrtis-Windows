@@ -251,6 +251,12 @@ public sealed partial class SettingsWindow : Window
                     return;
                 }
 
+                if (key == GrokBotConsent.StorageKey)
+                {
+                    // Answered on the card while Settings is open.
+                    SyncGrokBotSwitch();
+                }
+
                 if (rebuildAll)
                 {
                     Rebuild();
@@ -281,6 +287,32 @@ public sealed partial class SettingsWindow : Window
     }
 
     private const string UsageAttributionKeyPrefix = "tokenbar.usage.attribution.";
+
+    // The Grok Bot consent switch on the current Dashboard page (Rebuild
+    // replaces it), and the guard that keeps a programmatic IsOn from being
+    // read as the user's answer.
+    private ToggleSwitch? _grokBotSwitch;
+    private bool _syncingGrokBotSwitch;
+
+    /// <summary>Show the stored Grok Bot answer without recording a new one.
+    /// UI thread only.</summary>
+    private void SyncGrokBotSwitch()
+    {
+        if (_grokBotSwitch is not { } toggle)
+        {
+            return;
+        }
+
+        _syncingGrokBotSwitch = true;
+        try
+        {
+            toggle.IsOn = AppSettings.GrokBotConsent.Stored == true;
+        }
+        finally
+        {
+            _syncingGrokBotSwitch = false;
+        }
+    }
 
     private void ApplySize()
     {
@@ -543,6 +575,51 @@ public sealed partial class SettingsWindow : Window
         {
             limits.Children.Add(limitOptions);
         }
+
+        // Grok Bot sign-in consent (Q6-2): the same answer as Allow / Not now
+        // on the card. Outside the master switch: hiding the card must not hide
+        // the way to stop the read behind it. Off withdraws in the core at
+        // once and takes effect from the next refresh; a refresh already under
+        // way may finish (the core's re-checks before each decode, the
+        // account-scope fingerprint and the send are best-effort hardening,
+        // not a guarantee). The Cursor IDE sign-in is used only when Grok Bot
+        // is signed out, never because this is off.
+        var grokBot = new ToggleSwitch
+        {
+            IsOn = AppSettings.GrokBotConsent.Stored == true,
+            OnContent = null,
+            OffContent = null,
+        };
+        _grokBotSwitch = grokBot;
+        grokBot.Toggled += (_, _) =>
+        {
+            // A programmatic IsOn (SyncGrokBotSwitch) raises Toggled too; it
+            // shows an answer already stored and must not record another.
+            if (_syncingGrokBotSwitch)
+            {
+                return;
+            }
+
+            try
+            {
+                if (grokBot.IsOn)
+                {
+                    AppSettings.GrokBotConsent.Answer(true);
+                }
+                else
+                {
+                    AppSettings.GrokBotConsent.Withdraw();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Nothing was stored; show the state the core is actually in.
+                DevLog.Write($"grok-bot consent: settings toggle failed: {ex.GetType().Name}");
+                SyncGrokBotSwitch();
+            }
+        };
+        limits.Children.Add(ToggleRow(GrokBotConsent.Copy.SettingsToggle.Localized(), grokBot));
+        limits.Children.Add(Hint(GrokBotConsent.Copy.SettingsHint.Localized()));
 
         panel.Children.Add(Section("Agent limits".Localized(), limits));
 
@@ -956,6 +1033,8 @@ public sealed partial class SettingsWindow : Window
         panel.Children.Add(Section("Data refresh".Localized(), refresh));
 
         panel.Children.Add(Section(ClaudeAccountsCopy.Section.Localized(), BuildClaudeAccounts(store)));
+
+        panel.Children.Add(Section(AntigravityAccountsCopy.Section.Localized(), BuildAntigravityAccounts(store)));
 
         // ── Discord (macOS SettingsPanel :944-1007) ─────────────────────
         _discordSection = Section(DiscordCopy.Section.Localized(), BuildDiscord(store));
@@ -1467,19 +1546,13 @@ public sealed partial class SettingsWindow : Window
     private static void MoveClientTab(
         SettingsStore store, IReadOnlyList<string> present, string from, string to)
     {
-        // `present` is already TAB ids (TabClients folds group members). The
-        // saved order can still hold a legacy member id (e.g.
-        // `antigravity-cli`) from before the fold existed, so `TabOrder`
-        // folds it to its tab id and dedupes before this reorder runs — a
-        // raw compare would leave that legacy entry unmatched by `visible`
-        // and let it drift to the end of `full` on every move.
+        // `present` is already TAB ids and Settings lists every one of them,
+        // so the visible subset is the whole present set in saved order.
         var orderRaw = store.GetString(ClientRegistry.TabOrderKey) ?? "";
-        var order = ClientRegistry.TabOrder(orderRaw);
-        var visible = ClientRegistry.OrderedClients(present, order);
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        var full = order.Concat(visible).Where(seen.Add).ToList();
-        var merged = ClientRegistry.MergeReorder(full, visible, from, to);
-        store.SetString(ClientRegistry.TabOrderKey, string.Join(',', merged));
+        var visible = ClientRegistry.OrderedClients(present, ClientRegistry.TabOrder(orderRaw));
+        store.SetString(
+            ClientRegistry.TabOrderKey,
+            ClientRegistry.MoveTab(orderRaw, present, visible, from, to));
     }
 
     /// <summary>One switch per client that can show a quota card (macOS

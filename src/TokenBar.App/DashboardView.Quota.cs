@@ -1189,8 +1189,9 @@ public sealed partial class DashboardView
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(54) });
 
-        // Ui.Text already trims to an ellipsis by default.
-        grid.Children.Add(Ui.Text(model.ModelId, 10, 0.85));
+        // Middle-trimmed like macOS QuotaHistoryCard.swift:463: a model id's
+        // distinguishing part is its end.
+        grid.Children.Add(Ui.MiddleText(model.ModelId, 10, 0.85));
 
         var tokens = Ui.Text(WindowHistoryText.ModelTokens(model), 10, 0.6);
         Grid.SetColumn(tokens, 1);

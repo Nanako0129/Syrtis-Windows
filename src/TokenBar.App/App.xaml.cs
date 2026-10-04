@@ -65,6 +65,13 @@ public partial class App : Application
         // accounts, off the UI thread (ClaudeExtraRoots.AwaitLaunch names the
         // lanes that do not).
         StartClaudeExtraRoots();
+        StartAntigravityAccounts();
+
+        // The core's consent registry is in-memory and empty at launch; a
+        // stored "yes" for reading the Grok Bot sign-in is re-installed before
+        // the first agent-usage fetch, whichever surface starts it.
+        global::TokenBar.Core.AgentUsageFetchCoordinator.Shared.RunBeforeFirstFetch(
+            AppSettings.GrokBotConsent.ApplyIfGranted);
 
         try
         {
@@ -692,6 +699,35 @@ public partial class App : Application
         {
             e.Handled = true;
         }
+    }
+
+    /// <summary>Wires the captured Antigravity accounts. Nothing native runs
+    /// here: the shared quota fetch installs the stored list before its first
+    /// call (AntigravityFetch), so no launch gate is needed.</summary>
+    private static void StartAntigravityAccounts()
+    {
+        var store = AppSettings.Store;
+        var installer = new Core.AntigravityAccountsInstaller(
+            () => Core.AntigravityAccounts.PayloadJson(Core.AntigravityAccounts.Load(store)),
+            Interop.TbCore.SetAntigravityAccounts,
+            DevLog.Write);
+        Core.AntigravityAccounts.Installer = installer;
+        Core.AntigravityAutoCapture.Shared = new Core.AntigravityAutoCapture(
+            new Core.AntigravityAutoCapture.Io(
+                Interop.TbCore.AntigravityLoginMarker,
+                Interop.TbCore.AntigravityAutoCapture,
+                Interop.TbCore.AntigravityCapture,
+                Interop.TbCore.AntigravityRemove,
+                installer.Install),
+            store,
+            DevLog.Write);
+        Core.AccountLabel.AntigravityLabel = key => Core.AntigravityAccounts.Label(store, key);
+        Core.AccountLabel.AntigravityOrdinal = key => Core.AntigravityAccounts.Ordinal(store, key);
+        // A change that lands while the shared fetch is in flight (the capture
+        // PrepareForFetch started finishing during that same fetch) owes one
+        // more fetch; the consumers' own refresh would be dropped by their
+        // in-flight guard.
+        Core.AntigravityAccounts.Changed += Core.AgentUsageFetchCoordinator.Shared.RequestFollowUp;
     }
 
     private static void StartClaudeExtraRoots()

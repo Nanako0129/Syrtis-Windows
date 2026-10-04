@@ -295,7 +295,7 @@ public static class WindowCardText
         // primary window card may show other accounts' series.
         var identity = AccountIdentity.Of(clientId, accountKey);
         var agent = quota?.Agents.FirstOrDefault(a => a.Account == identity);
-        var liveScope = agent?.HistoryScope?.Scope;
+        var liveScope = agent?.HistoryReadScope?.Scope;
         var strict = identity.AccountKey is not null;
 
         // Every stored series this client's own scope-filtered set contains —

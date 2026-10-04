@@ -28,6 +28,7 @@ public sealed partial class DashboardView : UserControl
     private AppView _view = AppView.Overview;
     private readonly Dictionary<AppView, Button> _tabs = [];
     private IReadOnlyList<string> _displayClients = [];
+    private IReadOnlyList<string> _presentTabs = []; // every tab, hidden ones too
     private IReadOnlyList<string> _selectedClients = [];
     private HashSet<string> _selectedSet = new(StringComparer.Ordinal);
     private UsageStats? _selectedStats;
@@ -68,6 +69,15 @@ public sealed partial class DashboardView : UserControl
         // The wordmark reads Σύρτις; a screen reader names the product.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ProductTitle, ProductIdentity.Name);
         SetLiveRate(0);
+        // Hover tooltips stay inside the cards' scroll area, so none sits
+        // under the header or the footer (macOS popoverScrollViewport).
+        Loaded += (_, _) =>
+        {
+            if (XamlRoot is { } root)
+            {
+                HoverTip.RegisterViewport(root, () => HoverTip.BoundsInRoot(CardsScroll));
+            }
+        };
         // WinUI otherwise synthesizes a tooltip containing "Esc" for the
         // dashboard-wide Escape accelerator whenever the pointer rests over
         // the graph. The accelerator remains active; only its automatic
@@ -140,6 +150,27 @@ public sealed partial class DashboardView : UserControl
             else if (key == AppViews.HiddenKey)
             {
                 _ = DispatcherQueue.TryEnqueue(ApplyLensVisibility);
+            }
+            else if (key == GrokBotConsent.StorageKey)
+            {
+                // The card's buttons and the Settings switch both land here,
+                // after the core took the answer. The refetch is not asked for
+                // here: a changed grant signals QuotaEpoch (GrokBotConsent),
+                // which wakes both quota pollers. Either answer re-renders the
+                // card.
+                _ = DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (AppSettings.GrokBotConsent.Stored == true)
+                    {
+                        // A yes from the Settings switch keeps the last
+                        // consent card drawn (Declined stays one line), or
+                        // the one line if none was; after the card's own
+                        // Allow this is a no-op.
+                        _grokBotWaiting.GrantedElsewhere();
+                    }
+
+                    RenderContent(animated: false);
+                });
             }
             else if (key.StartsWith("tokenbar.limits.", StringComparison.Ordinal)
                 || key == "tokenbar.trace.detailed"
@@ -650,6 +681,7 @@ public sealed partial class DashboardView : UserControl
         var selection = ClientRegistry.ResolveSelection(
             snapshot.Graph.Summary.Clients, quotaIds, AppSettings.Store);
         _displayClients = selection.DisplayClients;
+        _presentTabs = ClientRegistry.PresentTabs(snapshot.Graph.Summary.Clients, quotaIds);
         _selectedClients = selection.SelectedClients;
         _selectedSet = new HashSet<string>(selection.SelectedClients, StringComparer.Ordinal);
         _selectedStats = new UsageStats(snapshot.Graph, _selectedSet);
@@ -701,9 +733,6 @@ public sealed partial class DashboardView : UserControl
         SetLiveRate(rate);
         CostLine.Text = CostSurfaceProjection.HeaderCostLine(
             today?.Cost ?? 0, stats, snapshot.CostAuthoritative);
-        // A restored snapshot reads as its age: FetchedAt is re-stamped by
-        // every quota / trace / model publish long before the live graph lands.
-        FooterText.Text = RefreshTip.Footer(snapshot.RestoredAt, snapshot.FetchedAt, DateTimeOffset.Now);
     }
 
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _ledTimer;
@@ -1004,7 +1033,7 @@ public sealed partial class DashboardView : UserControl
         {
             Content = content,
             FontSize = 11,
-            Padding = new Thickness(9, 4, 9, 4),
+            Padding = TabPadding,
             FontWeight = active
                 ? Microsoft.UI.Text.FontWeights.SemiBold
                 : Microsoft.UI.Text.FontWeights.Normal,
@@ -1016,13 +1045,185 @@ public sealed partial class DashboardView : UserControl
         };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(
             button, $"ClientTab_{id}");
-        button.Click += (_, _) => SelectClientTab(id);
+        // Every tab press (Overview's too) starts a fresh gesture, so a drag
+        // never swallows a later, unrelated click.
+        button.AddHandler(PointerPressedEvent, new Microsoft.UI.Xaml.Input.PointerEventHandler(
+            (_, _) => _tabDragMoved = false), handledEventsToo: true);
+        button.Click += (_, _) =>
+        {
+            // A press that moved past the threshold was a drag, not a
+            // selection — whichever order Button raises Click and its capture
+            // release in.
+            if (_tabDragMoved)
+            {
+                _tabDragMoved = false;
+                return;
+            }
+
+            SelectClientTab(id);
+        };
         if (id != ClientRegistry.OverviewTab)
         {
-            HoverTip.Attach(button, () => ClientRegistry.Style(id).DisplayName);
+            HoverTip.Attach(button, () => ClientRegistry.TabDragHint.Localized());
+            AttachTabDrag(button, id);
         }
 
         ClientTabsPanel.Children.Add(button);
+    }
+
+    // ── Client tab drag (macOS DashboardTabs.swift:124-178) ─────────────
+
+    private string? _tabDragId;
+    private string? _tabDragOver;
+    private Windows.Foundation.Point _tabDragStart;
+    private bool _tabDragging;
+    private bool _tabDragMoved; // this press passed the threshold; cleared on the next press
+
+    /// <summary>The drop line drawn on the hovered tab's leading or trailing
+    /// edge: 2 px of the accent, as macOS draws an accent Capsule 2 wide.</summary>
+    private const double TabDropLineWidth = 2;
+
+    private static readonly Thickness TabPadding = new(9, 4, 9, 4);
+
+    /// <summary>Drag a client tab onto another to reorder the row; the order is
+    /// written to the same tabs.order key the Settings ↑/↓ buttons write, through
+    /// <see cref="ClientRegistry.MoveTab"/>. Overview is neither draggable nor a
+    /// target. Handlers see handled events too, because Button marks the press
+    /// handled for its own Click.</summary>
+    private void AttachTabDrag(Button button, string id)
+    {
+        button.AddHandler(PointerPressedEvent, new Microsoft.UI.Xaml.Input.PointerEventHandler((_, e) =>
+        {
+            if (!e.GetCurrentPoint(button).Properties.IsLeftButtonPressed)
+            {
+                return;
+            }
+
+            _tabDragId = id;
+            _tabDragOver = null;
+            _tabDragging = false;
+            _tabDragStart = e.GetCurrentPoint(ClientTabsPanel).Position;
+        }), handledEventsToo: true);
+        button.AddHandler(PointerMovedEvent, new Microsoft.UI.Xaml.Input.PointerEventHandler((_, e) =>
+        {
+            if (_tabDragId != id)
+            {
+                return;
+            }
+
+            var at = e.GetCurrentPoint(ClientTabsPanel).Position;
+            if (!_tabDragging
+                && !ClientRegistry.IsTabDrag(at.X - _tabDragStart.X, at.Y - _tabDragStart.Y))
+            {
+                return;
+            }
+
+            _tabDragging = true;
+            _tabDragMoved = true;
+            var over = TabAt(at.X);
+            _tabDragOver = over != null && over != id ? over : null;
+            ShowTabDropLine();
+        }), handledEventsToo: true);
+        // Only the release drops. Button's own release handler may release
+        // the capture before the handler added here runs, so a capture loss
+        // does not end the gesture at once: it queues a cancel for after the
+        // current dispatch. A release in the same dispatch drops first, and the
+        // queued cancel then finds nothing to do. If no release follows (the
+        // window lost focus mid-drag), the cancel cleans up and writes nothing.
+        // This reads no button state inside the capture-loss event, whose
+        // value at that moment is not documented.
+        button.AddHandler(PointerReleasedEvent, new Microsoft.UI.Xaml.Input.PointerEventHandler(
+            (_, _) => FinishTabDrag(id, drop: true)), handledEventsToo: true);
+        button.PointerCaptureLost += (_, _) =>
+            DispatcherQueue.TryEnqueue(() => FinishTabDrag(id, drop: false));
+    }
+
+    private void FinishTabDrag(string id, bool drop)
+    {
+        if (_tabDragId != id)
+        {
+            return;
+        }
+
+        var (dragging, over) = (_tabDragging, _tabDragOver);
+        EndTabDrag();
+        // The flag only has to outlive this release's own Click, which Button
+        // raises inside the same pointer dispatch. A drop on another tab
+        // raises none, and a keyboard or UIA click raises no press to clear
+        // it. Clear it once this dispatch is over.
+        DispatcherQueue.TryEnqueue(() => _tabDragMoved = false);
+        if (drop && dragging && over is not null)
+        {
+            var store = AppSettings.Store;
+            store.SetString(
+                ClientRegistry.TabOrderKey,
+                ClientRegistry.MoveTab(
+                    store.GetString(ClientRegistry.TabOrderKey) ?? "",
+                    _presentTabs, _displayClients, id, over));
+        }
+    }
+
+    private void EndTabDrag()
+    {
+        _tabDragId = null;
+        _tabDragOver = null;
+        _tabDragging = false;
+        ShowTabDropLine();
+    }
+
+    /// <summary>The client tab under <paramref name="x"/> (ClientTabsPanel
+    /// coordinates), or null over Overview or a gap.</summary>
+    private string? TabAt(double x)
+    {
+        foreach (var child in ClientTabsPanel.Children.OfType<Button>())
+        {
+            var id = TabIdOf(child);
+            if (id is null || id == ClientRegistry.OverviewTab)
+            {
+                continue;
+            }
+
+            var left = child.TransformToVisual(ClientTabsPanel).TransformPoint(default).X;
+            if (x >= left && x < left + child.ActualWidth)
+            {
+                return id;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? TabIdOf(Button button) =>
+        Microsoft.UI.Xaml.Automation.AutomationProperties.GetAutomationId(button) is { } aid
+            && aid.StartsWith("ClientTab_", StringComparison.Ordinal)
+            ? aid["ClientTab_".Length..]
+            : null;
+
+    private void ShowTabDropLine()
+    {
+        var accent = (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"];
+        foreach (var child in ClientTabsPanel.Children.OfType<Button>())
+        {
+            var edge = TabIdOf(child) is { } id
+                ? ClientRegistry.DropEdge(_tabDragId, _tabDragOver, id, _displayClients)
+                : 0;
+            child.BorderBrush = edge == 0 ? null : accent;
+            child.BorderThickness = edge switch
+            {
+                -1 => new Thickness(TabDropLineWidth, 0, 0, 0),
+                1 => new Thickness(0, 0, TabDropLineWidth, 0),
+                _ => new Thickness(0),
+            };
+            // Give back the line's width from the padding on the same side,
+            // so the tab does not grow 2 px and shift the hit boundary under
+            // the pointer.
+            child.Padding = edge switch
+            {
+                -1 => new Thickness(TabPadding.Left - TabDropLineWidth, TabPadding.Top, TabPadding.Right, TabPadding.Bottom),
+                1 => new Thickness(TabPadding.Left, TabPadding.Top, TabPadding.Right - TabDropLineWidth, TabPadding.Bottom),
+                _ => TabPadding,
+            };
+        }
     }
 
     private void RenderContent(bool animated)
@@ -1040,6 +1241,10 @@ public sealed partial class DashboardView : UserControl
 
         DetachGraph3DContentHost();
         _heatmapScroll = null;
+        // The footer names the lens on screen, as macOS's footer shows
+        // effectiveView.label. Data freshness is the refresh button's job
+        // (its tooltip), not the footer's.
+        FooterText.Text = AppViews.Label(AppViews.Effective(_view, AppSettings.Store));
         UIElement content = _view switch
         {
             AppView.Quota => BuildQuota(_snapshot),
@@ -1736,7 +1941,7 @@ public sealed partial class DashboardView : UserControl
     /// clients on Overview and the Quota lens. A client tab asks for its own
     /// members (<paramref name="clientIds"/>), as macOS restrict mode lists
     /// <c>clients.filter(known)</c> over the tab's clients.</param>
-    private static FrameworkElement BuildLimits(
+    private FrameworkElement BuildLimits(
         DashboardModel.Snapshot snapshot, IReadOnlyList<string>? clientIds = null,
         IReadOnlyList<string>? requested = null)
     {
@@ -1811,21 +2016,34 @@ public sealed partial class DashboardView : UserControl
             var agent = limitsRow.Snapshot;
             var id = limitsRow.ClientId;
             var section = new StackPanel { Spacing = 5 };
-            var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+            // A Grid, not a horizontal StackPanel: the StackPanel measured the
+            // label unbounded, so a long config-dir label was clipped with no
+            // ellipsis. The label column is bounded and trims in the middle
+            // (macOS AgentLimitsCard.swift:751), keeping the directory name.
+            // Left-aligned so the header hugs a short label. The drag grip
+            // takes the first column on a primary card of the multi-client
+            // card; the plan is on the detail line ("email · plan"), as on
+            // macOS, not in the header.
+            var header = new Grid { ColumnSpacing = 6, HorizontalAlignment = HorizontalAlignment.Left };
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             if (drag is not null && limitsRow.IsPrimary)
             {
                 header.Children.Add(drag.Grip(id));
             }
 
-            header.Children.Add(AgentIcon.Create(id, 14));
+            var icon = AgentIcon.Create(id, 14);
+            Grid.SetColumn(icon, 1);
+            header.Children.Add(icon);
             var account = agent?.Account ?? AccountIdentity.Of(id, null);
-            var title = Ui.Text(AccountLabel.Of(account, snapshot.Quota), 12, bold: true);
-            if (AccountLabel.Detail(account) is { } fullPath)
-            {
-                ToolTipService.SetToolTip(title, fullPath);
-            }
-
+            var title = Ui.MiddleText(AccountLabel.Of(account, snapshot.Quota), 12, bold: true);
+            title.HorizontalAlignment = HorizontalAlignment.Left;
+            title.VerticalAlignment = VerticalAlignment.Center;
+            ToolTipService.SetToolTip(title, AccountLabel.Detail(account) ?? title.Full);
+            Grid.SetColumn(title, 2);
             header.Children.Add(title);
+
             var badge = AgentLimitsText.StatusBadge(agent, liveClients.Contains(id));
             section.Children.Add(Ui.Row(header, ToneText(badge.Text, 10, badge.Tone)));
             // Added before the section is filled; null when the card joined
@@ -1847,6 +2065,16 @@ public sealed partial class DashboardView : UserControl
                 }
 
                 AddPlaceholderRows(section, id, classic, placeholderValue);
+                continue;
+            }
+
+            // Ahead of the placeholder branch: "keychain-consent" is a setup
+            // placeholder, and this card is its setup prompt.
+            var consent = _grokBotWaiting.Decide(
+                agent, AppSettings.GrokBotConsent.Stored, snapshot.Quota, snapshot.QuotaFailures);
+            if (consent.Card != GrokBotConsent.Card.None)
+            {
+                section.Children.Add(BuildGrokBotConsent(consent, snapshot.Quota, snapshot.QuotaFailures));
                 continue;
             }
 
@@ -1874,32 +2102,25 @@ public sealed partial class DashboardView : UserControl
                 section.Children.Add(line);
             }
 
-            if (agent.Error is not null)
-            {
-                // macOS keeps the card's shape under the red line: an errored
-                // snapshot with no windows still draws its placeholder rows.
-                if (agent.UniqueCardWindows.Count == 0)
-                {
-                    AddPlaceholderRows(section, id, classic, placeholderValue);
-                }
-
-                continue;
-            }
-
+            // An error only colours the detail line and the badge: the core
+            // returns the last-good windows with a transient error stamped on
+            // them, and those still draw (macOS AgentLimitsCard.swift:771-787);
+            // with nothing cached there are no windows and no bars.
+            //
             // Chart layout draws each window's recorded quota history as a
             // curve instead of a bar. WindowCardText.Tabs — the same fold the
             // Session-window card already resolves its own samples through —
             // returns one WindowCardTab per live window in agent's own order
-            // when the client has live windows to enumerate (guaranteed here:
-            // snapshot.Quota is non-null inside this loop and agent.Error was
-            // just checked null above, so WindowCardText.LiveWindowsUnavailable
-            // cannot be true), so a plain index zip against UniqueCardWindows
-            // lines each tab up with the window it belongs to.
-            var windows = agent.UniqueCardWindows;
+            // whenever the agent has windows (snapshot.Quota is non-null inside
+            // this loop, and WindowCardText.LiveWindowsUnavailable needs an
+            // empty window list, so it is false whenever this loop draws), so a
+            // plain index zip against the same windows lines each tab up with
+            // the window it belongs to.
+            var windows = AgentLimitsText.BarWindows(agent);
             if (windows.Count == 0)
             {
-                // macOS draws the placeholder rows for a snapshot with no
-                // windows too, so the card keeps its shape.
+                // macOS draws the placeholder rows for a card with no windows,
+                // errored or not, so the card keeps its shape.
                 AddPlaceholderRows(section, id, classic, placeholderValue);
                 continue;
             }
@@ -1944,6 +2165,91 @@ public sealed partial class DashboardView : UserControl
             }
 
             section.Children.Add(root);
+        }
+    }
+
+    // A grant the core accepted over a consent card; its card and exits live
+    // in WaitingState.
+    private readonly GrokBotConsent.WaitingState _grokBotWaiting = new();
+
+    /// <summary>The Grok Bot consent prompt (source "keychain-consent"). On
+    /// Windows this is the only question before Syrtis decrypts Grok Bot's
+    /// sign-in — DPAPI never asks — so it states what is read and where it
+    /// goes. After "Not now" it collapses to one line and keeps Allow: a
+    /// decline has to be reversible where it was made. A grant keeps the card
+    /// it was made on while the answer stays yes (GrokBotConsent.WaitingState);
+    /// once Waiting ends, Allow is enabled again to re-send it. A stored yes
+    /// with no grant recorded shows the full card (macOS parity).</summary>
+    private FrameworkElement BuildGrokBotConsent(
+        GrokBotConsent.Prompt prompt, AgentUsagePayload? shownQuota, int failedFetches)
+    {
+        var body = new StackPanel { Spacing = 6 };
+        var text = Ui.Dim(prompt.Text.Localized(), 11);
+        body.Children.Add(text);
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        var allow = new Button
+        {
+            Style = (Style)Application.Current.Resources["AccentButtonStyle"],
+            FontSize = 12,
+        };
+        var notNow = new Button { Content = GrokBotConsent.Copy.NotNow.Localized(), FontSize = 12 };
+        allow.Click += (_, _) =>
+        {
+            // A changed answer reaches the store's Changed handler, which
+            // re-renders this card; the quota refetch comes from the
+            // QuotaEpoch signal GrokBotConsent raises when the installed
+            // grant changes (also when a stored yes the core never received
+            // is allowed again). A failed setter leaves Allow enabled.
+            if (!TryAnswerGrokBotConsent(true))
+            {
+                return;
+            }
+
+            _grokBotWaiting.Granted(prompt.Card, shownQuota, failedFetches);
+            ApplyGrokBotButtons(prompt with { Waiting = true }, allow, notNow);
+        };
+        notNow.Click += (_, _) =>
+        {
+            if (!TryAnswerGrokBotConsent(false))
+            {
+                return;
+            }
+
+            text.Text = GrokBotConsent.Copy.Declined.Localized();
+            notNow.Visibility = Visibility.Collapsed;
+        };
+        ApplyGrokBotButtons(prompt, allow, notNow);
+        buttons.Children.Add(allow);
+        if (prompt.ShowsNotNow)
+        {
+            buttons.Children.Add(notNow);
+        }
+
+        body.Children.Add(buttons);
+        return body;
+    }
+
+    // macOS: "Waiting for macOS…" with Not now disabled beside it.
+    private static void ApplyGrokBotButtons(GrokBotConsent.Prompt prompt, Button allow, Button notNow)
+    {
+        allow.IsEnabled = !prompt.Waiting;
+        allow.Content = prompt.Waiting
+            ? GrokBotConsent.Copy.Waiting.Localized()
+            : GrokBotConsent.Copy.Allow.LocalizedKey(GrokBotConsent.Copy.AllowEnglish);
+        notNow.IsEnabled = prompt.NotNowEnabled;
+    }
+
+    private static bool TryAnswerGrokBotConsent(bool granted)
+    {
+        try
+        {
+            AppSettings.GrokBotConsent.Answer(granted);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DevLog.Write($"grok-bot consent: answer failed: {ex.GetType().Name}");
+            return false;
         }
     }
 
@@ -2065,7 +2371,7 @@ public sealed partial class DashboardView : UserControl
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var (discHost, discGlow) = GlowingDisc(colors.Color(entry.Provider, entry.Model));
             name.Children.Add(discHost);
-            var modelText = Ui.Text(entry.Model, 11);
+            var modelText = Ui.MiddleText(entry.Model, 11);
             Grid.SetColumn(modelText, 1);
             name.Children.Add(modelText);
             if (!collapsible
@@ -2239,16 +2545,20 @@ public sealed partial class DashboardView : UserControl
     private FrameworkElement ModelStripeRow(
         ContributionClient client, ModelColorMap colors, bool authoritative)
     {
-        var name = new StackPanel
+        var name = new Grid
         {
-            Orientation = Orientation.Horizontal,
-            Spacing = 6,
+            ColumnSpacing = 6,
             Margin = new Thickness(12, 0, 0, 0),
         };
+        name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        name.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         var (subDiscHost, subDiscGlow) =
             GlowingDisc(colors.Color(client.ProviderId, client.ModelId), 6);
         name.Children.Add(subDiscHost);
-        name.Children.Add(Ui.Text(client.ModelId, 10, 0.85));
+        // Middle-trimmed (macOS DailyView.swift:210) in a bounded column.
+        var subName = Ui.MiddleText(client.ModelId, 10, 0.85);
+        Grid.SetColumn(subName, 1);
+        name.Children.Add(subName);
         // Token-aware, like the Models row: this sub-row's hover card is the
         // same ModelTip (attached below), which reads "—" for an unpriced model,
         // and a row must not say "$0.00" while its own tooltip says "—".
@@ -2612,9 +2922,7 @@ public sealed partial class DashboardView : UserControl
                 new ModelColorMap(snapshot.Models, authoritative).Color(favorite.Provider, favorite.Model), 7);
             disc.VerticalAlignment = VerticalAlignment.Center;
             name.Children.Add(disc);
-            var text = Ui.Text(favorite.Model, 11);
-            text.TextTrimming = TextTrimming.CharacterEllipsis;
-            text.TextWrapping = TextWrapping.NoWrap;
+            var text = Ui.MiddleText(favorite.Model, 11);
             Grid.SetColumn(text, 1);
             name.Children.Add(text);
             Grid.SetColumn(name, 1);
@@ -2812,7 +3120,7 @@ public sealed partial class DashboardView : UserControl
             // clients beside messages · tokens · cost.
             var block = new StackPanel { Spacing = 3 };
             block.Children.Add(Ui.Row(
-                Ui.Text(CostSurfaceProjection.AgentLabel(entry.Agent), 11, bold: true),
+                Ui.MiddleText(CostSurfaceProjection.AgentLabel(entry.Agent), 11, bold: true),
                 Ui.Text(
                     CostSurfaceProjection.AgentShare(entry, entries, snapshot.CostAuthoritative),
                     10,
