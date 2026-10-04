@@ -69,7 +69,7 @@ public static class AntigravityAccounts
     /// <summary>The account's 1-based position in the stored list; null when
     /// the key is not listed.</summary>
     public static int? Ordinal(SettingsStore store, string key) =>
-        ((List<AntigravityAccount>)Load(store)).FindIndex(a => a.Key == key) is var i and >= 0 ? i + 1 : null;
+        Load(store).Select((a, i) => (a.Key, N: i + 1)).FirstOrDefault(t => t.Key == key).N is var n and > 0 ? n : null;
 
     public static IReadOnlyList<string> RemovedKeys(SettingsStore store)
     {
