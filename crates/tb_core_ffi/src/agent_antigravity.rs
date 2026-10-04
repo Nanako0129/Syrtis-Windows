@@ -464,15 +464,28 @@ async fn oauth_endpoint_resolves() -> bool {
     }
 }
 
+/// Turns off agy's own auto-update for the runs Syrtis starts (#204).
+///
+/// On a run whose update check is due (agy throttles it to once per 15
+/// minutes), agy spawns `agy --bg-updater`, which can start further agy
+/// children of its own. Those get a fresh console rather than the windowless
+/// one `CREATE_NO_WINDOW` gave this run, and on Windows 11 with Windows
+/// Terminal as the default terminal that console is handed to Terminal: a
+/// visible window that takes the foreground (reproduced on 188, agy 1.2.16).
+/// With this variable agy logs "Auto-update disabled via environment variable"
+/// and starts no updater. The value is `true`: `1` was measured NOT to disable
+/// it. agy run by the user in a terminal still updates itself.
+#[cfg(windows)]
+const AGY_DISABLE_AUTO_UPDATE: (&str, &str) = ("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+
+/// The `agy --print /usage` command Syrtis runs, without spawning it.
 /// Direct spawn, no shell and no Job Object (measured: a native exe whose only
 /// child is conhost; a job could also kill a browser agy started). The working
 /// directory is agy's own bin directory, not whatever Syrtis inherited.
 #[cfg(windows)]
-async fn run_agy_cli(executable: PathBuf) -> Result<Vec<u8>, AgyRunFailure> {
-    use tokio::io::AsyncReadExt as _;
-
-    let bin_dir = executable.parent().ok_or(AgyRunFailure::NotStarted)?;
-    let mut child = tokio::process::Command::new(&executable)
+fn agy_command(executable: &Path, bin_dir: &Path) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(executable);
+    command
         .args([
             "--print",
             "/usage",
@@ -482,11 +495,21 @@ async fn run_agy_cli(executable: PathBuf) -> Result<Vec<u8>, AgyRunFailure> {
             "30s",
         ])
         .current_dir(bin_dir)
+        .env(AGY_DISABLE_AUTO_UPDATE.0, AGY_DISABLE_AUTO_UPDATE.1)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    command
+}
+
+#[cfg(windows)]
+async fn run_agy_cli(executable: PathBuf) -> Result<Vec<u8>, AgyRunFailure> {
+    use tokio::io::AsyncReadExt as _;
+
+    let bin_dir = executable.parent().ok_or(AgyRunFailure::NotStarted)?;
+    let mut child = agy_command(&executable, bin_dir)
         .spawn()
         .map_err(|_| AgyRunFailure::NotStarted)?;
     // `child` moves into the future, so a timeout or an early return drops it
@@ -3727,6 +3750,28 @@ pub(crate) async fn fetch_captured(
 mod tests {
     use super::*;
     use crate::agent_account_scope::test_support::TestRefreshScope;
+
+    /// #204: the agy run Syrtis starts must disable agy's auto-update, with
+    /// the value agy actually honours (`true`; `1` was measured not to work).
+    /// (`CREATE_NO_WINDOW` is not readable back from a `Command`.)
+    #[cfg(windows)]
+    #[test]
+    fn the_agy_run_disables_agys_auto_update() {
+        let command = agy_command(
+            Path::new(r"C:\agy\bin\agy.exe"),
+            Path::new(r"C:\agy\bin"),
+        );
+        let envs: Vec<_> = command.as_std().get_envs().collect();
+        assert!(
+            envs.contains(&(
+                std::ffi::OsStr::new("AGY_CLI_DISABLE_AUTO_UPDATE"),
+                Some(std::ffi::OsStr::new("true"))
+            )),
+            "agy would start its updater (and a Terminal window): {envs:?}"
+        );
+        let args: Vec<_> = command.as_std().get_args().collect();
+        assert_eq!(args, ["--print", "/usage", "--output-format", "json", "--print-timeout", "30s"]);
+    }
 
     /// An **absent** credential file must report the marker verbatim.
     ///
