@@ -959,7 +959,7 @@ public class AntigravityAccountsTests
         WithRegistry(() =>
         {
             var a = Captured(KeyA);
-            var b = Captured(KeyB);
+            var b = Captured(KeyB) with { Identity = new AgentIdentity(EmailB) };
             var payload = Payload(Primary(), a, b);
             var (ta, tb) = (Tooltip(a, payload), Tooltip(b, payload));
 
@@ -973,6 +973,28 @@ public class AntigravityAccountsTests
                 Assert.DoesNotContain(KeyA, t);
                 Assert.DoesNotContain(KeyB, t);
             }
+        });
+    }
+
+    [Fact]
+    public void ThePrimaryTooltipCarriesNoEmailMergedOrNot()
+    {
+        WithRegistry(() =>
+        {
+            // Un-merged: the primary's own identity email.
+            var plain = Payload(Primary(), Captured(KeyA));
+            var unmerged = plain.Agents[0];
+            Assert.Equal("primary@example.com", unmerged.Identity!.Email);
+            Assert.DoesNotContain("primary@example.com", Tooltip(unmerged, plain));
+
+            // Merged: Apply copies the captured account's email onto the primary.
+            var merged = AntigravityDedup.Apply(plain, KeyA, "M1");
+            var primary = merged.Agents[0];
+            Assert.Equal(EmailA, primary.Identity!.Email);
+            var line = Tooltip(primary, merged);
+            Assert.DoesNotContain(EmailA, line);
+            Assert.DoesNotContain("primary@example.com", line);
+            Assert.DoesNotContain(KeyA, line);
         });
     }
 

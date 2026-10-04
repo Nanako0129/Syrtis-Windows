@@ -22,7 +22,11 @@ public static class AccountLabel
     /// client whose directory name is the same (case-insensitive), both widen
     /// to "&lt;parent&gt;\&lt;name&gt;", further up only while still equal.
     /// Without a payload (the summary lines carry none) the bare directory
-    /// name is used.</summary>
+    /// name is used.
+    /// <para>A captured Antigravity account is labelled with its email, so
+    /// this is for surfaces the user opens (menus, cards, windows). A surface
+    /// a passer-by can read (the tray tooltip) must use
+    /// <see cref="OfPublic"/>.</para></summary>
     public static string Of(AccountIdentity account, AgentUsagePayload? payload = null, bool full = false)
     {
         if (account.AccountKey is null)
@@ -93,7 +97,7 @@ public static class AccountLabel
     /// and an unlisted one the generic "Antigravity account". Never the email
     /// or the key.</summary>
     public static string OfPublic(AccountIdentity account, AgentUsagePayload? payload = null) =>
-        account.AccountKey is { } key && key != ClaudeDesktopKey && account.ClientId == AntigravityClientId
+        account.AccountKey is { } key && account.ClientId == AntigravityClientId
             ? AntigravityOrdinal(key) is { } n
                 ? "Antigravity account {0}".Localized(n)
                 : "Antigravity account".Localized()
