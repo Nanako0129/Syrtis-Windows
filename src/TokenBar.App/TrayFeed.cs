@@ -20,10 +20,10 @@ public sealed class TrayFeed : IDisposable
     private readonly DispatcherQueueTimer _fast;
     private readonly DispatcherQueueTimer _slow;
     private readonly Action<string> _onStoreChanged;
-    private readonly Action<AgentUsagePayload> _onQuotaFetched;
     private int _fastInFlight; // Interlocked: reset in a background finally
     private int _slowInFlight;
-    private int _quotaInFlight;
+    private readonly QuotaPoller _quotaPoller;
+    private readonly Action<AgentUsagePayload, long> _onQuotaFetched;
     private bool _disposed;
 
     public UsagePayload? Graph { get; private set; }
@@ -69,6 +69,12 @@ public sealed class TrayFeed : IDisposable
     {
         _dispatcher = dispatcher;
         _graphCoordinator = graphCoordinator;
+        _quotaPoller = new QuotaPoller(
+            async () => await AgentUsageFetchCoordinator.Shared.FetchAsync().ConfigureAwait(false),
+            action => _dispatcher.TryEnqueue(() => action()),
+            ApplyQuota,
+            SettleQuota,
+            ex => DevLog.Write($"tray quota refresh failed: {ex.Message}"));
         _graphCoordinator.Started += OnGraphStarted;
         _graphCoordinator.Published += OnGraphPublished;
         _graphCoordinator.Completed += OnGraphCompleted;
@@ -97,11 +103,21 @@ public sealed class TrayFeed : IDisposable
         _slow.Start();
         AttachGraph();
         RefreshFast();
-        // Every successful agent-usage fetch lands here, the flyout's too, so
-        // the tray (and the Settings that reads it) never trails the flyout by
-        // up to a slow tick. The coordinator raises them in fetch order and
-        // the dispatcher keeps that order.
-        _onQuotaFetched = quota => _ = _dispatcher.TryEnqueue(() => ApplyQuota(quota));
+        // Adopt every payload the shared coordinator fetches, the flyout's
+        // included, so the tray (and Settings, which reads quota through this
+        // feed) does not lag the flyout by up to a slow tick. Same epoch rule
+        // as QuotaPoller. The reading's age comes from the payload
+        // (ResolveRemaining), not from when it arrived.
+        _onQuotaFetched = (quota, epoch) => _ = _dispatcher.TryEnqueue(() =>
+        {
+            if (_disposed || QuotaEpoch.Current != epoch || ReferenceEquals(Quota, quota))
+            {
+                return;
+            }
+
+            ApplyQuota(quota);
+            SettleQuota();
+        });
         AgentUsageFetchCoordinator.Shared.Fetched += _onQuotaFetched;
         RefreshQuota();
 
@@ -132,7 +148,7 @@ public sealed class TrayFeed : IDisposable
     /// <summary>A changed captured-account list reached the core, or agy's
     /// current account changed: refetch the quota now, as DashboardModel does
     /// (macOS RegistryChange wakes both pollers). A fetch already in flight
-    /// absorbs this (_quotaInFlight and the shared coordinator coalesce).</summary>
+    /// absorbs this (QuotaPoller and the shared coordinator coalesce).</summary>
     private void OnAntigravityAccountsChanged() => _dispatcher.TryEnqueue(() =>
     {
         if (!_disposed)
@@ -147,13 +163,14 @@ public sealed class TrayFeed : IDisposable
     {
         _disposed = true; // fences any in-flight lane's enqueued callback
         _graphState.Dispose();
+        _quotaPoller.Dispose();
+        AgentUsageFetchCoordinator.Shared.Fetched -= _onQuotaFetched;
         _graphCoordinator.Started -= OnGraphStarted;
         _graphCoordinator.Published -= OnGraphPublished;
         _graphCoordinator.Completed -= OnGraphCompleted;
         _fast.Stop();
         _slow.Stop();
         AppSettings.Store.Changed -= _onStoreChanged;
-        AgentUsageFetchCoordinator.Shared.Fetched -= _onQuotaFetched;
         AntigravityAccounts.Changed -= OnAntigravityAccountsChanged;
     }
 
@@ -307,54 +324,13 @@ public sealed class TrayFeed : IDisposable
         }
     }
 
-    private void RefreshQuota()
+    private void RefreshQuota() => _quotaPoller.Request();
+
+    // Dispatcher side of the quota poll. Applied only for a payload fetched
+    // at the current epoch (QuotaPoller); a null is a failed fetch.
+    private void ApplyQuota(AgentUsagePayload? quota)
     {
-        if (Interlocked.Exchange(ref _quotaInFlight, 1) == 1)
-        {
-            return;
-        }
-
-        _ = Task.Run(() =>
-        {
-            try
-            {
-                var quota = TryFetch(
-                    () => AgentUsageFetchCoordinator.Shared.FetchAsync().GetAwaiter().GetResult(),
-                    "tray quota");
-                if (quota is not null)
-                {
-                    return; // applied through Fetched, in fetch order
-                }
-
-                _ = _dispatcher.TryEnqueue(() =>
-                {
-                    if (_disposed)
-                    {
-                        return;
-                    }
-
-                    // Re-resolve and re-render even on a failed fetch: with no
-                    // new payload the value doesn't change, but its age can
-                    // cross the stale threshold (macOS TrayAnimator.swift:
-                    // 477-481, "nothing changed but the reading's age").
-                    ResolveRemaining();
-                    Changed?.Invoke();
-                });
-            }
-            finally
-            {
-                Volatile.Write(ref _quotaInFlight, 0);
-            }
-        });
-    }
-
-    /// <summary>Adopt a fetched payload, whoever fetched it. The reading's
-    /// age still comes from the payload (ResolveRemaining's resolved-at), not
-    /// from when it arrived, so adopting the flyout's fetch earlier cannot
-    /// make a stale reading look fresh.</summary>
-    private void ApplyQuota(AgentUsagePayload quota)
-    {
-        if (_disposed || ReferenceEquals(Quota, quota))
+        if (_disposed || quota is null)
         {
             return;
         }
@@ -369,6 +345,19 @@ public sealed class TrayFeed : IDisposable
         }
 
         RecomputeVisibleUsage();
+    }
+
+    // Runs after every posted quota action, applied or discarded. Re-resolve
+    // and re-render even without a new payload: the value doesn't change, but
+    // its age can cross the stale threshold (macOS TrayAnimator.swift:
+    // 477-481, "nothing changed but the reading's age").
+    private void SettleQuota()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
         ResolveRemaining();
         Changed?.Invoke();
     }
@@ -447,19 +436,6 @@ public sealed class TrayFeed : IDisposable
                 // candidates hidden (display suppressed only): leave the
                 // pair and the stamp untouched.
                 break;
-        }
-    }
-
-    private static T? TryFetch<T>(Func<T> fetch, string label) where T : class
-    {
-        try
-        {
-            return fetch();
-        }
-        catch (Exception ex)
-        {
-            DevLog.Write($"{label} failed: {ex.Message}");
-            return null;
         }
     }
 }

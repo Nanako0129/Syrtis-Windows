@@ -140,7 +140,7 @@ public class AgentUsageFetchCoordinatorTests
             return payload;
         });
         var raised = new List<AgentUsagePayload>();
-        coordinator.Fetched += p => { lock (raised) { raised.Add(p); } };
+        coordinator.Fetched += (p, _) => { lock (raised) { raised.Add(p); } };
 
         var first = coordinator.FetchAsync();
         var second = coordinator.FetchAsync();
@@ -157,7 +157,7 @@ public class AgentUsageFetchCoordinatorTests
         var coordinator = new AgentUsageFetchCoordinator(
             () => throw new InvalidOperationException("synthetic failure"));
         var raised = 0;
-        coordinator.Fetched += _ => Interlocked.Increment(ref raised);
+        coordinator.Fetched += (_, _) => Interlocked.Increment(ref raised);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.FetchAsync());
         await Task.Delay(50);
@@ -175,7 +175,7 @@ public class AgentUsageFetchCoordinatorTests
         var coordinator = new AgentUsageFetchCoordinator(() =>
             new AgentUsagePayload($"call-{Interlocked.Increment(ref calls)}", []));
         Task<AgentUsagePayload>? askedFromHandler = null;
-        coordinator.Fetched += _ => askedFromHandler ??= coordinator.FetchAsync();
+        coordinator.Fetched += (_, _) => askedFromHandler ??= coordinator.FetchAsync();
 
         var first = await coordinator.FetchAsync();
         await WaitFor(() => askedFromHandler is not null);
@@ -201,7 +201,7 @@ public class AgentUsageFetchCoordinatorTests
         var calls = 0;
         var coordinator = new AgentUsageFetchCoordinator(() =>
             new AgentUsagePayload($"call-{Interlocked.Increment(ref calls)}", []));
-        coordinator.Fetched += _ => throw new InvalidOperationException("handler");
+        coordinator.Fetched += (_, _) => throw new InvalidOperationException("handler");
 
         await coordinator.FetchAsync();
         await WaitFor(() => Volatile.Read(ref calls) == 1);

@@ -154,10 +154,10 @@ public sealed partial class DashboardView : UserControl
             else if (key == GrokBotConsent.StorageKey)
             {
                 // The card's buttons and the Settings switch both land here,
-                // after the core took the answer. A yes asks for a quota
-                // refresh, best effort: one already in flight may have begun
-                // before the grant, and the grant then waits for the next poll
-                // (RefreshQuotaNow). Either answer re-renders the card.
+                // after the core took the answer. The refetch is not asked for
+                // here: a changed grant signals QuotaEpoch (GrokBotConsent),
+                // which wakes both quota pollers. Either answer re-renders the
+                // card.
                 _ = DispatcherQueue.TryEnqueue(() =>
                 {
                     if (AppSettings.GrokBotConsent.Stored == true)
@@ -167,7 +167,6 @@ public sealed partial class DashboardView : UserControl
                         // the one line if none was; after the card's own
                         // Allow this is a no-op.
                         _grokBotWaiting.GrantedElsewhere();
-                        _model?.RefreshQuotaNow();
                     }
 
                     RenderContent(animated: false);
@@ -2131,13 +2130,10 @@ public sealed partial class DashboardView : UserControl
         allow.Click += (_, _) =>
         {
             // A changed answer reaches the store's Changed handler, which
-            // asks for the refresh and re-renders this card. Allowing again
-            // over a stored yes (one the core never received) re-sends the
-            // grant but changes nothing in the store, so Changed does not
-            // fire; only then is the refresh asked for here. Either way it is
-            // best effort (RefreshQuotaNow). A failed setter leaves Allow
-            // enabled.
-            var alreadyYes = AppSettings.GrokBotConsent.Stored == true;
+            // re-renders this card; the quota refetch comes from the
+            // QuotaEpoch signal GrokBotConsent raises when the installed
+            // grant changes (also when a stored yes the core never received
+            // is allowed again). A failed setter leaves Allow enabled.
             if (!TryAnswerGrokBotConsent(true))
             {
                 return;
@@ -2145,10 +2141,6 @@ public sealed partial class DashboardView : UserControl
 
             _grokBotWaiting.Granted(prompt.Card, shownQuota, failedFetches);
             ApplyGrokBotButtons(prompt with { Waiting = true }, allow, notNow);
-            if (alreadyYes)
-            {
-                _model?.RefreshQuotaNow();
-            }
         };
         notNow.Click += (_, _) =>
         {

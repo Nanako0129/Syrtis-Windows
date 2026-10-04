@@ -10,6 +10,7 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
 {
     private readonly object _gate = new();
     private Task<AgentUsagePayload>? _inFlight;
+    private long _inFlightEpoch;
     private Action? _beforeFirstFetch;
     private bool _owed;
 
@@ -23,8 +24,11 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
     /// when the flyout polled) still holds the newest payload instead of one
     /// up to a slow tick old. Raised on the fetch thread, before the next
     /// fetch can start, so payloads are raised in fetch order; a handler must
-    /// marshal to its own thread. Not raised for a failed fetch.</summary>
-    public event Action<AgentUsagePayload>? Fetched;
+    /// marshal to its own thread. Not raised for a failed fetch. Carries the
+    /// <see cref="QuotaEpoch"/> the fetch was requested at: a handler must
+    /// discard a payload whose epoch is no longer current, as
+    /// <see cref="QuotaPoller"/> does.</summary>
+    public event Action<AgentUsagePayload, long>? Fetched;
 
     // Waits for the launch push so the first fetch already carries the extra
     // Claude accounts' cards; AntigravityFetch installs the captured
@@ -51,26 +55,61 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
         }
     }
 
+    /// <summary>Single-flight and epoch-aware. A caller at the epoch the
+    /// in-flight fetch was requested at joins it. A caller that saw a newer
+    /// <see cref="QuotaEpoch"/> gets a fetch chained after it (never joined:
+    /// its payload may predate the change; never parallel: at most one fetch
+    /// delegate runs at a time), which then becomes the one later callers at
+    /// that epoch join.</summary>
     public Task<AgentUsagePayload> FetchAsync()
     {
         lock (_gate)
         {
+            var epoch = QuotaEpoch.Current;
+            Task<AgentUsagePayload> next;
             if (_inFlight is { } current)
             {
-                return current;
+                if (epoch <= _inFlightEpoch)
+                {
+                    return current;
+                }
+
+                next = current.ContinueWith(
+                    _ =>
+                    {
+                        Action? chainedBefore;
+                        lock (_gate)
+                        {
+                            chainedBefore = _beforeFirstFetch;
+                            _beforeFirstFetch = null;
+                            // Starts after any owed change: owes nothing yet.
+                            _owed = false;
+                        }
+
+                        chainedBefore?.Invoke();
+                        return FetchWithFollowUps();
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.None,
+                    TaskScheduler.Default);
+            }
+            else
+            {
+                var before = _beforeFirstFetch;
+                _beforeFirstFetch = null;
+                _owed = false;
+                // The launch re-apply runs once, before the first fetch of the
+                // chain; follow-ups owed during it do not run it again.
+                next = Task.Run(() =>
+                {
+                    before?.Invoke();
+                    return FetchWithFollowUps();
+                });
             }
 
-            var before = _beforeFirstFetch;
-            _beforeFirstFetch = null;
-            _owed = false;
-            // The launch re-apply runs once, before the first fetch of the
-            // chain; follow-ups owed during it do not run it again.
-            var next = Task.Run(() =>
-            {
-                before?.Invoke();
-                return FetchWithFollowUps();
-            });
             _inFlight = next;
+            _inFlightEpoch = epoch;
+            var fetchedEpoch = epoch;
             _ = next.ContinueWith(
                 completed =>
                 {
@@ -80,7 +119,7 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
                         // exists yet, so handlers see payloads in fetch order.
                         if (completed.Status == TaskStatus.RanToCompletion)
                         {
-                            Fetched?.Invoke(completed.Result);
+                            Fetched?.Invoke(completed.Result, fetchedEpoch);
                         }
                     }
                     finally
