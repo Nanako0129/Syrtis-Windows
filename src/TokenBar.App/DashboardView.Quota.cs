@@ -92,6 +92,25 @@ public sealed partial class DashboardView
         AppSettings.Store.GetString(SubscriptionTrendText.MetricKey) == "tokens"
             ? ChartMetric.Tokens : ChartMetric.Cost;
 
+    /// <summary>macOS AttributionSetupLink: a small underlined link that opens
+    /// Settings → Usage attribution.</summary>
+    private static HyperlinkButton AttributionSetupLink()
+    {
+        var link = new HyperlinkButton
+        {
+            Content = new TextBlock
+            {
+                Text = AttributionOnboardingCard.Copy.SetUpLink.Localized(),
+                FontSize = 9,
+                TextDecorations = Windows.UI.Text.TextDecorations.Underline,
+            },
+            Padding = new Thickness(0),
+            Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
+        };
+        link.Click += (_, _) => TrayService.OpenAttributionSettings?.Invoke();
+        return link;
+    }
+
     /// <summary>The attribution onboarding card sits above whichever Quota
     /// lens is showing, on every tab (macOS PopoverView.swift:765-770).</summary>
     private UIElement BuildQuota(DashboardModel.Snapshot snapshot)
@@ -221,7 +240,8 @@ public sealed partial class DashboardView
                     WindowCardText.AccountKeyPrefix + ClientRegistry.QuotaOwner(_activeClientTab)),
                 // Year-independent: the card's scan covers quota history,
                 // not the selected year (LocalRecordClients).
-                LocalRecordClients.Union(AppSettings.Store, snapshot.Graph.Summary.Clients)));
+                LocalRecordClients.Union(AppSettings.Store, snapshot.Graph.Summary.Clients)),
+            snapshot.AccountWindowUsage);
 
         // A client tab asks about one subscription, so it gets that
         // subscription's own three cards rather than the all-clients four.
@@ -531,11 +551,22 @@ public sealed partial class DashboardView
         // to this client. A second implementation of "where does the allowance
         // stand right now" would be free to disagree with the first.
         // Off by the master switch: a client tab drops the card too (macOS QuotaView.swift:116).
-        if (OverviewCards.ShowsLimitsCard(OverviewCards.LimitsEnabled(AppSettings.Store)))
+        // Switched off for this client (and no extra account): no card, not a
+        // card claiming the data is still loading (LimitsCardFilter.HidesClientCard).
+        // Same client set as the Overview lens (OverviewScope.LimitsClients):
+        // client.Owner can be grok-bot, whose TabSlice lacks grok.
+        var singleClient = OverviewScope.SingleClient(_activeClientTab)!;
+        var members = OverviewScope.LimitsClients(singleClient)!;
+        if (OverviewCards.ShowsLimitsCard(OverviewCards.LimitsEnabled(AppSettings.Store))
+            && !LimitsCardFilter.HidesClientCard(
+                snapshot.Quota?.Agents ?? [],
+                members,
+                ClientRegistry.HiddenLimitsClients(AppSettings.Store)))
         {
             stack.Children.Add(Ui.Card(
-                "Agent limits".Localized(),
-                BuildLimits(snapshot, OverviewScope.LimitsClients(OverviewScope.SingleClient(_activeClientTab)))));
+                // macOS QuotaView.swift:72: tabDisplayName(singleClient).
+                "{0} limits".Localized(ClientRegistry.TabDisplayName(singleClient)),
+                BuildLimits(snapshot, members)));
         }
 
         // Every subscription-facing lookup, including the history card's
@@ -984,6 +1015,16 @@ public sealed partial class DashboardView
         equivalenceLine.TextWrapping = TextWrapping.Wrap;
         equivalenceLine.Margin = new Thickness(0, 0, 0, 6);
         body.Children.Add(equivalenceLine);
+        if (AttributionOnboardingCard.ShowsHistoryZeroNote(
+            history.Equivalence, client.LocalUsageUnattributed))
+        {
+            var note = new StackPanel { Spacing = 2, Margin = new Thickness(0, 0, 0, 4) };
+            var text = Ui.Dim(AttributionOnboardingCard.Copy.HistoryZeroNote.Localized(), 9);
+            text.TextWrapping = TextWrapping.Wrap;
+            note.Children.Add(text);
+            note.Children.Add(AttributionSetupLink());
+            body.Children.Add(note);
+        }
 
         var colors = new ModelColorMap(snapshot.Models, snapshot.CostAuthoritative);
         foreach (var row in rows)

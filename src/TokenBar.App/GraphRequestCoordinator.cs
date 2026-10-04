@@ -17,10 +17,15 @@ public readonly record struct GraphQuery(string? Year)
 
 public readonly record struct GraphRequestId(GraphQuery Query, long Generation);
 
+/// <param name="RestoredFrom">When the payload is a persisted snapshot, the
+/// time it was captured; null for a live computation. Lets the UI say the
+/// numbers on screen are from an earlier run until the live pass replaces
+/// them.</param>
 public sealed record GraphPublication(
     GraphRequestId RequestId,
     GraphPublicationStage Stage,
-    UsagePayload Payload);
+    UsagePayload Payload,
+    DateTimeOffset? RestoredFrom = null);
 
 public sealed record GraphRequestCompletion(
     GraphRequestId RequestId,
@@ -60,7 +65,13 @@ public sealed class GraphRequestCoordinator
     internal const Environment.SpecialFolder SnapshotProfileRoot =
         Environment.SpecialFolder.LocalApplicationData;
 
-    private static readonly TimeSpan SnapshotMaxAge = TimeSpan.FromMinutes(30);
+    /// <summary>Oldest persisted snapshot still shown at startup: 90 days, as
+    /// macOS (<c>SnapshotStore.maxAge</c>). A hit already requires the same
+    /// schema, source context id and year (<see cref="GraphSnapshotStore"/>),
+    /// the payload is validated, and the live pass replaces it as soon as it
+    /// publishes, so age only decides whether a cold start shows yesterday's
+    /// numbers (marked as such) or nothing.</summary>
+    internal static readonly TimeSpan SnapshotMaxAge = TimeSpan.FromDays(90);
 
     private sealed class QueryState(GraphQuery query)
     {
@@ -153,6 +164,58 @@ public sealed class GraphRequestCoordinator
         Func<string?, UsagePayload>? refreshGraph = null,
         Func<DateTimeOffset>? utcNow = null)
     {
+        // Read on every access, never once per process: the id changes when
+        // the extra Claude scan roots do, so a snapshot written before a root
+        // was removed must stop matching (security review R4). Called off the
+        // UI thread only, after the launch push.
+        var currentId = sourceContextId ?? (() =>
+        {
+            ClaudeExtraRoots.AwaitLaunch();
+            return TbCore.SourceContextId();
+        });
+        string? SourceId()
+        {
+            try
+            {
+                var id = currentId();
+                return string.IsNullOrWhiteSpace(id) ? null : id;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // A richer scan records the id it started under, and its snapshot is
+        // written only while that is still the current id: a scan that
+        // straddled a root change is never saved under the new roots' id.
+        var scannedUnder = new System.Runtime.CompilerServices.ConditionalWeakTable<UsagePayload, string>();
+        Func<string?, UsagePayload> Track(Func<string?, UsagePayload> scan) => year =>
+        {
+            var startedUnder = SourceId();
+            var payload = scan(year);
+            if (startedUnder is not null)
+            {
+                scannedUnder.AddOrUpdate(payload, startedUnder);
+            }
+
+            return payload;
+        };
+
+        // The app's graph scans wait for the launch push of the saved extra
+        // Claude roots, so the first graph already includes them.
+        localFirst ??= year =>
+        {
+            ClaudeExtraRoots.AwaitLaunch();
+            return TbCore.GraphLocalFirst(year);
+        };
+        refreshGraph ??= graph ?? (year =>
+        {
+            ClaudeExtraRoots.AwaitLaunch();
+            return TbCore.RefreshGraph(year);
+        });
+        graph = Track(graph ?? refreshGraph);
+        refreshGraph = Track(refreshGraph);
         try
         {
             var root = getFolderPath is null
@@ -174,20 +237,17 @@ public sealed class GraphRequestCoordinator
                 createDirectory(profile);
             }
 
-            var sourceId = sourceContextId is null
-                ? TbCore.SourceContextId()
-                : sourceContextId();
-            if (string.IsNullOrWhiteSpace(sourceId))
-            {
-                throw new InvalidOperationException();
-            }
-
             var store = new GraphSnapshotStore(
                 Path.Combine(profile, "graph-snapshot.json"));
             var snapshot = new SnapshotAccess(
-                year => store.Read(sourceId, year),
+                year => SourceId() is { } id
+                    ? store.Read(id, year)
+                    : new GraphSnapshotReadResult(GraphSnapshotReadStatus.Missing),
                 (year, capturedAt, payload, commitFence) =>
-                    store.Write(sourceId, year, capturedAt, payload, commitFence));
+                    SourceId() is { } id
+                        && (!scannedUnder.TryGetValue(payload, out var startedUnder) || startedUnder == id)
+                        ? store.Write(id, year, capturedAt, payload, commitFence)
+                        : GraphSnapshotWriteStatus.Skipped);
             return new GraphRequestCoordinator(
                 localFirst,
                 graph,
@@ -490,7 +550,7 @@ public sealed class GraphRequestCoordinator
             state,
             requestId,
             new GraphPublication(
-                requestId, GraphPublicationStage.LocalFirst, result.Payload),
+                requestId, GraphPublicationStage.LocalFirst, result.Payload, capturedAt),
             snapshot: true);
     }
 

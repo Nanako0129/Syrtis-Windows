@@ -110,10 +110,11 @@ public class OverviewScopeTests
         Assert.Equal(["antigravity"], Shown("antigravity-cli", "antigravity", "codex"));
         Assert.Equal(["claude"], Shown("claude", "claude", "grok-bot"));
         Assert.Null(OverviewScope.LimitsClients(null));
-        Assert.Equal("Grok Build & Bot", ClientRegistry.TabLabel(OverviewScope.LimitsClientId("grok")!));
-        Assert.Equal(
-            ClientRegistry.ShortName("antigravity"),
-            ClientRegistry.TabLabel(OverviewScope.LimitsClientId("antigravity-cli")!));
+        // The card title is what ships: TabDisplayName of the tab's own id.
+        Assert.Equal("Grok Build & Bot", ClientRegistry.TabDisplayName("grok"));
+        Assert.Equal("Antigravity", ClientRegistry.TabDisplayName("antigravity"));
+        // antigravity-cli is not a TabGroups key (TabSlice has one member), so it keeps its own name.
+        Assert.Equal("Antigravity CLI", ClientRegistry.TabDisplayName("antigravity-cli"));
     }
 
     [Fact]
@@ -121,6 +122,48 @@ public class OverviewScopeTests
     {
         Assert.Equal("claude", OverviewScope.LimitsClientId("claude"));
         Assert.Null(OverviewScope.LimitsClientId(null));
+    }
+
+    // macOS ModelBreakdownCard: eight rows, then "Show N more" / "Show less".
+    [Fact]
+    public void ModelsCardCapsAtEightRowsBehindAShowMoreToggle()
+    {
+        Localization.Load("en", AppContext.BaseDirectory);
+        Assert.Equal((8, (string?)null), OverviewScope.ModelRows(8, expanded: false));
+        Assert.Equal((3, (string?)null), OverviewScope.ModelRows(3, expanded: true));
+        Assert.Equal((8, "Show 1 more"), OverviewScope.ModelRows(9, expanded: false));
+        Assert.Equal((8, "Show 4 more"), OverviewScope.ModelRows(12, expanded: false));
+        Assert.Equal((12, "Show less"), OverviewScope.ModelRows(12, expanded: true));
+
+        Localization.Load("zh-Hant", AppContext.BaseDirectory);
+        try
+        {
+            Assert.Equal((8, "再顯示 4 筆"), OverviewScope.ModelRows(12, expanded: false));
+            Assert.Equal((12, "收合"), OverviewScope.ModelRows(12, expanded: true));
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
+    }
+
+    // macOS OverviewView: "<client> models" on a client tab.
+    [Fact]
+    public void ModelsCardTitleNamesTheClientOnAClientTab()
+    {
+        Localization.Load("en", AppContext.BaseDirectory);
+        Assert.Equal("Models", OverviewScope.ModelsTitle(null));
+        Assert.Equal("Claude Code models", OverviewScope.ModelsTitle("claude"));
+
+        Localization.Load("zh-Hant", AppContext.BaseDirectory);
+        try
+        {
+            Assert.Equal("Claude Code 模型", OverviewScope.ModelsTitle("claude"));
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
     }
 }
 

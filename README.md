@@ -78,6 +78,7 @@ before you go looking for a missing card:
 | Claude | OAuth via the OS keychain / Claude Code login credentials |
 | Codex | OAuth via `~/.codex/auth.json` (`$CODEX_HOME` honored) |
 | GitHub Copilot | OAuth via **opencode's** `auth.json` — signing into the GitHub Copilot CLI alone is not enough, and the card is omitted rather than shown as an error |
+| OpenCode Go | The `opencode-go` API key in **opencode's** `auth.json` (read-only, never copied; sent only to `opencode.ai`). The quota appears on the OpenCode tab |
 | Grok | OAuth via `~/.grok/auth.json` |
 | Grok Bot | The Grok Bot app's sign-in (`%APPDATA%\Grok Bot\sand-secrets.json`, Electron safeStorage via DPAPI). Syrtis checks that file each refresh to see whether Grok Bot is signed in, and unlocks and uses the sign-in **only after you allow it**, with Allow on the card or the "Use Grok Bot's sign-in" switch in Settings → Agent limits; Windows does not ask separately. Sent only to `api2.cursor.sh`. Turning the switch off takes effect from the next refresh; a refresh already under way may finish. When Grok Bot is signed out, the Cursor IDE sign-in (`%APPDATA%\Cursor\User\globalStorage\state.vscdb`, read-only) is used instead, if there is one, and sent only to `cursor.com`; while Grok Bot is signed in it is not used, switch off included. Syrtis keeps no copy of either, only a one-way fingerprint to tell accounts apart |
 | Kiro | Bearer token from the Kiro IDE sign-in, expected at `~/.aws/sso/cache/kiro-auth-token.json` (not yet observed on a Windows device; read-only, never refreshed or copied; sent only to `codewhisperer.us-east-1.amazonaws.com`). Kiro CLI's own store is not read on Windows |
@@ -197,7 +198,10 @@ Claude.
 Shared parsing engine from [tokscale-core](https://github.com/Nanako0129/tokscale-core),
 originally derived from [tokscale](https://github.com/junhoyeo/tokscale) by
 junhoyeo. Original menu-bar concept by
-[handlecusion's tokcat](https://github.com/handlecusion/tokcat).
+[handlecusion's tokcat](https://github.com/handlecusion/tokcat). The spinning
+cat traces back to [RunCat](https://kyome.io/runcat/) by Takuto Nakamura, and
+the quota-pace cards reference [CodexBar](https://github.com/steipete/CodexBar)
+by Peter Steinberger.
 
 ## License
 

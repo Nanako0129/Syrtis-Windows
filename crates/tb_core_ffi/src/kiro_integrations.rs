@@ -9,7 +9,8 @@
 //!   `agent_antigravity.rs` uses for the Antigravity CLI; there is no SQLite
 //!   dependency in the crate. Other targets have no `sqlite3` at a known path,
 //!   so this source is unavailable there and only the IDE token file is read.
-//! - **Kiro IDE** writes a plain JSON token file under `~/.aws/sso/cache`.
+//! - **Kiro IDE** writes a plain JSON token file under `~/.aws/sso/cache` (on
+//!   Windows that location is expected, not yet observed on a device).
 //!
 //! We collect every source that holds a token, then pick the freshest: a valid
 //! IDE token wins over an expired CLI token and the reverse. When every source

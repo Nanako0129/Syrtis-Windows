@@ -710,8 +710,107 @@ public class GraphRequestCoordinatorTests
         Assert.Equal(3, publications.Count);
         Assert.Equal(requestId, publications.First().RequestId);
         Assert.Same(snapshot, publications.First().Payload);
+        Assert.Equal(now.AddMinutes(-5), publications.First().RestoredFrom);
         Assert.Contains(publications, value => ReferenceEquals(value.Payload, local));
         Assert.Contains(publications, value => ReferenceEquals(value.Payload, richer));
+        Assert.All(publications.Skip(1), value => Assert.Null(value.RestoredFrom));
+    }
+
+    /// <summary>A cold start the next day shows the last run's graph, marked
+    /// with its capture time, instead of nothing (macOS keeps 90 days; the old
+    /// 30-minute limit dropped it). The live stages still follow, unmarked.</summary>
+    [Fact]
+    public async Task DayOldSnapshotIsRestoredAndMarkedWithItsCaptureTime()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var capturedAt = now.AddHours(-25);
+        var completion = new TaskCompletionSource<GraphRequestCompletion>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        // The live local stage is held until the snapshot has published: a
+        // snapshot that loses the race to a live stage is dropped by design,
+        // and that is not what this test is about.
+        var releaseLocal = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var snapshotPublished = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var snapshot = Payload("2026", PricingMode.BestEffort);
+        var publications = new ConcurrentQueue<GraphPublication>();
+        var coordinator = new GraphRequestCoordinator(
+            _ =>
+            {
+                releaseLocal.Task.GetAwaiter().GetResult();
+                return Payload("2026");
+            },
+            _ => Payload("2026", PricingMode.BestEffort, CostCoverage.Complete),
+            snapshot: new SnapshotAccess(
+                _ => new GraphSnapshotReadResult(GraphSnapshotReadStatus.Hit, snapshot, capturedAt),
+                (_, _, _, _) => GraphSnapshotWriteStatus.Skipped),
+            utcNow: () => now);
+        coordinator.Published += publication =>
+        {
+            publications.Enqueue(publication);
+            if (ReferenceEquals(publication.Payload, snapshot))
+            {
+                snapshotPublished.TrySetResult(true);
+            }
+        };
+        coordinator.Completed += value => completion.TrySetResult(value);
+
+        coordinator.Attach("2026");
+        await snapshotPublished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseLocal.TrySetResult(true);
+        await completion.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var restored = Assert.Single(publications, value => ReferenceEquals(value.Payload, snapshot));
+        Assert.Equal(capturedAt, restored.RestoredFrom);
+        Assert.Equal(3, publications.Count);
+        Assert.Equal(2, publications.Count(value => value.RestoredFrom is null));
+    }
+
+    /// <summary>The footer gives a restored snapshot's age, not a clock time
+    /// that could be read as today's.</summary>
+    [Fact]
+    public void FooterGivesRestoredDataAsAnAge()
+    {
+        var now = new DateTimeOffset(2026, 10, 4, 9, 0, 0, TimeSpan.Zero);
+        Assert.Equal(
+            "updated 1d ago",
+            RefreshTip.Footer(now.AddHours(-25), fetchedAt: now, now));
+        Assert.StartsWith("updated ", RefreshTip.Footer(null, now, now));
+        Assert.DoesNotContain("ago", RefreshTip.Footer(null, now, now));
+    }
+
+    /// <summary>The header control and Ctrl+R share one busy condition, and
+    /// a background request (poll, year switch) counts, not only a manual
+    /// refresh (macOS refreshDisabled).</summary>
+    [Fact]
+    public void RefreshIsBusyForAnyGraphRequest()
+    {
+        Assert.False(RefreshTip.Busy(loading: false, manualRefresh: false, graphInFlight: false));
+        Assert.True(RefreshTip.Busy(loading: false, manualRefresh: false, graphInFlight: true));
+        Assert.True(RefreshTip.Busy(loading: false, manualRefresh: true, graphInFlight: false));
+        Assert.True(RefreshTip.Busy(loading: true, manualRefresh: false, graphInFlight: false));
+    }
+
+    /// <summary>Only restored data whose live refresh failed is tinted; restored
+    /// data with the refresh still to come, and live data, are not.</summary>
+    [Fact]
+    public void OnlyAFailedRestoreIsTinted()
+    {
+        var at = new DateTimeOffset(2026, 10, 3, 9, 0, 0, TimeSpan.Zero);
+        Assert.True(RefreshTip.ShowsStaleRestore(at, restoreFailed: true));
+        Assert.False(RefreshTip.ShowsStaleRestore(at, restoreFailed: false));
+        Assert.False(RefreshTip.ShowsStaleRestore(null, restoreFailed: true));
+    }
+
+    [Fact]
+    public void RefreshTipSaysHowOldRestoredDataIs()
+    {
+        var now = new DateTimeOffset(2026, 10, 4, 12, 0, 0, TimeSpan.Zero);
+        Assert.Equal("Refresh usage data", RefreshTip.Text(null, now));
+        Assert.Equal(
+            "Refresh usage data — showing data from 1d ago",
+            RefreshTip.Text(now.AddHours(-25), now));
     }
 
     [Fact]
@@ -817,19 +916,37 @@ public class GraphRequestCoordinatorTests
         Assert.Equal(2, thrownPublications.Count);
 
         var now = DateTimeOffset.UtcNow;
-        foreach (var capturedAt in new[] { now.AddMinutes(-31), now.AddMinutes(1) })
+        foreach (var capturedAt in new[]
         {
+            now - GraphRequestCoordinator.SnapshotMaxAge - TimeSpan.FromMinutes(1),
+            now.AddMinutes(1),
+        })
+        {
+            // The live local stage waits until the snapshot has been read and
+            // given time to publish: if live published first, the race rule
+            // would drop the snapshot and this case would pass with no age
+            // check at all.
+            var snapshotRead = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
             var completion = new TaskCompletionSource<GraphRequestCompletion>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
+            var stale = Payload("2026", PricingMode.BestEffort);
             var publications = new ConcurrentQueue<GraphPublication>();
             var coordinator = new GraphRequestCoordinator(
-                _ => Payload("2026"),
+                _ =>
+                {
+                    snapshotRead.Task.GetAwaiter().GetResult();
+                    Thread.Sleep(300);
+                    return Payload("2026");
+                },
                 _ => Payload("2026", PricingMode.BestEffort, CostCoverage.Complete),
                 snapshot: new SnapshotAccess(
-                    _ => new GraphSnapshotReadResult(
-                        GraphSnapshotReadStatus.Hit,
-                        Payload("2026", PricingMode.BestEffort),
-                        capturedAt),
+                    _ =>
+                    {
+                        snapshotRead.TrySetResult(true);
+                        return new GraphSnapshotReadResult(
+                            GraphSnapshotReadStatus.Hit, stale, capturedAt);
+                    },
                     (_, _, _, _) => GraphSnapshotWriteStatus.Skipped),
                 utcNow: () => now);
             coordinator.Published += publications.Enqueue;
@@ -837,6 +954,7 @@ public class GraphRequestCoordinatorTests
 
             coordinator.Attach("2026");
             await completion.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.DoesNotContain(publications, value => ReferenceEquals(value.Payload, stale));
             Assert.Equal(2, publications.Count);
         }
     }

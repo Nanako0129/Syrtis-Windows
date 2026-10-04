@@ -83,7 +83,7 @@ public class CostSurfaceProjectionTests
         Assert.False(CostSurfaceProjection.IsChartCostChecking(
             true, ChartMetric.Cost));
         Assert.Equal("Checking cost…", CostSurfaceProjection.ChartChecking);
-        Assert.Equal("2 models · Checking",
+        Assert.Equal("2 models · 101 · Checking",
             CostSurfaceProjection.ModelsSubtitle(entries, false));
         Assert.Equal("Checking",
             CostSurfaceProjection.CostText(100, false));
@@ -146,6 +146,24 @@ public class CostSurfaceProjectionTests
             CostSurfaceProjection.OrderContributionClients(clients, false).First().ModelId);
     }
 
+    // macOS ModelsView row: share of the listed cost, then In·Out·CR·CW.
+    [Fact]
+    public void ModelRowsCarryCostShareAndTokenSplit()
+    {
+        var entries = new[] { ExpensiveFewTokens, CheapManyTokens };
+        Assert.Equal("99.0%", CostSurfaceProjection.ModelShare(ExpensiveFewTokens, entries, true));
+        Assert.Equal("1.0%", CostSurfaceProjection.ModelShare(CheapManyTokens, entries, true));
+        Assert.Null(CostSurfaceProjection.ModelShare(ExpensiveFewTokens, entries, false));
+
+        var unpriced = ExpensiveFewTokens with { Cost = 0 };
+        Assert.Equal("0.0%", CostSurfaceProjection.ModelShare(unpriced, [unpriced], true));
+
+        var split = new ModelReportEntry("claude", "m", "anthropic", 1_500, 20, 3_000_000, 400, 7, 0, 1, 0);
+        Assert.Equal(
+            [("In", "1.5K"), ("Out", "20"), ("CR", "3M"), ("CW", "400")],
+            CostSurfaceProjection.ModelTokenSplit(split));
+    }
+
     [Fact]
     public void ExactCompleteRestoresCostOrderScaleAndFormatting()
     {
@@ -158,7 +176,7 @@ public class CostSurfaceProjectionTests
             CostSurfaceProjection.HeaderCostLine(100, stats, true));
         Assert.Equal(ChartMetric.Cost,
             CostSurfaceProjection.EffectiveMetric(true, ChartMetric.Cost));
-        Assert.Equal("2 models · $101.00",
+        Assert.Equal("2 models · 101 · $101.00",
             CostSurfaceProjection.ModelsSubtitle(entries, true));
         Assert.Equal("$100.00", CostSurfaceProjection.CostText(100, true));
         Assert.Equal("model-a",
@@ -356,7 +374,7 @@ public class CostSurfaceProjectionTests
                 $"今日 {Format.Usd(5)} · 累計 {Format.Usd(stats.TotalCost)} · "
                     + $"{stats.ActiveDays} 天有用量",
                 CostSurfaceProjection.HeaderCostLine(5, stats, true));
-            Assert.Equal("2 個模型 · 查詢中",
+            Assert.Equal("2 個模型 · 101 · 查詢中",
                 CostSurfaceProjection.ModelsSubtitle(entries, false));
         }
         finally

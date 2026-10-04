@@ -1,3 +1,4 @@
+using TokenBar.Core;
 using TokenBar.Interop;
 
 namespace TokenBar.App;
@@ -19,6 +20,43 @@ public static class GraphCompletionPolicy
         var shouldRerun = polling && (!sameYear || forceRequested);
         return (true, shouldRerun, refreshing && !shouldRerun);
     }
+}
+
+/// <summary>The Refresh button's tooltip (macOS <c>PopoverView.refreshHelp</c>):
+/// while the graph on screen is a restored snapshot, it says how old the data
+/// is.</summary>
+public static class RefreshTip
+{
+    public static string Text(DateTimeOffset? restoredAt, DateTimeOffset now) =>
+        restoredAt is { } at
+            ? "Refresh usage data — showing data from {0}".Localized(
+                Format.RelativeTime((ulong)Math.Max(0, at.ToUnixTimeSeconds()), now))
+            : "Refresh usage data".Localized();
+
+    /// <summary>The Refresh control is busy (spinning, disabled) while a
+    /// manual refresh or any graph request the dashboard started runs, or
+    /// while nothing is loaded yet. Ctrl+R passes <c>loading: false</c>, so a
+    /// failed first load can still be retried by hand (macOS
+    /// <c>refreshDisabled</c> has no loading term).</summary>
+    public static bool Busy(bool loading, bool manualRefresh, bool graphInFlight) =>
+        loading || manualRefresh || graphInFlight;
+
+    /// <summary>The glyph is tinted only when restored data is on screen and
+    /// its live refresh failed: the one state where data is stale and nothing
+    /// is running to fix it (macOS <c>showingStaleRestore</c>). Restored data
+    /// with a refresh still running is not tinted.</summary>
+    public static bool ShowsStaleRestore(DateTimeOffset? restoredAt, bool restoreFailed) =>
+        restoredAt is not null && restoreFailed;
+
+    /// <summary>The footer's "updated …". A restored snapshot can be up to 90
+    /// days old, so it reads as an age ("updated 1d ago") rather than a bare
+    /// time of day that would pass for today; live data keeps the clock
+    /// time.</summary>
+    public static string Footer(
+        DateTimeOffset? restoredAt, DateTimeOffset fetchedAt, DateTimeOffset now) =>
+        "updated {0}".Localized(restoredAt is { } at
+            ? Format.RelativeTime((ulong)Math.Max(0, at.ToUnixTimeSeconds()), now)
+            : fetchedAt.ToString("HH:mm:ss", System.Globalization.CultureInfo.CurrentCulture));
 }
 
 public static class GraphResumePolicy

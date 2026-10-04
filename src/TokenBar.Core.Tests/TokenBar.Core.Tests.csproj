@@ -34,6 +34,13 @@
     <Compile Include="..\TokenBar.App\GraphConsumerState.cs" Link="GraphConsumerState.cs" />
     <Compile Include="..\TokenBar.App\CostSurfaceProjection.cs" Link="CostSurfaceProjection.cs" />
     <Compile Include="..\TokenBar.App\AppViews.cs" Link="AppViews.cs" />
+    <!-- Settings copy shared word for word with macOS: SettingsWindow.cs
+         compiles under no test project. -->
+    <Compile Include="..\TokenBar.App\SettingsCopy.cs" Link="SettingsCopy.cs" />
+    <!-- The Hourly lens's and the Stats summary's decisions: DashboardView
+         compiles under no test project. -->
+    <Compile Include="..\TokenBar.App\HourlyLens.cs" Link="HourlyLens.cs" />
+    <Compile Include="..\TokenBar.App\StatsSummary.cs" Link="StatsSummary.cs" />
     <Compile Include="..\TokenBar.App\OverviewCard.cs" Link="OverviewCard.cs" />
     <!-- Tab-row keyboard rules (Ctrl+1..9, Ctrl+[ ], the Ctrl-held hints), the
          three-state chart view and the flat heatmap's layout math: DashboardView
@@ -89,6 +96,9 @@
          TrayService, App and SettingsWindow compile under no test project, so
          left there these would be rules nothing can assert against. -->
     <Compile Include="..\TokenBar.App\DiscordPresenceWiring.cs" Link="DiscordPresenceWiring.cs" />
+    <!-- Extra Claude accounts' Settings copy and reason mapping, for the same
+         reason: SettingsWindow.cs compiles under no test project. -->
+    <Compile Include="..\TokenBar.App\ClaudeAccountsCopy.cs" Link="ClaudeAccountsCopy.cs" />
     <!-- Syrtis.Installer's boundary logic, pulled in for the same reason as
          the App sources above: none of these five files references
          System.Windows.Forms, so they compile as-is under net10. Deliberately

@@ -58,6 +58,15 @@ internal static partial class NativeMethods
     internal static partial nint tb_window_usage(string? accountKey, long fromMs, long untilMs);
 
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_set_claude_config_dirs(string json);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_set_extra_scan_paths(string json);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_validate_claude_config_dir(string json);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial nint tb_set_keychain_consent(string json);
 
     [LibraryImport(Lib)]

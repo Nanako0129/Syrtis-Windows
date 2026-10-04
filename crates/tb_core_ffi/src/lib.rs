@@ -20,6 +20,7 @@ mod agent_copilot;
 mod agent_grok;
 mod agent_grokbot;
 mod agent_kiro;
+mod agent_opencode_go;
 mod agent_quota_duration;
 mod agent_quota_history;
 #[cfg(target_os = "windows")]
@@ -843,7 +844,8 @@ fn invalidate_scan_caches() {
 /// reason is a fixed code (`nullPayload`, `invalidUtf8`, `invalidJson`,
 /// `sourceContextUnavailable`; `unsupportedClient`, `empty`, `unsupportedPath`,
 /// `rootDirectory`, `invalidComponent`, `defaultConfigDir`, `duplicate`,
-/// `limitExceeded`, `notDirectory`); the input is never echoed. On an error
+/// `overlappingRoot`, `limitExceeded`, `notDirectory`); the input is never
+/// echoed. On an error
 /// envelope nothing changed.
 ///
 /// # Safety
@@ -855,16 +857,26 @@ pub unsafe extern "C" fn tb_set_extra_scan_paths(json: *const c_char) -> *mut c_
     })
 }
 
+/// The setters' JSON argument, copied out of the caller's buffer, with their
+/// fixed error codes (`nullPayload`, `invalidUtf8`); never the input.
+///
 /// # Safety
 /// `json` must be NULL or a valid NUL-terminated string.
-unsafe fn set_extra_scan_paths_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
+unsafe fn json_arg(json: *const c_char) -> Result<String, String> {
     if json.is_null() {
         return Err("nullPayload".to_string());
     }
-    let raw = unsafe { CStr::from_ptr(json) }
+    unsafe { CStr::from_ptr(json) }
         .to_str()
-        .map_err(|_| "invalidUtf8".to_string())?;
-    set_extra_scan_paths(raw)
+        .map(str::to_string)
+        .map_err(|_| "invalidUtf8".to_string())
+}
+
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+unsafe fn set_extra_scan_paths_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
+    let raw = unsafe { json_arg(json) }?;
+    set_extra_scan_paths(&raw)
 }
 
 /// The scan-root setter (security review R1). Validates into a candidate,
@@ -919,8 +931,9 @@ pub(crate) fn apply_scan_roots_for_test(
 /// Success data is `{"registeredCount":N,"rejected":[{"index":i,"reason":code}]}`.
 /// Every error and reason is a fixed code (`nullPayload`, `invalidUtf8`,
 /// `invalidJson`; `empty`, `unsupportedPath`, `rootDirectory`,
-/// `invalidComponent`, `duplicate`, `limitExceeded`); the input is never
-/// echoed. On an error envelope the registry is unchanged.
+/// `invalidComponent`, `homeDirectory`, `defaultConfigDir`, `duplicate`,
+/// `limitExceeded`); the input is never echoed. On an error envelope the
+/// registry is unchanged.
 ///
 /// # Safety
 /// `json` must be NULL or a valid NUL-terminated string.
@@ -934,13 +947,8 @@ pub unsafe extern "C" fn tb_set_claude_config_dirs(json: *const c_char) -> *mut 
 /// # Safety
 /// `json` must be NULL or a valid NUL-terminated string.
 unsafe fn set_claude_config_dirs_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
-    if json.is_null() {
-        return Err("nullPayload".to_string());
-    }
-    let raw = unsafe { CStr::from_ptr(json) }
-        .to_str()
-        .map_err(|_| "invalidUtf8".to_string())?;
-    set_claude_config_dirs(raw)
+    let raw = unsafe { json_arg(json) }?;
+    set_claude_config_dirs(&raw)
 }
 
 /// The config-dir setter. The registry commit and the in-memory purge are
@@ -953,6 +961,13 @@ fn set_claude_config_dirs(raw: &str) -> Result<serde_json::Value, String> {
     let _setter = ROOTS_SETTER.lock().unwrap_or_else(|p| p.into_inner());
     let result = agent_usage::replace_claude_config_dirs(|| claude_config_dirs::set_from_json(raw))
         .map_err(str::to_string)?;
+    bump_after_config_dirs_commit();
+    Ok(result)
+}
+
+/// The config-dir setter's half after a successful registry commit. Caller
+/// holds `ROOTS_SETTER`.
+fn bump_after_config_dirs_commit() {
     #[cfg(test)]
     GENERATION_AT_CONFIG_DIR_COMMIT.store(ROOT_GENERATION.load(Ordering::SeqCst), Ordering::SeqCst);
     {
@@ -967,7 +982,62 @@ fn set_claude_config_dirs(raw: &str) -> Result<serde_json::Value, String> {
     // and the tail, and a refresh in flight across it is dropped, so a stale
     // pre-refresh graph must not stay cached and keep being served.
     invalidate_scan_caches();
-    Ok(result)
+}
+
+/// Test seam: install config directories through the setter's commit path
+/// (registry replace + purge, then the generation bump and cache clears),
+/// skipping only the drive-path rule, so a POSIX fixture can register one on
+/// macOS (the twin of `apply_scan_roots_for_test`).
+#[cfg(test)]
+pub(crate) fn apply_config_dirs_for_test(dirs: Vec<String>) {
+    let _setter = ROOTS_SETTER.lock().unwrap_or_else(|p| p.into_inner());
+    agent_usage::replace_claude_config_dirs(|| {
+        Ok::<_, ()>(((), claude_config_dirs::commit_for_test(dirs)))
+    })
+    .unwrap();
+    bump_after_config_dirs_commit();
+}
+
+/// Whether `{"candidate": "<dir>", "existing": ["<dir>", ...]}` (the saved
+/// list before the candidate) would add a working extra Claude account:
+/// success data `{"reason": null}` or `{"reason": "<code>"}`: the config
+/// setter's code for that position (any of `tb_set_claude_config_dirs`'s
+/// reasons), else the scan setter's for the account's `projects` and
+/// `transcripts`: `defaultConfigDir` (under the primary's `<home>\.claude`)
+/// or `overlappingRoot` (at, under or above a root of an account already in
+/// the list) (`claude_config_dirs::validate`).
+/// Lets Settings refuse a path before saving it without re-implementing the
+/// rule. Changes no registry and touches no filesystem; errors are fixed
+/// codes (`nullPayload`, `invalidUtf8`, `invalidJson`); the input is never
+/// echoed.
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_validate_claude_config_dir(json: *const c_char) -> *mut c_char {
+    guarded("tb_validate_claude_config_dir", || {
+        envelope(unsafe { validate_claude_config_dir_from_c(json) })
+    })
+}
+
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+unsafe fn validate_claude_config_dir_from_c(
+    json: *const c_char,
+) -> Result<serde_json::Value, String> {
+    #[derive(serde::Deserialize)]
+    struct Request {
+        candidate: String,
+        existing: Vec<String>,
+    }
+    let raw = unsafe { json_arg(json) }?;
+    let request: Request = serde_json::from_str(&raw).map_err(|_| "invalidJson".to_string())?;
+    let reason = claude_config_dirs::validate(
+        &request.candidate,
+        &request.existing,
+        user_home_dir().as_deref(),
+    );
+    Ok(serde_json::json!({ "reason": reason }))
 }
 
 /// Replace the registry of credential reads the user has agreed to (see the

@@ -9,7 +9,13 @@ public sealed class AgentUsageFetchCoordinator(Func<AgentUsagePayload> fetch)
     private Task<AgentUsagePayload>? _inFlight;
     private Action? _beforeFirstFetch;
 
-    public static AgentUsageFetchCoordinator Shared { get; } = new(TbCore.AgentUsage);
+    // Waits for the launch push so the first fetch already carries the extra
+    // Claude accounts' cards.
+    public static AgentUsageFetchCoordinator Shared { get; } = new(() =>
+    {
+        ClaudeExtraRoots.AwaitLaunch();
+        return TbCore.AgentUsage();
+    });
 
     /// <summary>Run <paramref name="action"/> once, on the fetch thread, before
     /// the first fetch this coordinator starts after the call. For the core's

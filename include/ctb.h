@@ -142,7 +142,8 @@ char *tb_window_usage(const char *account_key, int64_t from_ms, int64_t until_ms
 // <dir>\transcripts); {} clears it. The next report scans the new roots.
 // Success data: {"registeredCount":N,"rejected":[{"client","index","reason"}],
 // "unreadable":[{"client","index","reason":"unreadable"}]}. Errors and reasons
-// are fixed codes; the input is never echoed. On error nothing changed.
+// are fixed codes (a root at, under or above one already accepted is
+// overlappingRoot); the input is never echoed. On error nothing changed.
 char *tb_set_extra_scan_paths(const char *json);
 
 // Replace the registry of extra Claude config directories (CLAUDE_CONFIG_DIR
@@ -150,10 +151,21 @@ char *tb_set_extra_scan_paths(const char *json);
 // directory becomes its own Claude card (accountKey = the directory) on the
 // next tb_agent_usage, read only from <dir>\.credentials.json. Success data:
 // {"registeredCount":N,"rejected":[{"index":i,"reason":code}]}. Errors and
-// reasons are fixed codes (including defaultConfigDir for the primary's own
-// <home>\.claude); the input is never echoed. On error the registry is
-// unchanged.
+// reasons are fixed codes: empty, unsupportedPath, rootDirectory,
+// invalidComponent, homeDirectory (the home folder itself), defaultConfigDir
+// (the primary's <home>\.claude or a folder above it), duplicate,
+// limitExceeded. A directory nested in another is allowed.
+// The input is never echoed. On error the registry is unchanged.
 char *tb_set_claude_config_dirs(const char *json);
+
+// Pre-save check for one extra Claude config directory:
+// {"candidate":"<dir>","existing":["<dir>",...]} -> data {"reason":null} or
+// {"reason":"<code>"}: tb_set_claude_config_dirs's code for that position,
+// else tb_set_extra_scan_paths's for the account's projects/transcripts:
+// defaultConfigDir (under <home>\.claude) or overlappingRoot (at, under or
+// above a root of an account already in the list). Changes no
+// registry and touches no filesystem; the input is never echoed.
+char *tb_validate_claude_config_dir(const char *json);
 
 // Replace the registry of credential reads the user has agreed to with
 // {"<client>":true|false} (only "grok-bot"); {} clears every grant. In-memory,

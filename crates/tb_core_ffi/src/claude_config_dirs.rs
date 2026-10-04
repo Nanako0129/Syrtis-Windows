@@ -109,7 +109,15 @@ pub(crate) fn duplicate_key(dir: &str) -> String {
 /// account would show the primary twice and, once its roots are excluded from
 /// the primary window, hide the primary's own usage (security review R2).
 fn default_config_dir_key(home: &std::path::Path) -> String {
-    duplicate_key(&home.join(".claude").to_string_lossy())
+    format!("{}\\.claude", home_key(home))
+}
+
+/// The home folder folded like [`duplicate_key`], without a trailing
+/// separator, so `HOME=C:\Users\me\` matches as `C:\Users\me` does.
+fn home_key(home: &std::path::Path) -> String {
+    duplicate_key(&home.to_string_lossy())
+        .trim_end_matches('\\')
+        .to_string()
 }
 
 /// Whether `dir` (already normalized) is the primary's `<home>\.claude` or an
@@ -151,29 +159,11 @@ pub(crate) fn is_at_or_under_default_config_dir(dir: &str, home: Option<&std::pa
 /// input is never echoed back across the FFI.
 pub(crate) fn set_from_json(raw: &str) -> Result<(serde_json::Value, Vec<String>), &'static str> {
     let input: Vec<String> = serde_json::from_str(raw).map_err(|_| "invalidJson")?;
-
-    let mut registered: Vec<String> = Vec::new();
-    let mut rejected: Vec<serde_json::Value> = Vec::new();
-    let home = crate::user_home_dir();
-    for (index, raw_dir) in input.iter().enumerate() {
-        let reason = match normalize(raw_dir) {
-            Ok(dir) if is_default_config_dir(&dir, home.as_deref()) => "defaultConfigDir",
-            Ok(dir)
-                if registered
-                    .iter()
-                    .any(|existing| duplicate_key(existing) == duplicate_key(&dir)) =>
-            {
-                "duplicate"
-            }
-            Ok(_) if registered.len() >= MAX_CLAUDE_CONFIG_DIRS => "limitExceeded",
-            Ok(dir) => {
-                registered.push(dir);
-                continue;
-            }
-            Err(reason) => reason,
-        };
-        rejected.push(serde_json::json!({ "index": index, "reason": reason }));
-    }
+    let (registered, refused) = register(&input, crate::user_home_dir().as_deref());
+    let rejected: Vec<serde_json::Value> = refused
+        .iter()
+        .map(|(index, reason)| serde_json::json!({ "index": index, "reason": reason }))
+        .collect();
 
     {
         let mut state = CLAUDE_CONFIG_DIRS
@@ -192,10 +182,121 @@ pub(crate) fn set_from_json(raw: &str) -> Result<(serde_json::Value, Vec<String>
     ))
 }
 
+/// The registry's per-entry rule, in list order: which directories a replace
+/// with `input` registers, and the index and fixed reason of each one it
+/// refuses. Shared by [`set_from_json`] and [`validate`], so the pre-save
+/// check gives the setter's answer for the config registry. Besides the path
+/// rule: the home folder itself (`homeDirectory`) and the primary's `.claude`
+/// or any folder above it (`defaultConfigDir`, security review R2); a folded
+/// duplicate; more than eight. A directory nested in another is allowed (the
+/// window_usage direct-children rule and macOS support it). The registered
+/// `projects`/`transcripts` roots overlap only when one sits inside the
+/// other's roots, which the scan registry refuses (`overlappingRoot`).
+/// Known gap, not handled here: an account's window is captured with the
+/// account directory as home, and the engine also scans
+/// `<home>\.claude\projects`, so an inner account at `<outer>\.claude` is
+/// counted in both windows (read from the code, not measured; pre-existing;
+/// deferred).
+fn register(
+    input: &[String],
+    home: Option<&std::path::Path>,
+) -> (Vec<String>, Vec<(usize, &'static str)>) {
+    let mut registered: Vec<String> = Vec::new();
+    let mut rejected: Vec<(usize, &'static str)> = Vec::new();
+    for (index, raw_dir) in input.iter().enumerate() {
+        let reason = match normalize(raw_dir) {
+            Ok(dir) if is_home(&dir, home) => "homeDirectory",
+            Ok(dir) if is_default_config_dir(&dir, home) => "defaultConfigDir",
+            Ok(dir)
+                if registered
+                    .iter()
+                    .any(|existing| duplicate_key(existing) == duplicate_key(&dir)) =>
+            {
+                "duplicate"
+            }
+            Ok(_) if registered.len() >= MAX_CLAUDE_CONFIG_DIRS => "limitExceeded",
+            Ok(dir) => {
+                registered.push(dir);
+                continue;
+            }
+            Err(reason) => reason,
+        };
+        rejected.push((index, reason));
+    }
+    (registered, rejected)
+}
+
+/// The home folder itself ([`home_key`]).
+fn is_home(dir: &str, home: Option<&std::path::Path>) -> bool {
+    home.is_some_and(|home| duplicate_key(dir) == home_key(home))
+}
+
+/// An account's two scan roots, as the pusher registers them.
+fn scan_roots(dir: &str) -> [String; 2] {
+    ["projects", "transcripts"].map(|root| format!("{dir}\\{root}"))
+}
+
+/// Why appending `candidate` to the saved list `existing` would not give a
+/// working extra account, or `None` if it would: the config registry's own
+/// answer for that position ([`register`]), then the scan registry's rules
+/// for the account's two roots, `<dir>\projects` and `<dir>\transcripts`:
+/// [`crate::extra_scan_paths::path_rule`], and `overlappingRoot` when one of
+/// them is at, under or above a root of an account the saved list registers
+/// ([`crate::extra_scan_paths::overlaps`]). So a directory the pusher would
+/// drop from both registries is refused before it is saved. Touches no
+/// filesystem (no stat, so a `\\wsl.localhost` path cannot wake WSL) and
+/// changes no registry. Returns a fixed reason code, never the input.
+pub(crate) fn validate(
+    candidate: &str,
+    existing: &[String],
+    home: Option<&std::path::Path>,
+) -> Option<&'static str> {
+    let mut all = existing.to_vec();
+    all.push(candidate.to_string());
+    let (registered, rejected) = register(&all, home);
+    if let Some((_, reason)) = rejected.iter().find(|(index, _)| *index == existing.len()) {
+        return Some(reason);
+    }
+    // Accepted, so the candidate is the last registered directory.
+    let (dir, others) = registered.split_last()?;
+    let roots = scan_roots(dir);
+    if let Some(reason) = roots
+        .iter()
+        .find_map(|root| crate::extra_scan_paths::path_rule(root, home).err())
+    {
+        return Some(reason);
+    }
+    let taken: Vec<String> = others
+        .iter()
+        .flat_map(|other| scan_roots(other))
+        .map(|root| duplicate_key(&root))
+        .collect();
+    roots
+        .iter()
+        .any(|root| {
+            let key = duplicate_key(root);
+            taken.iter().any(|other| crate::extra_scan_paths::overlaps(other, &key))
+        })
+        .then_some("overlappingRoot")
+}
+
 /// One process-wide mutex for every test that writes the static, so parallel
 /// `cargo test` threads do not observe each other's registry.
 #[cfg(test)]
 pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Commit `dirs` as given (no `normalize`), moving the registry generation as
+/// a real replace does; returns what was registered. Only for
+/// `apply_config_dirs_for_test`.
+#[cfg(test)]
+pub(crate) fn commit_for_test(dirs: Vec<String>) -> Vec<String> {
+    let mut state = CLAUDE_CONFIG_DIRS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.0 = dirs.clone();
+    state.1 = state.1.wrapping_add(1);
+    dirs
+}
 
 #[cfg(test)]
 pub(crate) fn reset_for_test() {
@@ -208,6 +309,101 @@ pub(crate) fn reset_for_test() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The setter refuses the home folder itself and the primary's .claude
+    /// even when HOME ends in a separator, and keeps a nested account
+    /// (window_usage and macOS support it).
+    #[test]
+    fn register_refuses_home_and_keeps_nested_accounts() {
+        let home = std::path::Path::new(r"C:\Users\Me\");
+        let input = [
+            r"D:\claude",
+            r"D:\claude\alt",
+            r"c:/users/me",
+            r"C:\Users\Me\.claude",
+            r"D:\",
+        ]
+        .map(String::from)
+        .to_vec();
+        let (registered, rejected) = register(&input, Some(home));
+        assert_eq!(registered, [r"D:\claude", r"D:\claude\alt"]);
+        assert_eq!(
+            rejected,
+            [(2, "homeDirectory"), (3, "defaultConfigDir"), (4, "rootDirectory")]
+        );
+    }
+
+    /// The pre-save check gives the setter's answer for the appended entry,
+    /// plus the scan registry's at-or-under rule, without touching the
+    /// registry or the filesystem.
+    #[test]
+    fn validate_answers_as_the_setter_would_for_the_appended_entry() {
+        let home = std::path::Path::new(r"C:\Users\Me");
+        let some = |raw: &[&str]| raw.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let empty: Vec<String> = Vec::new();
+        for (candidate, existing, expected) in [
+            (r"D:\work\.claude", empty.clone(), None),
+            ("", empty.clone(), Some("empty")),
+            ("C:work", empty.clone(), Some("unsupportedPath")),
+            (r"\Users\x", empty.clone(), Some("unsupportedPath")),
+            (
+                r"\\wsl.localhost\Ubuntu\home\me\.claude",
+                empty.clone(),
+                Some("unsupportedPath"),
+            ),
+            (r"E:\", empty.clone(), Some("rootDirectory")),
+            (r"D:\a\con", empty.clone(), Some("invalidComponent")),
+            (r"D:\a\b ", empty.clone(), Some("invalidComponent")),
+            (
+                r"c:/users/ME/.CLAUDE",
+                empty.clone(),
+                Some("defaultConfigDir"),
+            ),
+            (r"C:\Users", empty.clone(), Some("defaultConfigDir")),
+            (r"C:\Users\Me", empty.clone(), Some("homeDirectory")),
+            (r"c:/users/me/", empty.clone(), Some("homeDirectory")),
+            // Accepted by the config registry, refused by the scan registry.
+            (
+                r"C:\Users\Me\.claude\work",
+                empty.clone(),
+                Some("defaultConfigDir"),
+            ),
+            // A nested account's registered roots are disjoint; one inside the other's
+            // roots (or holding them) would scan files twice.
+            (r"D:\claude\alt", some(&[r"D:\claude"]), None),
+            (r"D:\a\projects", some(&[r"D:\a"]), Some("overlappingRoot")),
+            (r"D:\x", some(&[r"D:\x\transcripts"]), Some("overlappingRoot")),
+            (r"D:\ab", some(&[r"D:\a"]), None),
+            (r"D:\", some(&[r"D:\a"]), Some("rootDirectory")),
+            (
+                r"d:/WORK/.claude/",
+                some(&[r"D:\work\.claude"]),
+                Some("duplicate"),
+            ),
+            // A refused saved entry does not take a slot or cause a duplicate.
+            (r"D:\b", some(&[r"\\server\share", "D:/b/../b"]), None),
+            (
+                r"D:\z",
+                some(&[
+                    r"D:\a", r"D:\b", r"D:\c", r"D:\d", r"D:\e", r"D:\f", r"D:\g", r"D:\h",
+                ]),
+                Some("limitExceeded"),
+            ),
+            (
+                r"D:\z",
+                some(&[
+                    r"D:\a", r"D:\b", r"D:\c", r"D:\d", r"D:\e", r"D:\f", r"D:\g", r"E:\",
+                ]),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                validate(candidate, &existing, Some(home)),
+                expected,
+                "{candidate:?} after {existing:?}"
+            );
+        }
+    }
 
     #[test]
     fn normalize_accepts_only_absolute_drive_paths() {
