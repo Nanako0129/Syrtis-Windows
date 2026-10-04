@@ -162,6 +162,10 @@ public sealed partial class DashboardView : UserControl
                 {
                     if (AppSettings.GrokBotConsent.Stored == true)
                     {
+                        // A yes from the Settings switch keeps the card that
+                        // was showing (Declined stays one line); after the
+                        // card's own Allow this is a no-op.
+                        _grokBotWaiting.GrantedElsewhere();
                         _model?.RefreshQuotaNow();
                     }
 
@@ -2033,8 +2037,9 @@ public sealed partial class DashboardView : UserControl
 
             // Ahead of the placeholder branch: "keychain-consent" is a setup
             // placeholder, and this card is its setup prompt.
-            var consent = GrokBotConsent.CardFor(agent, AppSettings.GrokBotConsent.Stored);
-            if (consent != GrokBotConsent.Card.None)
+            var consent = _grokBotWaiting.Decide(
+                agent, AppSettings.GrokBotConsent.Stored, snapshot.Quota, snapshot.QuotaFailures);
+            if (consent.Card != GrokBotConsent.Card.None)
             {
                 section.Children.Add(BuildGrokBotConsent(consent, snapshot.Quota, snapshot.QuotaFailures));
                 continue;
@@ -2097,26 +2102,27 @@ public sealed partial class DashboardView : UserControl
         return panel;
     }
 
-    // The Allow click the core accepted; its exits live in WaitingState.
+    // A grant the core accepted over a consent card; its card and exits live
+    // in WaitingState.
     private readonly GrokBotConsent.WaitingState _grokBotWaiting = new();
 
     /// <summary>The Grok Bot consent prompt (source "keychain-consent"). On
     /// Windows this is the only question before Syrtis decrypts Grok Bot's
-    /// sign-in — DPAPI never asks — so it states what is read, where it goes
-    /// and how to stop. After "Not now" it collapses to one line and keeps
-    /// Allow: a decline has to be reversible where it was made. A stored yes
-    /// the core has not acted on yet shows the full card again, Allow kept to
-    /// re-send it (macOS parity).</summary>
+    /// sign-in — DPAPI never asks — so it states what is read and where it
+    /// goes. After "Not now" it collapses to one line and keeps Allow: a
+    /// decline has to be reversible where it was made. A grant keeps the card
+    /// it was made on until it ends (GrokBotConsent.WaitingState); a stored
+    /// yes the core has not acted on after that shows the full card again,
+    /// Allow kept to re-send it (macOS parity).</summary>
     private FrameworkElement BuildGrokBotConsent(
-        GrokBotConsent.Card state, AgentUsagePayload? shownQuota, int failedFetches)
+        GrokBotConsent.Prompt prompt, AgentUsagePayload? shownQuota, int failedFetches)
     {
         var body = new StackPanel { Spacing = 6 };
-        var text = Ui.Dim(GrokBotConsent.TextFor(state).Localized(), 11);
+        var text = Ui.Dim(prompt.Text.Localized(), 11);
         body.Children.Add(text);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         var allow = new Button
         {
-            Content = GrokBotConsent.Copy.Allow.LocalizedKey(GrokBotConsent.Copy.AllowEnglish),
             Style = (Style)Application.Current.Resources["AccentButtonStyle"],
             FontSize = 12,
         };
@@ -2136,8 +2142,8 @@ public sealed partial class DashboardView : UserControl
                 return;
             }
 
-            _grokBotWaiting.Granted(shownQuota, failedFetches);
-            ShowWaiting(allow);
+            _grokBotWaiting.Granted(prompt.Card, shownQuota, failedFetches);
+            ApplyGrokBotButtons(prompt with { Waiting = true }, allow, notNow);
             if (alreadyYes)
             {
                 _model?.RefreshQuotaNow();
@@ -2153,15 +2159,9 @@ public sealed partial class DashboardView : UserControl
             text.Text = GrokBotConsent.Copy.Declined.Localized();
             notNow.Visibility = Visibility.Collapsed;
         };
-        // macOS: "Waiting for macOS…". Ends on Not now / Settings off, a new
-        // payload, or a failed fetch (GrokBotConsent.WaitingState).
-        if (_grokBotWaiting.IsWaiting(AppSettings.GrokBotConsent.Stored, shownQuota, failedFetches))
-        {
-            ShowWaiting(allow);
-        }
-
+        ApplyGrokBotButtons(prompt, allow, notNow);
         buttons.Children.Add(allow);
-        if (state != GrokBotConsent.Card.Declined)
+        if (prompt.ShowsNotNow)
         {
             buttons.Children.Add(notNow);
         }
@@ -2170,10 +2170,14 @@ public sealed partial class DashboardView : UserControl
         return body;
     }
 
-    private static void ShowWaiting(Button allow)
+    // macOS: "Waiting for macOS…" with Not now disabled beside it.
+    private static void ApplyGrokBotButtons(GrokBotConsent.Prompt prompt, Button allow, Button notNow)
     {
-        allow.IsEnabled = false;
-        allow.Content = GrokBotConsent.Copy.Waiting.Localized();
+        allow.IsEnabled = !prompt.Waiting;
+        allow.Content = prompt.Waiting
+            ? GrokBotConsent.Copy.Waiting.Localized()
+            : GrokBotConsent.Copy.Allow.LocalizedKey(GrokBotConsent.Copy.AllowEnglish);
+        notNow.IsEnabled = prompt.NotNowEnabled;
     }
 
     private static bool TryAnswerGrokBotConsent(bool granted)

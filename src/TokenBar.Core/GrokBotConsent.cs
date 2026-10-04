@@ -117,28 +117,67 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
             ? answer == false ? Card.Declined : Card.Ask
             : Card.None;
 
+    /// <summary>What the consent card draws: the card, whether a grant is in
+    /// flight, and the button states that follow from both. Decided here
+    /// because the view compiles under no test project.</summary>
+    public readonly record struct Prompt(Card Card, bool Waiting)
+    {
+        public string Text => TextFor(Card);
+
+        /// <summary>Not now exists only on the full card: the declined line
+        /// already is its answer (macOS <c>if !consentDeclined</c>).</summary>
+        public bool ShowsNotNow => Card == Card.Ask;
+
+        /// <summary>Disabled, not hidden, while a grant is in flight (macOS
+        /// <c>.disabled(granting)</c>): offering "no" under a pending "yes"
+        /// invites answering the same question twice. Allow is disabled for
+        /// the same span and reads <see cref="Copy.Waiting"/>.</summary>
+        public bool NotNowEnabled => !Waiting;
+    }
+
     /// <summary>The Allow button's "Waiting…" (macOS "Waiting for macOS…").
-    /// Set when Allow's setter succeeded over the payload the card showed;
-    /// every card build asks <see cref="IsWaiting"/>, which ends it for good
+    /// Set when a grant the core accepted lands over a consent card — Allow on
+    /// the card, or the Settings switch (<see cref="GrantedElsewhere"/>) — and
+    /// records the card that was showing. While it holds,
+    /// <see cref="Decide"/> keeps drawing that card, so a grant never brings
+    /// new text: Declined → Allow stays one line, Ask → Allow stays the
+    /// disclosure (macOS re-reads the text only when the payload changes).
+    /// Every decision asks IsWaiting, which ends it for good
     /// when the stored answer is no longer yes (Not now, Settings off), a
     /// different payload is shown, or a quota fetch has failed since the
-    /// grant. The refresh after Allow is best effort and may wait for the next
-    /// poll (macOS guarantees a refetch; Windows aligns in slice W6c), so
-    /// without these exits the button could stay disabled.</summary>
+    /// grant; the normal <see cref="CardFor"/> decision then applies. The
+    /// refresh after a grant is best effort and may wait for the next poll
+    /// (macOS guarantees a refetch; Windows aligns in slice W6c), so without
+    /// these exits the button could stay disabled.</summary>
     public sealed class WaitingState
     {
         private bool _waiting;
         private object? _over;
         private int _failuresAtGrant;
+        private Card _card;
+        private (Card Card, object? Over, int Failures)? _shown;
 
-        public void Granted(object? shownPayload, int failedFetches)
+        public void Granted(Card shownCard, object? shownPayload, int failedFetches)
         {
             _waiting = true;
+            _card = shownCard;
             _over = shownPayload;
             _failuresAtGrant = failedFetches;
         }
 
-        public bool IsWaiting(bool? stored, object? shownPayload, int failedFetches)
+        /// <summary>A yes that did not come from the card's Allow (the Settings
+        /// switch): wait over the consent card last decided, if one was. A
+        /// no-op while already waiting, so Allow's own grant is not
+        /// re-recorded.</summary>
+        public void GrantedElsewhere()
+        {
+            if (!_waiting && _shown is { } shown)
+            {
+                Granted(shown.Card, shown.Over, shown.Failures);
+            }
+        }
+
+        private bool IsWaiting(bool? stored, object? shownPayload, int failedFetches)
         {
             if (stored != true
                 || !ReferenceEquals(shownPayload, _over)
@@ -150,10 +189,27 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
 
             return _waiting;
         }
+
+        /// <summary>The card for <paramref name="agent"/>: the recorded card
+        /// while IsWaiting holds, else <see cref="CardFor"/>.</summary>
+        public Prompt Decide(
+            AgentUsageSnapshot agent, bool? stored, object? shownPayload, int failedFetches)
+        {
+            var card = CardFor(agent, stored);
+            if (card == Card.None)
+            {
+                return new(Card.None, false);
+            }
+
+            var waiting = IsWaiting(stored, shownPayload, failedFetches);
+            var prompt = new Prompt(waiting ? _card : card, waiting);
+            _shown = (prompt.Card, shownPayload, failedFetches);
+            return prompt;
+        }
     }
 
     /// <summary>The card's line for <paramref name="card"/> (English source;
-    /// localize at the view). Every consent card keeps an enabled Allow.</summary>
+    /// localize at the view).</summary>
     public static string TextFor(Card card) => card switch
     {
         Card.Declined => Copy.Declined,
@@ -165,17 +221,16 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     /// to stop.</summary>
     public static class Copy
     {
+        /// <summary>The pre-consent disclosure only: what is unlocked, that
+        /// Windows doesn't ask, the one destination, nothing kept or logged.
+        /// The operational detail (the switch, when a
+        /// withdrawal takes effect, the Cursor fallback) is
+        /// <see cref="SettingsHint"/>.</summary>
         public const string Explanation =
-            "To show your weekly Grok Bot limits, Syrtis needs to unlock and use Grok Bot's "
-            + "saved sign-in on this PC. Windows does not ask separately, so this is the only "
-            + "prompt: choose Allow here, or turn on \"Use Grok Bot's sign-in\" in Settings. "
-            + "Until you allow it, Syrtis only checks whether Grok Bot is signed in. "
-            + "The sign-in is sent only to Grok Bot's usage service (api2.cursor.sh). Syrtis "
-            + "keeps no copy, only a one-way fingerprint to tell accounts apart, and doesn't "
-            + "log it. Turning the switch off in Settings takes effect from the next refresh; "
-            + "a refresh already under way may finish. If you sign out of Grok "
-            + "Bot, Syrtis uses the Cursor IDE sign-in instead, if there is one, and sends it "
-            + "only to cursor.com.";
+            "To show your weekly Grok Bot limits, Syrtis needs to unlock Grok Bot's saved "
+            + "sign-in on this PC; Windows doesn't ask separately. The sign-in is sent only to "
+            + "Grok Bot's usage service (api2.cursor.sh). Syrtis keeps no copy and doesn't "
+            + "log it.";
 
         public const string Declined = "Syrtis isn't reading your Grok Bot limits.";
 

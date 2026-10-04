@@ -237,69 +237,160 @@ public class GrokBotConsentTests : IDisposable
         Assert.Equal("invalidJson", error.Message);
     }
 
+    // The card is the pre-consent disclosure only: what is unlocked, that
+    // Windows doesn't ask, the one destination, nothing kept or logged. The
+    // operational contract (the switch, when a withdrawal takes effect, the
+    // Cursor fallback, the sign-in file checked before consent) is the
+    // Settings hint's.
     [Fact]
-    public void ConsentCardSaysWhereItGoesAndHowToStop()
+    public void ConsentCardIsTheDisclosureAndTheSettingsHintCarriesTheRest()
     {
-        Assert.Contains("api2.cursor.sh", GrokBotConsent.Copy.Explanation);
-        // One contract on the card and the switch: consent from either place,
-        // a withdrawal that takes effect from the next refresh (a refresh
-        // already under way may finish; the core's mid-fetch re-checks are
-        // hardening, not a promise), and the Cursor IDE fallback only when
-        // Grok Bot is signed out.
-        foreach (var copy in new[] { GrokBotConsent.Copy.Explanation, GrokBotConsent.Copy.SettingsHint })
+        var card = GrokBotConsent.Copy.Explanation;
+        Assert.Contains("unlock Grok Bot's saved sign-in on this PC; Windows doesn't ask separately", card);
+        Assert.Contains("sent only to Grok Bot's usage service (api2.cursor.sh)", card);
+        Assert.Contains("keeps no copy and doesn't log it", card);
+        foreach (var later in new[] { "next refresh", "Cursor", "fingerprint" })
         {
-            Assert.Contains("takes effect from the next refresh; a refresh already under way may finish", copy);
-            Assert.Contains("Cursor IDE sign-in instead, if there is one, and sends it only to cursor.com", copy);
-            Assert.DoesNotContain("before it next sends", copy);
-            Assert.DoesNotContain("before the sign-in is used", copy);
+            Assert.DoesNotContain(later, card);
         }
 
-        Assert.Contains("Choosing Allow on the Grok Bot card turns this on too", GrokBotConsent.Copy.SettingsHint);
-        Assert.Contains(GrokBotConsent.Copy.SettingsToggle, GrokBotConsent.Copy.Explanation);
-        Assert.Contains("without encryption", GrokBotConsent.Copy.SettingsHint);
+        var hint = GrokBotConsent.Copy.SettingsHint;
+        Assert.Contains("takes effect from the next refresh; a refresh already under way may finish", hint);
+        Assert.Contains("Cursor IDE sign-in instead, if there is one, and sends it only to cursor.com", hint);
+        Assert.Contains("Choosing Allow on the Grok Bot card turns this on too", hint);
+        Assert.Contains("without encryption", hint);
         // sand-secrets.json is read every refresh to learn whether Grok Bot is
-        // signed in; the copy must not claim it is untouched before Allow.
-        Assert.Contains("only checks whether Grok Bot is signed in", GrokBotConsent.Copy.Explanation);
-        Assert.Contains("still checks Grok Bot's sign-in file", GrokBotConsent.Copy.SettingsHint);
+        // signed in; the hint must not claim it is untouched before Allow.
+        Assert.Contains("still checks Grok Bot's sign-in file", hint);
     }
 
-    // The Allow button's Waiting state. The refresh after Allow is best effort,
-    // so each exit is what keeps the button from latching disabled. Every test
+    // The Waiting state after a grant. A grant never brings new text: the card
+    // that was showing stays until Waiting ends (macOS re-reads the text only
+    // when the payload changes). The refresh after a grant is best effort, so
+    // each exit is what keeps the buttons from latching disabled. Every test
     // first shows Waiting holding (stored yes, same payload, no new failure),
     // so a state that never waits cannot pass.
-    private static GrokBotConsent.WaitingState GrantedOver(AgentUsagePayload shown)
+    private static readonly AgentUsageSnapshot Marked = Snapshot("grok-bot", "keychain-consent");
+
+    private static GrokBotConsent.WaitingState GrantedOver(
+        AgentUsagePayload shown, GrokBotConsent.Card card = GrokBotConsent.Card.Ask)
     {
         var waiting = new GrokBotConsent.WaitingState();
-        waiting.Granted(shown, failedFetches: 2);
-        Assert.True(waiting.IsWaiting(true, shown, 2));
+        waiting.Granted(card, shown, failedFetches: 2);
+        Assert.Equal(new GrokBotConsent.Prompt(card, Waiting: true), waiting.Decide(Marked, true, shown, 2));
         return waiting;
     }
 
     [Fact]
-    public void NotNowDuringWaitingEndsWaitingAndShowsTheDeclinedCard()
+    public void AllowOnTheDeclinedLineStaysOneLineWhileWaiting()
     {
         var shown = new AgentUsagePayload("now", []);
-        var waiting = GrantedOver(shown);
-        Assert.False(waiting.IsWaiting(false, shown, 2));
+        var waiting = new GrokBotConsent.WaitingState();
+        var before = waiting.Decide(Marked, false, shown, 2);
+        Assert.Equal(GrokBotConsent.Card.Declined, before.Card);
+        waiting.Granted(before.Card, shown, 2);
+        // The re-render after Allow: stored is now yes, which alone would be Ask.
+        var after = waiting.Decide(Marked, true, shown, 2);
+        Assert.Equal(GrokBotConsent.Card.Declined, after.Card);
+        Assert.True(after.Waiting);
+        Assert.Equal(GrokBotConsent.Copy.Declined, after.Text);
+        Assert.False(after.ShowsNotNow);
+    }
+
+    [Fact]
+    public void AllowOnTheFullCardKeepsTheDisclosureWhileWaiting()
+    {
+        var shown = new AgentUsagePayload("now", []);
+        var waiting = new GrokBotConsent.WaitingState();
+        var before = waiting.Decide(Marked, null, shown, 2);
+        Assert.Equal(new GrokBotConsent.Prompt(GrokBotConsent.Card.Ask, Waiting: false), before);
+        Assert.True(before.NotNowEnabled);
+        waiting.Granted(before.Card, shown, 2);
+        var after = waiting.Decide(Marked, true, shown, 2);
+        Assert.Equal(GrokBotConsent.Card.Ask, after.Card);
+        Assert.True(after.Waiting);
+        Assert.Equal(GrokBotConsent.Copy.Explanation, after.Text);
+        // Not now stays on the card, disabled rather than hidden.
+        Assert.True(after.ShowsNotNow);
+        Assert.False(after.NotNowEnabled);
+    }
+
+    [Fact]
+    public void SettingsSwitchOnOverTheDeclinedLineKeepsIt()
+    {
+        var shown = new AgentUsagePayload("now", []);
+        var waiting = new GrokBotConsent.WaitingState();
+        Assert.Equal(GrokBotConsent.Card.Declined, waiting.Decide(Marked, false, shown, 2).Card);
+        waiting.GrantedElsewhere();
         Assert.Equal(
-            GrokBotConsent.Card.Declined,
-            GrokBotConsent.CardFor(Snapshot("grok-bot", "keychain-consent"), false));
-        // Ended, not paused: a later yes over the same payload is not Waiting.
-        Assert.False(waiting.IsWaiting(true, shown, 2));
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.Declined, Waiting: true),
+            waiting.Decide(Marked, true, shown, 2));
     }
 
     [Fact]
-    public void FailedFetchEndsWaiting()
+    public void GrantElsewhereWithNoConsentCardShownDoesNotWait()
     {
         var shown = new AgentUsagePayload("now", []);
-        var waiting = GrantedOver(shown);
-        Assert.False(waiting.IsWaiting(true, shown, 3));
+        var waiting = new GrokBotConsent.WaitingState();
+        waiting.GrantedElsewhere();
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.Ask, Waiting: false),
+            waiting.Decide(Marked, true, shown, 2));
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.None, Waiting: false),
+            waiting.Decide(Snapshot("grok-bot", "oauth"), true, shown, 2));
+    }
+
+    [Theory]
+    [InlineData(GrokBotConsent.Card.Ask)]
+    [InlineData(GrokBotConsent.Card.Declined)]
+    public void NotNowDuringWaitingEndsWaitingAndShowsTheDeclinedCard(GrokBotConsent.Card recorded)
+    {
+        var shown = new AgentUsagePayload("now", []);
+        var waiting = GrantedOver(shown, recorded);
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.Declined, Waiting: false),
+            waiting.Decide(Marked, false, shown, 2));
+        // Ended, not paused: a later yes over the same payload is the normal
+        // decision (Ask, Allow kept to re-send), not Waiting.
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.Ask, Waiting: false),
+            waiting.Decide(Marked, true, shown, 2));
+    }
+
+    [Theory]
+    [InlineData(GrokBotConsent.Card.Ask)]
+    [InlineData(GrokBotConsent.Card.Declined)]
+    public void FailedFetchEndsWaiting(GrokBotConsent.Card recorded)
+    {
+        var shown = new AgentUsagePayload("now", []);
+        var waiting = GrantedOver(shown, recorded);
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.Ask, Waiting: false),
+            waiting.Decide(Marked, true, shown, 3));
+    }
+
+    [Theory]
+    [InlineData(GrokBotConsent.Card.Ask)]
+    [InlineData(GrokBotConsent.Card.Declined)]
+    public void NewPayloadEndsWaiting(GrokBotConsent.Card recorded)
+    {
+        var waiting = GrantedOver(new AgentUsagePayload("now", []), recorded);
+        Assert.Equal(
+            new GrokBotConsent.Prompt(GrokBotConsent.Card.Ask, Waiting: false),
+            waiting.Decide(Marked, true, new AgentUsagePayload("now", []), 2));
     }
 
     [Fact]
-    public void NewPayloadEndsWaiting()
+    public void ConsentTablesHaveTheSameKeys()
     {
-        var waiting = GrantedOver(new AgentUsagePayload("now", []));
-        Assert.False(waiting.IsWaiting(true, new AgentUsagePayload("now", []), 2));
+        var keys = new[] { "strings-zh-Hant.json", "strings-zh-Hans.json" }
+            .Select(table => JsonSerializer.Deserialize<Dictionary<string, string>>(
+                File.ReadAllText(Path.Combine(AppContext.BaseDirectory, table)))!.Keys.ToHashSet())
+            .ToList();
+        Assert.True(keys[0].SetEquals(keys[1]));
+        // The old long card copy is gone from both tables, not left orphaned.
+        Assert.DoesNotContain(keys[0], key => key.StartsWith("To show your weekly Grok Bot limits", StringComparison.Ordinal)
+            && key != GrokBotConsent.Copy.Explanation);
     }
 }
