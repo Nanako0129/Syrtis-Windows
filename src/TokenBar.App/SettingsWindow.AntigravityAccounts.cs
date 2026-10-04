@@ -56,6 +56,9 @@ public sealed partial class SettingsWindow
                 Padding = new Thickness(7, 2, 7, 3),
                 IsEnabled = !busy,
             };
+            // Every row's button reads "Remove"; the accessible name says which.
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+                remove, AntigravityAccountsCopy.RemoveNamed.Localized(account.Label));
             var key = account.Key;
             remove.Click += async (_, _) => await capture.Remove(key);
             Grid.SetColumn(remove, 1);
@@ -104,6 +107,8 @@ public sealed partial class SettingsWindow
 
             FillAntigravityAccounts(store);
         };
+        // The visible label is a sibling TextBlock; give the switch the same name.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(toggle, AntigravityAccountsCopy.Toggle.Localized());
         body.Children.Add(ToggleRow(AntigravityAccountsCopy.Toggle.Localized(), toggle));
 
         if (enabled && capture.Paused)

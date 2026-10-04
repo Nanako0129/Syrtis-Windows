@@ -19,6 +19,9 @@ internal static class AntigravityAccountsCopy
 
     internal const string Remove = "Remove";
 
+    /// <summary>The Remove button's accessible name: which account it removes.</summary>
+    internal const string RemoveNamed = "Remove {0}";
+
     internal const string Toggle = "Capture accounts agy signs into automatically";
 
     internal const string Paused =
@@ -34,7 +37,7 @@ internal static class AntigravityAccountsCopy
         "Turn this on to keep agy's current account merged into one card. With it off, a Capture merges it only until agy next refreshes its sign-in, usually within an hour.";
 
     internal const string WhenOn =
-        "When on, Syrtis copies the sign-in of each account agy signs into to Windows Credential Manager: once when you turn this on, then each time agy rewrites its saved sign-in (including its routine refresh). Turning it off keeps the copies. An account you remove while this is on stays removed until you press Capture.";
+        "When on, Syrtis copies the sign-in of each account agy signs into to Windows Credential Manager: once when you turn this on, then each time agy rewrites its saved sign-in (including its routine refresh). Turning it off keeps the copies. An account you remove while this is on stays removed until you sign agy in to it and press Capture.";
 
     internal const string HowTo =
         "To add another Google account:\n1. Sign agy in to that account.\n2. Press Capture current agy login.\n3. Sign agy back in to your main account.";
@@ -51,7 +54,7 @@ internal static class AntigravityAccountsCopy
     internal const string ConfirmTitle = "Turn on automatic capture?";
 
     internal const string ConfirmBody =
-        "Syrtis captures agy's current account now, and each time agy rewrites its saved sign-in it copies that account to Windows Credential Manager without asking again. Accounts you remove while this is on stay removed until you press Capture.";
+        "Syrtis captures agy's current account now, and each time agy rewrites its saved sign-in it copies that account to Windows Credential Manager without asking again. Accounts you remove while this is on stay removed until you sign agy in to them and press Capture.";
 
     internal const string ConfirmOk = "Turn on";
 
@@ -91,7 +94,7 @@ internal static class AntigravityAccountsCopy
     ];
 
     internal static IEnumerable<string> All() =>
-        [Section, "Antigravity account", Capture, Capturing, Remove, Toggle, Paused, MergeOnlyUntilRefresh,
+        [Section, "Antigravity account", Capture, Capturing, Remove, RemoveNamed, Toggle, Paused, MergeOnlyUntilRefresh,
             WhenOn, HowTo, Reads, RemoveMeans, TwiceFromIde, ConfirmTitle, ConfirmBody, ConfirmOk,
             ConfirmCancel, Generic, .. Codes.Select(Message)];
 }
