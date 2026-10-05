@@ -422,7 +422,11 @@ public class AccountIdentityTests
                 records ?? [new UsageAttribution.Record("claude", "anthropic", UsageAttribution.State.Assigned("claude"))],
                 IsWritable: true),
             year: null,
-            new QuotaLensProjection.Selection("claude", storedTab ?? "", WindowCardAccount: stored, LocalUsageClients: localClients)).Client!;
+            new QuotaLensProjection.Selection("claude", storedTab ?? "", WindowCardAccount: stored, LocalUsageClients: localClients),
+            // Inside the payload window (95 h..100 h) so the cycle IS placed:
+            // a null LiveEquivalence below is then the unattributed guard, not
+            // an Unavailable resolve.
+            now: DateTimeOffset.FromUnixTimeSeconds(99 * Hour)).Client!;
     }
 
     /// <summary>A subscription used only through another client still has
@@ -469,6 +473,9 @@ public class AccountIdentityTests
         Assert.Equal("P", primary.Selected!.Id.AccountScope);
         Assert.NotEmpty(primary.Mine);
         Assert.Equal(2, primary.Accounts.Count);
+        // Control: the attributed primary's placed cycle gets a numbers row.
+        Assert.NotNull(primary.Selected.Active);
+        Assert.NotNull(primary.LiveEquivalence);
 
         var desktop = ClientFor(Desktop);
         Assert.True(desktop.LocalUsageUnattributed);
@@ -477,6 +484,7 @@ public class AccountIdentityTests
         Assert.Equal("S", desktop.Selected!.Id.AccountScope);
         Assert.Empty(desktop.Mine);
         Assert.Empty(desktop.Messages);
+        Assert.NotNull(desktop.Selected.Active);
         Assert.Null(desktop.LiveEquivalence);
         Assert.Equal(0, desktop.UndatedCount);
         Assert.Equal("Local usage can't be attributed to this account yet.", WindowCardText.LocalUsageUnattributed());
@@ -489,6 +497,7 @@ public class AccountIdentityTests
         Assert.True(primary.LocalUsageUnattributed);
         Assert.Empty(primary.Mine);
         Assert.Empty(primary.Messages);
+        Assert.NotNull(primary.Selected!.Active);
         Assert.Null(primary.LiveEquivalence);
         Assert.Equal(0, primary.UndatedCount);
         Assert.Equal(WindowCardText.LocalUsageUnattributed(), WindowCardText.ZoneUsage([], unattributed: primary.LocalUsageUnattributed).Empty);

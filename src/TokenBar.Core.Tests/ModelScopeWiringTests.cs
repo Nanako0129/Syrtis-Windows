@@ -238,8 +238,13 @@ public class ModelScopeWiringTests
             windowUsageOutcome: WindowEquivalence.FetchOutcome.Failed,
             quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
             Confirmed(), year: null,
-            new QuotaLensProjection.Selection("claude", string.Empty)).Client!;
+            new QuotaLensProjection.Selection("claude", string.Empty),
+            now: DateTimeOffset.FromUnixTimeSeconds(5_950)).Client!;
 
+        // Control: the cycle is placed and the same inputs with a Succeeded
+        // read raise the note (AScopeThatMatchesNothing...), so only the
+        // Failed outcome keeps it false here.
+        Assert.NotNull(client.Selected?.Active);
         Assert.False(client.ScopeMatchedNothing);
     }
 
