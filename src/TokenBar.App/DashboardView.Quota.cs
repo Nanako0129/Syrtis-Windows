@@ -247,6 +247,7 @@ public sealed partial class DashboardView
                 ClientRegistry.HiddenLimitsClients(AppSettings.Store)),
             snapshot.AccountWindowUsage,
             snapshot.QuotaHistoryReadFailed,
+            snapshot.QuotaAttempted,
             windowUsageFromMs: snapshot.WindowUsageFromMs,
             accountWindowUsageFromMs: snapshot.AccountWindowUsageFromMs);
 

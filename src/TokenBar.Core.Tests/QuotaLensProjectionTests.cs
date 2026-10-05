@@ -69,6 +69,17 @@ public class QuotaLensProjectionTests
         new("2026-01-01T00:00:00Z",
             [new AgentUsageSnapshot(clientId, "source", "2026-01-01T00:00:00Z", windows)]);
 
+    // A payload with a codex primary whose history scope matches
+    // TwoCycleSeries("codex", "primary", ...), so the series passes the
+    // overview's visible-agents filter and the equivalence tests below fold
+    // it the way production does once a payload has arrived.
+    private static AgentUsagePayload CodexPrimaryQuota() =>
+        new("2026-01-01T00:00:00Z",
+            [new AgentUsageSnapshot("codex", "source", "2026-01-01T00:00:00Z",
+                [new UsageWindow(Label: "Weekly", UsedPercent: 10, RemainingPercent: 90, CardId: "codex|weekly.v1",
+                    PaceStatus: new PaceStatus(UsagePaceState.Available, WindowKey: "weekly.v1"))],
+                HistoryScope: new AccountScopeStatus("primary"))]);
+
     // Two completed (single-sample) cycles, plus a running cycle carrying TWO
     // active samples — WindowEquivalence.LiveRow needs a non-empty
     // [first, last] span to admit a message as "declared" at all before it
@@ -144,20 +155,50 @@ public class QuotaLensProjectionTests
 
         var model = QuotaLensProjection.Build(
             history,
-            quota: null,
+            quota: CodexPrimaryQuota(),
             EmptyGraph(),
             windowUsage: new WindowUsage(messages, 0, 0),
             windowUsageOutcome: WindowEquivalence.FetchOutcome.Failed,
             quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
             Confirmed(new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex"))),
             year: null,
-            new QuotaLensProjection.Selection(ClientRegistry.OverviewTab, string.Empty));
+            new QuotaLensProjection.Selection(ClientRegistry.OverviewTab, string.Empty, PresentClients: ["codex"]));
 
         Assert.Empty(model.Overview.Equivalences);
     }
 
     [Fact]
     public void OverviewEquivalencesArePopulatedOnceTheFetchSucceeds()
+    {
+        var history = new[] { TwoCycleSeries("codex", "primary", "weekly.v1") };
+        var messages = new[] { Message(1_800, "codex", "openai", 1000, 5.0) };
+
+        var model = QuotaLensProjection.Build(
+            history,
+            quota: CodexPrimaryQuota(),
+            EmptyGraph(),
+            windowUsage: new WindowUsage(messages, 0, 0),
+            windowUsageOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            Confirmed(new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex"))),
+            year: null,
+            new QuotaLensProjection.Selection(ClientRegistry.OverviewTab, string.Empty, PresentClients: ["codex"]));
+
+        // QuotaEquivalenceFold.Build inserts one row per series regardless of
+        // how much evidence it carries — the row's own shape (Ratio,
+        // Unavailable, ...) is QuotaEquivalenceFold's own contract, already
+        // asserted in QuotaEquivalenceFoldTests. What this test pins is that
+        // the projection actually calls it once the outcome is Succeeded.
+        Assert.Single(model.Overview.Equivalences);
+    }
+
+    // Before the first payload the overview draws retained series (a
+    // maintainer-approved deviation) but prices none of them: without a
+    // payload nothing can be narrowed to its account or model scope, so an
+    // estimate would come from the whole unscoped scan. Same inputs as the
+    // test above, with no payload.
+    [Fact]
+    public void OverviewEquivalencesWaitForThePayloadEvenWhenRowsAreDrawn()
     {
         var history = new[] { TwoCycleSeries("codex", "primary", "weekly.v1") };
         var messages = new[] { Message(1_800, "codex", "openai", 1000, 5.0) };
@@ -171,14 +212,10 @@ public class QuotaLensProjectionTests
             quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
             Confirmed(new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex"))),
             year: null,
-            new QuotaLensProjection.Selection(ClientRegistry.OverviewTab, string.Empty));
+            new QuotaLensProjection.Selection(ClientRegistry.OverviewTab, string.Empty, PresentClients: ["codex"]));
 
-        // QuotaEquivalenceFold.Build inserts one row per series regardless of
-        // how much evidence it carries — the row's own shape (Ratio,
-        // Unavailable, ...) is QuotaEquivalenceFold's own contract, already
-        // asserted in QuotaEquivalenceFoldTests. What this test pins is that
-        // the projection actually calls it once the outcome is Succeeded.
-        Assert.Single(model.Overview.Equivalences);
+        Assert.NotEmpty(model.Overview.Summaries);
+        Assert.Empty(model.Overview.Equivalences);
     }
 
     // ---- retained data renders as data, not as a failure ------------------
