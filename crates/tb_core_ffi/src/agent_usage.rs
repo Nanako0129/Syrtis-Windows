@@ -1015,6 +1015,11 @@ impl UsageWindow {
     }
 
     #[cfg(test)]
+    pub(crate) fn duration_seconds_for_test(&self) -> Option<i64> {
+        self.duration_seconds
+    }
+
+    #[cfg(test)]
     pub(crate) fn remaining_for_test(&self) -> f64 {
         self.remaining_percent
     }
@@ -4103,9 +4108,9 @@ fn load_codex_credentials_from(auth_path: &Path) -> Result<CodexCredentials, Str
 /// Names only what Windows reads: the Keychain item and the login-shell
 /// harvest are macOS-only and are stubs here
 /// (`load_claude_raw_token_from_keychain`, `harvest_shell_env_token_uncached`).
-/// The environment variable is read when the process starts, hence the
-/// reopen.
-const CLAUDE_UNCONFIGURED_ERROR: &str = "Claude OAuth credentials not found. Run `claude` to authenticate, or, to use a setup-token, set CLAUDE_CODE_OAUTH_TOKEN as a user environment variable, then quit Syrtis and reopen it from the Start menu.";
+/// The variable is read from the registry on every fetch
+/// (`claude_direct_env_token`), so no reopen is needed.
+const CLAUDE_UNCONFIGURED_ERROR: &str = "Claude OAuth credentials not found. Run `claude` to authenticate, or, to use a setup-token, set CLAUDE_CODE_OAUTH_TOKEN as a user environment variable.";
 const CLAUDE_CREDENTIALS_LOAD_ERROR: &str = "Claude credentials could not be loaded.";
 
 /// Full-login credentials: structured `claudeAiOauth` blobs (Keychain
@@ -4175,8 +4180,11 @@ fn resolve_stored_claude_login(raw: &str, source: ClaudeCredentialSource) -> Cla
     }
 }
 
-/// `CLAUDE_CODE_OAUTH_TOKEN` as Claude Code itself resolves it: this process's
-/// own environment (covers `launchctl setenv` / terminal launch), then a
+/// `CLAUDE_CODE_OAUTH_TOKEN`: this process's own environment, as Claude Code
+/// resolves it (covers `launchctl setenv` / terminal launch) — except on
+/// Windows, where the live user/machine registry values are read instead, so
+/// a token in only one shell's environment is seen by the CLI there but not
+/// by Syrtis (see `claude_direct_env_token`); then a
 /// login-shell harvest of the user's `~/.zshrc` (so a plain export a
 /// Finder-launched GUI app never inherits is still found). Per Claude Code's
 /// auth precedence this outranks a stored subscription `/login`.
@@ -4859,14 +4867,228 @@ fn claude_credentials_from_access_token(token: ResolvedClaudeToken) -> ClaudeCre
 
 /// C — `CLAUDE_CODE_OAUTH_TOKEN` from this process's own environment (covers
 /// `launchctl setenv` and terminal-launched runs).
+#[cfg(not(windows))]
 fn claude_direct_env_token() -> Option<String> {
     claude_token_from_lookup(|key| std::env::var(key).ok())
 }
 
+/// C on Windows — `CLAUDE_CODE_OAUTH_TOKEN` from the live registry, read on
+/// every fetch, so a token saved (or removed) while Syrtis runs takes effect
+/// at the next refresh. The process environment is never consulted: after
+/// Syrtis's own update restart it is the old process's block, so it cannot
+/// tell a deliberate override from a withdrawn token. The trade-off is that a
+/// token set only in a shell's temporary environment is not used.
+///
+/// The `EnvRoot` → (HKEY, subkey) mapping lives in `env_location`, pinned by
+/// a read-only Windows test (the exact user key, which must exist, and the
+/// machine key's `OS` value); the rest is in `windows_claude_token_with` and
+/// `read_string_value`.
+#[cfg(windows)]
+fn claude_direct_env_token() -> Option<String> {
+    static LAST: Mutex<EnvCache> = Mutex::new(EnvCache::EMPTY);
+    windows_claude_token_with(
+        |root| {
+            let (hkey, subkey) = env_location(root);
+            read_string_value(hkey, subkey, "CLAUDE_CODE_OAUTH_TOKEN")
+        },
+        &LAST,
+    )
+}
+
+/// The registry key holding each environment: the user's (HKCU\Environment)
+/// and the machine's (HKLM ...\Session Manager\Environment).
+#[cfg(windows)]
+fn env_location(root: EnvRoot) -> (windows_sys::Win32::System::Registry::HKEY, &'static str) {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    match root {
+        EnvRoot::User => (HKEY_CURRENT_USER, "Environment"),
+        EnvRoot::System => (
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+    }
+}
+
+#[cfg_attr(windows, allow(dead_code))]
 fn claude_token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
     lookup("CLAUDE_CODE_OAUTH_TOKEN")
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+        .as_deref()
+        .and_then(normalise_claude_token)
+}
+
+/// Trim; empty means none.
+fn normalise_claude_token(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// Where Windows keeps environment variables: the user's (HKCU\Environment)
+/// and the machine's (HKLM ...\Session Manager\Environment).
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnvRoot {
+    User,
+    System,
+}
+
+/// A registry value that was read: absent (key or value not found), or its
+/// raw text.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, PartialEq, Eq)]
+enum Lookup {
+    Absent,
+    Value(String),
+}
+
+/// Redacted: a value read here may be a credential.
+impl std::fmt::Debug for Lookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Lookup::Absent => f.write_str("Absent"),
+            Lookup::Value(_) => f.write_str("Value(<redacted>)"),
+        }
+    }
+}
+
+/// The last successful read of each location (`Absent` before the first).
+#[cfg_attr(not(windows), allow(dead_code))]
+struct EnvCache {
+    user: Lookup,
+    system: Lookup,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl EnvCache {
+    const EMPTY: Self = Self {
+        user: Lookup::Absent,
+        system: Lookup::Absent,
+    };
+}
+
+/// Any registry read failure other than "not found". Deliberately carries no
+/// data, so a value can never travel inside an error or be formatted into one.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+struct RegistryReadError;
+
+/// Explorer's rule: a user value that EXISTS wins, even when it is empty (no
+/// fall-through to the machine value); otherwise the machine value.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn compose_user_system(user: Lookup, system: Lookup) -> Option<String> {
+    match (user, system) {
+        (Lookup::Value(user), _) => normalise_claude_token(&user),
+        (Lookup::Absent, Lookup::Value(system)) => normalise_claude_token(&system),
+        (Lookup::Absent, Lookup::Absent) => None,
+    }
+}
+
+/// The whole Windows rule, platform-independent so it is tested everywhere:
+/// read both locations, then compose. Retention is per location: a failed read
+/// keeps that location's last successful value (`Absent` before the first)
+/// rather than flapping to "unconfigured", while the other location still
+/// follows the registry — a failing machine value neither blocks a good user
+/// value nor resends a user token that was removed. Reads happen under the
+/// lock (see the body). Never touches the process environment.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_claude_token_with(
+    read: impl Fn(EnvRoot) -> Result<Lookup, RegistryReadError>,
+    last: &Mutex<EnvCache>,
+) -> Option<String> {
+    // The reads happen under the lock on purpose: read and store must be one
+    // step, or a slow read that started before a removal could land after a
+    // newer read and put the withdrawn token back in the cache, from where a
+    // later read error would resend it.
+    let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let user = read(EnvRoot::User);
+    let system = read(EnvRoot::System);
+    if let Ok(user) = user {
+        last.user = user;
+    }
+    if let Ok(system) = system {
+        last.system = system;
+    }
+    compose_user_system(last.user.clone(), last.system.clone())
+}
+
+/// One string value, read raw: REG_SZ or REG_EXPAND_SZ with `RRF_NOEXPAND`, so
+/// no other environment value is expanded into it. Not found = `Absent`; any
+/// other failure, a value longer than `MAX_UNITS` UTF-16 units, or a value
+/// still growing after three tries = `RegistryReadError`.
+#[cfg(windows)]
+fn read_string_value(
+    root: windows_sys::Win32::System::Registry::HKEY,
+    subkey: &str,
+    name: &str,
+) -> Result<Lookup, RegistryReadError> {
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_SUCCESS};
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    };
+    // A sanity bound, not the platform's exact environment limit (a setup-token
+    // is ~100 units). The decoded length decides (MAX_UNITS), checked after the
+    // read: the size query alone is not a reliable bound, because what
+    // RegGetValueW reports for a value stored WITHOUT a NUL varied between runs
+    // on 188 (a 32 768-unit unterminated value was refused by MAX_BYTES on one
+    // run and passed it on another). MAX_BYTES only bounds the allocation; it
+    // leaves room for the stored NUL and the one the size query adds ((32 767
+    // + 1) * 2 refused a 32 767-unit value stored with its NUL).
+    const MAX_UNITS: usize = 32_767;
+    const MAX_BYTES: u32 = (32_767 + 2) * 2;
+    let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
+    let subkey: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
+    let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    for _ in 0..3 {
+        let mut needed: u32 = 0;
+        // SAFETY: both strings are NUL-terminated and outlive the call; a null
+        // data pointer asks only for the size.
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                subkey.as_ptr(),
+                name.as_ptr(),
+                flags,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut needed,
+            )
+        };
+        if status == ERROR_FILE_NOT_FOUND {
+            return Ok(Lookup::Absent);
+        }
+        if status != ERROR_SUCCESS || needed > MAX_BYTES {
+            return Err(RegistryReadError);
+        }
+        let mut buffer = vec![0u16; (needed as usize).div_ceil(2).max(1)];
+        let mut size = (buffer.len() * 2) as u32;
+        // SAFETY: `buffer` holds `size` bytes and outlives the call.
+        let status = unsafe {
+            RegGetValueW(
+                root,
+                subkey.as_ptr(),
+                name.as_ptr(),
+                flags,
+                std::ptr::null_mut(),
+                buffer.as_mut_ptr().cast(),
+                &mut size,
+            )
+        };
+        match status {
+            ERROR_SUCCESS => {
+                let written = &buffer[..(size as usize / 2).min(buffer.len())];
+                let text = written.split(|&unit| unit == 0).next().unwrap_or(&[]);
+                if text.len() > MAX_UNITS {
+                    return Err(RegistryReadError);
+                }
+                return String::from_utf16(text)
+                    .map(Lookup::Value)
+                    .map_err(|_| RegistryReadError);
+            }
+            ERROR_MORE_DATA => continue,
+            ERROR_FILE_NOT_FOUND => return Ok(Lookup::Absent),
+            _ => return Err(RegistryReadError),
+        }
+    }
+    Err(RegistryReadError)
 }
 
 /// Cache for the shell-harvested token — harvesting spawns a full interactive
@@ -7484,6 +7706,9 @@ mod tests {
         assert!(!display.contains("Keychain"), "{display}");
         assert!(display.contains("CLAUDE_CODE_OAUTH_TOKEN"), "{display}");
         assert!(display.contains("user environment variable"), "{display}");
+        // The variable is read live from the registry; no restart to ask for.
+        assert!(!display.contains("Start menu"), "{display}");
+        assert!(!display.contains("reopen"), "{display}");
     }
 
     #[tokio::test]
@@ -8967,21 +9192,32 @@ mod tests {
         let dir_text = dir.to_str().unwrap().to_string();
 
         // Primary-only credential sources set in the environment are ignored.
-        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+        let _env = PROCESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Restores the variables on drop, so a panic cannot leave them set.
+        struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                for (name, value) in self.0.drain(..) {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+        let restore = RestoreEnv(
             ["TOKENBAR_CLAUDE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]
                 .into_iter()
                 .map(|name| (name, std::env::var_os(name)))
-                .collect();
-        for (name, _) in &saved {
+                .collect(),
+        );
+        for (name, _) in &restore.0 {
             std::env::set_var(name, "env-token-must-not-be-used");
         }
         let loaded = load_claude_config_dir_credentials(&dir_text);
-        for (name, value) in saved {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
+        drop(restore);
 
         let credentials = loaded.unwrap();
         assert_eq!(credentials.access_token, "dir-access");
@@ -12851,6 +13087,338 @@ mod tests {
         assert!(claude_token_from_lookup(|_| Some("   ".to_string())).is_none());
     }
 
+    /// Serialises tests that set process environment variables.
+    static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn value(text: &str) -> Lookup {
+        Lookup::Value(text.to_string())
+    }
+
+    /// Explorer's composition: an existing user value wins, even an empty one.
+    #[test]
+    fn the_user_value_wins_and_an_empty_one_does_not_fall_through() {
+        assert_eq!(
+            compose_user_system(value("user-fixture"), value("system-fixture")).as_deref(),
+            Some("user-fixture")
+        );
+        assert_eq!(
+            compose_user_system(value(""), value("system-fixture")),
+            None
+        );
+        assert_eq!(
+            compose_user_system(value("   "), value("system-fixture")),
+            None
+        );
+        assert_eq!(
+            compose_user_system(Lookup::Absent, value("system-fixture")).as_deref(),
+            Some("system-fixture")
+        );
+        assert_eq!(compose_user_system(Lookup::Absent, Lookup::Absent), None);
+        assert_eq!(
+            compose_user_system(value("  user-fixture \t"), Lookup::Absent).as_deref(),
+            Some("user-fixture")
+        );
+        assert_eq!(compose_user_system(Lookup::Absent, value(" ")), None);
+    }
+
+    /// Scripted registry: each call to `windows_claude_token_with` consumes one
+    /// (user, system) pair.
+    fn scripted_rule(
+        steps: Vec<(
+            Result<Lookup, RegistryReadError>,
+            Result<Lookup, RegistryReadError>,
+        )>,
+    ) -> Vec<Option<String>> {
+        let last = Mutex::new(EnvCache::EMPTY);
+        steps
+            .into_iter()
+            .map(|(user, system)| {
+                let user = std::cell::RefCell::new(Some(user));
+                let system = std::cell::RefCell::new(Some(system));
+                windows_claude_token_with(
+                    |root| match root {
+                        EnvRoot::User => user.borrow_mut().take().unwrap(),
+                        EnvRoot::System => system.borrow_mut().take().unwrap(),
+                    },
+                    &last,
+                )
+            })
+            .collect()
+    }
+
+    /// A token saved or removed while Syrtis runs takes effect on the next
+    /// read; a read failure keeps that location's last good value instead of
+    /// flapping, without freezing the other location.
+    #[test]
+    fn the_windows_rule_follows_the_registry_and_keeps_the_last_good_on_error() {
+        let a = || Ok(value("fixture-a"));
+        let b = || Ok(value("fixture-b"));
+        let absent = || Ok(Lookup::Absent);
+        let error = || Err(RegistryReadError);
+        let some = |text: &str| Some(text.to_string());
+
+        // Set while running.
+        assert_eq!(
+            scripted_rule(vec![(absent(), absent()), (a(), absent())]),
+            vec![None, some("fixture-a")]
+        );
+        // Removed while running.
+        assert_eq!(
+            scripted_rule(vec![(a(), absent()), (absent(), absent())]),
+            vec![some("fixture-a"), None]
+        );
+        // Replaced.
+        assert_eq!(
+            scripted_rule(vec![(a(), absent()), (b(), absent())]),
+            vec![some("fixture-a"), some("fixture-b")]
+        );
+        // A failure on either side retains that side's last good value.
+        assert_eq!(
+            scripted_rule(vec![(a(), absent()), (error(), absent()), (a(), error())]),
+            vec![some("fixture-a"), some("fixture-a"), some("fixture-a")]
+        );
+        // A machine value that always fails does not block the user value...
+        assert_eq!(
+            scripted_rule(vec![(a(), error()), (a(), error())]),
+            vec![some("fixture-a"), some("fixture-a")]
+        );
+        // ...nor resend a user token removed while it fails.
+        assert_eq!(
+            scripted_rule(vec![(a(), error()), (absent(), error())]),
+            vec![some("fixture-a"), None]
+        );
+        assert_eq!(
+            scripted_rule(vec![(a(), absent()), (absent(), error())]),
+            vec![some("fixture-a"), None]
+        );
+        // A failure before any success is absent.
+        assert_eq!(scripted_rule(vec![(error(), error())]), vec![None]);
+        assert_eq!(scripted_rule(vec![(error(), a())]), vec![some("fixture-a")]);
+        // The user location is the user's, not the machine's.
+        assert_eq!(
+            scripted_rule(vec![(Ok(value("U")), Ok(value("S")))]),
+            vec![some("U")]
+        );
+        assert_eq!(
+            scripted_rule(vec![(absent(), Ok(value("S")))]),
+            vec![some("S")]
+        );
+    }
+
+    /// Security F1: on Windows the process environment is never consulted,
+    /// because after an update restart it is the old process's block and
+    /// would resend a token the user removed.
+    #[test]
+    fn the_windows_rule_never_reads_the_process_environment() {
+        const SENTINEL: &str = "process-env-sentinel-not-a-token";
+        let _env = PROCESS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let saved = std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN");
+        std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", SENTINEL);
+        let results = std::panic::catch_unwind(|| {
+            [
+                scripted_rule(vec![(Ok(Lookup::Absent), Ok(Lookup::Absent))]),
+                scripted_rule(vec![(Ok(value("user-fixture")), Ok(Lookup::Absent))]),
+                scripted_rule(vec![(Ok(Lookup::Absent), Ok(value("system-fixture")))]),
+                scripted_rule(vec![(Ok(value("")), Ok(Lookup::Absent))]),
+            ]
+        });
+        match saved {
+            Some(saved) => std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", saved),
+            None => std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN"),
+        }
+        let [neither, user, system, empty_user] = results.unwrap();
+        assert_eq!(neither, vec![None]);
+        assert_eq!(user, vec![Some("user-fixture".to_string())]);
+        assert_eq!(system, vec![Some("system-fixture".to_string())]);
+        assert_eq!(empty_user, vec![None]);
+    }
+
+    /// A throwaway `HKCU\Software\TokenBarTest-<pid>-<n>` key, deleted with
+    /// everything under it when dropped (also on panic). Tests never touch a
+    /// real environment key.
+    #[cfg(windows)]
+    struct TestRegistryKey {
+        subkey: String,
+        handle: windows_sys::Win32::System::Registry::HKEY,
+    }
+
+    #[cfg(windows)]
+    impl TestRegistryKey {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+            use windows_sys::Win32::System::Registry::{
+                RegCreateKeyExW, HKEY_CURRENT_USER, KEY_ALL_ACCESS, REG_OPTION_VOLATILE,
+            };
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let subkey = format!(
+                r"Software\TokenBarTest-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
+            let wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
+            let mut handle = std::ptr::null_mut();
+            // SAFETY: `wide` is NUL-terminated; `handle` receives the new key.
+            let status = unsafe {
+                RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    wide.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                    REG_OPTION_VOLATILE,
+                    KEY_ALL_ACCESS,
+                    std::ptr::null(),
+                    &mut handle,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_eq!(status, ERROR_SUCCESS, "create {subkey}");
+            Self { subkey, handle }
+        }
+
+        fn set(&self, name: &str, kind: u32, text: &str) {
+            use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+            use windows_sys::Win32::System::Registry::RegSetValueExW;
+            let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+            let data: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+            // SAFETY: both buffers are live and sized as passed.
+            let status = unsafe {
+                RegSetValueExW(
+                    self.handle,
+                    name.as_ptr(),
+                    0,
+                    kind,
+                    data.as_ptr().cast(),
+                    (data.len() * 2) as u32,
+                )
+            };
+            assert_eq!(status, ERROR_SUCCESS);
+        }
+
+        fn read(&self, child: Option<&str>, name: &str) -> Result<Lookup, RegistryReadError> {
+            let subkey = match child {
+                Some(child) => format!(r"{}\{child}", self.subkey),
+                None => self.subkey.clone(),
+            };
+            read_string_value(
+                windows_sys::Win32::System::Registry::HKEY_CURRENT_USER,
+                &subkey,
+                name,
+            )
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TestRegistryKey {
+        fn drop(&mut self) {
+            use windows_sys::Win32::System::Registry::{
+                RegCloseKey, RegDeleteTreeW, HKEY_CURRENT_USER,
+            };
+            let wide: Vec<u16> = self.subkey.encode_utf16().chain(Some(0)).collect();
+            // SAFETY: `handle` came from RegCreateKeyExW; `wide` is NUL-terminated.
+            unsafe {
+                RegCloseKey(self.handle);
+                RegDeleteTreeW(HKEY_CURRENT_USER, wide.as_ptr());
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_string_value_reads_strings_raw_and_reports_missing_as_absent() {
+        use windows_sys::Win32::System::Registry::{REG_DWORD, REG_EXPAND_SZ, REG_SZ};
+        let key = TestRegistryKey::new();
+        key.set("plain", REG_SZ, "registry-fixture");
+        key.set("expandable", REG_EXPAND_SZ, "%SystemRoot%x");
+        key.set("empty", REG_SZ, "");
+
+        assert_eq!(key.read(None, "plain"), Ok(value("registry-fixture")));
+        // RRF_NOEXPAND: used literally, nothing expanded into it.
+        assert_eq!(key.read(None, "expandable"), Ok(value("%SystemRoot%x")));
+        assert_eq!(key.read(None, "empty"), Ok(value("")));
+        assert_eq!(key.read(None, "missing"), Ok(Lookup::Absent));
+        assert_eq!(key.read(Some("missing-key"), "plain"), Ok(Lookup::Absent));
+
+        // A value of another type is a failure, not an absence.
+        let name: Vec<u16> = "number".encode_utf16().chain(Some(0)).collect();
+        let data: u32 = 7;
+        // SAFETY: `data` is a live u32 passed with its size.
+        unsafe {
+            windows_sys::Win32::System::Registry::RegSetValueExW(
+                key.handle,
+                name.as_ptr(),
+                0,
+                REG_DWORD,
+                (&data as *const u32).cast(),
+                4,
+            );
+        }
+        assert_eq!(key.read(None, "number"), Err(RegistryReadError));
+
+        // The size bound (MAX_BYTES, a sanity bound, not the platform's exact
+        // environment limit), as measured on 188.
+        key.set("at-limit", REG_SZ, &"x".repeat(32_767));
+        key.set("over-limit", REG_SZ, &"x".repeat(32_768));
+        assert_eq!(key.read(None, "at-limit"), Ok(value(&"x".repeat(32_767))));
+        assert_eq!(key.read(None, "over-limit"), Err(RegistryReadError));
+        // Stored without a terminator, the same over-long text is still
+        // refused — by MAX_UNITS, since the size query may let it through.
+        let name: Vec<u16> = "over-unterminated".encode_utf16().chain(Some(0)).collect();
+        let data: Vec<u16> = "x".repeat(32_768).encode_utf16().collect();
+        // SAFETY: both buffers are live and sized as passed.
+        unsafe {
+            windows_sys::Win32::System::Registry::RegSetValueExW(
+                key.handle,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                data.as_ptr().cast(),
+                (data.len() * 2) as u32,
+            );
+        }
+        assert_eq!(key.read(None, "over-unterminated"), Err(RegistryReadError));
+    }
+
+    /// `env_location` points at the real environment keys. Read-only; never
+    /// reads the token.
+    #[cfg(windows)]
+    #[test]
+    fn env_location_reads_the_user_and_machine_environments() {
+        use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+        use windows_sys::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, KEY_READ};
+        use windows_sys::Win32::System::Registry::HKEY_CURRENT_USER;
+        // User: exactly HKCU\Environment (the key any loaded profile has; no
+        // value there is guaranteed, so the mapping itself is asserted), the
+        // key opens, and it is not the machine key, the only one carrying OS.
+        let (hkey, subkey) = env_location(EnvRoot::User);
+        assert_eq!((hkey, subkey), (HKEY_CURRENT_USER, "Environment"));
+        let wide: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
+        let mut handle = std::ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated; `handle` is closed right after.
+        let status = unsafe { RegOpenKeyExW(hkey, wide.as_ptr(), 0, KEY_READ, &mut handle) };
+        assert_eq!(status, ERROR_SUCCESS, "user environment key must exist");
+        // SAFETY: `handle` was opened above.
+        unsafe { RegCloseKey(handle) };
+        assert_eq!(read_string_value(hkey, subkey, "OS"), Ok(Lookup::Absent));
+        let (hkey, subkey) = env_location(EnvRoot::System);
+        assert_eq!(
+            read_string_value(hkey, subkey, "OS"),
+            Ok(value("Windows_NT"))
+        );
+    }
+
+    /// The Debug form never prints a value read from the registry.
+    #[test]
+    fn lookup_debug_redacts_the_value() {
+        assert_eq!(
+            format!("{:?}", value("secret-fixture")),
+            "Value(<redacted>)"
+        );
+        assert_eq!(format!("{:?}", Lookup::Absent), "Absent");
+    }
+
     #[test]
     fn refreshes_or_expires_cached_windows() {
         let base = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
@@ -14129,6 +14697,131 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["cardId"], "shared-card.v1");
         assert_eq!(rows[0]["paceStatus"]["windowKey"], "first.v1");
+        scope.cleanup();
+    }
+
+    /// The Antigravity grouped buckets, from the captured-account summary
+    /// parser through `enrich_snapshot_with` into a REAL history store rooted
+    /// in a temp dir. The unused 5h bucket (fraction 1, reset = server now +
+    /// 5h) must end `learningDuration` with the local clock 1 s slow, accurate
+    /// and 1 s fast (the case a clock-only guard missed), and write nothing to
+    /// the store; the in-use weekly bucket keeps its contract. The agy route's
+    /// unverified scope still clears the duration.
+    #[test]
+    fn antigravity_unused_bucket_stays_learning_through_a_real_store_at_any_clock() {
+        let scope = TestRefreshScope::new("stage4", "agy-window-duration");
+        let account_scope = scope
+            .resolve_current("antigravity", "agy", b"agy-marker")
+            .unwrap();
+        let history_scope = scope.resolve_history("antigravity", None).unwrap();
+        let history_path = scope
+            .root()
+            .join(crate::agent_quota_history::HISTORY_FILE_NAME);
+        let server_now = 1_700_000_000_i64;
+        let rfc = |offset: i64| {
+            Utc.timestamp_opt(server_now + offset, 0)
+                .single()
+                .unwrap()
+                .to_rfc3339()
+        };
+        let body = serde_json::json!({ "groups": [{ "displayName": "G", "buckets": [
+            { "bucketId": "used", "displayName": "Weekly", "remainingFraction": 0.5,
+              "resetTime": rfc(86_400), "window": "weekly" },
+            { "bucketId": "unused", "displayName": "5h", "remainingFraction": 1,
+              "resetTime": rfc(5 * 3_600), "window": "5h" },
+            // Chained phase (Windows test machine, 2026-10-04/05, agy 1.2.16):
+            // fraction 1 with a fixed reset (previous reset + 5h), later
+            // abandoned. Started by our clock, still no contract.
+            { "bucketId": "chained", "displayName": "5h chained", "remainingFraction": 1,
+              "resetTime": rfc(4 * 3_600), "window": "5h" }
+        ]}]})
+        .to_string();
+        let snapshot_at = |local: DateTime<Utc>,
+                           account_scope: Result<AccountScope, AccountScopeError>,
+                           history_scope: Result<HistoryScope, AccountScopeError>| {
+            AgentUsageSnapshot {
+                account_key: None,
+                agy_login_marker: None,
+                merge_scope: None,
+                client_id: "antigravity".to_string(),
+                source: "fixture".to_string(),
+                updated_at: String::new(),
+                identity: None,
+                history_scope,
+                account_scope,
+                windows: agent_antigravity::windows_from_quota_summary_for_test(&body, local),
+                credits: None,
+                error: None,
+                transport_diagnostic: None,
+            }
+        };
+
+        for skew in [-1_i64, 0, 1] {
+            let local = Utc.timestamp_opt(server_now + skew, 0).single().unwrap();
+            let mut captured = snapshot_at(
+                local,
+                Ok(account_scope.clone()),
+                Ok(history_scope.clone()),
+            );
+            enrich_snapshot_with(&mut captured, local.timestamp(), |active, obs, now| {
+                crate::agent_quota_history::record_observations_at_path_and_evaluate(
+                    active,
+                    obs,
+                    now,
+                    &history_path,
+                )
+            });
+            let used = &captured.windows[0];
+            assert_eq!(used.duration_seconds, Some(604_800), "skew {skew}s");
+            assert_eq!(
+                used.duration_source,
+                Some(DurationSource::Contract),
+                "skew {skew}s"
+            );
+            let unused = &captured.windows[1];
+            assert_eq!(unused.duration_seconds, None, "skew {skew}s");
+            assert!(
+                matches!(unused.pace_status.state, PaceState::LearningDuration),
+                "skew {skew}s: {:?}",
+                unused.pace_status
+            );
+            assert_eq!(unused.pace_status.reason, None, "skew {skew}s");
+            let chained = &captured.windows[2];
+            assert_eq!(chained.duration_seconds, None, "skew {skew}s");
+            assert!(
+                matches!(chained.pace_status.state, PaceState::LearningDuration),
+                "skew {skew}s: {:?}",
+                chained.pace_status
+            );
+        }
+        // The store holds nothing for the unused or chained bucket: no
+        // sample, no cycle.
+        for id in ["agy.unused.v1", "agy.chained.v1"] {
+            let key = SeriesKey::new("antigravity".to_string(), &history_scope, id);
+            let stored = crate::agent_quota_history::read_series_at_path(
+                &key,
+                &history_path,
+                server_now,
+            )
+            .unwrap();
+            assert!(
+                stored.as_ref().is_none_or(|s| s.samples.is_empty()),
+                "{id} wrote to the store: {stored:?}"
+            );
+        }
+
+        // The agy route has no trusted account evidence: cleared, as before.
+        let local = Utc.timestamp_opt(server_now, 0).single().unwrap();
+        let mut agy = snapshot_at(
+            local,
+            Err(AccountScopeError::NoTrustedEvidence),
+            Ok(history_scope.clone()),
+        );
+        enrich_snapshot_with(&mut agy, local.timestamp(), |_, _, _| Ok(vec![]));
+        for window in &agy.windows {
+            assert_eq!(window.duration_seconds, None);
+            assert_eq!(window.pace_status.reason.as_deref(), Some("accountScope"));
+        }
         scope.cleanup();
     }
 

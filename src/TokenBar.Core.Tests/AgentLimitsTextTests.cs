@@ -108,7 +108,9 @@ public class AgentLimitsTextTests
         Assert.NotNull(prompt);
         var prose = string.Join(" ", prompt!.Parts.Where(static p => !p.IsCommand).Select(static p => p.Text));
         Assert.Contains("CLAUDE_CODE_OAUTH_TOKEN", prose);
-        Assert.Contains("Start menu", prose);
+        // The token is read live from the registry: no restart to ask for.
+        Assert.DoesNotContain("Start menu", prose);
+        Assert.DoesNotContain("reopen", prose);
         Assert.DoesNotContain("Keychain", prose);
         // Setting first, then how to undo it: the claude CLI reads the same
         // variable and prefers it over /login (user decision, 2026-10-04).
@@ -116,16 +118,17 @@ public class AgentLimitsTextTests
             [AgentLimitsText.ClaudeSetupCommand, AgentLimitsText.ClaudeRemoveCommand],
             prompt.Parts.Where(static p => p.IsCommand).Select(static p => p.Text));
         Assert.Contains("prefers it over /login", prose);
-        Assert.Equal("and reopen Syrtis.", prompt.Parts[^1].Text);
+        // The English removal sentence ends at the command.
+        Assert.Equal(new LimitsSetupPart(AgentLimitsText.ClaudeRemoveCommand, IsCommand: true), prompt.Parts[^1]);
         // The token is typed at a prompt, never passed on the command line.
         Assert.Contains("Read-Host", AgentLimitsText.ClaudeSetupCommand);
         Assert.Contains("'User'", AgentLimitsText.ClaudeSetupCommand);
         Assert.Contains("$null, 'User'", AgentLimitsText.ClaudeRemoveCommand);
     }
 
-    // Chinese folds "reopen Syrtis" into the sentence before the removal
-    // command, so nothing follows it there — the {0} entry, not a pair of
-    // keys, is what lets each language place it.
+    // The {0} entry, not a pair of keys, is what lets each language place
+    // the removal command; in zh-Hant nothing follows it, and no sentence
+    // asks for a restart.
     [Fact]
     public void TheRemovalCommandSitsWhereEachLanguagePutsIt()
     {
@@ -136,6 +139,9 @@ public class AgentLimitsTextTests
                 "claude", "unconfigured", "2026-10-04T00:00:00Z", []))!;
             Assert.Equal(new LimitsSetupPart(AgentLimitsText.ClaudeRemoveCommand, IsCommand: true), prompt.Parts[^1]);
             Assert.Contains("優先於 /login", prompt.Parts[^2].Text);
+            var prose = string.Join(" ", prompt.Parts.Where(static p => !p.IsCommand).Select(static p => p.Text));
+            Assert.DoesNotContain("重新開啟", prose);
+            Assert.DoesNotContain("開始選單", prose);
         }
         finally
         {
@@ -315,26 +321,30 @@ public class AgentLimitsTextTests
             Placeholders([Who("grok")], ["grok", "grok-bot"], multiClient: false));
     }
 
-    // INTERIM, to be changed by the known() follow-up (W5-7): with grok
-    // switched off and no snapshot at all, main's HidesClientCard follows the
-    // tab's owner alone and drops the whole Grok tab card, so Grok Bot's
-    // placeholder from Rows is never drawn. macOS keeps the card for an
-    // unhidden grok-bot; aligning HidesClientCard with
-    // LimitsPlaceholders.Known flips this assertion.
+    // Flipped from the interim rule (macOS AgentLimitsCard.swift :502-510,
+    // :437-439): grok switched off and no snapshot at all no longer drops the
+    // Grok tab card, because grok-bot is known (it has placeholder rows) and not
+    // hidden, so Rows draws its placeholder. Only both hidden drops the card.
     [Fact]
-    public void Interim_PendingKnownFollowUp_GroupedTabHiddenOwnerHidesTheCardBeforeAnySnapshot()
+    public void GroupedTabHiddenOwnerKeepsTheCardForAnUnhiddenBotBeforeAnySnapshot()
     {
-        Assert.True(LimitsCardFilter.HidesClientCard([], ["grok", "grok-bot"], new HashSet<string> { "grok" }));
+        var grokHidden = new HashSet<string> { "grok" };
+        Assert.False(LimitsCardFilter.HidesClientCard([], ["grok", "grok-bot"], grokHidden, attempted: false));
+        Assert.Equal(["grok-bot?"], Placeholders([], ["grok", "grok-bot"], multiClient: false, limitsHidden: grokHidden));
     }
 
-    // A client with only extra accounts and no placeholder labels (the
-    // Antigravity tab with captured accounts only) draws its accounts and no
-    // invented "Limit" card above them.
+    // A client with only extra accounts and no placeholder labels is not
+    // known() (macOS :437-439), so a restricted (client-tab) card lists nothing
+    // for it (:444-447); the multi-client card still appends every snapshot
+    // (:449-451). Flipped from "the tab draws its accounts": that listed a
+    // client macOS's restricted card never lists.
     [Fact]
-    public void AnExtraOnlyClientWithoutLabelsGetsNoPlaceholder()
+    public void AnExtraOnlyClientWithoutLabelsDrawsNothingOnATabButStillOnOverview()
     {
-        Assert.Equal(["antigravity#acct-1"],
+        Assert.Empty(
             Placeholders([Who("antigravity", accountKey: "acct-1")], ["antigravity", "antigravity-cli"], multiClient: false));
+        Assert.Equal(["antigravity#acct-1"],
+            Placeholders([Who("antigravity", accountKey: "acct-1")], ["antigravity", "antigravity-cli"], multiClient: true));
     }
 
     // The placeholder hide rule is LimitsCardFilter's, not a copy of it.
@@ -351,6 +361,20 @@ public class AgentLimitsTextTests
                 Assert.Equal(!LimitsCardFilter.Hides(id, isPrimary: true, multi, tab, limits), placeholderShown);
             }
         }
+    }
+
+    // G's report (b), macOS ClientRegistry.swift:299-316: Grok Build present
+    // locally, Grok Bot signed out and without a snapshot - the card draws the
+    // Bot's placeholder, so Settings must offer a grok-bot toggle. The tab id
+    // "grok" alone (unexpanded `present`) offered none.
+    [Fact]
+    public void SettingsOffersAGrokBotToggleWhenOnlyGrokBuildIsPresent()
+    {
+        Assert.Equal(["grok", "grok-bot"],
+            ClientRegistry.KnownLimitsClients(["grok"], [], LimitsPlaceholders.Clients));
+        // Control: an id that is neither a placeholder client nor in the payload stays out.
+        Assert.Equal(["grok", "grok-bot"],
+            ClientRegistry.KnownLimitsClients(["grok", "foo"], [], LimitsPlaceholders.Clients));
     }
 
     [Fact]
