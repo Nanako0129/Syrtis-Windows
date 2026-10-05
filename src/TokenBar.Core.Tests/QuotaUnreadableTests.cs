@@ -31,18 +31,19 @@ public class QuotaUnreadableTests
         new("2026-01-01T00:00:00Z", agents);
 
     private static QuotaLensProjection.Selection Sel(
-        string tab, IReadOnlySet<string>? limitsHidden = null) =>
+        string tab, IReadOnlySet<string>? limitsHidden = null, IReadOnlySet<string>? tabHidden = null) =>
         new(tab, string.Empty, PresentClients: ["codex", "opencode"],
-            TabHidden: new HashSet<string>(), LimitsHidden: limitsHidden ?? new HashSet<string>());
+            TabHidden: tabHidden ?? new HashSet<string>(), LimitsHidden: limitsHidden ?? new HashSet<string>());
 
     private static QuotaLensProjection.Overview Overview(
-        AgentUsagePayload? quota, WindowEquivalence.FetchOutcome outcome, IReadOnlySet<string>? limitsHidden = null) =>
+        AgentUsagePayload? quota, WindowEquivalence.FetchOutcome outcome, IReadOnlySet<string>? limitsHidden = null,
+        IReadOnlySet<string>? tabHidden = null) =>
         QuotaLensProjection.Build(
             history: null, quota, EmptyGraph(), windowUsage: null,
             windowUsageOutcome: WindowEquivalence.FetchOutcome.NotAttempted,
             quotaHistoryOutcome: outcome,
             UsageAttribution.Table.Empty, year: null,
-            Sel(ClientRegistry.OverviewTab, limitsHidden)).Overview;
+            Sel(ClientRegistry.OverviewTab, limitsHidden, tabHidden)).Overview;
 
     private static UsagePayload EmptyGraph() =>
         new(
@@ -115,6 +116,33 @@ public class QuotaUnreadableTests
 
         Assert.Empty(primary.UnreadableClients);
         Assert.Equal(["codex"], extra.UnreadableClients);
+    }
+
+    // macOS windowCardClients drop tab-hidden clients (quotaClients), so a
+    // hidden tab's agent is not visible either.
+    [Fact]
+    public void ATabHiddenClientIsNotVisible()
+    {
+        var payload = Payload(Agent("codex", null, Window("codex|weekly.v1")));
+
+        Assert.Empty(Overview(payload, Failed, tabHidden: new HashSet<string> { "codex" }).UnreadableClients);
+        Assert.Equal(["codex"], Overview(payload, Failed).UnreadableClients);
+    }
+
+    // macOS reads only windows with a history key (DashboardModel.swift:1686):
+    // an account-scope-unavailable window (agy CLI route, Grok Bot with no
+    // subject) is never read, so it is never "could not be read".
+    [Fact]
+    public void AnAccountScopeUnavailableWindowIsNeverUnreadable()
+    {
+        var noHistory = new UsageWindow(Label: "Weekly", UsedPercent: 10, RemainingPercent: 90,
+            CardId: "antigravity|weekly.v1",
+            PaceStatus: new PaceStatus(UsagePaceState.Unavailable, WindowKey: "weekly.v1",
+                Reason: UsagePaceUnavailableReason.AccountScope));
+        var o = Overview(Payload(Agent("antigravity", null, noHistory)), Failed);
+
+        Assert.Empty(o.UnreadableClients);
+        Assert.Equal(QuotaStripState.NoCompletedWindows, Strip(o, o.UnreadableClients.Count > 0));
     }
 
     [Theory]

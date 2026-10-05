@@ -268,7 +268,12 @@ public static class QuotaLensProjection
     /// over <c>visibleAgents</c>, :1502-1508): clients of visible agents —
     /// payload agents in <see cref="ClientRegistry.QuotaClients"/>, minus a
     /// limits-hidden PRIMARY (extra accounts stay) — that have a card window
-    /// which failed to read and is not drawn.
+    /// which failed to read and is not drawn. Only a window macOS would READ
+    /// counts: one with a history key (DashboardModel.swift:1686;
+    /// <c>PaceStatus.historyKey</c>, TokenBarCore/AgentUsage.swift:140-150 —
+    /// none without a window key, and none for an account-scope-unavailable
+    /// window, the <c>agy</c> CLI route or a Grok Bot token with no subject,
+    /// which is never recorded and so never "could not be read").
     /// <para>Windows reads quota history in one call and has no per-window
     /// failure signal, so partial unreadability ("A failed, B read") cannot
     /// arise here. The faithful analog: when the whole read FAILED (nothing
@@ -288,10 +293,16 @@ public static class QuotaLensProjection
         return (quota?.Agents ?? [])
             .Where(a => cardClients.Contains(a.ClientId)
                 && (a.AccountKey is not null || !limitsHidden.Contains(a.ClientId))
-                && a.UniqueCardWindows.Count > 0)
+                && a.UniqueCardWindows.Any(HasHistoryKey))
             .Select(a => a.ClientId)
             .ToHashSet();
     }
+
+    // macOS PaceStatus.historyKey (TokenBarCore/AgentUsage.swift:148-150).
+    private static bool HasHistoryKey(UsageWindow window) =>
+        window.PaceStatus.WindowKey is not null
+        && !(window.PaceStatus.State == UsagePaceState.Unavailable
+            && window.PaceStatus.Reason == UsagePaceUnavailableReason.AccountScope);
 
     /// <summary>Whether a stored series may get a local-usage equivalence.
     /// A client with no non-primary card keeps every series (as before). With

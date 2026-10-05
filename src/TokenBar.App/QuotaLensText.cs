@@ -92,8 +92,9 @@ public static class QuotaLensText
         : outcome switch
         {
             // macOS QuotaHistoryStripCard.swift:40-61: "could not be read" only
-            // when attempted AND unreadable (a failed fetch of an unrelated
-            // client does not make this strip unreadable).
+            // when attempted AND unreadable (on Windows: the whole read failed
+            // and a client in scope has a window macOS would read; a failed
+            // read with no such client says "no completed windows").
             WindowEquivalence.FetchOutcome.Succeeded => QuotaStripState.NoCompletedWindows,
             WindowEquivalence.FetchOutcome.Failed =>
                 unreadable ? QuotaStripState.Failed : QuotaStripState.NoCompletedWindows,
