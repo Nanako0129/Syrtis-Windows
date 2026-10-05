@@ -19,9 +19,12 @@ public class AccountIdentityTests
 
     private static UsageWindow Window(string cardId, string label, double remaining, string? key = null) =>
         new(Label: label, UsedPercent: 100 - remaining, RemainingPercent: remaining, CardId: cardId,
+            // The payload window (reset 100 h, 5 h) the chart's samples are ranged by.
+            ResetsAt: DateTimeOffset.FromUnixTimeSeconds(100 * Hour).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
             PaceStatus: key is null
                 ? new PaceStatus(UsagePaceState.Unavailable)
-                : new PaceStatus(UsagePaceState.Available, WindowKey: key, DurationSeconds: 5 * Hour));
+                : new PaceStatus(UsagePaceState.Available, WindowKey: key, DurationSeconds: 5 * Hour),
+            DurationSeconds: key is null ? null : 5 * Hour);
 
     private static AgentUsageSnapshot Card(
         string? accountKey, string? scope, string? error = null, params UsageWindow[] windows) =>
@@ -194,13 +197,15 @@ public class AccountIdentityTests
         var quota = TwoAccounts();
         var history = new[] { Series("P", used: 70), Series("S", used: 20) };
 
-        var desktop = Assert.Single(WindowCardText.Tabs(history, quota, "claude", Desktop));
+        // `now` inside the payload window (reset 100 h): the cycle is placed from it.
+        var nowMs = 99 * Hour * 1_000;
+        var desktop = Assert.Single(WindowCardText.Tabs(history, quota, "claude", Desktop, nowMs));
         Assert.Equal("S", desktop.Id.AccountScope);
-        Assert.Equal(20, desktop.Active!.Samples[^1].UsedPercent);
+        Assert.Equal(20, desktop.Active!.Samples[0].UsedPercent);
 
-        var primary = Assert.Single(WindowCardText.Tabs(history, quota, "claude", null));
+        var primary = Assert.Single(WindowCardText.Tabs(history, quota, "claude", null, nowMs));
         Assert.Equal("P", primary.Id.AccountScope);
-        Assert.Equal(70, primary.Active!.Samples[^1].UsedPercent);
+        Assert.Equal(70, primary.Active!.Samples[0].UsedPercent);
 
         // Desktop whose profile failed: a card with no scope gets no series.
         var noScope = Payload(
@@ -417,7 +422,11 @@ public class AccountIdentityTests
                 records ?? [new UsageAttribution.Record("claude", "anthropic", UsageAttribution.State.Assigned("claude"))],
                 IsWritable: true),
             year: null,
-            new QuotaLensProjection.Selection("claude", storedTab ?? "", WindowCardAccount: stored, LocalUsageClients: localClients)).Client!;
+            new QuotaLensProjection.Selection("claude", storedTab ?? "", WindowCardAccount: stored, LocalUsageClients: localClients),
+            // Inside the payload window (95 h..100 h) so the cycle IS placed:
+            // a null LiveEquivalence below is then the unattributed guard, not
+            // an Unavailable resolve.
+            now: DateTimeOffset.FromUnixTimeSeconds(99 * Hour)).Client!;
     }
 
     /// <summary>A subscription used only through another client still has
@@ -464,6 +473,9 @@ public class AccountIdentityTests
         Assert.Equal("P", primary.Selected!.Id.AccountScope);
         Assert.NotEmpty(primary.Mine);
         Assert.Equal(2, primary.Accounts.Count);
+        // Control: the attributed primary's placed cycle gets a numbers row.
+        Assert.NotNull(primary.Selected.Active);
+        Assert.NotNull(primary.LiveEquivalence);
 
         var desktop = ClientFor(Desktop);
         Assert.True(desktop.LocalUsageUnattributed);
@@ -472,6 +484,7 @@ public class AccountIdentityTests
         Assert.Equal("S", desktop.Selected!.Id.AccountScope);
         Assert.Empty(desktop.Mine);
         Assert.Empty(desktop.Messages);
+        Assert.NotNull(desktop.Selected.Active);
         Assert.Null(desktop.LiveEquivalence);
         Assert.Equal(0, desktop.UndatedCount);
         Assert.Equal("Local usage can't be attributed to this account yet.", WindowCardText.LocalUsageUnattributed());
@@ -484,6 +497,7 @@ public class AccountIdentityTests
         Assert.True(primary.LocalUsageUnattributed);
         Assert.Empty(primary.Mine);
         Assert.Empty(primary.Messages);
+        Assert.NotNull(primary.Selected!.Active);
         Assert.Null(primary.LiveEquivalence);
         Assert.Equal(0, primary.UndatedCount);
         Assert.Equal(WindowCardText.LocalUsageUnattributed(), WindowCardText.ZoneUsage([], unattributed: primary.LocalUsageUnattributed).Empty);

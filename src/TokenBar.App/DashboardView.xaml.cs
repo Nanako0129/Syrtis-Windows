@@ -2150,13 +2150,14 @@ public sealed partial class DashboardView : UserControl
             // surface — macOS passes the curves to the client tab's card too
             // (OverviewView.swift, QuotaView.swift:74).
             var tabs = WindowCardText.Tabs(
-                snapshot.QuotaHistory, snapshot.Quota, agent.ClientId, agent.Account.AccountKey);
+                snapshot.QuotaHistory, snapshot.Quota, agent.ClientId, agent.Account.AccountKey,
+                now.ToUnixTimeMilliseconds());
             for (var i = 0; i < windows.Count; i++)
             {
                 var window = windows[i];
                 var row = UsagePace.RowPresentation(
                     window, paceMode, asUsed, classic, now);
-                var samples = i < tabs.Count ? tabs[i].Active?.Samples : null;
+                var samples = i < tabs.Count ? (tabs[i].ChartSamples ?? tabs[i].Active?.Samples) : null;
                 var trend = AgentLimitsText.Trend(window, samples, now.ToUnixTimeMilliseconds());
                 section.Children.Add(QuotaRow(
                     window, row, classic, metric,

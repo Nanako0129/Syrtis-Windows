@@ -50,7 +50,14 @@ public class ModelScopeWiringTests
             RemainingPercent: 85,
             CardId: cardId,
             PaceStatus: new PaceStatus(UsagePaceState.Available, WindowKey: cardId))
-        with { ModelScope = modelScope };
+        // The payload window the running cycle is placed from (reset 6,000 s,
+        // 5 h) and, via Build's `now`, still ahead of it.
+        with
+        {
+            ModelScope = modelScope,
+            ResetsAt = DateTimeOffset.FromUnixTimeSeconds(6_000).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+            DurationSeconds = FiveHours,
+        };
 
     private static AgentUsagePayload Quota(params UsageWindow[] windows) =>
         new("2026-01-01T00:00:00Z",
@@ -89,7 +96,8 @@ public class ModelScopeWiringTests
             windowUsageOutcome: WindowEquivalence.FetchOutcome.Succeeded,
             quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
             Confirmed(), year: null,
-            new QuotaLensProjection.Selection("claude", string.Empty));
+            new QuotaLensProjection.Selection("claude", string.Empty),
+            now: DateTimeOffset.FromUnixTimeSeconds(5_950));
 
     // ---- the wire ----------------------------------------------------------
 
@@ -230,8 +238,13 @@ public class ModelScopeWiringTests
             windowUsageOutcome: WindowEquivalence.FetchOutcome.Failed,
             quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
             Confirmed(), year: null,
-            new QuotaLensProjection.Selection("claude", string.Empty)).Client!;
+            new QuotaLensProjection.Selection("claude", string.Empty),
+            now: DateTimeOffset.FromUnixTimeSeconds(5_950)).Client!;
 
+        // Control: the cycle is placed and the same inputs with a Succeeded
+        // read raise the note (AScopeThatMatchesNothing...), so only the
+        // Failed outcome keeps it false here.
+        Assert.NotNull(client.Selected?.Active);
         Assert.False(client.ScopeMatchedNothing);
     }
 

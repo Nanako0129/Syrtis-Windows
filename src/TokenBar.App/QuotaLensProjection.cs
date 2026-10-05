@@ -528,7 +528,7 @@ public static class QuotaLensProjection
             scanFromMs = accountWindowUsageFromMs;
         }
 
-        var tabs = WindowCardText.Tabs(history, quota, owner, account).ToList();
+        var tabs = WindowCardText.Tabs(history, quota, owner, account, now.ToUnixTimeMilliseconds()).ToList();
         var selected = tabs.FirstOrDefault(tab => WindowId(tab.Id) == windowCardTab)
             ?? DefaultTab(tabs);
         IReadOnlyList<WindowMessage> messages = unattributed ? [] : windowUsage?.Messages ?? [];
@@ -573,28 +573,41 @@ public static class QuotaLensProjection
             scopeMatchedNothing = !mine.Any(Inside) && subscription.Any(Inside);
         }
 
-        // Only when the selected tab has a placed running cycle — the same
-        // condition WindowCardText.State resolves to WindowCardState.Chart
-        // for, which is the only state the view draws this line under.
+        // Only when the selected tab has a placed running cycle: Chart is the
+        // only state the view draws this line under, and a placed Active is
+        // Chart barring two arms: the scan-pending one of an inferred cycle,
+        // and an empty ChartSamples (NoQuotaHistory, checked before Active).
+        // Null otherwise (no card body to put it under).
         WindowEquivalence.Row? liveEquivalence = null;
-        // A cycle placed from the live reset has no samples, hence no quota line to compare.
-        if (!unattributed && selected?.Active is { IsPlaced: true, Samples.Count: > 0 } active)
+        // Only readings inside the placed window count (macOS
+        // WindowUsageCard filters to [interval.start, interval.end], no
+        // fallback); a window with none still gets the row, as Unavailable
+        // ("Not enough quota readings yet"), never a carried-over ratio.
+        if (!unattributed && selected?.Active is { IsPlaced: true } active)
         {
             // The card and this line must describe the same interval:
             // WindowCardGeometry.Chart already clips its bars and curve to
-            // [active.StartMs, now), because a provider that shortens its
-            // reported duration mid-cycle moves StartMs past readings
-            // QuotaHistoryFold.Active deliberately still carries (see that
+            // [active.StartMs, now). On the live path StartMs is the inferred
+            // start; on the store-fallback path it can sit past readings
+            // QuotaHistoryFold.Active deliberately still carries, when a
+            // provider shortens its reported duration mid-cycle (see that
             // method's own doc comment). Declared() and LiveEquivalence()
             // used to run over the full unclipped Samples, so this line
             // could count quota movement and messages from before the
             // window the chart above it actually draws. One clip here feeds
             // both calls, rather than each re-deriving its own bound.
-            var clipped = active.Samples.Where(sample => sample.AtMs >= active.StartMs!.Value).ToList();
-            IReadOnlyList<QuotaSample> clippedSamples = clipped.Count == 0 ? active.Samples : clipped;
-
-            var declared = QuotaEquivalenceFold.DeclaredSpan(
-                clippedSamples[0].AtMs, clippedSamples[^1].AtMs, owner, messages, confirmed.Records);
+            var clippedSamples = active.Samples
+                .Where(sample => sample.AtMs >= active.StartMs!.Value && sample.AtMs <= active.ResetAtMs!.Value)
+                .ToList();
+            // macOS always renders the row (WindowUsageCard.swift:167): an empty
+            // in-window list is .unavailable ("Not enough quota readings yet",
+            // WindowEquivalence.swift:164/:202), never a ratio carried over from
+            // another cycle. LiveRow answers Loading / ScanFailed / <2 samples
+            // before it reads `declared`; the Count guard only spares
+            // DeclaredSpan an empty list.
+            var declared = clippedSamples.Count > 0
+                && QuotaEquivalenceFold.DeclaredSpan(
+                    clippedSamples[0].AtMs, clippedSamples[^1].AtMs, owner, messages, confirmed.Records);
             liveEquivalence = WindowCardText.LiveEquivalence(clippedSamples, mine, declared, windowUsageOutcome);
         }
 
