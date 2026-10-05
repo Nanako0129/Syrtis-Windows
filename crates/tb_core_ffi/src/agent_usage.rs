@@ -14165,7 +14165,12 @@ mod tests {
             { "bucketId": "used", "displayName": "Weekly", "remainingFraction": 0.5,
               "resetTime": rfc(86_400), "window": "weekly" },
             { "bucketId": "unused", "displayName": "5h", "remainingFraction": 1,
-              "resetTime": rfc(5 * 3_600), "window": "5h" }
+              "resetTime": rfc(5 * 3_600), "window": "5h" },
+            // Chained phase (Windows test machine, 2026-10-04/05, agy 1.2.16):
+            // fraction 1 with a fixed reset (previous reset + 5h), later
+            // abandoned. Started by our clock, still no contract.
+            { "bucketId": "chained", "displayName": "5h chained", "remainingFraction": 1,
+              "resetTime": rfc(4 * 3_600), "window": "5h" }
         ]}]})
         .to_string();
         let snapshot_at = |local: DateTime<Utc>,
@@ -14218,23 +14223,29 @@ mod tests {
                 unused.pace_status
             );
             assert_eq!(unused.pace_status.reason, None, "skew {skew}s");
+            let chained = &captured.windows[2];
+            assert_eq!(chained.duration_seconds, None, "skew {skew}s");
+            assert!(
+                matches!(chained.pace_status.state, PaceState::LearningDuration),
+                "skew {skew}s: {:?}",
+                chained.pace_status
+            );
         }
-        // The store holds nothing for the unused bucket: no sample, no cycle.
-        let unused_key = SeriesKey::new(
-            "antigravity".to_string(),
-            &history_scope,
-            "agy.unused.v1",
-        );
-        let stored = crate::agent_quota_history::read_series_at_path(
-            &unused_key,
-            &history_path,
-            server_now,
-        )
-        .unwrap();
-        assert!(
-            stored.as_ref().is_none_or(|s| s.samples.is_empty()),
-            "unused bucket wrote to the store: {stored:?}"
-        );
+        // The store holds nothing for the unused or chained bucket: no
+        // sample, no cycle.
+        for id in ["agy.unused.v1", "agy.chained.v1"] {
+            let key = SeriesKey::new("antigravity".to_string(), &history_scope, id);
+            let stored = crate::agent_quota_history::read_series_at_path(
+                &key,
+                &history_path,
+                server_now,
+            )
+            .unwrap();
+            assert!(
+                stored.as_ref().is_none_or(|s| s.samples.is_empty()),
+                "{id} wrote to the store: {stored:?}"
+            );
+        }
 
         // The agy route has no trusted account evidence: cleared, as before.
         let local = Utc.timestamp_opt(server_now, 0).single().unwrap();

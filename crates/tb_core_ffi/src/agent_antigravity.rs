@@ -5453,6 +5453,50 @@ mod tests {
         assert_eq!(duration(0.5, Some(60), Some("monthly")), None);
     }
 
+    /// Measured on the Windows test machine, 2026-10-04/05, agy 1.2.16
+    /// (5-min `/usage` samples, 91 of them). Unused buckets roll (fraction 1,
+    /// reset = capture + window). First use fixes the reset at first use +
+    /// window; no in-use segment ever rolled. After a 5h reset passes the
+    /// bucket reads fraction 1 with the reset CHAINED to previous reset + 5h
+    /// and fixed for ~30 min, then (22:07:50Z) rolls again with the reset
+    /// jumping forward to 2026-10-05T03:07:52Z. The chained phase must not
+    /// declare: its fixed reset is later abandoned, so a contract there would
+    /// record a cycle that never ends. Fraction < 1 is the only gate that
+    /// separates it from the fixed in-use cycles.
+    #[test]
+    fn measured_agy_1_2_16_reset_phases_declare_only_when_in_use() {
+        let at = |now: &str, id: &str, window: &str, fraction: f64, reset: &str| {
+            let now = DateTime::parse_from_rfc3339(now).unwrap().with_timezone(&Utc);
+            let body = format!(
+                r#"{{"status":"SUCCESS","command":{{"name":"usage","data":{{"groups":[
+                {{"name":"G","buckets":[{{"id":"{id}","name":"B","window":"{window}","remaining_fraction":{fraction},"reset_time":"{reset}"}}]}}]}}}}}}"#
+            );
+            parse_agy_usage(body.as_bytes(), now).unwrap().windows[0].duration_seconds_for_test()
+        };
+        // (a) chained phase: fraction 1, reset fixed at previous reset + 5h,
+        // cycle started by our clock.
+        assert_eq!(
+            at("2026-10-04T21:47:00Z", "gemini-5h", "5h", 1.0, "2026-10-05T02:32:24Z"),
+            None
+        );
+        // (b) in use, fixed resets (gemini-5h, gemini-weekly, 3p-weekly).
+        let t = "2026-10-04T18:00:00Z";
+        assert_eq!(at(t, "gemini-5h", "5h", 0.9995, "2026-10-04T21:32:24Z"), Some(18_000));
+        assert_eq!(at(t, "gemini-weekly", "weekly", 0.9991, "2026-10-09T23:43:14Z"), Some(604_800));
+        assert_eq!(at(t, "3p-weekly", "weekly", 0.9817, "2026-10-11T16:33:07Z"), Some(604_800));
+        // (c) just back to rolling after the chained phase: reset jumped to
+        // capture + 5h.
+        assert_eq!(
+            at("2026-10-04T22:07:50Z", "gemini-5h", "5h", 1.0, "2026-10-05T03:07:52Z"),
+            None
+        );
+        // (d) before first use, rolling.
+        assert_eq!(
+            at("2026-10-04T16:03:32Z", "gemini-5h", "5h", 1.0, "2026-10-04T21:03:38Z"),
+            None
+        );
+    }
+
     #[test]
     fn rejects_agy_usage_without_valid_windows() {
         let now = Utc::now();
