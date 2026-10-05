@@ -935,4 +935,110 @@ public class QuotaLensProjectionTests
         Assert.Equal("antigravity", client.Owner);
         Assert.Equal("antigravity", client.Selected!.Id.ProviderId);
     }
+
+    // ---- the macOS `.inferred` branch (WindowResolution.swift:33-35) -------
+
+    private const long NowMs = 1_800_000_000_000;
+    private const long DurationMs = FiveHours * 1_000;
+
+    // Store: only a completed cycle (the LearningDuration shape, no active
+    // group). Live: reset one hour ago, five-hour duration.
+    private static QuotaLensProjection.Client InferenceClient(params WindowMessage[] messages) =>
+        InferenceClient(-3_600_000, messages);
+
+    private static QuotaLensProjection.Client InferenceClient(long resetOffsetMs, params WindowMessage[] messages)
+    {
+        var resetIso = DateTimeOffset.FromUnixTimeMilliseconds(NowMs + resetOffsetMs).UtcDateTime
+            .ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+        var quota = Quota(
+            "codex",
+            Window("codex|session.v1", "Session", "session.v1") with
+            {
+                ResetsAt = resetIso,
+                DurationSeconds = FiveHours,
+            });
+        var history = new[] { Series("codex", "primary", "session.v1", Sample(40, 1_500, 2_000, active: false)) };
+
+        return QuotaLensProjection.Build(
+            history, quota, EmptyGraph(), new WindowUsage(messages, 0, 0),
+            WindowEquivalence.FetchOutcome.Succeeded, WindowEquivalence.FetchOutcome.Succeeded,
+            Confirmed(
+                new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex")),
+                new UsageAttribution.Record("claude", "anthropic", UsageAttribution.State.Assigned("claude"))),
+            year: null,
+            new QuotaLensProjection.Selection("codex", string.Empty),
+            now: DateTimeOffset.FromUnixTimeMilliseconds(NowMs)).Client!;
+    }
+
+    [Fact]
+    public void OwnUsageAfterTheLiveResetInfersTheWindowFromTheFirstMessage()
+    {
+        var first = NowMs - 1_800_000;
+        var client = InferenceClient(
+            Message(first + 600_000, "codex", "openai", 10, 0.1),
+            Message(first, "codex", "openai", 10, 0.1));
+
+        Assert.Equal(
+            WindowCardState.Chart,
+            WindowCardText.State(client.Selected, WindowEquivalence.FetchOutcome.Succeeded,
+                DateTimeOffset.FromUnixTimeMilliseconds(NowMs)));
+        Assert.True(client.Selected!.Inferred);
+        Assert.Equal(first, client.Selected.Active!.StartMs);
+        Assert.Equal(first + DurationMs, client.Selected.Active.ResetAtMs);
+        Assert.Empty(client.Selected.Active.Samples);
+        Assert.Null(client.LiveEquivalence);
+        // The card's line under the chart: none, rather than a null deref.
+        Assert.Null(WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence));
+        Assert.Same(client.Selected, Assert.Single(client.Tabs));
+        Assert.StartsWith(
+            "Inferred window · resets in",
+            WindowCardText.Subtitle(
+                WindowCardState.Chart, client.Selected, DateTimeOffset.FromUnixTimeMilliseconds(NowMs)));
+    }
+
+    // macOS `.active` (WindowResolution.swift:29-31): the quota payload shows
+    // a new session whose reset is ahead, before the next history read
+    // records it, so the store has no running cycle yet. Placed at macOS's
+    // interval [reset - duration, reset), not "Window unavailable".
+    [Fact]
+    public void AFutureLiveResetWithinOneDurationPlacesTheWindowWithoutAStoredCycle()
+    {
+        var reset = NowMs + 3_600_000;
+        var client = InferenceClient(3_600_000);
+
+        Assert.Equal(
+            WindowCardState.Chart,
+            WindowCardText.State(client.Selected, WindowEquivalence.FetchOutcome.Succeeded,
+                DateTimeOffset.FromUnixTimeMilliseconds(NowMs)));
+        Assert.False(client.Selected!.Inferred);
+        Assert.Equal(reset - DurationMs, client.Selected.Active!.StartMs);
+        Assert.Equal(reset, client.Selected.Active.ResetAtMs);
+        Assert.Null(WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence));
+        Assert.StartsWith(
+            "Resets in",
+            WindowCardText.Subtitle(
+                WindowCardState.Chart, client.Selected, DateTimeOffset.FromUnixTimeMilliseconds(NowMs)));
+    }
+
+    [Fact]
+    public void AnotherClientsUsageAfterTheResetDoesNotInferTheWindow()
+    {
+        var client = InferenceClient(Message(NowMs - 1_800_000, "claude", "anthropic", 10, 0.1));
+
+        Assert.False(client.Selected!.Inferred);
+        Assert.Null(client.Selected.Active);
+        Assert.Equal(
+            WindowCardState.Idle,
+            WindowCardText.State(client.Selected, WindowEquivalence.FetchOutcome.Succeeded,
+                DateTimeOffset.FromUnixTimeMilliseconds(NowMs)));
+    }
+
+    [Fact]
+    public void OwnUsageBeforeTheResetDoesNotInferTheWindow()
+    {
+        var client = InferenceClient(Message(NowMs - 3_600_000 - 1, "codex", "openai", 10, 0.1));
+
+        Assert.False(client.Selected!.Inferred);
+        Assert.Null(client.Selected.Active);
+    }
 }

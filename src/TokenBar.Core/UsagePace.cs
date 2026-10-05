@@ -496,7 +496,7 @@ public sealed record UsagePace(
     /// <summary>Strict RFC3339 parser requiring an explicit zone while
     /// tolerating arbitrary fractional precision and lowercase z, matching
     /// the canonical Swift formatter's valid timestamp variants.</summary>
-    internal static DateTimeOffset? ParseRfc3339(string s)
+    public static DateTimeOffset? ParseRfc3339(string s)
     {
         var match = Rfc3339Pattern.Match(s);
         if (!match.Success)

@@ -13,6 +13,9 @@ public class WindowCardTextTests
     private const long FiveHours = 5 * 3_600;
     private const long ResetAt = 1_767_330_000;
 
+    private static readonly DateTimeOffset Now = DateTimeOffset.FromUnixTimeSeconds(NowS);
+    private const long NowS = 1_800_000_000;
+
     public WindowCardTextTests() => Localization.Load("en", AppContext.BaseDirectory);
 
     private static QuotaHistorySample Sample(
@@ -119,9 +122,9 @@ public class WindowCardTextTests
         Assert.Equal("Weekly", tabs[0].Label);
         Assert.Equal(
             WindowCardState.NoQuotaHistory,
-            WindowCardText.State(tabs[0], WindowEquivalence.FetchOutcome.Succeeded));
+            WindowCardText.State(tabs[0], WindowEquivalence.FetchOutcome.Succeeded, Now));
         Assert.Equal(
-            WindowCardState.Loading, WindowCardText.State(tabs[0], WindowEquivalence.FetchOutcome.NotAttempted));
+            WindowCardState.Loading, WindowCardText.State(tabs[0], WindowEquivalence.FetchOutcome.NotAttempted, Now));
     }
 
     // A stored series with no live window (the provider stopped reporting
@@ -165,7 +168,7 @@ public class WindowCardTextTests
         // recorded" claim `selected is null` used to produce upstream.
         Assert.Equal(
             WindowCardState.Chart,
-            WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded));
+            WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded, Now));
     }
 
     // A client with no stored series at all AND no live payload still
@@ -208,7 +211,7 @@ public class WindowCardTextTests
         Assert.Equal(40, tab.Active!.Samples[^1].UsedPercent);
         Assert.Equal(
             WindowCardState.Chart,
-            WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded));
+            WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded, Now));
     }
 
     // The sibling shape that must NOT fall back: a transient failure that DID
@@ -606,6 +609,69 @@ public class WindowCardTextTests
 
     // ---- states ---------------------------------------------------------
 
+    // The store has an older completed cycle and no active-group sample (the
+    // LearningDuration shape); the live window carries the given reset and
+    // duration. `resetS` is unix seconds.
+    private static WindowCardTab LiveTab(long? resetS, long? durationSeconds) =>
+        WindowCardText.Tabs(
+            [Series("claude", "session.v1", Sample(40, ResetAt - 600, active: false))],
+            Quota("claude", Window("claude|session.v1", "Session", "session.v1") with
+            {
+                ResetsAt = resetS is null
+                    ? null
+                    : DateTimeOffset.FromUnixTimeSeconds(resetS.Value).UtcDateTime
+                        .ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+                DurationSeconds = durationSeconds,
+            }),
+            "claude")[0];
+
+    private static WindowCardState NoCycleState(WindowCardTab tab) =>
+        WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded, Now);
+
+    // Port of macOS WindowResolver.resolve (WindowResolution.swift:21-35),
+    // one test per branch, all with no running cycle in the store.
+    [Fact]
+    public void NoCycleAndNoLiveResetIsUnplaceable() =>
+        Assert.Equal(WindowCardState.Unplaceable, NoCycleState(LiveTab(null, FiveHours)));
+
+    [Fact]
+    public void NoCycleAndNoLiveDurationIsUnplaceableEvenWithAFutureReset() =>
+        Assert.Equal(WindowCardState.Unplaceable, NoCycleState(LiveTab(NowS + 3_600, null)));
+
+    [Fact]
+    public void NoCycleAndAFutureResetWithinOneDurationIsUnplaceable() =>
+        Assert.Equal(WindowCardState.Unplaceable, NoCycleState(LiveTab(NowS + 3_600, FiveHours)));
+
+    [Fact]
+    public void NoCycleAndAFutureResetBeyondOneDurationIsUnplaceable() =>
+        Assert.Equal(WindowCardState.Unplaceable, NoCycleState(LiveTab(NowS + 10 * 3_600, FiveHours)));
+
+    [Fact]
+    public void NoCycleAndAResetPastByMoreThanOneDurationIsUnplaceable() =>
+        Assert.Equal(WindowCardState.Unplaceable, NoCycleState(LiveTab(NowS - 6 * 3_600, FiveHours)));
+
+    [Fact]
+    public void NoCycleAndAResetPastWithinOneDurationAndNoOwnUsageIsIdle() =>
+        Assert.Equal(WindowCardState.Idle, NoCycleState(LiveTab(NowS - 3_600, FiveHours)));
+
+    // Swift: `guard now - reset <= duration`, so exactly one duration is idle.
+    [Fact]
+    public void NoCycleAndAResetPastByExactlyOneDurationIsIdle() =>
+        Assert.Equal(WindowCardState.Idle, NoCycleState(LiveTab(NowS - FiveHours, FiveHours)));
+
+    // No live window (store fallback): nothing to resolve against.
+    [Fact]
+    public void NoCycleOnTheStoreFallbackPathIsUnplaceable()
+    {
+        var tab = Assert.Single(WindowCardText.Tabs(
+            [Series("codex", "session.v1", Sample(40, ResetAt - 600, active: false))],
+            quota: null,
+            clientId: "codex"));
+
+        Assert.Null(tab.Active);
+        Assert.Equal(WindowCardState.Unplaceable, NoCycleState(tab));
+    }
+
     [Fact]
     public void EveryStateIsDistinct()
     {
@@ -613,10 +679,7 @@ public class WindowCardTextTests
             [Series("claude", "session.v1", Sample(40, ResetAt - 600))],
             Quota("claude", Window("claude|session.v1", "Session", "session.v1")),
             "claude")[0];
-        var idle = WindowCardText.Tabs(
-            [Series("claude", "session.v1", Sample(40, ResetAt - 600, active: false))],
-            Quota("claude", Window("claude|session.v1", "Session", "session.v1")),
-            "claude")[0];
+        var idle = LiveTab(NowS - 3_600, FiveHours);
         var unplaceable = WindowCardText.Tabs(
             [Series("claude", "session.v1", Sample(40, ResetAt - 600, duration: 0))],
             Quota("claude", Window("claude|session.v1", "Session", "session.v1")),
@@ -625,36 +688,36 @@ public class WindowCardTextTests
             [], Quota("claude", Window("claude|session.v1", "Session", "session.v1")), "claude")[0];
 
         Assert.Equal(
-            WindowCardState.Chart, WindowCardText.State(running, WindowEquivalence.FetchOutcome.Succeeded));
+            WindowCardState.Chart, WindowCardText.State(running, WindowEquivalence.FetchOutcome.Succeeded, Now));
         Assert.Equal(
-            WindowCardState.Idle, WindowCardText.State(idle, WindowEquivalence.FetchOutcome.Succeeded));
+            WindowCardState.Idle, WindowCardText.State(idle, WindowEquivalence.FetchOutcome.Succeeded, Now));
         Assert.Equal(
             WindowCardState.Unplaceable,
-            WindowCardText.State(unplaceable, WindowEquivalence.FetchOutcome.Succeeded));
+            WindowCardText.State(unplaceable, WindowEquivalence.FetchOutcome.Succeeded, Now));
         // The pair that differs only in `outcome`, which is the whole point:
         // a lazy lens fetches on first visit, so no tab before the read has
         // settled is the first paint of every cold start.
         Assert.Equal(
             WindowCardState.NoQuotaHistory,
-            WindowCardText.State(null, WindowEquivalence.FetchOutcome.Succeeded));
+            WindowCardText.State(null, WindowEquivalence.FetchOutcome.Succeeded, Now));
         Assert.Equal(
-            WindowCardState.Loading, WindowCardText.State(null, WindowEquivalence.FetchOutcome.NotAttempted));
+            WindowCardState.Loading, WindowCardText.State(null, WindowEquivalence.FetchOutcome.NotAttempted, Now));
         // Round 8: a fetch that threw is neither of the above — it must not
         // render as "no history" (which claims the read landed and found
         // nothing) nor stay stuck on "loading" (which claims no answer has
         // come back at all).
         Assert.Equal(
             WindowCardState.HistoryFetchFailed,
-            WindowCardText.State(null, WindowEquivalence.FetchOutcome.Failed));
+            WindowCardText.State(null, WindowEquivalence.FetchOutcome.Failed, Now));
         // A live window with a tab but no matched series reads the same as no
         // tab at all — `HasHistory` is what carries the distinction from
         // `Idle`, not the tab's mere presence.
         Assert.Equal(
             WindowCardState.NoQuotaHistory,
-            WindowCardText.State(noHistory, WindowEquivalence.FetchOutcome.Succeeded));
+            WindowCardText.State(noHistory, WindowEquivalence.FetchOutcome.Succeeded, Now));
         Assert.Equal(
             WindowCardState.HistoryFetchFailed,
-            WindowCardText.State(noHistory, WindowEquivalence.FetchOutcome.Failed));
+            WindowCardText.State(noHistory, WindowEquivalence.FetchOutcome.Failed, Now));
     }
 
     // Each empty state has its own sentence. "The window ended" and "the

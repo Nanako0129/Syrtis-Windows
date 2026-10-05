@@ -627,7 +627,7 @@ public sealed partial class DashboardView
     {
         var tabs = client.Tabs;
         var selected = client.Selected;
-        var state = WindowCardText.State(selected, client.QuotaHistoryOutcome);
+        var state = WindowCardText.State(selected, client.QuotaHistoryOutcome, DateTimeOffset.Now);
         var body = new StackPanel { Spacing = 4 };
         if (client.Accounts.Count > 1)
         {
@@ -689,19 +689,16 @@ public sealed partial class DashboardView
         // usage" rather than "nothing was recorded", and the outcome is the
         // quota-samples fetch's own, not the card's QuotaHistoryOutcome
         // (client.QuotaHistoryOutcome, used for `state` above), because the
-        // two are separate fetches. LiveEquivalence is non-null here for an
-        // attributable (primary) card, because WindowCardText.State only
-        // reaches Chart when the projection's guard (a placed active cycle)
-        // held. For a non-primary card it is null by design and never
-        // dereferenced: LocalUsageUnattributed short-circuits below.
-        var equivalenceLine = Ui.Text(
-            client.LocalUsageUnattributed
-                ? WindowCardText.LocalUsageUnattributed()
-                : WindowEquivalenceText.Line(client.LiveEquivalence!),
-            9, 0.6);
-        equivalenceLine.TextWrapping = TextWrapping.Wrap;
-        equivalenceLine.Margin = new Thickness(0, 2, 0, 0);
-        body.Children.Add(equivalenceLine);
+        // two are separate fetches. LiveEquivalence is null for a non-primary
+        // card and for a window placed from the live reset (no quota samples); LiveLine maps
+        // those to rule 6 or to no line.
+        if (WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence) is { } liveLine)
+        {
+            var equivalenceLine = Ui.Text(liveLine, 9, 0.6);
+            equivalenceLine.TextWrapping = TextWrapping.Wrap;
+            equivalenceLine.Margin = new Thickness(0, 2, 0, 0);
+            body.Children.Add(equivalenceLine);
+        }
 
         if (WindowCardText.UndatedNote(client.UndatedCount) is { } undated)
         {
