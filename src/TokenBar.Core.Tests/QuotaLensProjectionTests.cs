@@ -723,7 +723,8 @@ public class QuotaLensProjectionTests
             windowUsage: new WindowUsage(messages, 0, 0),
             windowUsageOutcome: WindowEquivalence.FetchOutcome.Succeeded,
             quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded, confirmed, year: null,
-            new QuotaLensProjection.Selection("codex", string.Empty));
+            new QuotaLensProjection.Selection("codex", string.Empty),
+            now: DateTimeOffset.FromUnixTimeMilliseconds(5_950_000)); // inside the running window
 
         Assert.Equal(6_000_000, model.Client!.Selected!.Active!.ResetAtMs);
         Assert.IsType<WindowEquivalence.Row.NotMoved>(model.Client.LiveEquivalence);
