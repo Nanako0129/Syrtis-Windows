@@ -14186,7 +14186,7 @@ mod tests {
                 identity: None,
                 history_scope,
                 account_scope,
-                windows: agent_antigravity::windows_from_quota_summary(&body, local),
+                windows: agent_antigravity::windows_from_quota_summary_for_test(&body, local),
                 credits: None,
                 error: None,
                 transport_diagnostic: None,
