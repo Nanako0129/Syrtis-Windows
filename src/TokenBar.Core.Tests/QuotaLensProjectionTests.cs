@@ -69,6 +69,18 @@ public class QuotaLensProjectionTests
         new("2026-01-01T00:00:00Z",
             [new AgentUsageSnapshot(clientId, "source", "2026-01-01T00:00:00Z", windows)]);
 
+    // A payload with a codex primary whose history scope matches
+    // TwoCycleSeries("codex", "primary", ...). Deliberately not null: with no
+    // payload the overview draws nothing from history (macOS
+    // DashboardModel.swift:1509), so the equivalence tests below would have no
+    // series to fold and could not tell their outcomes apart.
+    private static AgentUsagePayload CodexPrimaryQuota() =>
+        new("2026-01-01T00:00:00Z",
+            [new AgentUsageSnapshot("codex", "source", "2026-01-01T00:00:00Z",
+                [new UsageWindow(Label: "Weekly", UsedPercent: 10, RemainingPercent: 90, CardId: "codex|weekly.v1",
+                    PaceStatus: new PaceStatus(UsagePaceState.Available, WindowKey: "weekly.v1"))],
+                HistoryScope: new AccountScopeStatus("primary"))]);
+
     // Two completed (single-sample) cycles, plus a running cycle carrying TWO
     // active samples — WindowEquivalence.LiveRow needs a non-empty
     // [first, last] span to admit a message as "declared" at all before it
@@ -144,20 +156,14 @@ public class QuotaLensProjectionTests
 
         var model = QuotaLensProjection.Build(
             history,
-            // A payload, deliberately: with no payload the overview draws
-            // nothing from history (macOS DashboardModel.swift:1509), so there
-            // would be no series to fold an equivalence for.
-            quota: Agents(new AgentUsageSnapshot("codex", "source", "2026-01-01T00:00:00Z",
-                [new UsageWindow(Label: "Weekly", UsedPercent: 10, RemainingPercent: 90, CardId: "codex|weekly.v1",
-                    PaceStatus: new PaceStatus(UsagePaceState.Available, WindowKey: "weekly.v1"))],
-                HistoryScope: new AccountScopeStatus("primary"))),
+            quota: CodexPrimaryQuota(),
             EmptyGraph(),
             windowUsage: new WindowUsage(messages, 0, 0),
             windowUsageOutcome: WindowEquivalence.FetchOutcome.Failed,
             quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
             Confirmed(new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex"))),
             year: null,
-            new QuotaLensProjection.Selection(ClientRegistry.OverviewTab, string.Empty));
+            new QuotaLensProjection.Selection(ClientRegistry.OverviewTab, string.Empty, PresentClients: ["codex"]));
 
         Assert.Empty(model.Overview.Equivalences);
     }
@@ -170,7 +176,7 @@ public class QuotaLensProjectionTests
 
         var model = QuotaLensProjection.Build(
             history,
-            quota: null,
+            quota: CodexPrimaryQuota(),
             EmptyGraph(),
             windowUsage: new WindowUsage(messages, 0, 0),
             windowUsageOutcome: WindowEquivalence.FetchOutcome.Succeeded,
