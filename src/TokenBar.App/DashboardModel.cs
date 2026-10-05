@@ -653,7 +653,7 @@ public sealed class DashboardModel
                 // same reason the agent-usage lane does: a lens that reads null as
                 // "not yet" would wait forever for an answer that already came back.
                 QuotaHistoryAttempted = quotaHistory || s.QuotaHistoryAttempted,
-                QuotaHistoryReadFailed = quotaHistory ? history is null : s.QuotaHistoryReadFailed,
+                QuotaHistoryReadFailed = LazyLaneFold.LatestReadFailed(quotaHistory, history, s.QuotaHistoryReadFailed),
                 // Same failed-read and same completion rules as QuotaHistory,
                 // immediately above, and for the same reason.
                 WindowUsage = usage ?? s.WindowUsage,

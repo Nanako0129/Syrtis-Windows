@@ -41,7 +41,7 @@ public class QuotaLensTextTests
             QuotaHeatmapState.Unplaced,
             QuotaLensText.HeatmapState(Grid(total: 0, unplaced: 7), WindowEquivalence.FetchOutcome.Succeeded, unreadable: true, windowsEmpty: true));
 
-        // The trio that differs only in the outcome, which is the whole point:
+        // The trio that differs in outcome and unreadable, which is the whole point:
         // a card that has lost the distinction passes every assertion above.
         Assert.Equal(
             QuotaHeatmapState.NoMovement,

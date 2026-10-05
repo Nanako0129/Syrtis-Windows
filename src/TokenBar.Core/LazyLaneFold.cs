@@ -96,4 +96,16 @@ public static class LazyLaneFold
         !attempted ? WindowEquivalence.FetchOutcome.NotAttempted
         : value is null ? WindowEquivalence.FetchOutcome.Failed
         : WindowEquivalence.FetchOutcome.Succeeded;
+
+    /// <summary>Whether the LATEST read failed, independent of what is
+    /// retained: a pass that read sets it from its own result (a failed
+    /// read returns null), a pass that did not read carries the previous
+    /// answer. <see cref="Outcome"/> cannot say this once an earlier read
+    /// retained a value (an empty list included); the Quota lens's "could
+    /// not be read" needs it (macOS decides per read, DashboardModel.swift
+    /// :1670-1712). Here, not inline in DashboardModel, so a test fails if
+    /// the rule changes.</summary>
+    public static bool LatestReadFailed<T>(bool requested, T? value, bool previous)
+        where T : class =>
+        requested ? value is null : previous;
 }

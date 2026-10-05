@@ -23,6 +23,20 @@ public class LazyLaneFoldTests
 {
     private sealed record Report(int Value);
 
+    // ---- the latest read's own failure (Q33b) -------------------------------
+
+    // A retained empty list says nothing about the latest read: a pass that
+    // read and failed is a failure even though something is retained, a pass
+    // that read and succeeded clears it, a pass that did not read carries it.
+    [Fact]
+    public void LatestReadFailedFollowsTheLatestReadNotWhatIsRetained()
+    {
+        Assert.True(LazyLaneFold.LatestReadFailed<Report>(requested: true, value: null, previous: false));
+        Assert.False(LazyLaneFold.LatestReadFailed(requested: true, value: new Report(0), previous: true));
+        Assert.True(LazyLaneFold.LatestReadFailed<Report>(requested: false, value: null, previous: true));
+        Assert.False(LazyLaneFold.LatestReadFailed<Report>(requested: false, value: null, previous: false));
+    }
+
     // ---- the retention bug itself -----------------------------------------
 
     [Fact]
