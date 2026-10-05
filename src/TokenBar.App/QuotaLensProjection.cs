@@ -266,7 +266,9 @@ public static class QuotaLensProjection
         // equivalences to visibleAgents' window keys (:1509-1526, guarded by
         // `quotaVisibility != nil, agentUsage != nil` at :1509), so a
         // tab-hidden or limits-hidden client's retained series draws nothing.
-        // Filtered ONCE; everything below derives from this slice.
+        // With a payload, a stored series of a visible single-account client
+        // under a FORMER account scope is dropped too, as on macOS (it reads
+        // only historyReadAccountKey's curve).
         // Before the first payload macOS has no rows at all (they only come
         // from those curve reads). Windows deliberately differs, as the
         // maintainer decided: it draws the retained series right away, as the
@@ -275,18 +277,18 @@ public static class QuotaLensProjection
         // tab-hidden client (folded to its group) and a limits-hidden client.
         // Without a payload a limits-hidden client's extra accounts cannot be
         // told from its primary, so all of its series wait for the payload.
-        // A stored series of a visible single-account client under a FORMER
-        // account scope is dropped too, as on macOS (it reads only
-        // historyReadAccountKey's curve).
+        // Filtered ONCE; everything below derives from this slice.
         if (quota is null)
         {
             var excluded = ClientRegistry.QuotaExcludedClients(
                 selection.TabHidden ?? new HashSet<string>(), selection.LimitsHidden ?? new HashSet<string>());
             history = history?.Where(s => !excluded.Contains(s.ProviderId)).ToList();
-            // With nothing retained to draw: Loading until the agent-usage fetch has been attempted (macOS
-            // usageAttempted), then NoCompleted/NoMovement. Loading while
-            // EITHER that fetch or the history read is unattempted: the
-            // history outcome already drives Loading on its own.
+            // Until the agent-usage fetch has been attempted (macOS
+            // usageAttempted) a card with nothing to draw says Loading — the
+            // strip when no retained row is left, the heatmap when its
+            // selected window has no grid — then NoCompleted/NoMovement.
+            // Loading while EITHER that fetch or the history read is
+            // unattempted: the history outcome already drives Loading.
             if (!quotaAttempted)
             {
                 quotaHistoryOutcome = WindowEquivalence.FetchOutcome.NotAttempted;
@@ -304,7 +306,13 @@ public static class QuotaLensProjection
         // stale (or no) messages. The strip/heatmap draw no line for a window
         // with no key rather than computing one from a read that did not
         // land; see this method's own doc comment on `windowUsageOutcome`.
-        var equivalences = windowUsageOutcome == WindowEquivalence.FetchOutcome.Succeeded
+        // Also absent before the first payload: without it no series can be
+        // narrowed to its account or model scope (LocalUsageScopable and
+        // ModelScope.Of pass everything through for a null quota), so an
+        // extra account's or a model-scoped window's estimate would be priced
+        // from the whole unscoped scan and overstated. macOS has no rows to
+        // price before a payload either.
+        var equivalences = quota is not null && windowUsageOutcome == WindowEquivalence.FetchOutcome.Succeeded
             ? QuotaEquivalenceFold.Build(
                 [.. (history ?? []).Where(s => LocalUsageScopable(quota, s))],
                 windowUsage?.Messages ?? [], confirmed,

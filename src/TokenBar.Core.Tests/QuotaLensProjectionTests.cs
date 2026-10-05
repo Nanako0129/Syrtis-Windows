@@ -192,6 +192,32 @@ public class QuotaLensProjectionTests
         Assert.Single(model.Overview.Equivalences);
     }
 
+    // Before the first payload the overview draws retained series (a
+    // maintainer-approved deviation) but prices none of them: without a
+    // payload nothing can be narrowed to its account or model scope, so an
+    // estimate would come from the whole unscoped scan. Same inputs as the
+    // test above, with no payload.
+    [Fact]
+    public void OverviewEquivalencesWaitForThePayloadEvenWhenRowsAreDrawn()
+    {
+        var history = new[] { TwoCycleSeries("codex", "primary", "weekly.v1") };
+        var messages = new[] { Message(1_800, "codex", "openai", 1000, 5.0) };
+
+        var model = QuotaLensProjection.Build(
+            history,
+            quota: null,
+            EmptyGraph(),
+            windowUsage: new WindowUsage(messages, 0, 0),
+            windowUsageOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            Confirmed(new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex"))),
+            year: null,
+            new QuotaLensProjection.Selection(ClientRegistry.OverviewTab, string.Empty, PresentClients: ["codex"]));
+
+        Assert.NotEmpty(model.Overview.Summaries);
+        Assert.Empty(model.Overview.Equivalences);
+    }
+
     // ---- retained data renders as data, not as a failure ------------------
 
     // Formerly "FailedOutcomeIsNotReadAsSuccessAtAnyOfTheThreeSitesEvenWithMessagesRetained",
