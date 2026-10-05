@@ -373,4 +373,15 @@ public static class QuotaEquivalenceFold
 
         return earliest ?? fallbackMs;
     }
+
+    /// <summary>The scan start the published account rows can vouch for. No
+    /// account pass: the prior bound stands. A key whose rescan failed keeps
+    /// its prior rows (scanned from the prior bound), so only then is the
+    /// shared bound the later of the two, never over-claiming; a pass where
+    /// every key rescanned takes the fresh bound, which may be earlier (a
+    /// series whose evidence starts earlier joined the history).</summary>
+    public static long? NextAccountBound(long? prior, long? fresh, bool scanned, bool keptPrior) =>
+        !scanned ? prior
+        : keptPrior && prior is { } p && fresh is { } f ? Math.Max(p, f)
+        : fresh;
 }

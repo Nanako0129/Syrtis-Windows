@@ -615,6 +615,7 @@ public sealed class DashboardModel
         IReadOnlyDictionary<string, Interop.WindowUsage>? accountUsage = null;
         long? scanFromMs = null;
         long? accountFromMs = null;
+        var accountKeptPrior = false;
         if (windowUsage)
         {
             var forBound = history ?? Current?.QuotaHistory ?? [];
@@ -635,7 +636,7 @@ public sealed class DashboardModel
                 scanFromMs = fromMs;
                 accountFromMs = fromMs;
                 usage = TryFetch(() => TbCore.WindowUsage(fromMs, now), "windowUsage");
-                accountUsage = FetchAccountWindows(fromMs, now, Current?.AccountWindowUsage);
+                accountUsage = FetchAccountWindows(fromMs, now, Current?.AccountWindowUsage, out accountKeptPrior);
             }
         }
 
@@ -678,12 +679,8 @@ public sealed class DashboardModel
                 WindowUsage = usage ?? s.WindowUsage,
                 WindowUsageFromMs = usage is null ? s.WindowUsageFromMs : scanFromMs,
                 AccountWindowUsage = accountUsage ?? s.AccountWindowUsage,
-                // A key whose rescan failed keeps its prior rows (older bound), so
-                // the shared bound is the later of the two: never over-claims.
-                AccountWindowUsageFromMs = accountUsage is null
-                    ? s.AccountWindowUsageFromMs
-                    : s.AccountWindowUsageFromMs is { } prior && accountFromMs is { } fresh
-                        ? Math.Max(prior, fresh) : accountFromMs,
+                AccountWindowUsageFromMs = QuotaEquivalenceFold.NextAccountBound(
+                    s.AccountWindowUsageFromMs, accountFromMs, accountUsage is not null, accountKeptPrior),
                 WindowUsageAttempted = windowUsage || s.WindowUsageAttempted,
             };
         }, graph: null, stillValid: () => SelectionStillValid(year, generation));
@@ -697,8 +694,9 @@ public sealed class DashboardModel
     // ponytail: one account after another, at most 8 scans (the registry's cap); run them
     // in parallel or only for the shown card if a many-account setup is slow.
     private IReadOnlyDictionary<string, Interop.WindowUsage> FetchAccountWindows(
-        long fromMs, long untilMs, IReadOnlyDictionary<string, Interop.WindowUsage>? prior)
+        long fromMs, long untilMs, IReadOnlyDictionary<string, Interop.WindowUsage>? prior, out bool keptPrior)
     {
+        keptPrior = false;
         var result = new Dictionary<string, Interop.WindowUsage>(StringComparer.Ordinal);
         foreach (var key in ClaudeExtraRoots.AttributableAccountKeys(_latestQuota))
         {
@@ -713,6 +711,7 @@ public sealed class DashboardModel
                 if (prior is not null && prior.TryGetValue(key, out var kept))
                 {
                     result[key] = kept;
+                    keptPrior = true;
                 }
             }
         }

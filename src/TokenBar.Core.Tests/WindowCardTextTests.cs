@@ -674,6 +674,18 @@ public class WindowCardTextTests
             WindowCardState.PlacementPending,
             Scanned(WindowEquivalence.FetchOutcome.Succeeded, QuotaEquivalenceFold.ScanFromMs([], NowS * 1_000)));
 
+    // The account-scan bound may move earlier when every key rescanned (a
+    // series with earlier evidence joined the history); only a key that kept
+    // its prior rows holds it at the later of the two.
+    [Fact]
+    public void TheAccountScanBoundMovesEarlierWhenEveryKeyRescanned()
+    {
+        Assert.Equal(100, QuotaEquivalenceFold.NextAccountBound(prior: 900, fresh: 100, scanned: true, keptPrior: false));
+        Assert.Equal(900, QuotaEquivalenceFold.NextAccountBound(prior: 900, fresh: 100, scanned: true, keptPrior: true));
+        Assert.Equal(900, QuotaEquivalenceFold.NextAccountBound(prior: 900, fresh: 100, scanned: false, keptPrior: false));
+        Assert.Equal(100, QuotaEquivalenceFold.NextAccountBound(prior: null, fresh: 100, scanned: true, keptPrior: true));
+    }
+
     [Fact] // row 5
     public void IdleWithACoveringScanStaysIdle() =>
         Assert.Equal(WindowCardState.Idle, Scanned(WindowEquivalence.FetchOutcome.Succeeded, ResetMs));
