@@ -168,7 +168,7 @@ public class WindowCardTextTests
         var tab = Assert.Single(tabs);
         Assert.True(tab.HasHistory);
         Assert.NotNull(tab.Active);
-        Assert.Equal([40d, 10d], tab.Active!.Samples.Select(s => s.UsedPercent).ToArray());
+        Assert.Equal([40d], tab.Active!.Samples.Select(s => s.UsedPercent).ToArray());
         // Both cards this feeds must see real data, not the false "nothing
         // recorded" claim `selected is null` used to produce upstream.
         Assert.Equal(
@@ -213,7 +213,7 @@ public class WindowCardTextTests
         var tab = Assert.Single(tabs);
         Assert.True(tab.HasHistory);
         Assert.NotNull(tab.Active);
-        Assert.Equal([40d, 10d], tab.Active!.Samples.Select(s => s.UsedPercent).ToArray());
+        Assert.Equal([40d], tab.Active!.Samples.Select(s => s.UsedPercent).ToArray());
         Assert.Equal(
             WindowCardState.Chart,
             WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded, Now));
@@ -404,8 +404,8 @@ public class WindowCardTextTests
         Assert.Equal(
             new[] { "account-a", "account-b" }.OrderBy(s => s),
             tabs.Select(tab => tab.Id.AccountScope).OrderBy(s => s));
-        Assert.Contains(tabs, tab => tab.Id.AccountScope == "account-a" && tab.Active!.Samples.Select(s => s.UsedPercent).SequenceEqual([40d, 10d]));
-        Assert.Contains(tabs, tab => tab.Id.AccountScope == "account-b" && tab.Active!.Samples.Select(s => s.UsedPercent).SequenceEqual([90d, 10d]));
+        Assert.Contains(tabs, tab => tab.Id.AccountScope == "account-a" && tab.Active!.Samples.Select(s => s.UsedPercent).SequenceEqual([40d]));
+        Assert.Contains(tabs, tab => tab.Id.AccountScope == "account-b" && tab.Active!.Samples.Select(s => s.UsedPercent).SequenceEqual([90d]));
     }
 
     // The window key is the store's own, and ProviderId is already a registered
@@ -907,10 +907,8 @@ public class WindowCardTextTests
             Quota("claude", Window("claude|session.v1", "Session", "session.v1")),
             "claude")[0];
         var idle = LiveTab(NowS - 3_600, FiveHours);
-        var unplaceable = WindowCardText.Tabs(
-            [Series("claude", "session.v1", Sample(40, ResetAt - 600, duration: 0))],
-            Quota("claude", Window("claude|session.v1", "Session", "session.v1")),
-            "claude")[0];
+        // No running cycle and a live reset beyond one window: Unplaceable.
+        var unplaceable = LiveTab(NowS + 10 * 3_600, FiveHours);
         var noHistory = WindowCardText.Tabs(
             [], Quota("claude", Window("claude|session.v1", "Session", "session.v1")), "claude")[0];
 

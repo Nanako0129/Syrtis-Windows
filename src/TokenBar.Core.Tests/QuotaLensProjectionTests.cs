@@ -693,13 +693,14 @@ public class QuotaLensProjectionTests
         var messages = new[] { Message(4_500_000, "codex", "openai", 5_000, 25.0) };
         var confirmed = Confirmed(
             new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex")));
-        // Payload window [6_000 - 20 h, now] holds all three readings; used 0
-        // adds no live point, so the clip under test sees only the stored ones.
+        // The payload now places the cycle (Q37), so it carries the shortened
+        // 1_000 s duration: window [5_000, 6_000]. Range and clip both drop the
+        // 4_000 reading; used 0 adds no live point.
         var quota = Quota("codex", Window("codex|weekly.v1", "Weekly", "weekly.v1") with
         {
             UsedPercent = 0,
             ResetsAt = DateTimeOffset.FromUnixTimeSeconds(6_000).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
-            DurationSeconds = 20 * 3_600,
+            DurationSeconds = 1_000,
         });
 
         var model = QuotaLensProjection.Build(
