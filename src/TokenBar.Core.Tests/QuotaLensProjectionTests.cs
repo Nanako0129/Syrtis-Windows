@@ -946,6 +946,7 @@ public class QuotaLensProjectionTests
         Assert.Equal(first, client.Selected.Active!.StartMs);
         Assert.Equal(first + DurationMs, client.Selected.Active.ResetAtMs);
         Assert.Empty(client.Selected.Active.Samples);
+        Assert.Null(client.LiveEquivalence);
         Assert.Same(client.Selected, Assert.Single(client.Tabs));
         Assert.StartsWith(
             "Inferred window · resets in",

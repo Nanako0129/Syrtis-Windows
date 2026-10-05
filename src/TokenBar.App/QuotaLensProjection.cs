@@ -411,7 +411,8 @@ public static class QuotaLensProjection
         // condition WindowCardText.State resolves to WindowCardState.Chart
         // for, which is the only state the view draws this line under.
         WindowEquivalence.Row? liveEquivalence = null;
-        if (!unattributed && selected?.Active is { IsPlaced: true } active)
+        // An inferred cycle has no samples, hence no quota line to compare.
+        if (!unattributed && selected?.Active is { IsPlaced: true, Samples.Count: > 0 } active)
         {
             // The card and this line must describe the same interval:
             // WindowCardGeometry.Chart already clips its bars and curve to
