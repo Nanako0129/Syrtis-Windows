@@ -245,7 +245,8 @@ public sealed partial class DashboardView
                 (_selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet)).PresentClients,
                 ClientRegistry.HiddenClients(AppSettings.Store),
                 ClientRegistry.HiddenLimitsClients(AppSettings.Store)),
-            snapshot.AccountWindowUsage);
+            snapshot.AccountWindowUsage,
+            snapshot.QuotaHistoryReadFailed);
 
         // A client tab asks about one subscription, so it gets that
         // subscription's own three cards rather than the all-clients four.

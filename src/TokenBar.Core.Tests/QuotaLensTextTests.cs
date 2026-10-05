@@ -45,7 +45,7 @@ public class QuotaLensTextTests
         // a card that has lost the distinction passes every assertion above.
         Assert.Equal(
             QuotaHeatmapState.NoMovement,
-            QuotaLensText.HeatmapState(Grid(), WindowEquivalence.FetchOutcome.Succeeded, unreadable: true, windowsEmpty: true));
+            QuotaLensText.HeatmapState(Grid(), WindowEquivalence.FetchOutcome.Succeeded, unreadable: false, windowsEmpty: true));
         Assert.Equal(
             QuotaHeatmapState.Loading,
             QuotaLensText.HeatmapState(Grid(), WindowEquivalence.FetchOutcome.NotAttempted, unreadable: true, windowsEmpty: true));
@@ -64,7 +64,7 @@ public class QuotaLensTextTests
     public void NoGridYetIsLoadingUntilTheFetchHasBeenAttempted()
     {
         Assert.Equal(QuotaHeatmapState.Loading, QuotaLensText.HeatmapState(null, WindowEquivalence.FetchOutcome.NotAttempted, unreadable: true, windowsEmpty: true));
-        Assert.Equal(QuotaHeatmapState.NoMovement, QuotaLensText.HeatmapState(null, WindowEquivalence.FetchOutcome.Succeeded, unreadable: true, windowsEmpty: true));
+        Assert.Equal(QuotaHeatmapState.NoMovement, QuotaLensText.HeatmapState(null, WindowEquivalence.FetchOutcome.Succeeded, unreadable: false, windowsEmpty: true));
         Assert.Equal(QuotaHeatmapState.Failed, QuotaLensText.HeatmapState(null, WindowEquivalence.FetchOutcome.Failed, unreadable: true, windowsEmpty: true));
     }
 
@@ -76,7 +76,7 @@ public class QuotaLensTextTests
             QuotaLensText.StripState([Summary(40)], WindowEquivalence.FetchOutcome.Succeeded, unreadable: true));
         Assert.Equal(
             QuotaStripState.NoCompletedWindows,
-            QuotaLensText.StripState([], WindowEquivalence.FetchOutcome.Succeeded, unreadable: true));
+            QuotaLensText.StripState([], WindowEquivalence.FetchOutcome.Succeeded, unreadable: false));
         Assert.Equal(
             QuotaStripState.Loading,
             QuotaLensText.StripState([], WindowEquivalence.FetchOutcome.NotAttempted, unreadable: true));

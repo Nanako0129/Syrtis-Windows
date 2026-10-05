@@ -6,15 +6,16 @@ using Xunit;
 namespace TokenBar.Core.Tests;
 
 /// <summary>
-/// Q33: the Quota strip/heatmap "could not be read" state follows macOS's
-/// per-client rule (DashboardModel.swift:1502-1508 visibleAgents,
-/// :1845-1862 quotaUnreadableClients; QuotaView.swift:87/:92 tab,
-/// :125/:132 all-clients).
-/// <para>Windows reads quota history in ONE call and has no per-window read
-/// failure, so partial unreadability ("A failed, B read") is not reachable
-/// here. These tests use the whole-fetch-failure analog: outcome Failed means
-/// nothing is retained, and every visible agent with a card window that has a
-/// history key is unreadable.</para>
+/// Q33/Q33b: the Quota strip/heatmap "could not be read" state follows
+/// macOS's rule (DashboardModel.swift:1502-1508 visibleAgents, :1670-1712
+/// each read, :1845-1862 quotaUnreadableClients; QuotaView.swift:87/:92 tab,
+/// :125/:132 all-clients; QuotaHistoryStripCard.swift:40-61,
+/// QuotaHeatmapCard.swift:62-95).
+/// <para>Windows reads quota history in ONE call, so partial unreadability
+/// ("A failed, B read") is not reachable. The analog: when the LATEST read
+/// failed (not "nothing retained" — an earlier empty read may be retained),
+/// every visible agent with a history-key card window not drawn in the strip
+/// is unreadable; when it did not fail, none.</para>
 /// </summary>
 public class QuotaUnreadableTests
 {
@@ -37,13 +38,15 @@ public class QuotaUnreadableTests
 
     private static QuotaLensProjection.Overview Overview(
         AgentUsagePayload? quota, WindowEquivalence.FetchOutcome outcome, IReadOnlySet<string>? limitsHidden = null,
-        IReadOnlySet<string>? tabHidden = null) =>
+        IReadOnlySet<string>? tabHidden = null, bool? latestReadFailed = null,
+        IReadOnlyList<QuotaHistorySeries>? history = null) =>
         QuotaLensProjection.Build(
-            history: null, quota, EmptyGraph(), windowUsage: null,
+            history, quota, EmptyGraph(), windowUsage: null,
             windowUsageOutcome: WindowEquivalence.FetchOutcome.NotAttempted,
             quotaHistoryOutcome: outcome,
             UsageAttribution.Table.Empty, year: null,
-            Sel(ClientRegistry.OverviewTab, limitsHidden, tabHidden)).Overview;
+            Sel(ClientRegistry.OverviewTab, limitsHidden, tabHidden),
+            quotaHistoryReadFailed: latestReadFailed ?? outcome == WindowEquivalence.FetchOutcome.Failed).Overview;
 
     private static UsagePayload EmptyGraph() =>
         new(
@@ -179,5 +182,58 @@ public class QuotaUnreadableTests
         Assert.Equal(
             QuotaHeatmapState.Grid,
             QuotaLensText.HeatmapState(QuotaHeatmap.Empty with { Total = 12 }, Failed, true, true));
+    }
+
+    private const WindowEquivalence.FetchOutcome Succeeded = WindowEquivalence.FetchOutcome.Succeeded;
+
+    private const long Hour = 3_600;
+
+    // Two readings inside one completed cycle: enough for a strip summary.
+    private static QuotaHistorySeries Series(string client, string window = "weekly.v1") =>
+        new(client, "acct", window,
+        [
+            new QuotaHistorySample(100 * Hour, 5 * Hour, QuotaHistoryDurationSource.Provider, 10,
+                96 * Hour, QuotaHistorySampleOrigin.LiveV3, false),
+            new QuotaHistorySample(100 * Hour, 5 * Hour, QuotaHistoryDurationSource.Provider, 40,
+                97 * Hour, QuotaHistorySampleOrigin.LiveV3, false),
+        ]);
+
+    // Q33b: an earlier read returned [] (retained, outcome Succeeded), the
+    // latest threw. Old code keyed on outcome == Failed -> nothing unreadable.
+    [Fact]
+    public void RetainedEmptyHistoryWithALatestFailedReadIsUnreadable()
+    {
+        var o = Overview(Payload(Agent("codex", null, Window("codex|weekly.v1"))), Succeeded, latestReadFailed: true);
+
+        Assert.Equal(["codex"], o.UnreadableClients);
+        Assert.Equal(QuotaStripState.Failed, Strip(o, o.UnreadableIn(ClientRegistry.TabSlice("codex"))));
+        Assert.Equal(QuotaHeatmapState.Failed, Heat(o, o.UnreadableIn(ClientRegistry.TabSlice("codex"))));
+    }
+
+    // Control: same retained [] with a latest read that succeeded.
+    [Fact]
+    public void RetainedEmptyHistoryWithASucceededLatestReadIsNotUnreadable()
+    {
+        var o = Overview(Payload(Agent("codex", null, Window("codex|weekly.v1"))), Succeeded, latestReadFailed: false);
+
+        Assert.Empty(o.UnreadableClients);
+        Assert.Equal(QuotaStripState.NoCompletedWindows, Strip(o, false));
+        Assert.Equal(QuotaHeatmapState.NoMovement, Heat(o, false));
+    }
+
+    // macOS keeps previously drawn windows over a failed pass (:1788-1796):
+    // codex is drawn (a summary exists), opencode has an undrawn window.
+    [Fact]
+    public void ADrawnWindowIsNotUnreadableButAnUndrawnOneIs()
+    {
+        var history = new[] { Series("codex") };
+        var payload = Payload(
+            Agent("codex", null, Window("codex|weekly.v1")),
+            Agent("opencode", null, Window("opencode|weekly.v1")));
+        var o = Overview(payload, Succeeded, latestReadFailed: true, history: history);
+
+        Assert.NotEmpty(o.Summaries);
+        Assert.Equal(["opencode"], o.UnreadableClients);
+        Assert.Equal(QuotaStripState.Rows, Strip(o, true));
     }
 }
