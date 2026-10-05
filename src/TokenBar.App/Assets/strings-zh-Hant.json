@@ -157,6 +157,8 @@
   "No provider-split usage in this range.": "這個區間沒有按供應商分列的用量。",
   "No quota data yet.": "尚無額度資料。",
   "No supported agents yet": "目前沒有支援的 Agent",
+  "↔ Routes through opencode": "↔ 透過 opencode 轉送",
+  "opencode also taps: {0}": "opencode 另外接上：{0}",
   "No quota history": "沒有額度歷史紀錄",
   "No quota reading in this interval": "這個區間沒有額度讀數",
   "No quota reading in this window": "這個時間窗內沒有額度讀數",
