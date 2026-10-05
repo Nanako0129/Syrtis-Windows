@@ -618,7 +618,7 @@ public sealed partial class DashboardView
     {
         var tabs = client.Tabs;
         var selected = client.Selected;
-        var state = WindowCardText.State(selected, client.QuotaHistoryOutcome);
+        var state = WindowCardText.State(selected, client.QuotaHistoryOutcome, DateTimeOffset.Now);
         var body = new StackPanel { Spacing = 4 };
         if (client.Accounts.Count > 1)
         {

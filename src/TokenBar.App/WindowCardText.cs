@@ -26,13 +26,21 @@ public enum WindowCardState
     /// this distinction.</summary>
     HistoryFetchFailed,
 
-    /// <summary>The last window ended and nothing has been used since.</summary>
+    /// <summary>The stored series has no running cycle AND the live reset is
+    /// recent enough to trust: it passed no more than one window length ago
+    /// and none of this subscription's usage came after it (macOS
+    /// <c>WindowResolver.resolve</c>, WindowResolution.swift:21-35, the
+    /// <c>.idle</c> branch). Exactly that one branch: every other way of
+    /// having no running cycle is <see cref="Unplaceable"/>.</summary>
     Idle,
 
-    /// <summary>A window IS running, and the subscription reported no usable
-    /// reset time to place it with. Not <see cref="Idle"/>: that one says the
-    /// user stopped working, and this one says the provider stopped
-    /// answering.</summary>
+    /// <summary>The window cannot be placed: the live window carries no reset
+    /// or no duration, or its reset is more than one window length away in
+    /// either direction (macOS <c>.unavailable</c>,
+    /// WindowResolution.swift:21-29). Not <see cref="Idle"/>: that one says
+    /// the user stopped working, and this one says the provider stopped
+    /// answering — or, under a store's LearningDuration, that a window is
+    /// running whose cycle the store has not yet grouped.</summary>
     Unplaceable,
 
     Chart,
@@ -45,6 +53,16 @@ public enum WindowCardState
 /// happens when a series EXISTS but its last window simply ended, which is
 /// <see cref="WindowCardState.Idle"/>, not <see cref="WindowCardState.NoQuotaHistory"/>
 /// — two different facts a shared null would collapse into one.</param>
+/// <param name="LiveResetMs">The live window's own reset instant (unix ms),
+/// the macOS <c>resetsAt</c> input of <see cref="WindowCardText.Resolve"/>.
+/// Null on the store-fallback path (no live window) and when the payload
+/// carries none.</param>
+/// <param name="LiveDurationMs">The live window's own length in ms, from
+/// <c>UsageWindow.DurationSeconds</c> (null under a store's
+/// LearningDuration). Null on the store-fallback path.</param>
+/// <param name="Inferred">True when <see cref="Active"/> was not read from the
+/// store but inferred from the first own usage after the live reset
+/// (<see cref="WindowCardText.Infer"/>); such a cycle has no samples.</param>
 /// <param name="RemainingPercent">The live window's own remaining percent,
 /// for <see cref="QuotaLensProjection"/>'s "most depleted" default-selection
 /// tiebreak — mirroring macOS's <c>$0.remainingPercent</c> scan in
@@ -52,7 +70,8 @@ public enum WindowCardState
 /// <c>UsageWindow</c> to read it off).</param>
 public sealed record WindowCardTab(
     QuotaWindowIdentity Id, string? Label, QuotaActiveCycle? Active, bool HasHistory,
-    double? RemainingPercent = null);
+    double? RemainingPercent = null,
+    long? LiveResetMs = null, long? LiveDurationMs = null, bool Inferred = false);
 
 /// <summary>
 /// Every state choice and every string on the Session-window card (port of
@@ -387,7 +406,12 @@ public static class WindowCardText
                     window.Label,
                     series is null ? null : QuotaHistoryFold.Active(series.Samples),
                     HasHistory: series is not null,
-                    RemainingPercent: window.RemainingPercent));
+                    RemainingPercent: window.RemainingPercent,
+                    LiveResetMs: window.ResetsAt is { } resetsAt
+                        && UsagePace.ParseRfc3339(resetsAt) is { } reset
+                        ? reset.ToUnixTimeMilliseconds()
+                        : null,
+                    LiveDurationMs: window.DurationSeconds * 1000));
             }
         }
 
@@ -495,7 +519,85 @@ public static class WindowCardText
             [.. samples.Select(sample => new WindowEquivalence.Sample(sample.AtMs, sample.UsedPercent))],
             mine);
 
-    public static WindowCardState State(WindowCardTab? tab, WindowEquivalence.FetchOutcome outcome)
+    public enum WindowResolutionKind { Active, Idle, Inferred, Unavailable }
+
+    /// <summary>Port of macOS <c>WindowResolver.resolve</c>
+    /// (WindowResolution.swift:21-35), same branches and same
+    /// <c>&lt;=</c>/<c>&gt;</c> boundaries. <c>Start</c>/<c>End</c> are only
+    /// meaningful for <see cref="WindowResolutionKind.Active"/> and
+    /// <see cref="WindowResolutionKind.Inferred"/>.</summary>
+    public readonly record struct WindowResolution(WindowResolutionKind Kind, long Start = 0, long End = 0);
+
+    public static WindowResolution Resolve(
+        long? resetsAtMs, long? durationMs, long nowMs, long? firstUsageAfterReset)
+    {
+        if (resetsAtMs is not { } reset || durationMs is not { } duration)
+        {
+            return new(WindowResolutionKind.Unavailable);
+        }
+
+        if (reset > nowMs)
+        {
+            return reset - nowMs <= duration
+                ? new(WindowResolutionKind.Active, reset - duration, reset)
+                : new(WindowResolutionKind.Unavailable);
+        }
+
+        if (nowMs - reset > duration)
+        {
+            return new(WindowResolutionKind.Unavailable);
+        }
+
+        return firstUsageAfterReset is { } first
+            ? new(WindowResolutionKind.Inferred, first, first + duration)
+            : new(WindowResolutionKind.Idle);
+    }
+
+    /// <summary>When the stored series has no running cycle but the live
+    /// window resolves to <c>inferred</c> (reset passed within one window
+    /// length, own usage since), the tab with that window as its
+    /// <see cref="WindowCardTab.Active"/> and <see cref="WindowCardTab.Inferred"/>
+    /// set; else null. <paramref name="subscription"/> is attribution-scoped
+    /// only, never model-scoped (macOS <c>isMine</c>). The cycle has no
+    /// samples: under LearningDuration the store records none for it.</summary>
+    public static WindowCardTab? Infer(
+        WindowCardTab tab, IReadOnlyList<WindowMessage> subscription, long nowMs)
+    {
+        if (tab.Active is not null || !tab.HasHistory || tab.LiveResetMs is not { } reset)
+        {
+            return null;
+        }
+
+        long? first = null;
+        foreach (var message in subscription)
+        {
+            if (message.Timestamp >= reset && message.Timestamp <= nowMs
+                && (first is null || message.Timestamp < first))
+            {
+                first = message.Timestamp;
+            }
+        }
+
+        var resolved = Resolve(reset, tab.LiveDurationMs, nowMs, first);
+        return resolved.Kind == WindowResolutionKind.Inferred
+            ? tab with
+            {
+                Active = new QuotaActiveCycle(resolved.End, resolved.Start, []),
+                Inferred = true,
+            }
+            : null;
+    }
+
+    /// <summary>Which state the card is in. With no running cycle in the
+    /// stored series, macOS's rule decides (WindowResolution.swift:21-35):
+    /// <see cref="WindowCardState.Idle"/> only when
+    /// <see cref="Resolve"/> over the live reset and duration says idle (reset
+    /// passed within one window length, no own usage since — the caller
+    /// replaces an inferred tab beforehand via <see cref="Infer"/>); any other
+    /// resolution, including a missing live reset or duration, is
+    /// <see cref="WindowCardState.Unplaceable"/>.</summary>
+    public static WindowCardState State(
+        WindowCardTab? tab, WindowEquivalence.FetchOutcome outcome, DateTimeOffset now)
     {
         // No tab at all (nothing to select) and a tab with no stored series
         // (a live window the store has nothing recorded for) are the same
@@ -513,7 +615,10 @@ public static class WindowCardText
 
         return tab.Active switch
         {
-            null => WindowCardState.Idle,
+            null => Resolve(tab.LiveResetMs, tab.LiveDurationMs, now.ToUnixTimeMilliseconds(), null).Kind
+                == WindowResolutionKind.Idle
+                ? WindowCardState.Idle
+                : WindowCardState.Unplaceable,
             { IsPlaced: false } => WindowCardState.Unplaceable,
             _ => WindowCardState.Chart,
         };
@@ -598,9 +703,17 @@ public static class WindowCardText
             WindowCardState.HistoryFetchFailed => "Quota history could not be read. It will be retried.".Localized(),
             WindowCardState.Idle => "No window running".Localized(),
             WindowCardState.Unplaceable => "Window unavailable".Localized(),
-            _ => "Resets in {0}".Localized(UsagePace.DurationText(
-                Math.Max(0, (tab!.Active!.ResetAtMs!.Value / 1000.0) - now.ToUnixTimeSeconds()))),
+            _ => ResetsIn(tab!, now),
         };
+
+    private static string ResetsIn(WindowCardTab tab, DateTimeOffset now)
+    {
+        var left = UsagePace.DurationText(
+            Math.Max(0, (tab.Active!.ResetAtMs!.Value / 1000.0) - now.ToUnixTimeSeconds()));
+        return tab.Inferred
+            ? "Inferred window · resets in {0}".Localized(left)
+            : "Resets in {0}".Localized(left);
+    }
 
     /// <summary>The body copy for every state that draws no chart. Each one is
     /// its own sentence: "no history at all", "the window ended", and "the

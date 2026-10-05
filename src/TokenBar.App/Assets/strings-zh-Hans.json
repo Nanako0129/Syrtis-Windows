@@ -247,6 +247,7 @@
   "Reset": "重置",
   "Reset the saved 3D camera": "重设已保存的 3D 视角",
   "Resets in {0}": "{0} 后重置",
+  "Inferred window · resets in {0}": "推算的窗口 · {0} 后重置",
   "Resets now": "立即重置",
   "Restart to apply the new language.": "重新启动后套用新语言。",
   "Ring gauge": "环形仪表",

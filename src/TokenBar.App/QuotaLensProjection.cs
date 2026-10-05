@@ -214,7 +214,8 @@ public static class QuotaLensProjection
         UsageAttribution.Table confirmed,
         string? year,
         Selection selection,
-        IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage = null)
+        IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage = null,
+        DateTimeOffset? now = null)
     {
         var overview = BuildOverview(history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed);
         var (trend, pastYearSelected) = BuildTrend(graph, confirmed, year);
@@ -223,7 +224,7 @@ public static class QuotaLensProjection
             : BuildClient(
                 selection.ActiveClientTab, selection.WindowCardTab,
                 history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed,
-                selection, accountWindowUsage);
+                selection, accountWindowUsage, now ?? DateTimeOffset.UtcNow);
         return new Model(overview, trend, pastYearSelected, client);
     }
 
@@ -323,7 +324,8 @@ public static class QuotaLensProjection
         WindowEquivalence.FetchOutcome quotaHistoryOutcome,
         UsageAttribution.Table confirmed,
         Selection selection,
-        IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage)
+        IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage,
+        DateTimeOffset now)
     {
         // Every subscription-facing lookup below is keyed by the quota OWNER,
         // not the raw client id — antigravity-cli spends the antigravity
@@ -361,7 +363,7 @@ public static class QuotaLensProjection
             windowUsageOutcome = WindowEquivalence.FetchOutcome.Succeeded;
         }
 
-        var tabs = WindowCardText.Tabs(history, quota, owner, account);
+        var tabs = WindowCardText.Tabs(history, quota, owner, account).ToList();
         var selected = tabs.FirstOrDefault(tab => WindowId(tab.Id) == windowCardTab)
             ?? DefaultTab(tabs);
         IReadOnlyList<WindowMessage> messages = unattributed ? [] : windowUsage?.Messages ?? [];
@@ -372,6 +374,18 @@ public static class QuotaLensProjection
         var modelScope = ModelScope.Of(
             quota, selected?.Id.ProviderId, selected?.Id.AccountScope, selected?.Id.WindowKey);
         var subscription = WindowCardText.Mine(messages, owner, confirmed.Records);
+        // macOS WindowResolver's `.inferred` branch (WindowResolution.swift:
+        // 33-35): no running cycle in the store, but the live reset passed
+        // within one window length and this subscription (attribution only,
+        // no model scope) has used it since. Done before everything below so
+        // the scope note and the live line follow the placed window.
+        if (selected is not null
+            && WindowCardText.Infer(selected, subscription, now.ToUnixTimeMilliseconds()) is { } inferred)
+        {
+            tabs[tabs.IndexOf(selected)] = inferred;
+            selected = inferred;
+        }
+
         // The scope narrows what the card DISPLAYS only. Placement
         // (selected.Active) comes from the quota samples and never reads
         // messages, so a scope join that matches nothing leaves the window
