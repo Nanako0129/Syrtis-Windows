@@ -246,7 +246,8 @@ public sealed partial class DashboardView
                 ClientRegistry.HiddenClients(AppSettings.Store),
                 ClientRegistry.HiddenLimitsClients(AppSettings.Store)),
             snapshot.AccountWindowUsage,
-            snapshot.QuotaHistoryReadFailed);
+            snapshot.QuotaHistoryReadFailed,
+            windowUsageFromMs: snapshot.WindowUsageFromMs);
 
         // A client tab asks about one subscription, so it gets that
         // subscription's own three cards rather than the all-clients four.
@@ -626,7 +627,7 @@ public sealed partial class DashboardView
     {
         var tabs = client.Tabs;
         var selected = client.Selected;
-        var state = WindowCardText.State(selected, client.QuotaHistoryOutcome, DateTimeOffset.Now);
+        var state = WindowCardText.State(selected, client.QuotaHistoryOutcome, DateTimeOffset.Now, client.Scan);
         var body = new StackPanel { Spacing = 4 };
         if (client.Accounts.Count > 1)
         {

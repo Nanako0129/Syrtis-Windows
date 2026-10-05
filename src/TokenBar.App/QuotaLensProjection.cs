@@ -142,7 +142,9 @@ public static class QuotaLensProjection
         // (<see cref="WindowCardOwner"/> returned null): the view draws the
         // strip and heatmap in its place and no window history.
         // <c>Owner</c> and the folds are then the tab's own owner, unused.
-        bool HasWindowCard = true);
+        bool HasWindowCard = true,
+        // What WindowCardText.State needs to decide Idle vs pending.
+        LocalScan? Scan = null);
 
     /// <summary>Site 6 on its own: the window-history card's rows and its
     /// pooled ≈ line.</summary>
@@ -223,7 +225,8 @@ public static class QuotaLensProjection
         Selection selection,
         IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage = null,
         bool quotaHistoryReadFailed = false,
-        DateTimeOffset? now = null)
+        DateTimeOffset? now = null,
+        long? windowUsageFromMs = null)
     {
         var overview = BuildOverview(
             history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed, selection,
@@ -234,7 +237,7 @@ public static class QuotaLensProjection
             : BuildClient(
                 selection.ActiveClientTab, selection.WindowCardTab,
                 history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed,
-                selection, accountWindowUsage, now ?? DateTimeOffset.UtcNow);
+                selection, accountWindowUsage, now ?? DateTimeOffset.UtcNow, windowUsageFromMs);
         return new Model(overview, trend, pastYearSelected, client);
     }
 
@@ -395,7 +398,8 @@ public static class QuotaLensProjection
         UsageAttribution.Table confirmed,
         Selection selection,
         IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        long? windowUsageFromMs)
     {
         // Every subscription-facing lookup below is keyed by the quota OWNER,
         // not the raw client id — antigravity-cli spends the antigravity
@@ -510,7 +514,8 @@ public static class QuotaLensProjection
             unattributed ? 0 : windowUsage?.UndatedCount ?? 0, windowHistory, quotaHistoryOutcome,
             WindowCardText.AccountPills(quota, owner), account, unattributed,
             WindowCardText.HeaderAccountLabel(quota, owner, account),
-            scopeMatchedNothing, HasWindowCard: cardOwner is not null);
+            scopeMatchedNothing, HasWindowCard: cardOwner is not null,
+            Scan: new LocalScan(windowUsageOutcome, windowUsageFromMs, unattributed));
     }
 
     /// <summary>The tab-group member whose window card, history and account

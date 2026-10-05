@@ -461,6 +461,14 @@ public sealed class DashboardModel
         /// that was never going to come.</summary>
         public bool WindowUsageAttempted { get; init; }
 
+        /// <summary>Start of the bound the retained <see cref="WindowUsage"/>
+        /// (and <see cref="AccountWindowUsage"/>) was scanned from; null when
+        /// that read had no bound (no history to bound it by, so nothing to
+        /// cover). A window starting before this is not answered by the scan
+        /// (macOS <c>scan.covers(start:)</c>); travels with the data it
+        /// describes, so a failed refetch keeps the pair.</summary>
+        public long? WindowUsageFromMs { get; init; }
+
         /// <summary>
         /// The two facts <see cref="WindowUsageAttempted"/> and
         /// <see cref="WindowUsage"/> collapse to, so a call site reads one
@@ -600,6 +608,7 @@ public sealed class DashboardModel
         // which macOS's own probe measured at 67s over 15 days.
         Interop.WindowUsage? usage = null;
         IReadOnlyDictionary<string, Interop.WindowUsage>? accountUsage = null;
+        long? scanFromMs = null;
         if (windowUsage)
         {
             var forBound = history ?? Current?.QuotaHistory ?? [];
@@ -615,6 +624,7 @@ public sealed class DashboardModel
                 using var boost = ProcessPower.Boost();
                 var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 var fromMs = QuotaEquivalenceFold.BoundFromMs(forBound, now);
+                scanFromMs = fromMs;
                 usage = TryFetch(() => TbCore.WindowUsage(fromMs, now), "windowUsage");
                 accountUsage = FetchAccountWindows(fromMs, now, Current?.AccountWindowUsage);
             }
@@ -657,6 +667,7 @@ public sealed class DashboardModel
                 // Same failed-read and same completion rules as QuotaHistory,
                 // immediately above, and for the same reason.
                 WindowUsage = usage ?? s.WindowUsage,
+                WindowUsageFromMs = usage is null ? s.WindowUsageFromMs : scanFromMs,
                 AccountWindowUsage = accountUsage ?? s.AccountWindowUsage,
                 WindowUsageAttempted = windowUsage || s.WindowUsageAttempted,
             };

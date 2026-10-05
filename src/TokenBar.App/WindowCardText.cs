@@ -43,7 +43,34 @@ public enum WindowCardState
     /// running whose cycle the store has not yet grouped.</summary>
     Unplaceable,
 
+    /// <summary>Stage 1 of macOS's two-stage load (<c>placementPending</c>,
+    /// WindowCardLoading.swift:23-26): the quota half says "idle" or "inferred
+    /// from own usage", but the local-usage read that would confirm it has not
+    /// landed or does not reach back to the window. Said as pending so the card
+    /// never states "no window running" and then replaces it.</summary>
+    PlacementPending,
+
+    /// <summary>Windows-only (no macOS counterpart: macOS has no rule 6): the
+    /// last window ended, but this account's local usage cannot be attributed,
+    /// so whether a new window started is unknowable. Never pending: no scan
+    /// would ever settle it.</summary>
+    IdleUnattributed,
+
     Chart,
+}
+
+/// <summary>What the local-usage read says about the selected card, as
+/// <see cref="WindowCardText.State"/> needs it. <paramref name="FromMs"/> is the
+/// start of the scan's bound (null = unbounded, or nothing to scan).</summary>
+public readonly record struct LocalScan(
+    WindowEquivalence.FetchOutcome Outcome, long? FromMs, bool Unattributed)
+{
+    /// <summary>A landed, attributed read that reaches back far enough.</summary>
+    public static readonly LocalScan Covering = new(WindowEquivalence.FetchOutcome.Succeeded, null, false);
+
+    /// <summary>macOS <c>scan.covers(start:)</c>: a scan that starts after
+    /// <paramref name="startMs"/> cannot say what happened before it.</summary>
+    public bool Covers(long startMs) => FromMs is not { } from || from <= startMs;
 }
 
 /// <summary>One sub-tab of the Session-window card: a window of the selected
@@ -612,8 +639,10 @@ public static class WindowCardText
     /// resolution, including a missing live reset or duration, is
     /// <see cref="WindowCardState.Unplaceable"/>.</summary>
     public static WindowCardState State(
-        WindowCardTab? tab, WindowEquivalence.FetchOutcome outcome, DateTimeOffset now)
+        WindowCardTab? tab, WindowEquivalence.FetchOutcome outcome, DateTimeOffset now,
+        LocalScan? localScan = null)
     {
+        var scan = localScan ?? LocalScan.Covering;
         // No tab at all (nothing to select) and a tab with no stored series
         // (a live window the store has nothing recorded for) are the same
         // fact from this card's point of view, and `outcome` still decides
@@ -630,11 +659,21 @@ public static class WindowCardText
 
         return tab.Active switch
         {
-            null => Resolve(tab.LiveResetMs, tab.LiveDurationMs, now.ToUnixTimeMilliseconds(), null).Kind
-                == WindowResolutionKind.Idle
-                ? WindowCardState.Idle
-                : WindowCardState.Unplaceable,
+            // Idle is a claim about local usage since the reset, so it needs a
+            // read that landed and reaches back to the reset (macOS stage 1 ->
+            // placementPending). An unattributed account has no such read to
+            // wait for, so it says what it cannot know instead.
+            null when Resolve(tab.LiveResetMs, tab.LiveDurationMs, now.ToUnixTimeMilliseconds(), null).Kind
+                == WindowResolutionKind.Idle =>
+                scan.Unattributed ? WindowCardState.IdleUnattributed
+                : scan.Outcome != WindowEquivalence.FetchOutcome.Succeeded || !scan.Covers(tab.LiveResetMs!.Value)
+                    ? WindowCardState.PlacementPending
+                    : WindowCardState.Idle,
+            null => WindowCardState.Unplaceable,
             { IsPlaced: false } => WindowCardState.Unplaceable,
+            // macOS WindowCardLoader.swift:310: an inferred interval a scan
+            // starting after it cannot vouch for stays at stage 1.
+            { StartMs: { } start } when tab.Inferred && !scan.Covers(start) => WindowCardState.PlacementPending,
             _ => WindowCardState.Chart,
         };
     }
@@ -717,6 +756,8 @@ public static class WindowCardText
             WindowCardState.NoQuotaHistory => "No quota history".Localized(),
             WindowCardState.HistoryFetchFailed => "Quota history could not be read. It will be retried.".Localized(),
             WindowCardState.Idle => "No window running".Localized(),
+            WindowCardState.PlacementPending => "Placing the window".Localized(),
+            WindowCardState.IdleUnattributed => "Window start unknown".Localized(),
             WindowCardState.Unplaceable => "Window unavailable".Localized(),
             _ => ResetsIn(tab!, now),
         };
@@ -743,6 +784,10 @@ public static class WindowCardText
             "Quota history could not be read. It will be retried.".Localized(),
         WindowCardState.Idle =>
             "The last window ended and nothing has been used since — no window is running."
+                .Localized(),
+        WindowCardState.PlacementPending => "Placing the window…".Localized(),
+        WindowCardState.IdleUnattributed =>
+            "The last window ended. Local usage can't be attributed to this account, so the current window's start can't be determined."
                 .Localized(),
         _ => "This subscription did not report a usable reset time, so the window cannot be placed."
             .Localized(),
