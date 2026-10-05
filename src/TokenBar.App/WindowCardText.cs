@@ -569,9 +569,12 @@ public static class WindowCardText
     /// <see cref="WindowCardTab.Inferred"/>; <c>active</c> (reset ahead within
     /// one window length, e.g. a new session the quota payload already shows
     /// before the next history read records it) is placed at
-    /// [reset - duration, reset), as macOS draws it. <paramref name="subscription"/>
+    /// [reset - duration, reset), the interval macOS resolves. <paramref name="subscription"/>
     /// is attribution-scoped only, never model-scoped (macOS <c>isMine</c>).
-    /// The cycle has no samples: the store has recorded none for it.</summary>
+    /// The cycle has no samples: the store has recorded none for it. Unlike
+    /// macOS, no live reading is added (macOS <c>liveReading</c>,
+    /// WindowCardLoader.swift:539-548, appends the payload's used percent to
+    /// every chart), so the headline reads "No quota reading".</summary>
     public static WindowCardTab? Infer(
         WindowCardTab tab, IReadOnlyList<WindowMessage> subscription, long nowMs)
     {

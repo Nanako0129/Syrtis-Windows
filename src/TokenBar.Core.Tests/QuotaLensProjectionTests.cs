@@ -961,8 +961,8 @@ public class QuotaLensProjectionTests
 
     // macOS `.active` (WindowResolution.swift:29-31): the quota payload shows
     // a new session whose reset is ahead, before the next history read
-    // records it, so the store has no running cycle yet. Drawn at
-    // [reset - duration, reset), not "Window unavailable".
+    // records it, so the store has no running cycle yet. Placed at macOS's
+    // interval [reset - duration, reset), not "Window unavailable".
     [Fact]
     public void AFutureLiveResetWithinOneDurationPlacesTheWindowWithoutAStoredCycle()
     {
