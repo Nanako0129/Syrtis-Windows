@@ -347,8 +347,7 @@ public static class QuotaEquivalenceFold
     /// duration past) is skipped, as is any agent with an error. Skipping errored
     /// agents relies on #230: it makes the Windows card show blocked for an
     /// errored agent, as macOS does, so such a card never needs a scan.
-    /// macOS scans
-    /// per client and passes one client; Windows scans once for every client
+    /// macOS scans per client and passes one client; Windows scans once for every client
     /// (and every extra account), so this takes the union over the whole
     /// payload. Null without a payload or any qualifying window.</summary>
     public static long? PayloadStartMs(AgentUsagePayload? payload, long nowMs)

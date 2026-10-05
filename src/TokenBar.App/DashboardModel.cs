@@ -1170,8 +1170,12 @@ public sealed class DashboardModel
             accountsChanged = !ClaudeExtraRoots.AttributableAccountKeys(quota)
                 .SequenceEqual(ClaudeExtraRoots.AttributableAccountKeys(_latestQuota));
             _latestQuota = quota;
-            // The new payload may start earlier than the published scan reached.
-            scanNeeded = QuotaEquivalenceFold.NeedsRescan(
+            // The new payload may start earlier than the published scan
+            // reached. Only while the Quota lens wants window usage: no other
+            // view publishes a scan bound, so the predicate would see null and
+            // re-run that view's lazy lanes on every quota tick. Switching to
+            // the Quota lens already requests a lazy pass (SetActiveView).
+            scanNeeded = _windowUsageWanted && QuotaEquivalenceFold.NeedsRescan(
                 QuotaEquivalenceFold.PayloadStartMs(quota, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
                 Current?.WindowUsageFromMs);
         }
@@ -1186,9 +1190,10 @@ public sealed class DashboardModel
         if (quota is not null)
         {
             Publish(s => s with { Quota = quota, QuotaAttempted = true }, graph: null, StillCurrent);
-            // An extra Claude account appeared or went: its window
-            // scan keys off these cards, so fetch it now rather than
-            // after the next graph publication.
+            // An extra Claude account appeared or went (its window scan
+            // keys off these cards), or the new payload starts before the
+            // published scan bound: fetch now rather than after the next
+            // graph publication.
             if (accountsChanged || scanNeeded)
             {
                 RequestLazyRefresh();
