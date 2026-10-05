@@ -117,8 +117,8 @@ public static class WindowCardText
 
     /// <summary>The line under the window chart: rule 6 for an account whose
     /// usage cannot be attributed, else the live equivalence. Null when there
-    /// is no equivalence row, which a window placed from the live reset (no quota samples)
-    /// always is; the card then draws no line.</summary>
+    /// is no equivalence row (the projection builds none when no chart reading
+    /// lies inside the placed window); the card then draws no line.</summary>
     public static string? LiveLine(bool unattributed, WindowEquivalence.Row? row) =>
         unattributed ? LocalUsageUnattributed()
         : row is { } live ? WindowEquivalenceText.Line(live)
@@ -409,14 +409,26 @@ public static class WindowCardText
                     ? reset.ToUnixTimeMilliseconds()
                     : null;
                 long? liveDurationMs = window.DurationSeconds * 1000;
-                // Placement stays with QuotaHistoryFold.Active; the SAMPLES are
-                // macOS's curveSamples (range of the payload window + live
-                // reading), not the active group.
+                // Placement follows macOS WindowCardLoader.resolution(window:)
+                // (WindowCardLoader.swift:122-129; called at :220-228): reset and
+                // duration come from the payload window, never the store.
+                // The SAMPLES are macOS's curveSamples (range of the payload
+                // window + live reading), and the running cycle is PLACED from
+                // that same payload window (macOS WindowCardLoader.resolution
+                // takes reset/duration from the payload, never the store), so
+                // a lagging history lane cannot leave the samples outside the
+                // placement. The store's Active only decides whether a cycle
+                // exists and is the placement when the payload has no window.
                 var chartSamples = series is null
                     ? null
                     : QuotaHistoryFold.RangeSamples(
                         series.Samples, liveResetMs, liveDurationMs, window.UsedPercent, now);
                 var active = series is null ? null : QuotaHistoryFold.Active(series.Samples);
+                if (active is not null && liveResetMs is { } placeReset && liveDurationMs is > 0 and var placeDuration)
+                {
+                    active = active with { ResetAtMs = placeReset, StartMs = placeReset - placeDuration };
+                }
+
                 tabs.Add(new WindowCardTab(
                     // The store's own WindowKey when a series was found — that is
                     // what BuildWindowHistoryCard joins back against to find this

@@ -953,7 +953,11 @@ public class QuotaLensProjectionTests
     private static QuotaLensProjection.Client InferenceClient(params WindowMessage[] messages) =>
         InferenceClient(-3_600_000, messages);
 
-    private static QuotaLensProjection.Client InferenceClient(long resetOffsetMs, params WindowMessage[] messages)
+    private static QuotaLensProjection.Client InferenceClient(long resetOffsetMs, params WindowMessage[] messages) =>
+        InferenceClient(resetOffsetMs, [Sample(40, 1_500, 2_000, active: false)], messages);
+
+    private static QuotaLensProjection.Client InferenceClient(
+        long resetOffsetMs, QuotaHistorySample[] stored, params WindowMessage[] messages)
     {
         var resetIso = DateTimeOffset.FromUnixTimeMilliseconds(NowMs + resetOffsetMs).UtcDateTime
             .ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
@@ -964,7 +968,7 @@ public class QuotaLensProjectionTests
                 ResetsAt = resetIso,
                 DurationSeconds = FiveHours,
             });
-        var history = new[] { Series("codex", "primary", "session.v1", Sample(40, 1_500, 2_000, active: false)) };
+        var history = new[] { Series("codex", "primary", "session.v1", stored) };
 
         return QuotaLensProjection.Build(
             history, quota, EmptyGraph(), new WindowUsage(messages, 0, 0),
@@ -1004,6 +1008,40 @@ public class QuotaLensProjectionTests
             "Inferred window · resets in",
             WindowCardText.Subtitle(
                 WindowCardState.Chart, client.Selected, DateTimeOffset.FromUnixTimeMilliseconds(NowMs)));
+    }
+
+    // H1: the live reading (10) equals the newest stored sample, so the chart
+    // has no live point, and its only reading predates the inferred window
+    // [first, first + 5 h]. The line must not borrow it (macOS
+    // WindowUsageCard.swift:540-549: strict [start, end], no fallback).
+    [Fact]
+    public void AnInferredWindowWhoseOnlyReadingPredatesItHasNoEquivalenceLine()
+    {
+        var first = NowMs - 1_800_000;
+        var client = InferenceClient(
+            -3_600_000,
+            [Sample(10, (NowMs - 7_200_000) / 1_000, 2_000, active: false)],
+            Message(first, "codex", "openai", 10, 0.1));
+
+        Assert.True(client.Selected!.Inferred);
+        Assert.Equal(first, client.Selected.Active!.StartMs);
+        Assert.Equal([10d], client.Selected.Active.Samples.Select(sample => sample.UsedPercent).ToArray());
+        Assert.Null(client.LiveEquivalence);
+        Assert.Null(WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence));
+    }
+
+    // H1 control: the same shape with a reading inside the window gives a row.
+    [Fact]
+    public void AnInferredWindowWithAReadingInsideItHasAnEquivalenceLine()
+    {
+        var first = NowMs - 1_800_000;
+        var client = InferenceClient(
+            -3_600_000,
+            [Sample(10, (NowMs - 1_200_000) / 1_000, 2_000, active: false)],
+            Message(first, "codex", "openai", 10, 0.1));
+
+        Assert.NotNull(client.LiveEquivalence);
+        Assert.NotNull(WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence));
     }
 
     // macOS `.active` (WindowResolution.swift:29-31): the quota payload shows

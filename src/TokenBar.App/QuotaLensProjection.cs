@@ -558,8 +558,10 @@ public static class QuotaLensProjection
         // condition WindowCardText.State resolves to WindowCardState.Chart
         // for, which is the only state the view draws this line under.
         WindowEquivalence.Row? liveEquivalence = null;
-        // A cycle placed from the live reset has no samples, hence no quota line to compare.
-        if (!unattributed && selected?.Active is { IsPlaced: true, Samples.Count: > 0 } active)
+        // Only readings inside the placed window count (macOS
+        // WindowUsageCard filters to [interval.start, interval.end], no
+        // fallback); a window with none has no quota line to compare.
+        if (!unattributed && selected?.Active is { IsPlaced: true } active)
         {
             // The card and this line must describe the same interval:
             // WindowCardGeometry.Chart already clips its bars and curve to
@@ -571,12 +573,15 @@ public static class QuotaLensProjection
             // could count quota movement and messages from before the
             // window the chart above it actually draws. One clip here feeds
             // both calls, rather than each re-deriving its own bound.
-            var clipped = active.Samples.Where(sample => sample.AtMs >= active.StartMs!.Value).ToList();
-            IReadOnlyList<QuotaSample> clippedSamples = clipped.Count == 0 ? active.Samples : clipped;
-
-            var declared = QuotaEquivalenceFold.DeclaredSpan(
-                clippedSamples[0].AtMs, clippedSamples[^1].AtMs, owner, messages, confirmed.Records);
-            liveEquivalence = WindowCardText.LiveEquivalence(clippedSamples, mine, declared, windowUsageOutcome);
+            var clippedSamples = active.Samples
+                .Where(sample => sample.AtMs >= active.StartMs!.Value && sample.AtMs <= active.ResetAtMs!.Value)
+                .ToList();
+            if (clippedSamples.Count > 0)
+            {
+                var declared = QuotaEquivalenceFold.DeclaredSpan(
+                    clippedSamples[0].AtMs, clippedSamples[^1].AtMs, owner, messages, confirmed.Records);
+                liveEquivalence = WindowCardText.LiveEquivalence(clippedSamples, mine, declared, windowUsageOutcome);
+            }
         }
 
         var windowHistory = BuildHistory(

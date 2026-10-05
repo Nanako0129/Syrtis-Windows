@@ -168,7 +168,7 @@ public class WindowCardTextTests
         var tab = Assert.Single(tabs);
         Assert.True(tab.HasHistory);
         Assert.NotNull(tab.Active);
-        Assert.Contains(tab.Active!.Samples, s => s.UsedPercent == 40);
+        Assert.Equal([40d, 10d], tab.Active!.Samples.Select(s => s.UsedPercent).ToArray());
         // Both cards this feeds must see real data, not the false "nothing
         // recorded" claim `selected is null` used to produce upstream.
         Assert.Equal(
@@ -213,7 +213,7 @@ public class WindowCardTextTests
         var tab = Assert.Single(tabs);
         Assert.True(tab.HasHistory);
         Assert.NotNull(tab.Active);
-        Assert.Contains(tab.Active!.Samples, s => s.UsedPercent == 40);
+        Assert.Equal([40d, 10d], tab.Active!.Samples.Select(s => s.UsedPercent).ToArray());
         Assert.Equal(
             WindowCardState.Chart,
             WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded, Now));
@@ -300,7 +300,7 @@ public class WindowCardTextTests
         // pinning that the RIGHT series' data reached the tab, not just that
         // the right scope string was recorded on the identity.
         Assert.NotNull(tab.Active);
-        Assert.Contains(tab.Active!.Samples, s => s.UsedPercent == 40);
+        Assert.Equal([40d, 10d], tab.Active!.Samples.Select(s => s.UsedPercent).ToArray());
     }
 
     // The mirror case: when the live scope cannot be resolved at all (an
@@ -350,7 +350,7 @@ public class WindowCardTextTests
         var tab = Assert.Single(tabs);
         Assert.Equal("history-scope", tab.Id.AccountScope);
         Assert.NotNull(tab.Active);
-        Assert.Contains(tab.Active!.Samples, s => s.UsedPercent == 40);
+        Assert.Equal([40d, 10d], tab.Active!.Samples.Select(s => s.UsedPercent).ToArray());
     }
 
     // A payload from a producer that predates `historyScope` still carries
@@ -379,7 +379,7 @@ public class WindowCardTextTests
 
         var tab = Assert.Single(tabs);
         Assert.Equal("account-a", tab.Id.AccountScope);
-        Assert.Contains(tab.Active!.Samples, s => s.UsedPercent == 40);
+        Assert.Equal([40d, 10d], tab.Active!.Samples.Select(s => s.UsedPercent).ToArray());
     }
 
     // Round 19's finding: the store-only fallback (no live windows to
@@ -404,8 +404,8 @@ public class WindowCardTextTests
         Assert.Equal(
             new[] { "account-a", "account-b" }.OrderBy(s => s),
             tabs.Select(tab => tab.Id.AccountScope).OrderBy(s => s));
-        Assert.Contains(tabs, tab => tab.Id.AccountScope == "account-a" && tab.Active!.Samples.Any(s => s.UsedPercent == 40));
-        Assert.Contains(tabs, tab => tab.Id.AccountScope == "account-b" && tab.Active!.Samples.Any(s => s.UsedPercent == 90));
+        Assert.Contains(tabs, tab => tab.Id.AccountScope == "account-a" && tab.Active!.Samples.Select(s => s.UsedPercent).SequenceEqual([40d, 10d]));
+        Assert.Contains(tabs, tab => tab.Id.AccountScope == "account-b" && tab.Active!.Samples.Select(s => s.UsedPercent).SequenceEqual([90d, 10d]));
     }
 
     // The window key is the store's own, and ProviderId is already a registered
@@ -618,8 +618,9 @@ public class WindowCardTextTests
     // LearningDuration shape); the live window carries the given reset and
     // duration. `resetS` is unix seconds.
     // ChartSamples is cleared: these tests pin State's no-running-cycle
-    // resolution, and the empty-samples -> NoQuotaHistory rule that would
-    // pre-empt it for a missing reset is covered by its own tests below.
+    // resolution (Q34's branch) in isolation. The rule that a payload window
+    // without reset or duration yields no chart samples (-> NoQuotaHistory) is
+    // pinned through Tabs by APayloadWindowWithout* below, not by these.
     private static WindowCardTab LiveTab(long? resetS, long? durationSeconds) =>
         WindowCardText.Tabs(
             [Series("claude", "session.v1", Sample(40, ResetAt - 600, active: false))],
@@ -765,17 +766,137 @@ public class WindowCardTextTests
     }
 
     [Fact]
-    public void TheInferredCycleCarriesTheRangeAndLiveSamples()
+    public void AnInferredFutureResetCycleIsActiveAndCarriesTheRangeAndLiveSamples()
     {
-        // No active-group sample, so the cycle is synthesised from the live reset.
+        // No active-group sample, so the cycle is synthesised from the live
+        // reset, which is in the future: Resolve gives Active, not Inferred.
         var tab = RangeTab(55, Sample(30, ResetAt - 3_000, active: false));
         Assert.Null(tab.Active);
 
         var inferred = WindowCardText.Infer(tab, [], RangeNowMs);
 
         Assert.NotNull(inferred);
-        Assert.Equal([30d, 55d], inferred!.Active!.Samples.Select(sample => sample.UsedPercent).ToArray());
+        Assert.False(inferred!.Inferred);
+        Assert.Equal([30d, 55d], inferred.Active!.Samples.Select(sample => sample.UsedPercent).ToArray());
         Assert.Equal(tab.ChartSamples, inferred.Active.Samples);
+    }
+
+    [Fact]
+    public void AnInferredPastResetCycleCarriesTheRangeAndLiveSamples()
+    {
+        // Reset passed 500 s ago, own usage since: Resolve gives Inferred.
+        var nowMs = (ResetAt + 500) * 1_000;
+        var tab = WindowCardText.Tabs(
+            [Series("claude", "session.v1", Sample(30, ResetAt - 3_000, active: false))],
+            Quota("claude", Window("claude|session.v1", "Session", "session.v1") with { UsedPercent = 55 }),
+            "claude",
+            nowMs: nowMs)[0];
+        var first = (ResetAt + 100) * 1_000;
+        WindowMessage[] subscription = [Message("claude", "anthropic", "m", first)];
+
+        var inferred = WindowCardText.Infer(tab, subscription, nowMs);
+
+        Assert.True(inferred!.Inferred);
+        Assert.Equal(first, inferred.Active!.StartMs);
+        Assert.Equal([30d, 55d], inferred.Active.Samples.Select(sample => sample.UsedPercent).ToArray());
+    }
+
+    // ---- placement follows the payload window (Q37 / M1) ------------------
+    //
+    // macOS places by WindowCardLoader.resolution(window:) (:122-129, called at
+    // :220-228): reset/duration from the payload, never the store.
+
+    private static WindowCardTab PlacedTab(long payloadResetS, long nowS, double used, params QuotaHistorySample[] stored) =>
+        WindowCardText.Tabs(
+            [Series("claude", "session.v1", stored)],
+            Quota("claude", Window("claude|session.v1", "Session", "session.v1") with
+            {
+                UsedPercent = used,
+                ResetsAt = DateTimeOffset.FromUnixTimeSeconds(payloadResetS).UtcDateTime
+                    .ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+            }),
+            "claude",
+            nowMs: nowS * 1_000)[0];
+
+    // Q37: the stored active group is the OLD cycle (reset ResetAt); the
+    // payload already rolled to a new one. Placement and samples share the
+    // payload window. On 272cc46 Active stayed [ResetAt-5h, ResetAt] and the
+    // live point (after it) was clipped: Chart, empty curve, "Resets in 0s".
+    [Fact]
+    public void Q37_ALaggingStoreIsPlacedAtThePayloadWindowWithTheLivePointInside()
+    {
+        var newReset = ResetAt + 3 * 3_600;
+        var nowS = ResetAt + 3_600;
+        var tab = PlacedTab(newReset, nowS, 25, Sample(40, ResetAt - 3 * 3_600));
+
+        Assert.Equal(newReset * 1_000, tab.Active!.ResetAtMs);
+        Assert.Equal((newReset - FiveHours) * 1_000, tab.Active.StartMs);
+        Assert.Equal([25d], Used(tab));
+        Assert.All(tab.Active.Samples, sample =>
+            Assert.InRange(sample.AtMs, tab.Active.StartMs!.Value, tab.Active.ResetAtMs!.Value));
+        // Regression shape: not a Chart over an empty curve that already ended.
+        Assert.Equal(
+            WindowCardState.Chart, WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded, Now));
+        Assert.True(tab.Active.ResetAtMs > nowS * 1_000);
+        Assert.NotEmpty(tab.Active.Samples);
+    }
+
+    // Q37 control: payload window equal to the stored one changes nothing.
+    [Fact]
+    public void Q37_APayloadWindowEqualToTheStoredOneKeepsPlacementAndSamples()
+    {
+        var tab = PlacedTab(ResetAt, ResetAt - 1_000, 55, Sample(40, ResetAt - 3_000));
+
+        Assert.Equal(ResetAt * 1_000, tab.Active!.ResetAtMs);
+        Assert.Equal((ResetAt - FiveHours) * 1_000, tab.Active.StartMs);
+        Assert.Equal([40d, 55d], Used(tab));
+    }
+
+    // A fixed-window provider quantizes the stored reset; the payload's raw
+    // reset is the placement, as macOS.
+    [Fact]
+    public void Q37_ThePayloadsRawResetWinsOverTheStoredQuantizedOne()
+    {
+        var tab = PlacedTab(ResetAt + 40, ResetAt - 1_000, 55, Sample(40, ResetAt - 3_000));
+
+        Assert.Equal((ResetAt + 40) * 1_000, tab.Active!.ResetAtMs);
+    }
+
+    // Macos curveSamples guard (-> noQuotaHistory): a payload window lacking a
+    // reset or a duration gives no chart samples even with a stored series.
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void APayloadWindowWithoutResetOrDurationIsNoQuotaHistory(bool noReset, bool noDuration)
+    {
+        var window = Window("claude|session.v1", "Session", "session.v1") with
+        {
+            ResetsAt = noReset ? null : Window("c", "S", null).ResetsAt,
+            DurationSeconds = noDuration ? null : FiveHours,
+        };
+        var tab = WindowCardText.Tabs(
+            [Series("claude", "session.v1", Sample(40, ResetAt - 3_000))],
+            Quota("claude", window), "claude", nowMs: RangeNowMs)[0];
+
+        Assert.Empty(tab.ChartSamples!);
+        Assert.Equal(
+            WindowCardState.NoQuotaHistory,
+            WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded, Now));
+    }
+
+    [Fact]
+    public void AStoredSeriesWithZeroSamplesIsNoQuotaHistory()
+    {
+        var tab = WindowCardText.Tabs(
+            [Series("claude", "session.v1")],
+            Quota("claude", Window("claude|session.v1", "Session", "session.v1")),
+            "claude", nowMs: RangeNowMs)[0];
+
+        Assert.True(tab.HasHistory);
+        Assert.Empty(tab.ChartSamples!);
+        Assert.Equal(
+            WindowCardState.NoQuotaHistory,
+            WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded, Now));
     }
 
     [Fact]

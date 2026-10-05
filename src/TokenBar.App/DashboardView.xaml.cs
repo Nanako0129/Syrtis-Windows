@@ -2157,7 +2157,7 @@ public sealed partial class DashboardView : UserControl
                 var window = windows[i];
                 var row = UsagePace.RowPresentation(
                     window, paceMode, asUsed, classic, now);
-                var samples = i < tabs.Count ? tabs[i].Active?.Samples : null;
+                var samples = i < tabs.Count ? (tabs[i].ChartSamples ?? tabs[i].Active?.Samples) : null;
                 var trend = AgentLimitsText.Trend(window, samples, now.ToUnixTimeMilliseconds());
                 section.Children.Add(QuotaRow(
                     window, row, classic, metric,
