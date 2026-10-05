@@ -619,11 +619,15 @@ public sealed class DashboardModel
         if (windowUsage)
         {
             var forBound = history ?? Current?.QuotaHistory ?? [];
-            if (forBound.Count == 0)
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            // The store's bound or the payload windows' start, whichever is
+            // earlier (a new client has no stored cycle yet).
+            var fromMs = QuotaEquivalenceFold.ScanFromMs(forBound, now, Current?.Quota ?? _latestQuota);
+            if (fromMs >= now)
             {
                 usage = new Interop.WindowUsage([], 0, 0);
                 // Nothing scanned: must not read as covering.
-                scanFromMs = QuotaEquivalenceFold.ScanFromMs(forBound, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                scanFromMs = now;
             }
             else
             {
@@ -631,8 +635,6 @@ public sealed class DashboardModel
                 // like the quota-history read above — the same reason the
                 // hourly/agents fetch above it boosts.
                 using var boost = ProcessPower.Boost();
-                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                var fromMs = QuotaEquivalenceFold.ScanFromMs(forBound, now);
                 scanFromMs = fromMs;
                 accountFromMs = fromMs;
                 usage = TryFetch(() => TbCore.WindowUsage(fromMs, now), "windowUsage");
