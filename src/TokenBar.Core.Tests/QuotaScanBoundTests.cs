@@ -86,13 +86,48 @@ public class QuotaScanBoundTests
         var before = CardFor(oldBound);
         Assert.Empty(before.Mine);
         Assert.False(before.Scan!.Value.Covers(reset));
+        var nowAt = DateTimeOffset.FromUnixTimeMilliseconds(Now);
+        Assert.Equal(WindowCardState.PlacementPending,
+            WindowCardText.State(before.Selected, WindowEquivalence.FetchOutcome.Succeeded, nowAt, before.Scan));
 
         var bound = QuotaEquivalenceFold.ScanFromMs(history, Now, payload);
         Assert.Equal(reset - FiveHours * 1000, bound);
         var after = CardFor(bound);
         Assert.Single(after.Mine);
         Assert.True(after.Scan!.Value.Covers(reset));
+        Assert.Equal(WindowCardState.Chart,
+            WindowCardText.State(after.Selected, WindowEquivalence.FetchOutcome.Succeeded, nowAt, after.Scan));
     }
+
+    // Pins PayloadStartMs's inlined Unavailable test to WindowCardText.Resolve.
+    [Theory]
+    [InlineData(5 * 3_600_000L)]
+    [InlineData(1_000L)]
+    [InlineData(0L)]
+    [InlineData(-1_000L)]
+    public void PayloadStartAgreesWithResolveAtTheBoundaries(long durationMs)
+    {
+        foreach (var offset in new long[] { -durationMs - 1000, -durationMs, -durationMs + 1000, -1000, 0, 1000,
+                     durationMs - 1000, durationMs, durationMs + 1000 })
+        {
+            var reset = Now + offset;
+            var payload = Payload(Agent("codex", null, null, Window("w", reset, durationMs / 1000)));
+            var resolved = WindowCardText.Resolve(reset / 1000 * 1000, durationMs, Now, null);
+            Assert.True(
+                (QuotaEquivalenceFold.PayloadStartMs(payload, Now) is not null)
+                    == (resolved.Kind != WindowCardText.WindowResolutionKind.Unavailable),
+                $"duration {durationMs} offset {offset}: {resolved.Kind}");
+        }
+    }
+
+    [Theory]
+    [InlineData(null, null, false)]
+    [InlineData(100L, null, true)]
+    [InlineData(100L, 200L, true)]
+    [InlineData(200L, 200L, false)]
+    [InlineData(300L, 200L, false)]
+    public void NeedsRescanOnlyWhenThePayloadReachesBackPastThePublishedBound(long? start, long? from, bool expected) =>
+        Assert.Equal(expected, QuotaEquivalenceFold.NeedsRescan(start, from));
 
     [Theory]
     [InlineData(-6)] // reset more than one duration past

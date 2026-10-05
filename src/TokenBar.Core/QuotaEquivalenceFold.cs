@@ -320,9 +320,11 @@ public static class QuotaEquivalenceFold
     /// payload windows' start (<see cref="PayloadStartMs"/>). With neither — no
     /// history and no placeable payload window, so nothing is scanned — it is
     /// <paramref name="nowMs"/>, which covers no past window. A payload start is
-    /// always before now (an active window starts one duration before a reset
-    /// within one duration; a past one starts before its reset), so a from at or
-    /// past now means "nothing to scan", never a range to scan.</summary>
+    /// at or before now (an active window starts one duration before a reset
+    /// within one duration, equal to now only when reset - now == duration; a
+    /// past one starts before its reset, equal to now only when the duration is
+    /// 0 and reset == now), so a from at or past now means "nothing to scan",
+    /// never a range to scan.</summary>
     public static long ScanFromMs(
         IReadOnlyList<QuotaHistorySeries> history, long nowMs, AgentUsagePayload? payload = null)
     {
@@ -330,13 +332,22 @@ public static class QuotaEquivalenceFold
         return PayloadStartMs(payload, nowMs) is { } start ? Math.Min(store, start) : store;
     }
 
+    /// <summary>Whether a new payload's start reaches back past the bound the
+    /// published window usage was scanned from (or none was published yet), so
+    /// the scan must be redone.</summary>
+    public static bool NeedsRescan(long? payloadStart, long? publishedFrom) =>
+        payloadStart is { } start && (publishedFrom is not { } from || start < from);
+
     /// <summary>Port of macOS <c>WindowCardLoader.unionStart</c>
     /// (WindowCardLoader.swift:237-269): the minimum of <c>reset - duration</c>
     /// over each unique card window carrying both a reset and a duration, so a
     /// client with no stored cycle (new, or its first window) is scanned from
     /// its window start. A window <c>WindowResolver.resolve</c> calls
     /// unavailable (reset more than one duration ahead, or more than one
-    /// duration past) is skipped, as is any agent with an error. macOS scans
+    /// duration past) is skipped, as is any agent with an error. Skipping errored
+    /// agents relies on #230: it makes the Windows card show blocked for an
+    /// errored agent, as macOS does, so such a card never needs a scan.
+    /// macOS scans
     /// per client and passes one client; Windows scans once for every client
     /// (and every extra account), so this takes the union over the whole
     /// payload. Null without a payload or any qualifying window.</summary>

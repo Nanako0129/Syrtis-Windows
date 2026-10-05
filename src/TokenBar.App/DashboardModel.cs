@@ -622,7 +622,7 @@ public sealed class DashboardModel
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             // The store's bound or the payload windows' start, whichever is
             // earlier (a new client has no stored cycle yet).
-            var fromMs = QuotaEquivalenceFold.ScanFromMs(forBound, now, Current?.Quota ?? _latestQuota);
+            var fromMs = QuotaEquivalenceFold.ScanFromMs(forBound, now, _latestQuota ?? Current?.Quota);
             if (fromMs >= now)
             {
                 usage = new Interop.WindowUsage([], 0, 0);
@@ -1163,12 +1163,17 @@ public sealed class DashboardModel
         var epoch = QuotaEpoch.Current;
         bool StillCurrent() => QuotaEpoch.Current == epoch;
         var accountsChanged = false;
+        var scanNeeded = false;
         var failures = 0;
         if (quota is not null)
         {
             accountsChanged = !ClaudeExtraRoots.AttributableAccountKeys(quota)
                 .SequenceEqual(ClaudeExtraRoots.AttributableAccountKeys(_latestQuota));
             _latestQuota = quota;
+            // The new payload may start earlier than the published scan reached.
+            scanNeeded = QuotaEquivalenceFold.NeedsRescan(
+                QuotaEquivalenceFold.PayloadStartMs(quota, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
+                Current?.WindowUsageFromMs);
         }
         else
         {
@@ -1184,7 +1189,7 @@ public sealed class DashboardModel
             // An extra Claude account appeared or went: its window
             // scan keys off these cards, so fetch it now rather than
             // after the next graph publication.
-            if (accountsChanged)
+            if (accountsChanged || scanNeeded)
             {
                 RequestLazyRefresh();
             }
