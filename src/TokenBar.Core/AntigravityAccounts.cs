@@ -238,12 +238,13 @@ public static class AntigravityFetch
 /// One card for agy's current account (macOS <c>AntigravityDedup</c>). Once
 /// agy's current account is known, it is also a captured account and would be
 /// drawn twice. This drops the captured card and labels the primary with its
-/// email ONLY when all hold: <c>currentKey</c> set; its marker set and not
+/// email (captured ?? primary) and plan (primary ?? captured) ONLY when all hold: <c>currentKey</c> set; its marker set and not
 /// <c>"present"</c>; the primary Antigravity snapshot (no account key) came
 /// from the agy route, was fetched under that same marker and has no error; a
 /// captured snapshot carries that key. Otherwise both are shown.
 /// <para>
-/// The primary keeps its own windows and values. When the captured snapshot
+/// The primary keeps its own windows and values, and takes the captured
+/// plan when it has none. When the captured snapshot
 /// has no error and has windows, the merged primary adopts its pace status,
 /// historical pace and duration per matching card id and records it as
 /// <see cref="AgentUsageSnapshot.HistoryAccountKey"/>, so every stored-series
@@ -284,9 +285,14 @@ public static class AntigravityDedup
 
         var captured = agents[capturedIndex];
         var merged = primary;
-        if (captured.Identity?.Email is { } email)
+        // Email and plan are chosen independently. The agy route carries no
+        // plan; the captured snapshot is the same account (marker-bound
+        // above), so its plan labels the primary too, with or without an email.
+        var email = captured.Identity?.Email ?? primary.Identity?.Email;
+        var plan = primary.Identity?.Plan ?? captured.Identity?.Plan;
+        if (email is not null || plan is not null)
         {
-            merged = merged with { Identity = new AgentIdentity(email, primary.Identity?.Plan) };
+            merged = merged with { Identity = new AgentIdentity(email, plan) };
         }
 
         agents[primaryIndex] = AdoptingHistory(merged, captured);
