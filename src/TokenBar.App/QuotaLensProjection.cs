@@ -222,9 +222,12 @@ public static class QuotaLensProjection
         string? year,
         Selection selection,
         IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage = null,
+        bool quotaHistoryReadFailed = false,
         DateTimeOffset? now = null)
     {
-        var overview = BuildOverview(history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed, selection);
+        var overview = BuildOverview(
+            history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed, selection,
+            quotaHistoryReadFailed);
         var (trend, pastYearSelected) = BuildTrend(graph, confirmed, year);
         var client = selection.ActiveClientTab == ClientRegistry.OverviewTab
             ? null
@@ -242,7 +245,8 @@ public static class QuotaLensProjection
         WindowEquivalence.FetchOutcome windowUsageOutcome,
         WindowEquivalence.FetchOutcome quotaHistoryOutcome,
         UsageAttribution.Table confirmed,
-        Selection selection)
+        Selection selection,
+        bool quotaHistoryReadFailed)
     {
         var (summaries, windows, grids) = QuotaLensData.Build(history, quota);
         // Absent (not merely empty) unless the fetch actually SUCCEEDED — not
@@ -261,7 +265,7 @@ public static class QuotaLensProjection
             : new Dictionary<QuotaWindowIdentity, WindowEquivalence.Row>();
         return new Overview(
             summaries, windows, grids, quotaHistoryOutcome, equivalences,
-            UnreadableClients(quota, quotaHistoryOutcome, selection));
+            UnreadableClients(quota, quotaHistoryReadFailed, summaries, selection));
     }
 
     /// <summary>The clients whose strip/heatmap must say "could not be read"
@@ -275,16 +279,25 @@ public static class QuotaLensProjection
     /// none without a window key, and none for an account-scope-unavailable
     /// window, the <c>agy</c> CLI route or a Grok Bot token with no subject,
     /// which is never recorded and so never "could not be read").
-    /// <para>Windows reads quota history in one call and has no per-window
-    /// failure signal, so partial unreadability ("A failed, B read") cannot
-    /// arise here. The faithful analog: when the whole read FAILED (nothing
-    /// retained, so nothing is drawn) every visible agent with at least one
-    /// card window that has a history key is unreadable; otherwise none
-    /// is.</para></summary>
+    /// <para>macOS decides per window on EVERY publication from the latest
+    /// read (:1670-1712, a throw puts the window in failedWindowIds), and
+    /// "drawn" is read from the summaries as they now stand, which keep a
+    /// previously drawn window over a failed pass (:1788-1796, :1845).
+    /// Windows reads quota history in one call, so the analog is:
+    /// <paramref name="latestReadFailed"/> (the latest read threw — NOT
+    /// <c>outcome == Failed</c>, which holds only when nothing is retained and
+    /// misses an earlier empty read retained under a later throw) makes every
+    /// visible agent with at least one history-key card window that has no
+    /// summary in <paramref name="summaries"/> unreadable. A summary matches
+    /// a window by the identity <see cref="QuotaLensData"/> builds them with
+    /// (client, account scope, window key); an agent with no history scope
+    /// matches at client + window key. When the latest read did not fail,
+    /// none.</para></summary>
     internal static IReadOnlySet<string> UnreadableClients(
-        AgentUsagePayload? quota, WindowEquivalence.FetchOutcome quotaHistoryOutcome, Selection selection)
+        AgentUsagePayload? quota, bool latestReadFailed,
+        IReadOnlyList<QuotaWindowSummary> summaries, Selection selection)
     {
-        if (quotaHistoryOutcome != WindowEquivalence.FetchOutcome.Failed)
+        if (!latestReadFailed)
         {
             return new HashSet<string>();
         }
@@ -295,10 +308,15 @@ public static class QuotaLensProjection
         return (quota?.Agents ?? [])
             .Where(a => cardClients.Contains(a.ClientId)
                 && (a.AccountKey is not null || !limitsHidden.Contains(a.ClientId))
-                && a.UniqueCardWindows.Any(HasHistoryKey))
+                && a.UniqueCardWindows.Any(w => HasHistoryKey(w) && !Drawn(a, w, summaries)))
             .Select(a => a.ClientId)
             .ToHashSet();
     }
+
+    private static bool Drawn(AgentUsageSnapshot agent, UsageWindow window, IReadOnlyList<QuotaWindowSummary> summaries) =>
+        summaries.Any(s => s.Id.ProviderId == agent.ClientId
+            && s.Id.WindowKey == window.PaceStatus.WindowKey
+            && (agent.HistoryReadScope?.Scope is not { } scope || s.Id.AccountScope == scope));
 
     // macOS PaceStatus.historyKey (TokenBarCore/AgentUsage.swift:148-150).
     private static bool HasHistoryKey(UsageWindow window) =>
