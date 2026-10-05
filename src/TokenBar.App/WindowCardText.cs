@@ -633,7 +633,11 @@ public static class WindowCardText
     public static WindowCardTab? Infer(
         WindowCardTab tab, IReadOnlyList<WindowMessage> subscription, long nowMs)
     {
-        if (tab.Active is not null || !tab.HasHistory || tab.LiveResetMs is not { } reset)
+        // ChartSamples is null only on the store-fallback path: with no payload
+        // there is no live reset to infer from, and the ended stored reset a
+        // fallback tab carries must stay Idle/Unplaceable, not become an empty chart.
+        if (tab.Active is not null || !tab.HasHistory || tab.ChartSamples is null
+            || tab.LiveResetMs is not { } reset)
         {
             return null;
         }

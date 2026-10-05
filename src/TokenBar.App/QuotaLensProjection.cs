@@ -537,11 +537,14 @@ public static class QuotaLensProjection
         var tabs = WindowCardText.Tabs(
             history, quota, owner, account, now.ToUnixTimeMilliseconds(), selection.PrimaryScope).ToList();
         var blocked = WindowCardText.Blocked(quota, owner, account, quotaAttempted, tabs);
-        if (blocked is not null)
-        {
-            tabs = [];
-        }
-
+        // A blocked card clears only what the Session card draws (tabs, selected
+        // tab, pills, live line, scope note) in the Client it returns. The
+        // history card still reads the selection made from these tabs without
+        // looking at the error, as macOS pickForHistory does
+        // (WindowCardLoader.swift:88-98): cycles on disk are not unwritten by a
+        // rate limit. Where macOS's pickForHistory has nothing (agent absent
+        // from the report, or no windows) Tabs is empty here too, so the
+        // history card shows no rows, as on macOS.
         var selected = tabs.FirstOrDefault(tab => WindowId(tab.Id) == windowCardTab)
             ?? DefaultTab(tabs);
         IReadOnlyList<WindowMessage> messages = unattributed ? [] : windowUsage?.Messages ?? [];
@@ -558,7 +561,8 @@ public static class QuotaLensProjection
         // one and this subscription (attribution only, no model scope) has
         // used it since. Done before everything below so the scope note and
         // the live line follow the placed window.
-        if (selected is not null
+        if (blocked is null
+            && selected is not null
             && WindowCardText.Infer(selected, subscription, now.ToUnixTimeMilliseconds()) is { } inferred)
         {
             tabs[tabs.IndexOf(selected)] = inferred;
@@ -576,7 +580,8 @@ public static class QuotaLensProjection
         // and the note is a claim about this subscription's usage. Never for
         // an unattributed account: it reads no messages, so "nothing matched"
         // would be a claim about usage it cannot see.
-        if (!unattributed
+        if (blocked is null
+            && !unattributed
             && modelScope is not null
             && windowUsageOutcome == WindowEquivalence.FetchOutcome.Succeeded
             && selected?.Active is { IsPlaced: true } placed)
@@ -596,7 +601,7 @@ public static class QuotaLensProjection
         // WindowUsageCard filters to [interval.start, interval.end], no
         // fallback); a window with none still gets the row, as Unavailable
         // ("Not enough quota readings yet"), never a carried-over ratio.
-        if (!unattributed && selected?.Active is { IsPlaced: true } active)
+        if (blocked is null && !unattributed && selected?.Active is { IsPlaced: true } active)
         {
             // The card and this line must describe the same interval:
             // WindowCardGeometry.Chart already clips its bars and curve to
@@ -627,7 +632,8 @@ public static class QuotaLensProjection
         var windowHistory = BuildHistory(
             history, selected, messages, confirmed, owner, windowUsageOutcome, selection, modelScope);
         return new Client(
-            owner, tabs, selected, messages, mine, liveEquivalence,
+            owner, blocked is null ? tabs : [], blocked is null ? selected : null,
+            messages, mine, liveEquivalence,
             unattributed ? 0 : windowUsage?.UndatedCount ?? 0, windowHistory, quotaHistoryOutcome,
             blocked is null ? WindowCardText.AccountPills(quota, owner) : [], account, unattributed,
             WindowCardText.HeaderAccountLabel(quota, owner, account),

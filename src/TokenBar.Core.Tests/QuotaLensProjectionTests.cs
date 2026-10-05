@@ -1040,6 +1040,52 @@ public class QuotaLensProjectionTests
             client.Selected, WindowEquivalence.FetchOutcome.Succeeded,
             DateTimeOffset.FromUnixTimeMilliseconds(NowMs), client.Scan);
 
+    // Q39 review P1: a blocked Session card must not take the history card
+    // with it (macOS pickForHistory ignores the error, WindowCardLoader.swift:88-98).
+    [Fact]
+    public void AnErroredAgentBlocksTheSessionCardButTheHistoryCardKeepsItsRows()
+    {
+        var quota = new AgentUsagePayload(
+            "2026-01-01T00:00:00Z",
+            [new AgentUsageSnapshot("codex", "source", "2026-01-01T00:00:00Z",
+                [Window("codex|weekly.v1", "Weekly", "weekly.v1")],
+                Error: "Rate limited; showing the last known values.")]);
+
+        var client = QuotaLensProjection.Build(
+            [TwoCycleSeries("codex", "primary", "weekly.v1")], quota, EmptyGraph(), windowUsage: null,
+            WindowEquivalence.FetchOutcome.NotAttempted, WindowEquivalence.FetchOutcome.Succeeded,
+            UsageAttribution.Table.Empty, year: null,
+            new QuotaLensProjection.Selection("codex", string.Empty)).Client!;
+
+        Assert.Equal("Rate limited; showing the last known values.", client.BlockedReason);
+        Assert.Empty(client.Tabs);
+        Assert.Null(client.Selected);
+        Assert.NotEmpty(client.History.Cycles);
+        Assert.NotEmpty(client.History.DisplayRows);
+    }
+
+    // Q39 review P2: an ended stored cycle with own usage after its reset must
+    // not be inferred into an empty chart on the store-fallback path.
+    [Fact]
+    public void AnEndedFallbackCycleWithLocalUsageAfterItsResetIsNotAChart()
+    {
+        var nowS = NowMs / 1_000;
+        var resetS = nowS - 3_600;
+        var client = QuotaLensProjection.Build(
+            [Series("codex", "primary", "session.v1",
+                Sample(10, resetS - 600, resetS, duration: FiveHours))],
+            quota: null, EmptyGraph(),
+            new WindowUsage([Message((resetS + 600) * 1_000, "codex", "openai", 10, 0.1)], 0, 0),
+            WindowEquivalence.FetchOutcome.Succeeded, WindowEquivalence.FetchOutcome.Succeeded,
+            Confirmed(new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex"))),
+            year: null, new QuotaLensProjection.Selection("codex", string.Empty),
+            quotaAttempted: false, now: DateTimeOffset.FromUnixTimeMilliseconds(NowMs)).Client!;
+
+        Assert.Null(client.BlockedReason);
+        Assert.NotEqual(WindowCardState.Chart, CardState(client));
+        Assert.Null(client.Selected!.Active);
+    }
+
     // ---- placement pending (macOS placementPending + scan.covers) ----------
     private const long ResetMs = NowMs - 3_600_000;
 
