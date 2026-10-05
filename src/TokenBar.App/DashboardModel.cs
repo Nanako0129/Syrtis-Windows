@@ -462,12 +462,17 @@ public sealed class DashboardModel
         public bool WindowUsageAttempted { get; init; }
 
         /// <summary>Start of the bound the retained <see cref="WindowUsage"/>
-        /// (and <see cref="AccountWindowUsage"/>) was scanned from; null when
-        /// that read had no bound (no history to bound it by, so nothing to
-        /// cover). A window starting before this is not answered by the scan
-        /// (macOS <c>scan.covers(start:)</c>); travels with the data it
-        /// describes, so a failed refetch keeps the pair.</summary>
+        /// was scanned from. With no history to bound a fetch by, nothing is
+        /// scanned and this is "now", which covers no past window. A window
+        /// starting before this is not answered by the scan (macOS
+        /// <c>scan.covers(start:)</c>); travels with the data it describes, so
+        /// a failed refetch keeps the pair.</summary>
         public long? WindowUsageFromMs { get; init; }
+
+        /// <summary>The same bound for <see cref="AccountWindowUsage"/>, which
+        /// is replaced on its own schedule (the main read can fail while the
+        /// account scans succeed), so it carries its own.</summary>
+        public long? AccountWindowUsageFromMs { get; init; }
 
         /// <summary>
         /// The two facts <see cref="WindowUsageAttempted"/> and
@@ -609,12 +614,15 @@ public sealed class DashboardModel
         Interop.WindowUsage? usage = null;
         IReadOnlyDictionary<string, Interop.WindowUsage>? accountUsage = null;
         long? scanFromMs = null;
+        long? accountFromMs = null;
         if (windowUsage)
         {
             var forBound = history ?? Current?.QuotaHistory ?? [];
             if (forBound.Count == 0)
             {
                 usage = new Interop.WindowUsage([], 0, 0);
+                // Nothing scanned: must not read as covering.
+                scanFromMs = QuotaEquivalenceFold.ScanFromMs(forBound, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             }
             else
             {
@@ -623,8 +631,9 @@ public sealed class DashboardModel
                 // hourly/agents fetch above it boosts.
                 using var boost = ProcessPower.Boost();
                 var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                var fromMs = QuotaEquivalenceFold.BoundFromMs(forBound, now);
+                var fromMs = QuotaEquivalenceFold.ScanFromMs(forBound, now);
                 scanFromMs = fromMs;
+                accountFromMs = fromMs;
                 usage = TryFetch(() => TbCore.WindowUsage(fromMs, now), "windowUsage");
                 accountUsage = FetchAccountWindows(fromMs, now, Current?.AccountWindowUsage);
             }
@@ -669,6 +678,12 @@ public sealed class DashboardModel
                 WindowUsage = usage ?? s.WindowUsage,
                 WindowUsageFromMs = usage is null ? s.WindowUsageFromMs : scanFromMs,
                 AccountWindowUsage = accountUsage ?? s.AccountWindowUsage,
+                // A key whose rescan failed keeps its prior rows (older bound), so
+                // the shared bound is the later of the two: never over-claims.
+                AccountWindowUsageFromMs = accountUsage is null
+                    ? s.AccountWindowUsageFromMs
+                    : s.AccountWindowUsageFromMs is { } prior && accountFromMs is { } fresh
+                        ? Math.Max(prior, fresh) : accountFromMs,
                 WindowUsageAttempted = windowUsage || s.WindowUsageAttempted,
             };
         }, graph: null, stillValid: () => SelectionStillValid(year, generation));

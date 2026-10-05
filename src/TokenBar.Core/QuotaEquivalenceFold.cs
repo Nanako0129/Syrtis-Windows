@@ -315,6 +315,13 @@ public static class QuotaEquivalenceFold
         return false;
     }
 
+    /// <summary>The bound a window-usage pass records for coverage
+    /// (<c>LocalScan.Covers</c>): the real fetch bound, or — with no history to
+    /// bound a fetch by, so nothing is scanned — <paramref name="nowMs"/>, which
+    /// covers no past window.</summary>
+    public static long ScanFromMs(IReadOnlyList<QuotaHistorySeries> history, long nowMs) =>
+        history.Count == 0 ? nowMs : BoundFromMs(history, nowMs);
+
     /// <summary>The earliest instant any window's admitted cycles need
     /// messages for — the lower bound a caller should pass to
     /// <c>TbCore.WindowUsage</c>, so the export is not asked to scan further

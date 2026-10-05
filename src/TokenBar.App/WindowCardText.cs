@@ -51,9 +51,12 @@ public enum WindowCardState
     PlacementPending,
 
     /// <summary>Windows-only (no macOS counterpart: macOS has no rule 6): the
-    /// last window ended, but this account's local usage cannot be attributed,
-    /// so whether a new window started is unknowable. Never pending: no scan
-    /// would ever settle it.</summary>
+    /// last window ended, but this account's local usage can NEVER be
+    /// attributed (Claude Desktop, another provider's extra account, a grouped
+    /// tab whose owner differs, a tab with no local records), so whether a new
+    /// window started is unknowable. Never pending: no scan would ever settle
+    /// it. An attributable account whose own scan has not landed is not this:
+    /// it is <see cref="PlacementPending"/>.</summary>
     IdleUnattributed,
 
     Chart,
@@ -61,7 +64,9 @@ public enum WindowCardState
 
 /// <summary>What the local-usage read says about the selected card, as
 /// <see cref="WindowCardText.State"/> needs it. <paramref name="FromMs"/> is the
-/// start of the scan's bound (null = unbounded, or nothing to scan).</summary>
+/// start of the scan's bound; null = an unbounded read that covers everything.
+/// A pass that scanned nothing must record a bound that covers nothing (see
+/// <see cref="QuotaEquivalenceFold.ScanFromMs"/>), never null.</summary>
 public readonly record struct LocalScan(
     WindowEquivalence.FetchOutcome Outcome, long? FromMs, bool Unattributed)
 {

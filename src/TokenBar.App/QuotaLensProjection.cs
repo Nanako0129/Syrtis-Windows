@@ -226,7 +226,8 @@ public static class QuotaLensProjection
         IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage = null,
         bool quotaHistoryReadFailed = false,
         DateTimeOffset? now = null,
-        long? windowUsageFromMs = null)
+        long? windowUsageFromMs = null,
+        long? accountWindowUsageFromMs = null)
     {
         var overview = BuildOverview(
             history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed, selection,
@@ -237,7 +238,8 @@ public static class QuotaLensProjection
             : BuildClient(
                 selection.ActiveClientTab, selection.WindowCardTab,
                 history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed,
-                selection, accountWindowUsage, now ?? DateTimeOffset.UtcNow, windowUsageFromMs);
+                selection, accountWindowUsage, now ?? DateTimeOffset.UtcNow,
+                windowUsageFromMs, accountWindowUsageFromMs);
         return new Model(overview, trend, pastYearSelected, client);
     }
 
@@ -399,7 +401,8 @@ public static class QuotaLensProjection
         Selection selection,
         IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage,
         DateTimeOffset now,
-        long? windowUsageFromMs)
+        long? windowUsageFromMs,
+        long? accountWindowUsageFromMs)
     {
         // Every subscription-facing lookup below is keyed by the quota OWNER,
         // not the raw client id — antigravity-cli spends the antigravity
@@ -431,10 +434,22 @@ public static class QuotaLensProjection
         var unattributed = (account is not null && accountUsage is null)
             || owner != ClientRegistry.QuotaOwner(clientId)
             || TabHasNoLocalRecords(clientId, selection.LocalUsageClients, confirmed.Records);
+        // An account the registry CAN attribute whose own scan has not landed
+        // (cold start, or failed with nothing retained) is not "unattributed":
+        // it is not read yet, and the card waits (PlacementPending) rather than
+        // saying "start unknown" and flipping when the scan arrives. The
+        // failed-vs-not-yet distinction is not carried per account, so both wait.
+        var accountScanPending = account is not null
+            && owner == ClaudeExtraRoots.ClientId
+            && accountUsage is null
+            && ClaudeExtraRoots.AttributableAccountKeys(quota).Contains(account);
+        // The bound belongs to the scan the card actually reads from.
+        var scanFromMs = windowUsageFromMs;
         if (accountUsage is not null)
         {
             windowUsage = accountUsage;
             windowUsageOutcome = WindowEquivalence.FetchOutcome.Succeeded;
+            scanFromMs = accountWindowUsageFromMs;
         }
 
         var tabs = WindowCardText.Tabs(history, quota, owner, account).ToList();
@@ -515,7 +530,9 @@ public static class QuotaLensProjection
             WindowCardText.AccountPills(quota, owner), account, unattributed,
             WindowCardText.HeaderAccountLabel(quota, owner, account),
             scopeMatchedNothing, HasWindowCard: cardOwner is not null,
-            Scan: new LocalScan(windowUsageOutcome, windowUsageFromMs, unattributed));
+            Scan: new LocalScan(
+                accountScanPending ? WindowEquivalence.FetchOutcome.NotAttempted : windowUsageOutcome,
+                scanFromMs, unattributed && !accountScanPending));
     }
 
     /// <summary>The tab-group member whose window card, history and account

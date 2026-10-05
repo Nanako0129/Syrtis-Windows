@@ -360,7 +360,8 @@ public class ClaudeExtraRootsTests
     }
 
     private static QuotaLensProjection.Client ClaudeCard(
-        string selectedAccount, IReadOnlyDictionary<string, WindowUsage>? accountUsage)
+        string selectedAccount, IReadOnlyDictionary<string, WindowUsage>? accountUsage,
+        long? mainFromMs = null, long? accountFromMs = null)
     {
         Localization.Load("en", AppContext.BaseDirectory);
         var primary = new WindowMessage(1_000, "claude", "anthropic", "m", 100, 0, 0, 0, 0, 0, true);
@@ -377,7 +378,35 @@ public class ClaudeExtraRootsTests
             new UsageAttribution.Table([], IsWritable: true),
             year: null,
             new QuotaLensProjection.Selection("claude", string.Empty, WindowCardAccount: selectedAccount),
-            accountUsage).Client!;
+            accountUsage,
+            windowUsageFromMs: mainFromMs,
+            accountWindowUsageFromMs: accountFromMs).Client!;
+    }
+
+    // A registry-attributable account whose own scan has not landed is not
+    // read yet, not "unattributable": it must wait, not say "start unknown".
+    [Fact]
+    public void AnAttributableAccountWithNoScanYetIsPendingNotUnattributed()
+    {
+        var scan = ClaudeCard(@"D:\work", null).Scan!.Value;
+
+        Assert.False(scan.Unattributed);
+        Assert.Equal(WindowEquivalence.FetchOutcome.NotAttempted, scan.Outcome);
+    }
+
+    // The account rows come from the account scan, so coverage must use the
+    // account scan's bound, not the main read's (the two are replaced separately).
+    [Fact]
+    public void AnAccountCardCoversWithTheAccountScansOwnBound()
+    {
+        var own = new WindowMessage(2_000, "claude", "anthropic", "m", 7, 0, 0, 0, 0, 0, true);
+        var scan = ClaudeCard(
+            @"D:\work",
+            new Dictionary<string, WindowUsage> { [@"D:\work"] = new([own], 0, 0) },
+            mainFromMs: 100, accountFromMs: 900).Scan!.Value;
+
+        Assert.Equal(900, scan.FromMs);
+        Assert.False(scan.Covers(500));
     }
 
     [Fact]

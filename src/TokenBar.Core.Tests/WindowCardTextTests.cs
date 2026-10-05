@@ -666,6 +666,14 @@ public class WindowCardTextTests
             WindowCardState.Chart, Scanned(WindowEquivalence.FetchOutcome.Succeeded, start, tab: inferred));
     }
 
+    // A pass that scanned nothing (no history to bound a fetch) records "now",
+    // which covers no past window — null would read as an unbounded scan.
+    [Fact]
+    public void ANothingScannedPassDoesNotCoverTheReset() =>
+        Assert.Equal(
+            WindowCardState.PlacementPending,
+            Scanned(WindowEquivalence.FetchOutcome.Succeeded, QuotaEquivalenceFold.ScanFromMs([], NowS * 1_000)));
+
     [Fact] // row 5
     public void IdleWithACoveringScanStaysIdle() =>
         Assert.Equal(WindowCardState.Idle, Scanned(WindowEquivalence.FetchOutcome.Succeeded, ResetMs));
