@@ -586,7 +586,7 @@ public sealed partial class DashboardView
                 members,
                 ClientRegistry.HiddenLimitsClients(AppSettings.Store),
                 snapshot.QuotaAttempted,
-                tabClients))
+                OpencodeRoutes.HideClients(tabClients, snapshot.Quota)))
         {
             stack.Children.Add(Ui.Card(
                 // macOS QuotaView.swift:72: tabDisplayName(singleClient).

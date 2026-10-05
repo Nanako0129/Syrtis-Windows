@@ -59,13 +59,13 @@ public static class LimitsCardFilter
     /// </list>
     /// An empty client list hides nothing (:502-504). On the opencode tab the
     /// list the card draws is the routed one (<see cref="OpencodeRoutes"/>,
-    /// :421-440) while <c>allRestrictedClientsHidden</c> reads the card's
-    /// <c>clients</c> — the tab's own <c>["opencode"]</c> — so
-    /// <paramref name="restricted"/> carries that, and a limits-hidden opencode
-    /// hides the whole card even when routed cards would draw (macOS does the
-    /// same).</summary>
-    /// <param name="restricted">The tab's own clients (macOS <c>clients</c>),
-    /// read by the switched-off test; null = <paramref name="clientIds"/>.
+    /// :421-440), and the switched-off test reads opencode plus the
+    /// subscriptions it forwards (<see cref="OpencodeRoutes.HideClients"/>,
+    /// macOS #480 <c>allRestrictedClientsHidden</c> :520-545), so switching
+    /// off opencode's own card keeps the forwarded cards.</summary>
+    /// <param name="restricted">The clients the switched-off test reads
+    /// (macOS <c>clients</c>, plus the forwarded subscriptions on the opencode
+    /// tab); null = <paramref name="clientIds"/>.
     /// <paramref name="clientIds"/> is the list the card draws.</param>
     /// <param name="attempted">The quota fetch has completed once, successfully
     /// or not (<c>DashboardModel.Snapshot.QuotaAttempted</c>; macOS
