@@ -197,11 +197,13 @@ public class AccountIdentityTests
         var quota = TwoAccounts();
         var history = new[] { Series("P", used: 70), Series("S", used: 20) };
 
-        var desktop = Assert.Single(WindowCardText.Tabs(history, quota, "claude", Desktop));
+        // `now` inside the payload window (reset 100 h): the cycle is placed from it.
+        var nowMs = 99 * Hour * 1_000;
+        var desktop = Assert.Single(WindowCardText.Tabs(history, quota, "claude", Desktop, nowMs));
         Assert.Equal("S", desktop.Id.AccountScope);
         Assert.Equal(20, desktop.Active!.Samples[0].UsedPercent);
 
-        var primary = Assert.Single(WindowCardText.Tabs(history, quota, "claude", null));
+        var primary = Assert.Single(WindowCardText.Tabs(history, quota, "claude", null, nowMs));
         Assert.Equal("P", primary.Id.AccountScope);
         Assert.Equal(70, primary.Active!.Samples[0].UsedPercent);
 

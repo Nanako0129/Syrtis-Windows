@@ -291,7 +291,8 @@ public class WindowCardTextTests
                 Series("claude", "account-a", "session.v1", Sample(40, ResetAt - 600)),
             ],
             quota,
-            clientId: "claude");
+            clientId: "claude",
+            nowMs: RangeNowMs);
 
         var tab = Assert.Single(tabs);
         Assert.Equal("account-a", tab.Id.AccountScope);
@@ -345,7 +346,8 @@ public class WindowCardTextTests
                 Series("claude", "history-scope", "session.v1", Sample(40, ResetAt - 600)),
             ],
             quota,
-            clientId: "claude");
+            clientId: "claude",
+            nowMs: RangeNowMs);
 
         var tab = Assert.Single(tabs);
         Assert.Equal("history-scope", tab.Id.AccountScope);
@@ -375,7 +377,8 @@ public class WindowCardTextTests
                 Series("claude", "account-b", "session.v1", Sample(90, ResetAt - 600)),
             ],
             quota,
-            clientId: "claude");
+            clientId: "claude",
+            nowMs: RangeNowMs);
 
         var tab = Assert.Single(tabs);
         Assert.Equal("account-a", tab.Id.AccountScope);
@@ -985,7 +988,7 @@ public class WindowCardTextTests
         var running = WindowCardText.Tabs(
             [Series("claude", "session.v1", Sample(40, ResetAt - 600))],
             Quota("claude", Window("claude|session.v1", "Session", "session.v1")),
-            "claude")[0];
+            "claude", nowMs: RangeNowMs)[0];
         var idle = LiveTab(NowS - 3_600, FiveHours);
         // No running cycle and a live reset beyond one window: Unplaceable.
         var unplaceable = LiveTab(NowS + 10 * 3_600, FiveHours);
