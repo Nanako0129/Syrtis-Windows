@@ -374,11 +374,12 @@ public static class QuotaLensProjection
         var modelScope = ModelScope.Of(
             quota, selected?.Id.ProviderId, selected?.Id.AccountScope, selected?.Id.WindowKey);
         var subscription = WindowCardText.Mine(messages, owner, confirmed.Records);
-        // macOS WindowResolver's `.inferred` branch (WindowResolution.swift:
-        // 33-35): no running cycle in the store, but the live reset passed
-        // within one window length and this subscription (attribution only,
-        // no model scope) has used it since. Done before everything below so
-        // the scope note and the live line follow the placed window.
+        // macOS WindowResolver's `.active` and `.inferred` branches
+        // (WindowResolution.swift:29-35): no running cycle in the store, but
+        // the live reset is ahead within one window length, or passed within
+        // one and this subscription (attribution only, no model scope) has
+        // used it since. Done before everything below so the scope note and
+        // the live line follow the placed window.
         if (selected is not null
             && WindowCardText.Infer(selected, subscription, now.ToUnixTimeMilliseconds()) is { } inferred)
         {
@@ -411,7 +412,7 @@ public static class QuotaLensProjection
         // condition WindowCardText.State resolves to WindowCardState.Chart
         // for, which is the only state the view draws this line under.
         WindowEquivalence.Row? liveEquivalence = null;
-        // An inferred cycle has no samples, hence no quota line to compare.
+        // A cycle placed from the live reset has no samples, hence no quota line to compare.
         if (!unattributed && selected?.Active is { IsPlaced: true, Samples.Count: > 0 } active)
         {
             // The card and this line must describe the same interval:

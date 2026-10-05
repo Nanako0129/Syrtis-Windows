@@ -110,7 +110,7 @@ public static class WindowCardText
 
     /// <summary>The line under the window chart: rule 6 for an account whose
     /// usage cannot be attributed, else the live equivalence. Null when there
-    /// is no equivalence row, which an inferred window (no quota samples)
+    /// is no equivalence row, which a window placed from the live reset (no quota samples)
     /// always is; the card then draws no line.</summary>
     public static string? LiveLine(bool unattributed, WindowEquivalence.Row? row) =>
         unattributed ? LocalUsageUnattributed()
@@ -563,12 +563,15 @@ public static class WindowCardText
     }
 
     /// <summary>When the stored series has no running cycle but the live
-    /// window resolves to <c>inferred</c> (reset passed within one window
-    /// length, own usage since), the tab with that window as its
-    /// <see cref="WindowCardTab.Active"/> and <see cref="WindowCardTab.Inferred"/>
-    /// set; else null. <paramref name="subscription"/> is attribution-scoped
-    /// only, never model-scoped (macOS <c>isMine</c>). The cycle has no
-    /// samples: under LearningDuration the store records none for it.</summary>
+    /// window resolves to a placeable interval, the tab with that interval as
+    /// its <see cref="WindowCardTab.Active"/>; else null. <c>inferred</c>
+    /// (reset passed within one window length, own usage since) also sets
+    /// <see cref="WindowCardTab.Inferred"/>; <c>active</c> (reset ahead within
+    /// one window length, e.g. a new session the quota payload already shows
+    /// before the next history read records it) is placed at
+    /// [reset - duration, reset), as macOS draws it. <paramref name="subscription"/>
+    /// is attribution-scoped only, never model-scoped (macOS <c>isMine</c>).
+    /// The cycle has no samples: the store has recorded none for it.</summary>
     public static WindowCardTab? Infer(
         WindowCardTab tab, IReadOnlyList<WindowMessage> subscription, long nowMs)
     {
@@ -588,11 +591,11 @@ public static class WindowCardText
         }
 
         var resolved = Resolve(reset, tab.LiveDurationMs, nowMs, first);
-        return resolved.Kind == WindowResolutionKind.Inferred
+        return resolved.Kind is WindowResolutionKind.Inferred or WindowResolutionKind.Active
             ? tab with
             {
                 Active = new QuotaActiveCycle(resolved.End, resolved.Start, []),
-                Inferred = true,
+                Inferred = resolved.Kind == WindowResolutionKind.Inferred,
             }
             : null;
     }
@@ -602,7 +605,7 @@ public static class WindowCardText
     /// <see cref="WindowCardState.Idle"/> only when
     /// <see cref="Resolve"/> over the live reset and duration says idle (reset
     /// passed within one window length, no own usage since — the caller
-    /// replaces an inferred tab beforehand via <see cref="Infer"/>); any other
+    /// replaces an active or inferred tab beforehand via <see cref="Infer"/>); any other
     /// resolution, including a missing live reset or duration, is
     /// <see cref="WindowCardState.Unplaceable"/>.</summary>
     public static WindowCardState State(

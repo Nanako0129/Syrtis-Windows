@@ -906,9 +906,12 @@ public class QuotaLensProjectionTests
 
     // Store: only a completed cycle (the LearningDuration shape, no active
     // group). Live: reset one hour ago, five-hour duration.
-    private static QuotaLensProjection.Client InferenceClient(params WindowMessage[] messages)
+    private static QuotaLensProjection.Client InferenceClient(params WindowMessage[] messages) =>
+        InferenceClient(-3_600_000, messages);
+
+    private static QuotaLensProjection.Client InferenceClient(long resetOffsetMs, params WindowMessage[] messages)
     {
-        var resetIso = DateTimeOffset.FromUnixTimeMilliseconds(NowMs - 3_600_000).UtcDateTime
+        var resetIso = DateTimeOffset.FromUnixTimeMilliseconds(NowMs + resetOffsetMs).UtcDateTime
             .ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
         var quota = Quota(
             "codex",
@@ -952,6 +955,30 @@ public class QuotaLensProjectionTests
         Assert.Same(client.Selected, Assert.Single(client.Tabs));
         Assert.StartsWith(
             "Inferred window · resets in",
+            WindowCardText.Subtitle(
+                WindowCardState.Chart, client.Selected, DateTimeOffset.FromUnixTimeMilliseconds(NowMs)));
+    }
+
+    // macOS `.active` (WindowResolution.swift:29-31): the quota payload shows
+    // a new session whose reset is ahead, before the next history read
+    // records it, so the store has no running cycle yet. Drawn at
+    // [reset - duration, reset), not "Window unavailable".
+    [Fact]
+    public void AFutureLiveResetWithinOneDurationPlacesTheWindowWithoutAStoredCycle()
+    {
+        var reset = NowMs + 3_600_000;
+        var client = InferenceClient(3_600_000);
+
+        Assert.Equal(
+            WindowCardState.Chart,
+            WindowCardText.State(client.Selected, WindowEquivalence.FetchOutcome.Succeeded,
+                DateTimeOffset.FromUnixTimeMilliseconds(NowMs)));
+        Assert.False(client.Selected!.Inferred);
+        Assert.Equal(reset - DurationMs, client.Selected.Active!.StartMs);
+        Assert.Equal(reset, client.Selected.Active.ResetAtMs);
+        Assert.Null(WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence));
+        Assert.StartsWith(
+            "Resets in",
             WindowCardText.Subtitle(
                 WindowCardState.Chart, client.Selected, DateTimeOffset.FromUnixTimeMilliseconds(NowMs)));
     }

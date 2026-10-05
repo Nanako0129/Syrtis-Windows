@@ -681,7 +681,7 @@ public sealed partial class DashboardView
         // quota-samples fetch's own, not the card's QuotaHistoryOutcome
         // (client.QuotaHistoryOutcome, used for `state` above), because the
         // two are separate fetches. LiveEquivalence is null for a non-primary
-        // card and for an inferred window (no quota samples); LiveLine maps
+        // card and for a window placed from the live reset (no quota samples); LiveLine maps
         // those to rule 6 or to no line.
         if (WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence) is { } liveLine)
         {
