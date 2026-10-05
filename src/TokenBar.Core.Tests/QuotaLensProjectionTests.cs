@@ -144,7 +144,13 @@ public class QuotaLensProjectionTests
 
         var model = QuotaLensProjection.Build(
             history,
-            quota: null,
+            // A payload, deliberately: with no payload the overview draws
+            // nothing from history (macOS DashboardModel.swift:1509), so there
+            // would be no series to fold an equivalence for.
+            quota: Agents(new AgentUsageSnapshot("codex", "source", "2026-01-01T00:00:00Z",
+                [new UsageWindow(Label: "Weekly", UsedPercent: 10, RemainingPercent: 90, CardId: "codex|weekly.v1",
+                    PaceStatus: new PaceStatus(UsagePaceState.Available, WindowKey: "weekly.v1"))],
+                HistoryScope: new AccountScopeStatus("primary"))),
             EmptyGraph(),
             windowUsage: new WindowUsage(messages, 0, 0),
             windowUsageOutcome: WindowEquivalence.FetchOutcome.Failed,
@@ -171,7 +177,7 @@ public class QuotaLensProjectionTests
             quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
             Confirmed(new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex"))),
             year: null,
-            new QuotaLensProjection.Selection(ClientRegistry.OverviewTab, string.Empty));
+            new QuotaLensProjection.Selection(ClientRegistry.OverviewTab, string.Empty, PresentClients: ["codex"]));
 
         // QuotaEquivalenceFold.Build inserts one row per series regardless of
         // how much evidence it carries — the row's own shape (Ratio,

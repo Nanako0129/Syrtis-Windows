@@ -34,20 +34,22 @@ public class QuotaVisibleAgentsTests
 
     private static QuotaLensProjection.Overview Overview(
         AgentUsageSnapshot[] agents, QuotaHistorySeries[] history,
-        string[]? limitsHidden = null, string[]? tabHidden = null) =>
+        string[]? limitsHidden = null, string[]? tabHidden = null,
+        bool payload = true, bool attempted = true,
+        WindowEquivalence.FetchOutcome historyOutcome = WindowEquivalence.FetchOutcome.Succeeded) =>
         QuotaLensProjection.Build(
-            history, new AgentUsagePayload("2026-01-01T00:00:00Z", agents),
+            history, payload ? new AgentUsagePayload("2026-01-01T00:00:00Z", agents) : null,
             new UsagePayload(
                 new UsageMeta("g", "v", new DateRange("2026-01-01", "2026-01-01"),
                     PricingMode.BestEffort, CostCoverage.Complete),
                 new UsageSummary(0, 0, 0, 0, 0, 0, [], []), [], []),
             windowUsage: null, windowUsageOutcome: WindowEquivalence.FetchOutcome.NotAttempted,
-            quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            quotaHistoryOutcome: historyOutcome,
             UsageAttribution.Table.Empty, year: null,
             new QuotaLensProjection.Selection(ClientRegistry.OverviewTab, string.Empty,
                 PresentClients: ["codex", "opencode"],
                 TabHidden: (tabHidden ?? []).ToHashSet(), LimitsHidden: (limitsHidden ?? []).ToHashSet()),
-            quotaHistoryReadFailed: false).Overview;
+            quotaHistoryReadFailed: false, quotaAttempted: attempted).Overview;
 
     private static QuotaStripState Strip(QuotaLensProjection.Overview o) =>
         QuotaLensText.StripState(o.Summaries, o.Outcome, o.UnreadableClients.Count > 0);
@@ -100,5 +102,67 @@ public class QuotaVisibleAgentsTests
         Assert.Empty(o.Grids);
         Assert.Equal(QuotaStripState.NoCompletedWindows, Strip(o));
         Assert.Equal(QuotaHeatmapState.NoMovement, Heat(o));
+    }
+
+    // Q36 M1: no payload yet -> macOS has no summaries/windows/grids at all
+    // (DashboardModel.swift:1509, :1543, :1663). Old ccd994a skipped the filter
+    // here and drew every retained series, tab-hidden clients' included.
+    [Fact]
+    public void NoPayloadYetDrawsNothingFromRetainedSeriesAndSaysLoadingUntilAttempted()
+    {
+        QuotaHistorySeries[] history = [Series("codex", "p"), Series("opencode", "o")];
+
+        var loading = Overview([], history, tabHidden: ["opencode"], payload: false, attempted: false);
+        Assert.Empty(loading.Summaries);
+        Assert.Empty(loading.Windows);
+        Assert.Empty(loading.Grids);
+        Assert.Empty(loading.Equivalences);
+        Assert.Equal(QuotaStripState.Loading, Strip(loading));
+        Assert.Equal(QuotaHeatmapState.Loading, Heat(loading));
+
+        var attempted = Overview([], history, tabHidden: ["opencode"], payload: false, attempted: true);
+        Assert.Empty(attempted.Summaries);
+        Assert.Empty(attempted.Windows);
+        Assert.Empty(attempted.Grids);
+        Assert.Equal(QuotaStripState.NoCompletedWindows, Strip(attempted));
+        Assert.Equal(QuotaHeatmapState.NoMovement, Heat(attempted));
+    }
+
+    [Fact]
+    public void NoPayloadStaysLoadingWhileTheHistoryReadIsUnattemptedEvenAfterTheFetch()
+    {
+        var o = Overview([], [], payload: false, attempted: true,
+            historyOutcome: WindowEquivalence.FetchOutcome.NotAttempted);
+
+        Assert.Equal(QuotaStripState.Loading, Strip(o));
+    }
+
+    // Q36 L2: a visible single-account client's series under a former account
+    // scope is not drawn (macOS reads only historyReadAccountKey's curve).
+    [Fact]
+    public void AVisibleSingleAccountClientsFormerScopeSeriesIsDropped()
+    {
+        var o = Overview([Agent("codex", null, "p")], [Series("codex", "former"), Series("codex", "p")]);
+
+        Assert.Equal(["p"], o.Summaries.Select(s => s.Id.AccountScope));
+        Assert.Equal(["p"], o.Grids.Keys.Select(k => k.AccountScope));
+    }
+
+    // Q36 L3b: an Antigravity merged primary reads the ADOPTED account's
+    // scope (HistoryReadScope), not its own HistoryScope.
+    [Fact]
+    public void AMergedPrimaryReadsTheAdoptedAccountsScopeNotItsOwn()
+    {
+        var merged = Agent("codex", null, "cli") with
+        {
+            HistoryAccountKey = "acct",
+            HistoryAccountScope = new AccountScopeStatus("adopted"),
+        };
+
+        var o = Overview([merged],
+            [Series("codex", "adopted"), Series("codex", "cli"), Series("codex", "other")]);
+
+        Assert.Equal(["adopted"], o.Summaries.Select(s => s.Id.AccountScope));
+        Assert.Equal(["adopted"], o.Windows.Select(w => w.Id.AccountScope));
     }
 }

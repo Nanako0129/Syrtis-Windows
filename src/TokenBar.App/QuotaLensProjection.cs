@@ -210,6 +210,15 @@ public static class QuotaLensProjection
     /// is a product decision, not a defect to fix on sight — noted here so
     /// the next reader finds it recorded rather than rediscovers it.
     /// </para>
+    /// <para>
+    /// <paramref name="quota"/> null (no agent-usage payload yet) makes the
+    /// overview draw nothing from history — no summaries, windows, grids or
+    /// equivalences — as macOS, whose prune/read guards are
+    /// DashboardModel.swift:1509 and :1543/:1663. <paramref name="quotaAttempted"/>
+    /// (<c>Snapshot.QuotaAttempted</c>, macOS <c>usageAttempted</c>) then
+    /// decides Loading vs NoCompletedWindows/NoMovement for that empty
+    /// overview, by folding NotAttempted into <c>Overview.Outcome</c>.
+    /// </para>
     /// </summary>
     public static Model Build(
         IReadOnlyList<QuotaHistorySeries>? history,
@@ -222,11 +231,12 @@ public static class QuotaLensProjection
         string? year,
         Selection selection,
         IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage = null,
-        bool quotaHistoryReadFailed = false)
+        bool quotaHistoryReadFailed = false,
+        bool quotaAttempted = true)
     {
         var overview = BuildOverview(
             history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed, selection,
-            quotaHistoryReadFailed);
+            quotaHistoryReadFailed, quotaAttempted);
         var (trend, pastYearSelected) = BuildTrend(graph, confirmed, year);
         var client = selection.ActiveClientTab == ClientRegistry.OverviewTab
             ? null
@@ -245,17 +255,35 @@ public static class QuotaLensProjection
         WindowEquivalence.FetchOutcome quotaHistoryOutcome,
         UsageAttribution.Table confirmed,
         Selection selection,
-        bool quotaHistoryReadFailed)
+        bool quotaHistoryReadFailed,
+        bool quotaAttempted)
     {
         // macOS reads ONLY visibleAgents' history-key card windows
-        // (DashboardModel.swift:1684-1712), then prunes summaries, heatmap
-        // windows, heatmaps and equivalences to visibleAgents' window keys
-        // (:1509-1526), so a tab-hidden or limits-hidden client's retained
-        // series draws nothing. Filtered ONCE here; the summaries, picker
-        // windows, grids and equivalences below all derive from this slice.
-        // Only once a payload is known (:1516 `agentUsage != nil`): until then
-        // the retained series stay.
-        if (quota is not null)
+        // (DashboardModel.swift:1684-1712, behind `if let payload = agentUsage`
+        // at :1543/:1663), then prunes summaries, heatmap windows, heatmaps and
+        // equivalences to visibleAgents' window keys (:1509-1526, guarded by
+        // `quotaVisibility != nil, agentUsage != nil` at :1509), so a
+        // tab-hidden or limits-hidden client's retained series draws nothing.
+        // Before the first payload macOS has no summaries, windows or grids at
+        // all (they only come from those curve reads), so a null quota draws
+        // nothing from history here either. Filtered ONCE; everything below
+        // derives from this slice.
+        // A stored series of a visible single-account client under a FORMER
+        // account scope is dropped too, as on macOS (it reads only
+        // historyReadAccountKey's curve).
+        if (quota is null)
+        {
+            history = null;
+            // Loading until the agent-usage fetch has been attempted (macOS
+            // usageAttempted), then NoCompleted/NoMovement. Loading while
+            // EITHER that fetch or the history read is unattempted: the
+            // history outcome already drives Loading on its own.
+            if (!quotaAttempted)
+            {
+                quotaHistoryOutcome = WindowEquivalence.FetchOutcome.NotAttempted;
+            }
+        }
+        else
         {
             var visible = VisibleAgents(quota, selection);
             history = history?.Where(s => visible.Any(a => ReadsSeries(a, s))).ToList();
