@@ -108,7 +108,9 @@ public class AgentLimitsTextTests
         Assert.NotNull(prompt);
         var prose = string.Join(" ", prompt!.Parts.Where(static p => !p.IsCommand).Select(static p => p.Text));
         Assert.Contains("CLAUDE_CODE_OAUTH_TOKEN", prose);
-        Assert.Contains("Start menu", prose);
+        // The token is read live from the registry: no restart to ask for.
+        Assert.DoesNotContain("Start menu", prose);
+        Assert.DoesNotContain("reopen", prose);
         Assert.DoesNotContain("Keychain", prose);
         // Setting first, then how to undo it: the claude CLI reads the same
         // variable and prefers it over /login (user decision, 2026-10-04).
@@ -116,16 +118,17 @@ public class AgentLimitsTextTests
             [AgentLimitsText.ClaudeSetupCommand, AgentLimitsText.ClaudeRemoveCommand],
             prompt.Parts.Where(static p => p.IsCommand).Select(static p => p.Text));
         Assert.Contains("prefers it over /login", prose);
-        Assert.Equal("and reopen Syrtis.", prompt.Parts[^1].Text);
+        // The English removal sentence ends at the command.
+        Assert.Equal(new LimitsSetupPart(AgentLimitsText.ClaudeRemoveCommand, IsCommand: true), prompt.Parts[^1]);
         // The token is typed at a prompt, never passed on the command line.
         Assert.Contains("Read-Host", AgentLimitsText.ClaudeSetupCommand);
         Assert.Contains("'User'", AgentLimitsText.ClaudeSetupCommand);
         Assert.Contains("$null, 'User'", AgentLimitsText.ClaudeRemoveCommand);
     }
 
-    // Chinese folds "reopen Syrtis" into the sentence before the removal
-    // command, so nothing follows it there — the {0} entry, not a pair of
-    // keys, is what lets each language place it.
+    // The {0} entry, not a pair of keys, is what lets each language place
+    // the removal command; in zh-Hant nothing follows it, and no sentence
+    // asks for a restart.
     [Fact]
     public void TheRemovalCommandSitsWhereEachLanguagePutsIt()
     {
@@ -136,6 +139,9 @@ public class AgentLimitsTextTests
                 "claude", "unconfigured", "2026-10-04T00:00:00Z", []))!;
             Assert.Equal(new LimitsSetupPart(AgentLimitsText.ClaudeRemoveCommand, IsCommand: true), prompt.Parts[^1]);
             Assert.Contains("優先於 /login", prompt.Parts[^2].Text);
+            var prose = string.Join(" ", prompt.Parts.Where(static p => !p.IsCommand).Select(static p => p.Text));
+            Assert.DoesNotContain("重新開啟", prose);
+            Assert.DoesNotContain("開始選單", prose);
         }
         finally
         {
