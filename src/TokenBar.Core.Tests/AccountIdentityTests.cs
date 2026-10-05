@@ -19,9 +19,12 @@ public class AccountIdentityTests
 
     private static UsageWindow Window(string cardId, string label, double remaining, string? key = null) =>
         new(Label: label, UsedPercent: 100 - remaining, RemainingPercent: remaining, CardId: cardId,
+            // The payload window (reset 100 h, 5 h) the chart's samples are ranged by.
+            ResetsAt: DateTimeOffset.FromUnixTimeSeconds(100 * Hour).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
             PaceStatus: key is null
                 ? new PaceStatus(UsagePaceState.Unavailable)
-                : new PaceStatus(UsagePaceState.Available, WindowKey: key, DurationSeconds: 5 * Hour));
+                : new PaceStatus(UsagePaceState.Available, WindowKey: key, DurationSeconds: 5 * Hour),
+            DurationSeconds: key is null ? null : 5 * Hour);
 
     private static AgentUsageSnapshot Card(
         string? accountKey, string? scope, string? error = null, params UsageWindow[] windows) =>
@@ -196,11 +199,11 @@ public class AccountIdentityTests
 
         var desktop = Assert.Single(WindowCardText.Tabs(history, quota, "claude", Desktop));
         Assert.Equal("S", desktop.Id.AccountScope);
-        Assert.Equal(20, desktop.Active!.Samples[^1].UsedPercent);
+        Assert.Equal(20, desktop.Active!.Samples[0].UsedPercent);
 
         var primary = Assert.Single(WindowCardText.Tabs(history, quota, "claude", null));
         Assert.Equal("P", primary.Id.AccountScope);
-        Assert.Equal(70, primary.Active!.Samples[^1].UsedPercent);
+        Assert.Equal(70, primary.Active!.Samples[0].UsedPercent);
 
         // Desktop whose profile failed: a card with no scope gets no series.
         var noScope = Payload(

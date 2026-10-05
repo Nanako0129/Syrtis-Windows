@@ -693,7 +693,14 @@ public class QuotaLensProjectionTests
         var messages = new[] { Message(4_500_000, "codex", "openai", 5_000, 25.0) };
         var confirmed = Confirmed(
             new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex")));
-        var quota = Quota("codex", Window("codex|weekly.v1", "Weekly", "weekly.v1"));
+        // Payload window [6_000 - 20 h, now] holds all three readings; used 0
+        // adds no live point, so the clip under test sees only the stored ones.
+        var quota = Quota("codex", Window("codex|weekly.v1", "Weekly", "weekly.v1") with
+        {
+            UsedPercent = 0,
+            ResetsAt = DateTimeOffset.FromUnixTimeSeconds(6_000).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+            DurationSeconds = 20 * 3_600,
+        });
 
         var model = QuotaLensProjection.Build(
             history, quota, EmptyGraph(),
@@ -985,10 +992,13 @@ public class QuotaLensProjectionTests
         Assert.True(client.Selected!.Inferred);
         Assert.Equal(first, client.Selected.Active!.StartMs);
         Assert.Equal(first + DurationMs, client.Selected.Active.ResetAtMs);
-        Assert.Empty(client.Selected.Active.Samples);
-        Assert.Null(client.LiveEquivalence);
-        // The card's line under the chart: none, rather than a null deref.
-        Assert.Null(WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence));
+        // The store's only reading is far outside the payload window, so the
+        // chart is the live reading alone (macOS curveSamples + liveReading).
+        Assert.Equal([10d], client.Selected.Active.Samples.Select(sample => sample.UsedPercent).ToArray());
+        // One reading is not enough to compare against usage.
+        Assert.Equal(
+            "Not enough quota readings yet",
+            WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence));
         Assert.Same(client.Selected, Assert.Single(client.Tabs));
         Assert.StartsWith(
             "Inferred window · resets in",
@@ -1013,7 +1023,9 @@ public class QuotaLensProjectionTests
         Assert.False(client.Selected!.Inferred);
         Assert.Equal(reset - DurationMs, client.Selected.Active!.StartMs);
         Assert.Equal(reset, client.Selected.Active.ResetAtMs);
-        Assert.Null(WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence));
+        Assert.Equal(
+            "Not enough quota readings yet",
+            WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence));
         Assert.StartsWith(
             "Resets in",
             WindowCardText.Subtitle(
