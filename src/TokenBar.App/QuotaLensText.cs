@@ -67,24 +67,36 @@ public static class QuotaLensText
     /// the result — <c>grid is null</c> cannot tell "asked and empty" from
     /// "not asked" from "asked and it threw", because all three leave it
     /// null.</para></summary>
-    public static QuotaHeatmapState HeatmapState(QuotaHeatmap? grid, WindowEquivalence.FetchOutcome outcome) =>
+    public static QuotaHeatmapState HeatmapState(
+        QuotaHeatmap? grid, WindowEquivalence.FetchOutcome outcome, bool unreadable, bool windowsEmpty) =>
         grid is { IsEmpty: false } ? QuotaHeatmapState.Grid
         : grid is { HasMovement: true } ? QuotaHeatmapState.Unplaced
         : outcome switch
         {
+            // macOS QuotaHeatmapCard.swift:62-95: "could not be read" only when
+            // attempted AND unreadable AND no window is listed; any other
+            // attempted answer is "no movement".
             WindowEquivalence.FetchOutcome.Succeeded => QuotaHeatmapState.NoMovement,
-            WindowEquivalence.FetchOutcome.Failed => QuotaHeatmapState.Failed,
+            WindowEquivalence.FetchOutcome.Failed =>
+                unreadable && windowsEmpty ? QuotaHeatmapState.Failed : QuotaHeatmapState.NoMovement,
             _ => QuotaHeatmapState.Loading,
         };
 
     /// <summary>The strip card's state. Same <paramref name="outcome"/>
-    /// contract as the heatmap's: an empty list is not an answer.</summary>
-    public static QuotaStripState StripState(IReadOnlyList<QuotaWindowSummary> summaries, WindowEquivalence.FetchOutcome outcome) =>
+    /// contract as the heatmap's: an empty list is not an answer.
+    /// <paramref name="unreadable"/> is <see cref="QuotaLensProjection.UnreadableClients"/>
+    /// reduced to this card's clients.</summary>
+    public static QuotaStripState StripState(
+        IReadOnlyList<QuotaWindowSummary> summaries, WindowEquivalence.FetchOutcome outcome, bool unreadable) =>
         summaries.Count > 0 ? QuotaStripState.Rows
         : outcome switch
         {
+            // macOS QuotaHistoryStripCard.swift:40-61: "could not be read" only
+            // when attempted AND unreadable (a failed fetch of an unrelated
+            // client does not make this strip unreadable).
             WindowEquivalence.FetchOutcome.Succeeded => QuotaStripState.NoCompletedWindows,
-            WindowEquivalence.FetchOutcome.Failed => QuotaStripState.Failed,
+            WindowEquivalence.FetchOutcome.Failed =>
+                unreadable ? QuotaStripState.Failed : QuotaStripState.NoCompletedWindows,
             _ => QuotaStripState.Loading,
         };
 

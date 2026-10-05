@@ -97,7 +97,14 @@ public static class QuotaLensProjection
         IReadOnlyList<QuotaHeatmapWindow> Windows,
         IReadOnlyDictionary<QuotaWindowIdentity, QuotaHeatmap> Grids,
         WindowEquivalence.FetchOutcome Outcome,
-        IReadOnlyDictionary<QuotaWindowIdentity, WindowEquivalence.Row> Equivalences);
+        IReadOnlyDictionary<QuotaWindowIdentity, WindowEquivalence.Row> Equivalences,
+        IReadOnlySet<string> UnreadableClients)
+    {
+        /// <summary>A single-client tab's flag: its slice intersected with the
+        /// unreadable set (macOS QuotaView.swift:87/:92,
+        /// <c>!stripUnreadableClients.isDisjoint(with: clientIds)</c>).</summary>
+        public bool UnreadableIn(IReadOnlyList<string> slice) => slice.Any(UnreadableClients.Contains);
+    }
 
     /// <summary>Sites 2, 4, 5 and 6 — the per-client lens.</summary>
     public sealed record Client(
@@ -216,7 +223,7 @@ public static class QuotaLensProjection
         Selection selection,
         IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage = null)
     {
-        var overview = BuildOverview(history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed);
+        var overview = BuildOverview(history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed, selection);
         var (trend, pastYearSelected) = BuildTrend(graph, confirmed, year);
         var client = selection.ActiveClientTab == ClientRegistry.OverviewTab
             ? null
@@ -233,7 +240,8 @@ public static class QuotaLensProjection
         Interop.WindowUsage? windowUsage,
         WindowEquivalence.FetchOutcome windowUsageOutcome,
         WindowEquivalence.FetchOutcome quotaHistoryOutcome,
-        UsageAttribution.Table confirmed)
+        UsageAttribution.Table confirmed,
+        Selection selection)
     {
         var (summaries, windows, grids) = QuotaLensData.Build(history, quota);
         // Absent (not merely empty) unless the fetch actually SUCCEEDED — not
@@ -250,7 +258,39 @@ public static class QuotaLensProjection
                 // DashboardModel.swift:1836-1843).
                 series => ModelScope.Of(quota, series.ProviderId, series.AccountScope, series.WindowKey))
             : new Dictionary<QuotaWindowIdentity, WindowEquivalence.Row>();
-        return new Overview(summaries, windows, grids, quotaHistoryOutcome, equivalences);
+        return new Overview(
+            summaries, windows, grids, quotaHistoryOutcome, equivalences,
+            UnreadableClients(quota, quotaHistoryOutcome, selection));
+    }
+
+    /// <summary>The clients whose strip/heatmap must say "could not be read"
+    /// (macOS <c>quotaUnreadableClients</c>, DashboardModel.swift:1845-1862,
+    /// over <c>visibleAgents</c>, :1502-1508): clients of visible agents —
+    /// payload agents in <see cref="ClientRegistry.QuotaClients"/>, minus a
+    /// limits-hidden PRIMARY (extra accounts stay) — that have a card window
+    /// which failed to read and is not drawn.
+    /// <para>Windows reads quota history in one call and has no per-window
+    /// failure signal, so partial unreadability ("A failed, B read") cannot
+    /// arise here. The faithful analog: when the whole read FAILED (nothing
+    /// retained, so nothing is drawn) every visible agent with at least one
+    /// card window is unreadable; otherwise none is.</para></summary>
+    internal static IReadOnlySet<string> UnreadableClients(
+        AgentUsagePayload? quota, WindowEquivalence.FetchOutcome quotaHistoryOutcome, Selection selection)
+    {
+        if (quotaHistoryOutcome != WindowEquivalence.FetchOutcome.Failed)
+        {
+            return new HashSet<string>();
+        }
+
+        var cardClients = ClientRegistry.QuotaClients(
+            selection.PresentClients ?? [], quota?.ConfiguredClientIds ?? [], selection.TabHidden ?? new HashSet<string>());
+        var limitsHidden = selection.LimitsHidden ?? new HashSet<string>();
+        return (quota?.Agents ?? [])
+            .Where(a => cardClients.Contains(a.ClientId)
+                && (a.AccountKey is not null || !limitsHidden.Contains(a.ClientId))
+                && a.UniqueCardWindows.Count > 0)
+            .Select(a => a.ClientId)
+            .ToHashSet();
     }
 
     /// <summary>Whether a stored series may get a local-usage equivalence.
