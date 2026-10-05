@@ -1015,6 +1015,11 @@ impl UsageWindow {
     }
 
     #[cfg(test)]
+    pub(crate) fn duration_seconds_for_test(&self) -> Option<i64> {
+        self.duration_seconds
+    }
+
+    #[cfg(test)]
     pub(crate) fn remaining_for_test(&self) -> f64 {
         self.remaining_percent
     }
@@ -14692,6 +14697,131 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["cardId"], "shared-card.v1");
         assert_eq!(rows[0]["paceStatus"]["windowKey"], "first.v1");
+        scope.cleanup();
+    }
+
+    /// The Antigravity grouped buckets, from the captured-account summary
+    /// parser through `enrich_snapshot_with` into a REAL history store rooted
+    /// in a temp dir. The unused 5h bucket (fraction 1, reset = server now +
+    /// 5h) must end `learningDuration` with the local clock 1 s slow, accurate
+    /// and 1 s fast (the case a clock-only guard missed), and write nothing to
+    /// the store; the in-use weekly bucket keeps its contract. The agy route's
+    /// unverified scope still clears the duration.
+    #[test]
+    fn antigravity_unused_bucket_stays_learning_through_a_real_store_at_any_clock() {
+        let scope = TestRefreshScope::new("stage4", "agy-window-duration");
+        let account_scope = scope
+            .resolve_current("antigravity", "agy", b"agy-marker")
+            .unwrap();
+        let history_scope = scope.resolve_history("antigravity", None).unwrap();
+        let history_path = scope
+            .root()
+            .join(crate::agent_quota_history::HISTORY_FILE_NAME);
+        let server_now = 1_700_000_000_i64;
+        let rfc = |offset: i64| {
+            Utc.timestamp_opt(server_now + offset, 0)
+                .single()
+                .unwrap()
+                .to_rfc3339()
+        };
+        let body = serde_json::json!({ "groups": [{ "displayName": "G", "buckets": [
+            { "bucketId": "used", "displayName": "Weekly", "remainingFraction": 0.5,
+              "resetTime": rfc(86_400), "window": "weekly" },
+            { "bucketId": "unused", "displayName": "5h", "remainingFraction": 1,
+              "resetTime": rfc(5 * 3_600), "window": "5h" },
+            // Chained phase (Windows test machine, 2026-10-04/05, agy 1.2.16):
+            // fraction 1 with a fixed reset (previous reset + 5h), later
+            // abandoned. Started by our clock, still no contract.
+            { "bucketId": "chained", "displayName": "5h chained", "remainingFraction": 1,
+              "resetTime": rfc(4 * 3_600), "window": "5h" }
+        ]}]})
+        .to_string();
+        let snapshot_at = |local: DateTime<Utc>,
+                           account_scope: Result<AccountScope, AccountScopeError>,
+                           history_scope: Result<HistoryScope, AccountScopeError>| {
+            AgentUsageSnapshot {
+                account_key: None,
+                agy_login_marker: None,
+                merge_scope: None,
+                client_id: "antigravity".to_string(),
+                source: "fixture".to_string(),
+                updated_at: String::new(),
+                identity: None,
+                history_scope,
+                account_scope,
+                windows: agent_antigravity::windows_from_quota_summary_for_test(&body, local),
+                credits: None,
+                error: None,
+                transport_diagnostic: None,
+            }
+        };
+
+        for skew in [-1_i64, 0, 1] {
+            let local = Utc.timestamp_opt(server_now + skew, 0).single().unwrap();
+            let mut captured = snapshot_at(
+                local,
+                Ok(account_scope.clone()),
+                Ok(history_scope.clone()),
+            );
+            enrich_snapshot_with(&mut captured, local.timestamp(), |active, obs, now| {
+                crate::agent_quota_history::record_observations_at_path_and_evaluate(
+                    active,
+                    obs,
+                    now,
+                    &history_path,
+                )
+            });
+            let used = &captured.windows[0];
+            assert_eq!(used.duration_seconds, Some(604_800), "skew {skew}s");
+            assert_eq!(
+                used.duration_source,
+                Some(DurationSource::Contract),
+                "skew {skew}s"
+            );
+            let unused = &captured.windows[1];
+            assert_eq!(unused.duration_seconds, None, "skew {skew}s");
+            assert!(
+                matches!(unused.pace_status.state, PaceState::LearningDuration),
+                "skew {skew}s: {:?}",
+                unused.pace_status
+            );
+            assert_eq!(unused.pace_status.reason, None, "skew {skew}s");
+            let chained = &captured.windows[2];
+            assert_eq!(chained.duration_seconds, None, "skew {skew}s");
+            assert!(
+                matches!(chained.pace_status.state, PaceState::LearningDuration),
+                "skew {skew}s: {:?}",
+                chained.pace_status
+            );
+        }
+        // The store holds nothing for the unused or chained bucket: no
+        // sample, no cycle.
+        for id in ["agy.unused.v1", "agy.chained.v1"] {
+            let key = SeriesKey::new("antigravity".to_string(), &history_scope, id);
+            let stored = crate::agent_quota_history::read_series_at_path(
+                &key,
+                &history_path,
+                server_now,
+            )
+            .unwrap();
+            assert!(
+                stored.as_ref().is_none_or(|s| s.samples.is_empty()),
+                "{id} wrote to the store: {stored:?}"
+            );
+        }
+
+        // The agy route has no trusted account evidence: cleared, as before.
+        let local = Utc.timestamp_opt(server_now, 0).single().unwrap();
+        let mut agy = snapshot_at(
+            local,
+            Err(AccountScopeError::NoTrustedEvidence),
+            Ok(history_scope.clone()),
+        );
+        enrich_snapshot_with(&mut agy, local.timestamp(), |_, _, _| Ok(vec![]));
+        for window in &agy.windows {
+            assert_eq!(window.duration_seconds, None);
+            assert_eq!(window.pace_status.reason.as_deref(), Some("accountScope"));
+        }
         scope.cleanup();
     }
 
