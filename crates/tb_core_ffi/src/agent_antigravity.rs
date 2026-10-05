@@ -1050,11 +1050,15 @@ fn agy_window_duration(window: Option<&str>) -> Option<DurationEvidence> {
 /// duration only when the bucket is in use (fraction < 1) and its cycle has
 /// started by our own clock (`reset - duration <= now`).
 ///
-/// Measured (Windows test machine, 2026-10-04/05, agy 1.2.16): a fraction-1
-/// bucket is either rolling (reset = server now + window, until first use and
-/// again from ~35 min after a reset) or in a fixed chained phase (previous
-/// reset + 5h, abandoned ~30 min later); an in-use bucket's reset never
-/// rolled. Fraction < 1 is the gate that separates them.
+/// Measured (Windows test machine, 2026-10-04/05, agy 1.2.16), 5h buckets:
+/// rolling (reset = server now + 5h) before first use; fixed at first use +
+/// 5h while in use; after the reset passes, a ~30 min chained phase
+/// (fraction 1, reset = previous reset + 5h, fixed), then rolling again with
+/// the reset jumping forward. In-use weekly buckets were fixed. No weekly
+/// bucket reset during the run, so fraction-1 weekly behaviour is not
+/// measured; the 2026-09-23 fixture shows a fixed fraction-1 `3p-weekly`
+/// (unexplained). The gate stays right: a fraction-1 bucket never declares,
+/// which only costs learning time.
 ///
 /// Derived from the engine code, not measured: a contract on a rolling bucket
 /// fails whichever way the clock is off, because `valid_evidence` has no
@@ -5371,7 +5375,7 @@ mod tests {
         // gemini-weekly (0.85). The fraction-1 buckets (both 5h, and 3p-weekly)
         // get none. Fraction-1 buckets were measured to be either rolling or
         // in a fixed chained phase; in this fixture the 3p-weekly reset is
-        // fixed (~5 days into its cycle). Either way they stay
+        // fixed (about 2 days into its cycle: reset 2026-09-28T13:14:23Z minus 7 d, capture about 09-23T13:30:15Z). Either way they stay
         // LearningDuration until used.
         let durations: Vec<Option<i64>> = fetched
             .windows
@@ -5517,9 +5521,16 @@ mod tests {
             at("2026-10-04T22:07:50Z", "gemini-5h", "5h", 1.0, "2026-10-05T03:07:52Z"),
             None
         );
-        // (d) before first use, rolling.
+        // (d) before first use, rolling. (c) and (d) are stopped by the
+        // cycle-start check (reset - 5h is after now), not the in-use gate.
         assert_eq!(
             at("2026-10-04T16:03:32Z", "gemini-5h", "5h", 1.0, "2026-10-04T21:03:38Z"),
+            None
+        );
+        // (e) rolling, local clock 3 s ahead of the server (reset = now + 5h
+        // - 3 s): the cycle "has started", so only the in-use gate stops it.
+        assert_eq!(
+            at("2026-10-04T16:03:32Z", "gemini-5h", "5h", 1.0, "2026-10-04T21:03:29Z"),
             None
         );
     }
@@ -5569,6 +5580,9 @@ mod tests {
         assert_eq!(at("2026-10-04T21:47:00Z", "gemini-5h", "5h", 1.0, "2026-10-05T02:32:24Z"), None);
         assert_eq!(at("2026-10-04T22:07:50Z", "gemini-5h", "5h", 1.0, "2026-10-05T03:07:52Z"), None);
         assert_eq!(at("2026-10-04T16:03:32Z", "gemini-5h", "5h", 1.0, "2026-10-04T21:03:38Z"), None);
+        // (c) and (d) above are stopped by the cycle-start check; this one,
+        // rolling with the local clock 3 s ahead, only by the in-use gate.
+        assert_eq!(at("2026-10-04T16:03:32Z", "gemini-5h", "5h", 1.0, "2026-10-04T21:03:29Z"), None);
     }
 
     #[test]
@@ -7298,7 +7312,7 @@ mod captured_account_tests {
         // The declared window becomes the duration only for a bucket in use
         // whose cycle has started: gemini-weekly (0.97, start 10-01) and
         // gemini-5h (0.88, reset 11:20, start 06:20 <= now). 3p-weekly is
-        // unused (fraction 1, rolling reset): no contract.
+        // unused (fraction 1): no contract.
         let durations: Vec<Option<i64>> = windows
             .iter()
             .map(|w| w.duration_seconds_for_test())
