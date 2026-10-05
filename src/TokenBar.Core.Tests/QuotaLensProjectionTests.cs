@@ -70,11 +70,9 @@ public class QuotaLensProjectionTests
             [new AgentUsageSnapshot(clientId, "source", "2026-01-01T00:00:00Z", windows)]);
 
     // A payload with a codex primary whose history scope matches
-    // TwoCycleSeries("codex", "primary", ...). Deliberately not null: with no
-    // payload the overview draws nothing from history (macOS
-    // DashboardModel.swift:1543/:1663 read curves only with a payload; :1509
-    // is the prune guard), so the equivalence tests below would have no
-    // series to fold and could not tell their outcomes apart.
+    // TwoCycleSeries("codex", "primary", ...), so the series passes the
+    // overview's visible-agents filter and the equivalence tests below fold
+    // it the way production does once a payload has arrived.
     private static AgentUsagePayload CodexPrimaryQuota() =>
         new("2026-01-01T00:00:00Z",
             [new AgentUsageSnapshot("codex", "source", "2026-01-01T00:00:00Z",

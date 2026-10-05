@@ -211,13 +211,15 @@ public static class QuotaLensProjection
     /// the next reader finds it recorded rather than rediscovers it.
     /// </para>
     /// <para>
-    /// <paramref name="quota"/> null (no agent-usage payload yet) makes the
-    /// overview draw nothing from history — no summaries, windows, grids or
-    /// equivalences — as macOS, whose prune/read guards are
-    /// DashboardModel.swift:1509 and :1543/:1663. <paramref name="quotaAttempted"/>
-    /// (<c>Snapshot.QuotaAttempted</c>, macOS <c>usageAttempted</c>) then
-    /// decides Loading vs NoCompletedWindows/NoMovement for that empty
-    /// overview, by folding NotAttempted into <c>Overview.Outcome</c>.
+    /// <paramref name="quota"/> null (no agent-usage payload yet): macOS
+    /// draws no rows then (its curve reads need the payload,
+    /// DashboardModel.swift:1543/:1663; :1509 is the prune guard). Windows
+    /// deliberately differs, by the maintainer's decision: it draws the
+    /// retained series at once, minus tab-hidden and limits-hidden clients
+    /// by settings. <paramref name="quotaAttempted"/>
+    /// (<c>Snapshot.QuotaAttempted</c>, macOS <c>usageAttempted</c>) decides
+    /// Loading vs NoCompletedWindows/NoMovement when nothing retained is
+    /// left to draw, by folding NotAttempted into <c>Overview.Outcome</c>.
     /// </para>
     /// </summary>
     public static Model Build(
@@ -264,17 +266,24 @@ public static class QuotaLensProjection
         // equivalences to visibleAgents' window keys (:1509-1526, guarded by
         // `quotaVisibility != nil, agentUsage != nil` at :1509), so a
         // tab-hidden or limits-hidden client's retained series draws nothing.
-        // Before the first payload macOS has no summaries, windows or grids at
-        // all (they only come from those curve reads), so a null quota draws
-        // nothing from history here either. Filtered ONCE; everything below
-        // derives from this slice.
+        // Filtered ONCE; everything below derives from this slice.
+        // Before the first payload macOS has no rows at all (they only come
+        // from those curve reads). Windows deliberately differs, as the
+        // maintainer decided: it draws the retained series right away, as the
+        // client lens already does (round 16), excluding by settings what
+        // visibleAgents would drop once a payload names the agents — a
+        // tab-hidden client (folded to its group) and a limits-hidden client.
+        // Without a payload a limits-hidden client's extra accounts cannot be
+        // told from its primary, so all of its series wait for the payload.
         // A stored series of a visible single-account client under a FORMER
         // account scope is dropped too, as on macOS (it reads only
         // historyReadAccountKey's curve).
         if (quota is null)
         {
-            history = null;
-            // Loading until the agent-usage fetch has been attempted (macOS
+            var excluded = ClientRegistry.QuotaExcludedClients(
+                selection.TabHidden ?? new HashSet<string>(), selection.LimitsHidden ?? new HashSet<string>());
+            history = history?.Where(s => !excluded.Contains(s.ProviderId)).ToList();
+            // With nothing retained to draw: Loading until the agent-usage fetch has been attempted (macOS
             // usageAttempted), then NoCompleted/NoMovement. Loading while
             // EITHER that fetch or the history read is unattempted: the
             // history outcome already drives Loading on its own.

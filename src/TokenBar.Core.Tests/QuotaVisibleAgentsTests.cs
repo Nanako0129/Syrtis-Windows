@@ -104,26 +104,34 @@ public class QuotaVisibleAgentsTests
         Assert.Equal(QuotaHeatmapState.NoMovement, Heat(o));
     }
 
-    // Q36 M1: no payload yet -> macOS has no summaries/windows/grids at all
-    // (DashboardModel.swift:1509, :1543, :1663). Old ccd994a skipped the filter
-    // here and drew every retained series, tab-hidden clients' included.
+    // No payload yet. macOS has no rows then (DashboardModel.swift:1543/:1663);
+    // Windows deliberately draws retained series (maintainer decision), but
+    // never a tab-hidden or limits-hidden client's. Round-1 2cb9c9b drew
+    // nothing; ccd994a drew every series, hidden clients' included.
     [Fact]
-    public void NoPayloadYetDrawsNothingFromRetainedSeriesAndSaysLoadingUntilAttempted()
+    public void NoPayloadYetDrawsRetainedSeriesExceptHiddenClients()
     {
-        QuotaHistorySeries[] history = [Series("codex", "p"), Series("opencode", "o")];
+        // Maintainer-approved deviation from macOS (which has no rows before a
+        // payload): Windows draws retained series at once, as the client lens
+        // does, and drops by settings the clients visibleAgents would drop.
+        QuotaHistorySeries[] history =
+            [Series("codex", "p"), Series("opencode", "o"), Series("claude", "c")];
 
-        var loading = Overview([], history, tabHidden: ["opencode"], payload: false, attempted: false);
-        Assert.Empty(loading.Summaries);
-        Assert.Empty(loading.Windows);
-        Assert.Empty(loading.Grids);
-        Assert.Empty(loading.Equivalences);
+        var o = Overview([], history, limitsHidden: ["claude"], tabHidden: ["opencode"], payload: false, attempted: false);
+        Assert.Equal(["codex"], o.Summaries.Select(s => s.Id.ProviderId));
+        Assert.Equal(["codex"], o.Windows.Select(w => w.Id.ProviderId));
+        Assert.Equal(["codex"], o.Grids.Keys.Select(k => k.ProviderId));
+        Assert.Equal(QuotaStripState.Rows, Strip(o));
+    }
+
+    [Fact]
+    public void NoPayloadAndNothingRetainedSaysLoadingUntilAttempted()
+    {
+        var loading = Overview([], [], payload: false, attempted: false);
         Assert.Equal(QuotaStripState.Loading, Strip(loading));
         Assert.Equal(QuotaHeatmapState.Loading, Heat(loading));
 
-        var attempted = Overview([], history, tabHidden: ["opencode"], payload: false, attempted: true);
-        Assert.Empty(attempted.Summaries);
-        Assert.Empty(attempted.Windows);
-        Assert.Empty(attempted.Grids);
+        var attempted = Overview([], [], payload: false, attempted: true);
         Assert.Equal(QuotaStripState.NoCompletedWindows, Strip(attempted));
         Assert.Equal(QuotaHeatmapState.NoMovement, Heat(attempted));
     }
