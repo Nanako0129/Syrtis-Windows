@@ -130,7 +130,12 @@ public static class QuotaLensProjection
         // unscoped usage did (macOS WindowUsageHalf.scopeMatchedNothing,
         // WindowCardLoader.swift:327-329). Said on the card, not drawn as an
         // idle week.
-        bool ScopeMatchedNothing = false);
+        bool ScopeMatchedNothing = false,
+        // False when macOS draws no window card for this tab
+        // (<see cref="WindowCardOwner"/> returned null): the view draws the
+        // strip and heatmap in its place and no window history.
+        // <c>Owner</c> and the folds are then the tab's own owner, unused.
+        bool HasWindowCard = true);
 
     /// <summary>Site 6 on its own: the window-history card's rows and its
     /// pooled ≈ line.</summary>
@@ -325,7 +330,8 @@ public static class QuotaLensProjection
         // subscription — or, on a grouped tab whose owner is not a card
         // client (a Grok Bot-only install), by the member that is
         // (WindowCardOwner).
-        var owner = WindowCardOwner(quota, clientId, selection.PresentClients, selection.TabHidden, selection.LimitsHidden);
+        var cardOwner = WindowCardOwner(quota, clientId, selection.PresentClients, selection.TabHidden, selection.LimitsHidden);
+        var owner = cardOwner ?? ClientRegistry.QuotaOwner(clientId);
         // One card per client: the primary when it has windows, else the
         // first other account that does (Desktop-only users).
         var account = WindowCardText.WindowCardAccount(quota, owner, selection.WindowCardAccount);
@@ -418,7 +424,7 @@ public static class QuotaLensProjection
             unattributed ? 0 : windowUsage?.UndatedCount ?? 0, windowHistory, quotaHistoryOutcome,
             WindowCardText.AccountPills(quota, owner), account, unattributed,
             WindowCardText.HeaderAccountLabel(quota, owner, account),
-            scopeMatchedNothing);
+            scopeMatchedNothing, HasWindowCard: cardOwner is not null);
     }
 
     /// <summary>The tab-group member whose window card, history and account
@@ -432,11 +438,11 @@ public static class QuotaLensProjection
     /// A Grok Bot-only user gets the grok-bot window on the "Grok Build &amp; Bot"
     /// tab; with Grok Build present locally the card is keyed on grok even
     /// when only the Bot reports windows. At most one card per tab.
-    /// Remaining difference: macOS draws no card at all when the tab itself is
-    /// excluded (limits-hidden owner, <c>guard !excluded.contains(tab)</c>) or
-    /// no member qualifies; Windows has no "no window card" path on the client
-    /// tab, so those cases still fall back to the owner.</summary>
-    internal static string WindowCardOwner(
+    /// Null when macOS draws no card: the tab itself is excluded
+    /// (limits-hidden owner, <c>guard !excluded.contains(tab)</c>; the tab is
+    /// <see cref="ClientRegistry.QuotaOwner"/> of the active tab, which is what
+    /// the Windows tab selection stores) or no member qualifies.</summary>
+    internal static string? WindowCardOwner(
         AgentUsagePayload? quota, string clientId,
         IReadOnlyList<string>? present = null,
         IReadOnlySet<string>? tabHidden = null, IReadOnlySet<string>? limitsHidden = null)
@@ -446,7 +452,7 @@ public static class QuotaLensProjection
         return ClientRegistry.WindowCardClient(
             owner,
             ClientRegistry.QuotaClients(present ?? [], quota?.ConfiguredClientIds ?? [], hidden),
-            ClientRegistry.QuotaExcludedClients(hidden, limitsHidden ?? new HashSet<string>())) ?? owner;
+            ClientRegistry.QuotaExcludedClients(hidden, limitsHidden ?? new HashSet<string>()));
     }
 
     /// <summary>True only when presence is KNOWN and no member of the tab group

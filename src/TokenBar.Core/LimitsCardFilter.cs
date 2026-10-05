@@ -57,10 +57,16 @@ public static class LimitsCardFilter
     /// ports <c>baseClients</c> :444-447, <c>known</c> :437-439 and the
     /// placeholders :784-787), so the card and this decision cannot disagree.</item>
     /// </list>
-    /// An empty client list hides nothing (:502-504). Remaining difference from
-    /// macOS: the opencode tab's routed subscriptions (:421-436, built from
-    /// <c>opencodeCardClients</c>) — Windows has no opencode view, so that tab
-    /// lists only its own slice and draws no routed-subscription cards.</summary>
+    /// An empty client list hides nothing (:502-504). On the opencode tab the
+    /// list the card draws is the routed one (<see cref="OpencodeRoutes"/>,
+    /// :421-440) while <c>allRestrictedClientsHidden</c> reads the card's
+    /// <c>clients</c> — the tab's own <c>["opencode"]</c> — so
+    /// <paramref name="restricted"/> carries that, and a limits-hidden opencode
+    /// hides the whole card even when routed cards would draw (macOS does the
+    /// same).</summary>
+    /// <param name="restricted">The tab's own clients (macOS <c>clients</c>),
+    /// read by the switched-off test; null = <paramref name="clientIds"/>.
+    /// <paramref name="clientIds"/> is the list the card draws.</param>
     /// <param name="attempted">The quota fetch has completed once, successfully
     /// or not (<c>DashboardModel.Snapshot.QuotaAttempted</c>; macOS
     /// <c>usageAttempted</c>).</param>
@@ -68,15 +74,17 @@ public static class LimitsCardFilter
         IReadOnlyList<AgentUsageSnapshot> agents,
         IReadOnlyList<string> clientIds,
         IReadOnlySet<string> limitsHidden,
-        bool attempted)
+        bool attempted,
+        IReadOnlyList<string>? restricted = null)
     {
-        if (clientIds.Count == 0)
+        restricted ??= clientIds;
+        if (restricted.Count == 0)
         {
             return false;
         }
 
-        if (clientIds.All(limitsHidden.Contains)
-            && !agents.Any(agent => clientIds.Contains(agent.ClientId) && agent.Account.AccountKey is not null))
+        if (restricted.All(limitsHidden.Contains)
+            && !agents.Any(agent => restricted.Contains(agent.ClientId) && agent.Account.AccountKey is not null))
         {
             return true;
         }

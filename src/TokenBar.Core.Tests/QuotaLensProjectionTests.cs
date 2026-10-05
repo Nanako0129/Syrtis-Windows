@@ -797,17 +797,78 @@ public class QuotaLensProjectionTests
         Assert.Equal("grok-bot", QuotaLensProjection.WindowCardOwner(botOnly, "grok", present: ["codex"]));
     }
 
-    // (iii) A limits-hidden Bot is not picked by the fallback; Windows has no
-    // "no window card" path, so the tab falls back to its owner (macOS draws
-    // none: remaining difference).
+    // (iii) A limits-hidden Bot is not picked by the fallback: the grok tab's
+    // owner is not a card client and the only member that is, grok-bot, is
+    // excluded, so macOS draws no window card (WindowCardLoader.swift:625-639).
     [Fact]
     public void ALimitsHiddenBotIsNotPickedByTheFallback()
     {
         var botOnly = Agents(Agent("grok-bot", Window("grok-bot|weekly.v1", "Weekly", "weekly.v1")));
         var hidden = new HashSet<string> { "grok-bot" };
-        Assert.Equal("grok", QuotaLensProjection.WindowCardOwner(botOnly, "grok", present: [], limitsHidden: hidden));
+        Assert.Null(QuotaLensProjection.WindowCardOwner(botOnly, "grok", present: [], limitsHidden: hidden));
         Assert.Equal("grok-bot", QuotaLensProjection.WindowCardOwner(botOnly, "grok", present: [], limitsHidden: new HashSet<string>()));
     }
+
+    // `guard !excluded.contains(tab)`: a visible tab whose own limits are
+    // switched off draws no window card even though it reports windows (the
+    // old fallback returned the owner).
+    [Fact]
+    public void ALimitsHiddenOwnerOfAVisibleTabDrawsNoWindowCard()
+    {
+        var quota = Agents(Agent("codex", Window("codex|weekly.v1", "Weekly", "weekly.v1")));
+        Assert.Equal("codex", QuotaLensProjection.WindowCardOwner(quota, "codex"));
+        Assert.Null(QuotaLensProjection.WindowCardOwner(
+            quota, "codex", limitsHidden: new HashSet<string> { "codex" }));
+
+        var client = CodexTab(quota, new HashSet<string> { "codex" });
+        Assert.False(client.HasWindowCard);
+        Assert.True(CodexTab(quota, new HashSet<string>()).HasWindowCard);
+    }
+
+    // The grouped tab's id is excluded but another member qualifies: macOS
+    // returns nil for the TAB first, so no other member's card is drawn.
+    [Fact]
+    public void AnExcludedGroupedTabIdDrawsNoCardEvenWhenAMemberQualifies()
+    {
+        var both = Agents(
+            Agent("grok", Window("grok|billing.weekly.v1", "Weekly", "billing.weekly.v1")),
+            Agent("grok-bot", Window("grok-bot|weekly.v1", "Weekly", "weekly.v1")));
+        Assert.Null(QuotaLensProjection.WindowCardOwner(
+            both, "grok", present: ["grok"], limitsHidden: new HashSet<string> { "grok" }));
+    }
+
+    // A tab with no card client at all (no records, no quota): no card.
+    [Fact]
+    public void ATabWithNoQuotaAndNoRecordsDrawsNoWindowCard() =>
+        Assert.Null(QuotaLensProjection.WindowCardOwner(Agents(), "cursor", present: []));
+
+    // The strip and heatmap a no-card tab draws are the tab's own slice
+    // (QuotaView.swift:92, :96).
+    [Fact]
+    public void TheStripAndHeatmapFilterToTheTabsClients()
+    {
+        QuotaWindowIdentity Id(string provider) => new(provider, "primary", "weekly.v1");
+        IReadOnlyList<QuotaWindowSummary> summaries =
+            [new(Id("grok"), "Weekly", [], [], 0, false, 1), new(Id("grok-bot"), "Weekly", [], [], 0, false, 1),
+             new(Id("codex"), "Weekly", [], [], 0, false, 1)];
+        IReadOnlyList<QuotaHeatmapWindow> windows =
+            [new(Id("grok"), "Weekly", 1), new(Id("codex"), "Weekly", 1)];
+
+        var slice = ClientRegistry.TabSlice("grok");
+        Assert.Equal(["grok", "grok-bot"], QuotaOverviewFold.ForClients(summaries, slice).Select(s => s.Id.ProviderId));
+        Assert.Equal(["grok"], QuotaOverviewFold.ForClients(windows, slice).Select(w => w.Id.ProviderId));
+        Assert.Empty(QuotaOverviewFold.ForClients(summaries, ["cursor"]));
+    }
+
+    private static QuotaLensProjection.Client CodexTab(AgentUsagePayload quota, IReadOnlySet<string> limitsHidden) =>
+        QuotaLensProjection.Build(
+            [], quota, EmptyGraph(),
+            windowUsage: new WindowUsage([], 0, 0),
+            windowUsageOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            Confirmed(),
+            year: null,
+            new QuotaLensProjection.Selection("codex", string.Empty, LimitsHidden: limitsHidden)).Client!;
 
     // Antigravity's local usage is recorded under antigravity-cli; with no
     // payload yet (before the first fetch, or offline) the tab must keep the

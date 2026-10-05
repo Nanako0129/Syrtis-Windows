@@ -251,7 +251,7 @@ public sealed partial class DashboardView
         // subscription's own three cards rather than the all-clients four.
         if (_activeClientTab != ClientRegistry.OverviewTab)
         {
-            return BuildClientQuota(snapshot, model.Client!);
+            return BuildClientQuota(snapshot, model.Client!, model.Overview);
         }
 
         var stack = new StackPanel { Spacing = 10 };
@@ -544,13 +544,22 @@ public sealed partial class DashboardView
     private string? _historyShownWindow;
     private int _historyShownCount = WindowHistoryText.VisibleRows;
 
-    /// <summary>One subscription's own three cards: the window it is in now,
-    /// where its allowance stands, and the windows before this one.</summary>
+    /// <summary>One client tab's quota cards (macOS QuotaView.swift
+    /// :59-100): the window card when the tab has one, the limits card, then
+    /// either the windows before this one (with a window card) or the
+    /// recorded-cycle strip and heatmap for the tab's clients (without).</summary>
     private UIElement BuildClientQuota(
-        DashboardModel.Snapshot snapshot, QuotaLensProjection.Client client)
+        DashboardModel.Snapshot snapshot, QuotaLensProjection.Client client,
+        QuotaLensProjection.Overview overview)
     {
         var stack = new StackPanel { Spacing = 10 };
-        stack.Children.Add(BuildWindowCard(client));
+        // macOS QuotaView.swift:60-66: no window card when the gate gave none
+        // (the tab's limits are switched off, or no member qualifies).
+        if (client.HasWindowCard)
+        {
+            stack.Children.Add(BuildWindowCard(client));
+        }
+
         // The same builder the Overview and the all-clients lens use, filtered
         // to this client. A second implementation of "where does the allowance
         // stand right now" would be free to disagree with the first.
@@ -561,18 +570,21 @@ public sealed partial class DashboardView
         // Same client set as the Overview lens (OverviewScope.LimitsClients):
         // client.Owner can be grok-bot, whose TabSlice lacks grok.
         var singleClient = OverviewScope.SingleClient(_activeClientTab)!;
-        var members = OverviewScope.LimitsClients(singleClient)!;
+        var tabClients = OverviewScope.LimitsClients(singleClient)!;
+        // The list the card draws: the tab's own, or opencode's routed one.
+        var members = OpencodeRoutes.LimitsClients(tabClients, snapshot.Quota);
         if (OverviewCards.ShowsLimitsCard(OverviewCards.LimitsEnabled(AppSettings.Store))
             && !LimitsCardFilter.HidesClientCard(
                 snapshot.Quota?.Agents ?? [],
                 members,
                 ClientRegistry.HiddenLimitsClients(AppSettings.Store),
-                snapshot.QuotaAttempted))
+                snapshot.QuotaAttempted,
+                tabClients))
         {
             stack.Children.Add(Ui.Card(
                 // macOS QuotaView.swift:72: tabDisplayName(singleClient).
                 "{0} limits".Localized(ClientRegistry.TabDisplayName(singleClient)),
-                BuildLimits(snapshot, members)));
+                BuildLimits(snapshot, members, opencodeView: OpencodeRoutes.IsView(tabClients))));
         }
 
         // Every subscription-facing lookup, including the history card's
@@ -580,7 +592,25 @@ public sealed partial class DashboardView
         // the confirmed attribution target these rows were folded against
         // (round 19's finding: antigravity-cli's rows are declared as
         // "Antigravity", not the raw tab id's own "Antigravity CLI").
-        stack.Children.Add(BuildWindowHistoryCard(snapshot, client));
+        if (client.HasWindowCard)
+        {
+            stack.Children.Add(BuildWindowHistoryCard(snapshot, client));
+        }
+        else
+        {
+            // macOS QuotaView.swift:85-100: nothing to list a history for, so the
+            // all-clients strip and heatmap filtered to this tab's own clients
+            // (macOS clientIds, the tab's slice; on the opencode tab the limits
+            // card draws the routed list, this stays the slice). Windows has no
+            // `unreadable` flag on either builder; not ported.
+            var slice = ClientRegistry.TabSlice(ClientRegistry.QuotaOwner(singleClient));
+            stack.Children.Add(BuildQuotaStripCard(
+                QuotaOverviewFold.ForClients(overview.Summaries, slice), overview.Outcome, overview.Equivalences));
+            stack.Children.Add(BuildQuotaHeatmapCard(
+                QuotaOverviewFold.ForClients(overview.Windows, slice), overview.Grids, overview.Outcome,
+                overview.Equivalences));
+        }
+
         return stack;
     }
 
