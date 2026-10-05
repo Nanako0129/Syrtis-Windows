@@ -2132,8 +2132,9 @@ public sealed partial class DashboardView : UserControl
             // Session-window card already resolves its own samples through —
             // returns one WindowCardTab per live window in agent's own order
             // whenever the agent has windows (snapshot.Quota is non-null inside
-            // this loop, and WindowCardText.LiveWindowsUnavailable needs an
-            // empty window list, so it is false whenever this loop draws), so a
+            // this loop, so the live path runs even for an agent carrying an
+            // error with last-good windows; the Session-window card blocks on
+            // that error, this card keeps drawing them), so a
             // plain index zip against the same windows lines each tab up with
             // the window it belongs to.
             var windows = AgentLimitsText.BarWindows(agent);

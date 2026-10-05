@@ -80,7 +80,10 @@ public static class QuotaLensProjection
         IReadOnlyCollection<string>? LocalUsageClients = null,
         IReadOnlyList<string>? PresentClients = null,
         IReadOnlySet<string>? TabHidden = null,
-        IReadOnlySet<string>? LimitsHidden = null);
+        IReadOnlySet<string>? LimitsHidden = null,
+        // The PRIMARY scope remembered from the last payload for the card's
+        // owner (WindowCardText.PrimaryScopeKeyPrefix); used only without a payload.
+        string? PrimaryScope = null);
 
     /// <summary>Everything the Quota lens's seven sites decided, assembled
     /// once. <see cref="Client"/> is null exactly when <see cref="Selection.ActiveClientTab"/>
@@ -144,7 +147,9 @@ public static class QuotaLensProjection
         // <c>Owner</c> and the folds are then the tab's own owner, unused.
         bool HasWindowCard = true,
         // What WindowCardText.State needs to decide Idle vs pending.
-        LocalScan? Scan = null);
+        LocalScan? Scan = null,
+        // Non-null = the card draws no tabs, only this reason (WindowCardText.Blocked).
+        string? BlockedReason = null);
 
     /// <summary>Site 6 on its own: the window-history card's rows and its
     /// pooled ≈ line.</summary>
@@ -251,7 +256,7 @@ public static class QuotaLensProjection
                 selection.ActiveClientTab, selection.WindowCardTab,
                 history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed,
                 selection, accountWindowUsage, now ?? DateTimeOffset.UtcNow,
-                windowUsageFromMs, accountWindowUsageFromMs);
+                windowUsageFromMs, accountWindowUsageFromMs, quotaAttempted);
         return new Model(overview, trend, pastYearSelected, client);
     }
 
@@ -478,7 +483,8 @@ public static class QuotaLensProjection
         IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage,
         DateTimeOffset now,
         long? windowUsageFromMs,
-        long? accountWindowUsageFromMs)
+        long? accountWindowUsageFromMs,
+        bool quotaAttempted)
     {
         // Every subscription-facing lookup below is keyed by the quota OWNER,
         // not the raw client id — antigravity-cli spends the antigravity
@@ -528,7 +534,14 @@ public static class QuotaLensProjection
             scanFromMs = accountWindowUsageFromMs;
         }
 
-        var tabs = WindowCardText.Tabs(history, quota, owner, account, now.ToUnixTimeMilliseconds()).ToList();
+        var tabs = WindowCardText.Tabs(
+            history, quota, owner, account, now.ToUnixTimeMilliseconds(), selection.PrimaryScope).ToList();
+        var blocked = WindowCardText.Blocked(quota, owner, account, quotaAttempted, tabs);
+        if (blocked is not null)
+        {
+            tabs = [];
+        }
+
         var selected = tabs.FirstOrDefault(tab => WindowId(tab.Id) == windowCardTab)
             ?? DefaultTab(tabs);
         IReadOnlyList<WindowMessage> messages = unattributed ? [] : windowUsage?.Messages ?? [];
@@ -616,12 +629,13 @@ public static class QuotaLensProjection
         return new Client(
             owner, tabs, selected, messages, mine, liveEquivalence,
             unattributed ? 0 : windowUsage?.UndatedCount ?? 0, windowHistory, quotaHistoryOutcome,
-            WindowCardText.AccountPills(quota, owner), account, unattributed,
+            blocked is null ? WindowCardText.AccountPills(quota, owner) : [], account, unattributed,
             WindowCardText.HeaderAccountLabel(quota, owner, account),
             scopeMatchedNothing, HasWindowCard: cardOwner is not null,
             Scan: new LocalScan(
                 accountScanPending ? WindowEquivalence.FetchOutcome.NotAttempted : windowUsageOutcome,
-                scanFromMs, unattributed && !accountScanPending));
+                scanFromMs, unattributed && !accountScanPending),
+            BlockedReason: blocked);
     }
 
     /// <summary>The tab-group member whose window card, history and account

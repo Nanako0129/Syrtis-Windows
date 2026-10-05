@@ -376,7 +376,8 @@ public class QuotaLensProjectionTests
             windowUsageOutcome: WindowEquivalence.FetchOutcome.NotAttempted,
             quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
             UsageAttribution.Table.Empty, year: null,
-            new QuotaLensProjection.Selection("codex", string.Empty));
+            new QuotaLensProjection.Selection("codex", string.Empty),
+            quotaAttempted: false); // attempted + an ended cycle would block (Q39)
 
         Assert.NotNull(model.Client);
         Assert.NotEmpty(model.Client!.Tabs);

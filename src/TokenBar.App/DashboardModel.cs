@@ -1167,6 +1167,16 @@ public sealed class DashboardModel
             accountsChanged = !ClaudeExtraRoots.AttributableAccountKeys(quota)
                 .SequenceEqual(ClaudeExtraRoots.AttributableAccountKeys(_latestQuota));
             _latestQuota = quota;
+            // Remember each primary's history scope for the store-fallback card
+            // (WindowCardText.PrimaryScopeKeyPrefix); written only on change.
+            foreach (var (clientId, scope) in WindowCardText.PrimaryScopes(quota))
+            {
+                var key = WindowCardText.PrimaryScopeKeyPrefix + clientId;
+                if (AppSettings.Store.GetString(key) != scope)
+                {
+                    AppSettings.Store.SetString(key, scope);
+                }
+            }
         }
         else
         {
