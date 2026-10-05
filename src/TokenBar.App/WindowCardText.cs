@@ -193,8 +193,12 @@ public static class WindowCardText
             : null;
     }
 
+    /// <summary>The CLIENT's display name, not the tab's (macOS
+    /// WindowUsageCard.swift:94 <c>ClientRegistry.style(clientId).displayName</c>):
+    /// the card is the owner's, so a grouped tab reads "Grok Build window",
+    /// not "Grok Build &amp; Bot window".</summary>
     public static string BlockedTitle(string ownerClientId) =>
-        "{0} window".Localized(ClientRegistry.TabDisplayName(ownerClientId));
+        "{0} window".Localized(ClientRegistry.Style(ownerClientId).DisplayName);
 
     public static string BlockedSubtitle() => "Quota unavailable".Localized();
 

@@ -235,6 +235,12 @@ public class WindowCardTextTests
             WindowCardText.Blocked(quota, "codex", null, true, []));
     }
 
+    // macOS WindowUsageCard.swift:94 titles the blocked card by the client's
+    // display name; the grouped "grok" tab's name is "Grok Build & Bot".
+    [Fact]
+    public void TheBlockedTitleNamesTheClientNotItsTab() =>
+        Assert.Equal("Grok Build window", WindowCardText.BlockedTitle("grok"));
+
     [Fact]
     public void AClientMissingFromThePayloadBlocksAsNotInTheReport()
     {
