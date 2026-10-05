@@ -292,7 +292,7 @@ public class WindowCardTextTests
             ],
             quota,
             clientId: "claude",
-            nowMs: RangeNowMs);
+            nowMs: (ResetAt - 300) * 1_000); // after the stored reading, before reset
 
         var tab = Assert.Single(tabs);
         Assert.Equal("account-a", tab.Id.AccountScope);
@@ -347,7 +347,7 @@ public class WindowCardTextTests
             ],
             quota,
             clientId: "claude",
-            nowMs: RangeNowMs);
+            nowMs: (ResetAt - 300) * 1_000); // after the stored reading, before reset
 
         var tab = Assert.Single(tabs);
         Assert.Equal("history-scope", tab.Id.AccountScope);
@@ -378,7 +378,7 @@ public class WindowCardTextTests
             ],
             quota,
             clientId: "claude",
-            nowMs: RangeNowMs);
+            nowMs: (ResetAt - 300) * 1_000); // after the stored reading, before reset
 
         var tab = Assert.Single(tabs);
         Assert.Equal("account-a", tab.Id.AccountScope);
