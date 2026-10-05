@@ -947,6 +947,8 @@ public class QuotaLensProjectionTests
         Assert.Equal(first + DurationMs, client.Selected.Active.ResetAtMs);
         Assert.Empty(client.Selected.Active.Samples);
         Assert.Null(client.LiveEquivalence);
+        // The card's line under the chart: none, rather than a null deref.
+        Assert.Null(WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence));
         Assert.Same(client.Selected, Assert.Single(client.Tabs));
         Assert.StartsWith(
             "Inferred window · resets in",

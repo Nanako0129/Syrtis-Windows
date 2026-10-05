@@ -108,6 +108,15 @@ public static class WindowCardText
     public static string LocalUsageUnattributed() =>
         "Local usage can't be attributed to this account yet.".Localized();
 
+    /// <summary>The line under the window chart: rule 6 for an account whose
+    /// usage cannot be attributed, else the live equivalence. Null when there
+    /// is no equivalence row, which an inferred window (no quota samples)
+    /// always is; the card then draws no line.</summary>
+    public static string? LiveLine(bool unattributed, WindowEquivalence.Row? row) =>
+        unattributed ? LocalUsageUnattributed()
+        : row is { } live ? WindowEquivalenceText.Line(live)
+        : null;
+
     /// <summary>The header label naming the resolved account: null for the
     /// primary (header unchanged), else the same label the pills use — shown
     /// with or without pills, right after the card title on its line
