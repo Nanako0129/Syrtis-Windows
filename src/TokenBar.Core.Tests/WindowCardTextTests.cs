@@ -628,6 +628,86 @@ public class WindowCardTextTests
     private static WindowCardState NoCycleState(WindowCardTab tab) =>
         WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded, Now);
 
+    // ---- placement pending (macOS placementPending + scan.covers) ----------
+    private static readonly long ResetMs = (NowS - 3_600) * 1_000;
+
+    private static WindowCardState Scanned(
+        WindowEquivalence.FetchOutcome outcome, long? fromMs, bool unattributed = false, WindowCardTab? tab = null) =>
+        WindowCardText.State(
+            tab ?? LiveTab(NowS - 3_600, FiveHours), WindowEquivalence.FetchOutcome.Succeeded, Now,
+            new LocalScan(outcome, fromMs, unattributed));
+
+    [Fact] // row 1
+    public void IdleBeforeTheScanIsAttemptedIsPlacementPending() =>
+        Assert.Equal(WindowCardState.PlacementPending, Scanned(WindowEquivalence.FetchOutcome.NotAttempted, null));
+
+    [Fact] // row 2
+    public void IdleAfterAFailedScanIsPlacementPending() =>
+        Assert.Equal(WindowCardState.PlacementPending, Scanned(WindowEquivalence.FetchOutcome.Failed, null));
+
+    [Fact] // row 3
+    public void IdleWithAScanStartingAfterTheResetIsPlacementPending() =>
+        Assert.Equal(WindowCardState.PlacementPending, Scanned(WindowEquivalence.FetchOutcome.Succeeded, ResetMs + 1));
+
+    [Fact] // row 4
+    public void AnInferredWindowBeforeTheScanStartIsPlacementPending()
+    {
+        var start = ResetMs + 600_000;
+        var inferred = LiveTab(NowS - 3_600, FiveHours) with
+        {
+            Active = new QuotaActiveCycle(start + FiveHours * 1_000, start, []),
+            Inferred = true,
+        };
+
+        Assert.Equal(
+            WindowCardState.PlacementPending,
+            Scanned(WindowEquivalence.FetchOutcome.Succeeded, start + 1, tab: inferred));
+        Assert.Equal(
+            WindowCardState.Chart, Scanned(WindowEquivalence.FetchOutcome.Succeeded, start, tab: inferred));
+    }
+
+    // A pass that scanned nothing (no history to bound a fetch) records "now",
+    // which covers no past window — null would read as an unbounded scan.
+    [Fact]
+    public void ANothingScannedPassDoesNotCoverTheReset() =>
+        Assert.Equal(
+            WindowCardState.PlacementPending,
+            Scanned(WindowEquivalence.FetchOutcome.Succeeded, QuotaEquivalenceFold.ScanFromMs([], NowS * 1_000)));
+
+    // The account-scan bound may move earlier when every key rescanned (a
+    // series with earlier evidence joined the history); only a key that kept
+    // its prior rows holds it at the later of the two.
+    [Fact]
+    public void TheAccountScanBoundMovesEarlierWhenEveryKeyRescanned()
+    {
+        Assert.Equal(100, QuotaEquivalenceFold.NextAccountBound(prior: 900, fresh: 100, scanned: true, keptPrior: false));
+        Assert.Equal(900, QuotaEquivalenceFold.NextAccountBound(prior: 900, fresh: 100, scanned: true, keptPrior: true));
+        Assert.Equal(900, QuotaEquivalenceFold.NextAccountBound(prior: 900, fresh: 100, scanned: false, keptPrior: false));
+        Assert.Equal(100, QuotaEquivalenceFold.NextAccountBound(prior: null, fresh: 100, scanned: true, keptPrior: true));
+    }
+
+    [Fact] // row 5
+    public void IdleWithACoveringScanStaysIdle() =>
+        Assert.Equal(WindowCardState.Idle, Scanned(WindowEquivalence.FetchOutcome.Succeeded, ResetMs));
+
+    [Fact] // row 6
+    public void IdleForAnUnattributedAccountIsIdleUnattributedWhateverTheScan()
+    {
+        Assert.Equal(
+            WindowCardState.IdleUnattributed, Scanned(WindowEquivalence.FetchOutcome.Succeeded, ResetMs, true));
+        Assert.Equal(
+            WindowCardState.IdleUnattributed, Scanned(WindowEquivalence.FetchOutcome.NotAttempted, null, true));
+    }
+
+    [Fact]
+    public void ThePendingAndUnattributedStatesHaveTheirOwnCopy()
+    {
+        Assert.Equal("Placing the window", WindowCardText.Subtitle(WindowCardState.PlacementPending, null, Now));
+        Assert.Equal("Placing the window…", WindowCardText.EmptyBody(WindowCardState.PlacementPending));
+        Assert.Equal("Window start unknown", WindowCardText.Subtitle(WindowCardState.IdleUnattributed, null, Now));
+        Assert.StartsWith("The last window ended. Local usage can't", WindowCardText.EmptyBody(WindowCardState.IdleUnattributed));
+    }
+
     // Port of macOS WindowResolver.resolve (WindowResolution.swift:21-35),
     // one test per branch, all with no running cycle in the store.
     [Fact]

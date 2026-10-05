@@ -461,6 +461,19 @@ public sealed class DashboardModel
         /// that was never going to come.</summary>
         public bool WindowUsageAttempted { get; init; }
 
+        /// <summary>Start of the bound the retained <see cref="WindowUsage"/>
+        /// was scanned from. With no history to bound a fetch by, nothing is
+        /// scanned and this is "now", which covers no past window. A window
+        /// starting before this is not answered by the scan (macOS
+        /// <c>scan.covers(start:)</c>); travels with the data it describes, so
+        /// a failed refetch keeps the pair.</summary>
+        public long? WindowUsageFromMs { get; init; }
+
+        /// <summary>The same bound for <see cref="AccountWindowUsage"/>, which
+        /// is replaced on its own schedule (the main read can fail while the
+        /// account scans succeed), so it carries its own.</summary>
+        public long? AccountWindowUsageFromMs { get; init; }
+
         /// <summary>
         /// The two facts <see cref="WindowUsageAttempted"/> and
         /// <see cref="WindowUsage"/> collapse to, so a call site reads one
@@ -600,12 +613,17 @@ public sealed class DashboardModel
         // which macOS's own probe measured at 67s over 15 days.
         Interop.WindowUsage? usage = null;
         IReadOnlyDictionary<string, Interop.WindowUsage>? accountUsage = null;
+        long? scanFromMs = null;
+        long? accountFromMs = null;
+        var accountKeptPrior = false;
         if (windowUsage)
         {
             var forBound = history ?? Current?.QuotaHistory ?? [];
             if (forBound.Count == 0)
             {
                 usage = new Interop.WindowUsage([], 0, 0);
+                // Nothing scanned: must not read as covering.
+                scanFromMs = QuotaEquivalenceFold.ScanFromMs(forBound, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             }
             else
             {
@@ -614,9 +632,11 @@ public sealed class DashboardModel
                 // hourly/agents fetch above it boosts.
                 using var boost = ProcessPower.Boost();
                 var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                var fromMs = QuotaEquivalenceFold.BoundFromMs(forBound, now);
+                var fromMs = QuotaEquivalenceFold.ScanFromMs(forBound, now);
+                scanFromMs = fromMs;
+                accountFromMs = fromMs;
                 usage = TryFetch(() => TbCore.WindowUsage(fromMs, now), "windowUsage");
-                accountUsage = FetchAccountWindows(fromMs, now, Current?.AccountWindowUsage);
+                accountUsage = FetchAccountWindows(fromMs, now, Current?.AccountWindowUsage, out accountKeptPrior);
             }
         }
 
@@ -657,7 +677,10 @@ public sealed class DashboardModel
                 // Same failed-read and same completion rules as QuotaHistory,
                 // immediately above, and for the same reason.
                 WindowUsage = usage ?? s.WindowUsage,
+                WindowUsageFromMs = usage is null ? s.WindowUsageFromMs : scanFromMs,
                 AccountWindowUsage = accountUsage ?? s.AccountWindowUsage,
+                AccountWindowUsageFromMs = QuotaEquivalenceFold.NextAccountBound(
+                    s.AccountWindowUsageFromMs, accountFromMs, accountUsage is not null, accountKeptPrior),
                 WindowUsageAttempted = windowUsage || s.WindowUsageAttempted,
             };
         }, graph: null, stillValid: () => SelectionStillValid(year, generation));
@@ -671,8 +694,9 @@ public sealed class DashboardModel
     // ponytail: one account after another, at most 8 scans (the registry's cap); run them
     // in parallel or only for the shown card if a many-account setup is slow.
     private IReadOnlyDictionary<string, Interop.WindowUsage> FetchAccountWindows(
-        long fromMs, long untilMs, IReadOnlyDictionary<string, Interop.WindowUsage>? prior)
+        long fromMs, long untilMs, IReadOnlyDictionary<string, Interop.WindowUsage>? prior, out bool keptPrior)
     {
+        keptPrior = false;
         var result = new Dictionary<string, Interop.WindowUsage>(StringComparer.Ordinal);
         foreach (var key in ClaudeExtraRoots.AttributableAccountKeys(_latestQuota))
         {
@@ -687,6 +711,7 @@ public sealed class DashboardModel
                 if (prior is not null && prior.TryGetValue(key, out var kept))
                 {
                     result[key] = kept;
+                    keptPrior = true;
                 }
             }
         }

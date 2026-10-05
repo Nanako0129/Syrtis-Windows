@@ -315,6 +315,13 @@ public static class QuotaEquivalenceFold
         return false;
     }
 
+    /// <summary>The bound a window-usage pass records for coverage
+    /// (<c>LocalScan.Covers</c>): the real fetch bound, or — with no history to
+    /// bound a fetch by, so nothing is scanned — <paramref name="nowMs"/>, which
+    /// covers no past window.</summary>
+    public static long ScanFromMs(IReadOnlyList<QuotaHistorySeries> history, long nowMs) =>
+        history.Count == 0 ? nowMs : BoundFromMs(history, nowMs);
+
     /// <summary>The earliest instant any window's admitted cycles need
     /// messages for — the lower bound a caller should pass to
     /// <c>TbCore.WindowUsage</c>, so the export is not asked to scan further
@@ -366,4 +373,15 @@ public static class QuotaEquivalenceFold
 
         return earliest ?? fallbackMs;
     }
+
+    /// <summary>The scan start the published account rows can vouch for. No
+    /// account pass: the prior bound stands. A key whose rescan failed keeps
+    /// its prior rows (scanned from the prior bound), so only then is the
+    /// shared bound the later of the two, never over-claiming; a pass where
+    /// every key rescanned takes the fresh bound, which may be earlier (a
+    /// series whose evidence starts earlier joined the history).</summary>
+    public static long? NextAccountBound(long? prior, long? fresh, bool scanned, bool keptPrior) =>
+        !scanned ? prior
+        : keptPrior && prior is { } p && fresh is { } f ? Math.Max(p, f)
+        : fresh;
 }
