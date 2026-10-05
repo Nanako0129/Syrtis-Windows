@@ -955,10 +955,23 @@ public class QuotaLensProjectionTests
         InferenceClient(-3_600_000, messages);
 
     private static QuotaLensProjection.Client InferenceClient(long resetOffsetMs, params WindowMessage[] messages) =>
-        InferenceClient(resetOffsetMs, [Sample(40, 1_500, 2_000, active: false)], messages);
+        InferenceClient(
+            resetOffsetMs, [Sample(40, 1_500, 2_000, active: false)],
+            WindowEquivalence.FetchOutcome.Succeeded, null, false, messages);
 
     private static QuotaLensProjection.Client InferenceClient(
-        long resetOffsetMs, QuotaHistorySample[] stored, params WindowMessage[] messages)
+        long resetOffsetMs, QuotaHistorySample[] stored, params WindowMessage[] messages) =>
+        InferenceClient(resetOffsetMs, stored, WindowEquivalence.FetchOutcome.Succeeded, null, false, messages);
+
+    private static QuotaLensProjection.Client InferenceClient(
+        long resetOffsetMs, WindowEquivalence.FetchOutcome outcome, long? scanFromMs, bool unattributed,
+        params WindowMessage[] messages) =>
+        InferenceClient(
+            resetOffsetMs, [Sample(40, 1_500, 2_000, active: false)], outcome, scanFromMs, unattributed, messages);
+
+    private static QuotaLensProjection.Client InferenceClient(
+        long resetOffsetMs, QuotaHistorySample[] stored, WindowEquivalence.FetchOutcome outcome,
+        long? scanFromMs, bool unattributed, params WindowMessage[] messages)
     {
         var resetIso = DateTimeOffset.FromUnixTimeMilliseconds(NowMs + resetOffsetMs).UtcDateTime
             .ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
@@ -973,14 +986,63 @@ public class QuotaLensProjectionTests
 
         return QuotaLensProjection.Build(
             history, quota, EmptyGraph(), new WindowUsage(messages, 0, 0),
-            WindowEquivalence.FetchOutcome.Succeeded, WindowEquivalence.FetchOutcome.Succeeded,
+            outcome, WindowEquivalence.FetchOutcome.Succeeded,
             Confirmed(
                 new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex")),
                 new UsageAttribution.Record("claude", "anthropic", UsageAttribution.State.Assigned("claude"))),
             year: null,
-            new QuotaLensProjection.Selection("codex", string.Empty),
-            now: DateTimeOffset.FromUnixTimeMilliseconds(NowMs)).Client!;
+            new QuotaLensProjection.Selection(
+                "codex", string.Empty, LocalUsageClients: unattributed ? [] : null),
+            now: DateTimeOffset.FromUnixTimeMilliseconds(NowMs),
+            windowUsageFromMs: scanFromMs).Client!;
     }
+
+    private static WindowCardState CardState(QuotaLensProjection.Client client) =>
+        WindowCardText.State(
+            client.Selected, WindowEquivalence.FetchOutcome.Succeeded,
+            DateTimeOffset.FromUnixTimeMilliseconds(NowMs), client.Scan);
+
+    // ---- placement pending (macOS placementPending + scan.covers) ----------
+    private const long ResetMs = NowMs - 3_600_000;
+
+    [Fact] // row 1
+    public void AColdStartCardIsPlacementPendingNotIdle() =>
+        Assert.Equal(WindowCardState.PlacementPending, CardState(
+            InferenceClient(-3_600_000, WindowEquivalence.FetchOutcome.NotAttempted, null, false)));
+
+    [Fact] // row 2
+    public void AFailedScanCardIsPlacementPendingNotIdle() =>
+        Assert.Equal(WindowCardState.PlacementPending, CardState(
+            InferenceClient(-3_600_000, WindowEquivalence.FetchOutcome.Failed, null, false)));
+
+    [Fact] // row 3
+    public void AScanStartingAfterTheResetCannotSayNothingWasUsed() =>
+        Assert.Equal(WindowCardState.PlacementPending, CardState(
+            InferenceClient(-3_600_000, WindowEquivalence.FetchOutcome.Succeeded, ResetMs + 1, false)));
+
+    [Fact] // row 4
+    public void AnInferredWindowStartingBeforeTheScanIsPlacementPendingNotChart()
+    {
+        var first = NowMs - 1_800_000;
+        Assert.Equal(WindowCardState.PlacementPending, CardState(
+            InferenceClient(
+                -3_600_000, WindowEquivalence.FetchOutcome.Succeeded, first + 1, false,
+                Message(first, "codex", "openai", 10, 0.1))));
+        Assert.Equal(WindowCardState.Chart, CardState(
+            InferenceClient(
+                -3_600_000, WindowEquivalence.FetchOutcome.Succeeded, first, false,
+                Message(first, "codex", "openai", 10, 0.1))));
+    }
+
+    [Fact] // row 5
+    public void ACoveringScanWithNoOwnUsageSinceTheResetIsIdle() =>
+        Assert.Equal(WindowCardState.Idle, CardState(
+            InferenceClient(-3_600_000, WindowEquivalence.FetchOutcome.Succeeded, ResetMs, false)));
+
+    [Fact] // row 6
+    public void AnUnattributedAccountWhoseWindowEndedIsIdleUnattributed() =>
+        Assert.Equal(WindowCardState.IdleUnattributed, CardState(
+            InferenceClient(-3_600_000, WindowEquivalence.FetchOutcome.Succeeded, ResetMs, true)));
 
     [Fact]
     public void OwnUsageAfterTheLiveResetInfersTheWindowFromTheFirstMessage()
