@@ -430,6 +430,14 @@ public sealed class DashboardModel
         public WindowEquivalence.FetchOutcome QuotaHistoryOutcome =>
             LazyLaneFold.Outcome(QuotaHistoryAttempted, QuotaHistory);
 
+        /// <summary>The LATEST quota-history read threw, whatever is retained
+        /// in <see cref="QuotaHistory"/> (unchanged when a pass did not ask).
+        /// <see cref="QuotaHistoryOutcome"/> is Failed only with nothing
+        /// retained, so it misses an earlier empty read kept under a later
+        /// throw; macOS decides "could not be read" per publication from the
+        /// latest read (DashboardModel.swift:1670-1712, :1845-1862).</summary>
+        public bool QuotaHistoryReadFailed { get; init; }
+
         /// <summary>The per-message rows behind the Quota lens's ≈ lines
         /// (5d-1's export). A fourth lazy lens, fetched only once
         /// <see cref="QuotaHistory"/> has told this lane how far back to ask —
@@ -645,6 +653,7 @@ public sealed class DashboardModel
                 // same reason the agent-usage lane does: a lens that reads null as
                 // "not yet" would wait forever for an answer that already came back.
                 QuotaHistoryAttempted = quotaHistory || s.QuotaHistoryAttempted,
+                QuotaHistoryReadFailed = LazyLaneFold.LatestReadFailed(quotaHistory, history, s.QuotaHistoryReadFailed),
                 // Same failed-read and same completion rules as QuotaHistory,
                 // immediately above, and for the same reason.
                 WindowUsage = usage ?? s.WindowUsage,

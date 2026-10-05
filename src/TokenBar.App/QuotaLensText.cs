@@ -61,45 +61,37 @@ public enum QuotaStripState
 public static class QuotaLensText
 {
     /// <summary>Which of the heatmap card's four-plus-one states applies.
-    /// Order matters: a drawable grid, then movement that could not be
-    /// placed, then whatever the fetch's own outcome says about the rest.
+    /// Order matters (macOS QuotaHeatmapCard.swift:62-95): a drawable grid,
+    /// then movement that could not be placed, then NotAttempted -> Loading,
+    /// then "could not be read" when <paramref name="unreadable"/> AND no
+    /// window is listed, else "no movement".
     /// <para><paramref name="outcome"/> is a fact about the REQUEST, not about
     /// the result — <c>grid is null</c> cannot tell "asked and empty" from
-    /// "not asked" from "asked and it threw", because all three leave it
-    /// null.</para></summary>
+    /// "not asked" from "asked and it threw". <paramref name="unreadable"/>
+    /// does NOT require <c>outcome == Failed</c>: the outcome is Failed only
+    /// when nothing is retained, but the latest read can fail while an
+    /// earlier empty one is retained (see
+    /// <see cref="QuotaLensProjection.UnreadableClients"/>).</para></summary>
     public static QuotaHeatmapState HeatmapState(
         QuotaHeatmap? grid, WindowEquivalence.FetchOutcome outcome, bool unreadable, bool windowsEmpty) =>
         grid is { IsEmpty: false } ? QuotaHeatmapState.Grid
         : grid is { HasMovement: true } ? QuotaHeatmapState.Unplaced
-        : outcome switch
-        {
-            // macOS QuotaHeatmapCard.swift:62-95: "could not be read" only when
-            // attempted AND unreadable AND no window is listed; any other
-            // attempted answer is "no movement".
-            WindowEquivalence.FetchOutcome.Succeeded => QuotaHeatmapState.NoMovement,
-            WindowEquivalence.FetchOutcome.Failed =>
-                unreadable && windowsEmpty ? QuotaHeatmapState.Failed : QuotaHeatmapState.NoMovement,
-            _ => QuotaHeatmapState.Loading,
-        };
+        : outcome == WindowEquivalence.FetchOutcome.NotAttempted ? QuotaHeatmapState.Loading
+        : unreadable && windowsEmpty ? QuotaHeatmapState.Failed
+        : QuotaHeatmapState.NoMovement;
 
-    /// <summary>The strip card's state. Same <paramref name="outcome"/>
-    /// contract as the heatmap's: an empty list is not an answer.
+    /// <summary>The strip card's state, same order as macOS
+    /// QuotaHistoryStripCard.swift:40-61: rows, then NotAttempted -> Loading,
+    /// then <paramref name="unreadable"/> -> Failed (no <c>outcome == Failed</c>
+    /// requirement, as for the heatmap), else "no completed windows".
     /// <paramref name="unreadable"/> is <see cref="QuotaLensProjection.UnreadableClients"/>
     /// reduced to this card's clients.</summary>
     public static QuotaStripState StripState(
         IReadOnlyList<QuotaWindowSummary> summaries, WindowEquivalence.FetchOutcome outcome, bool unreadable) =>
         summaries.Count > 0 ? QuotaStripState.Rows
-        : outcome switch
-        {
-            // macOS QuotaHistoryStripCard.swift:40-61: "could not be read" only
-            // when attempted AND unreadable (on Windows: the whole read failed
-            // and a client in scope has a window macOS would read; a failed
-            // read with no such client says "no completed windows").
-            WindowEquivalence.FetchOutcome.Succeeded => QuotaStripState.NoCompletedWindows,
-            WindowEquivalence.FetchOutcome.Failed =>
-                unreadable ? QuotaStripState.Failed : QuotaStripState.NoCompletedWindows,
-            _ => QuotaStripState.Loading,
-        };
+        : outcome == WindowEquivalence.FetchOutcome.NotAttempted ? QuotaStripState.Loading
+        : unreadable ? QuotaStripState.Failed
+        : QuotaStripState.NoCompletedWindows;
 
     // ---- Strip card ----------------------------------------------------
 
