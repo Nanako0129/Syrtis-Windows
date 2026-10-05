@@ -151,6 +151,37 @@ public class QuotaScanBoundTests
         Assert.Equal(Now + Hour - FiveHours * 1000, QuotaEquivalenceFold.PayloadStartMs(Payload(good, errored), Now));
     }
 
+    // Locks existing behavior (passes on cdd5989 too; not an old != new test):
+    // PayloadStartMs skips an errored agent, yet the store half of the bound
+    // still counts that agent's completed cycle, so its history card loses no
+    // scan range. Without a stored cycle the errored agent adds nothing.
+    [Fact]
+    public void AnErroredAgentsStoredCycleStillBoundsTheScanAndWithoutOneItAddsNothing()
+    {
+        var resetS = (Now - 20 * Hour) / 1000;
+        var cycleStart = resetS * 1000 - FiveHours * 1000;
+        var history = new[]
+        {
+            new QuotaHistorySeries("claude", "primary", "session.v1",
+            [
+                new QuotaHistorySample(resetS, FiveHours, QuotaHistoryDurationSource.Provider,
+                    UsedPercent: 10, SampledAt: resetS - 4 * 3_600, QuotaHistorySampleOrigin.LiveV3, IsActiveGroup: false),
+                new QuotaHistorySample(resetS, FiveHours, QuotaHistoryDurationSource.Provider,
+                    UsedPercent: 40, SampledAt: resetS - 3_600, QuotaHistorySampleOrigin.LiveV3, IsActiveGroup: false),
+            ]),
+        };
+        var errored = Agent("claude", "boom", null, Window("session.v1", Now + Hour, FiveHours));
+        var good = Agent("codex", null, null, Window("w", Now + Hour, FiveHours));
+
+        Assert.Equal(cycleStart, QuotaEquivalenceFold.ScanFromMs(history, Now, Payload(errored)));
+        Assert.Equal(cycleStart, QuotaEquivalenceFold.ScanFromMs(history, Now, Payload(errored, good)));
+        // No stored cycle: same as the agent being absent.
+        Assert.Equal(
+            QuotaEquivalenceFold.ScanFromMs([], Now, Payload(good)),
+            QuotaEquivalenceFold.ScanFromMs([], Now, Payload(errored, good)));
+        Assert.Equal(QuotaEquivalenceFold.ScanFromMs([], Now), QuotaEquivalenceFold.ScanFromMs([], Now, Payload(errored)));
+    }
+
     [Fact]
     public void TheStoreBoundIsKeptWhenItIsEarlierThanThePayloadStart()
     {
