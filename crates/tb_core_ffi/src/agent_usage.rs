@@ -14173,6 +14173,7 @@ mod tests {
                            history_scope: Result<HistoryScope, AccountScopeError>| {
             AgentUsageSnapshot {
                 account_key: None,
+                agy_login_marker: None,
                 merge_scope: None,
                 client_id: "antigravity".to_string(),
                 source: "fixture".to_string(),
