@@ -34,9 +34,9 @@ public enum WindowCardState
     /// having no running cycle is <see cref="Unplaceable"/>.</summary>
     Idle,
 
-    /// <summary>The window cannot be placed: the live window carries no reset
-    /// or no duration, or its reset is more than one window length away in
-    /// either direction (macOS <c>.unavailable</c>,
+    /// <summary>The window cannot be placed: its reset is more than one window
+    /// length away in either direction (a live window with no reset or
+    /// duration has empty ChartSamples and says NoQuotaHistory first) (macOS <c>.unavailable</c>,
     /// WindowResolution.swift:21-29). Not <see cref="Idle"/>: that one says
     /// the user stopped working, and this one says the provider stopped
     /// answering — or, under a store's LearningDuration, that a window is
@@ -676,8 +676,10 @@ public static class WindowCardText
     /// <see cref="Resolve"/> over the live reset and duration says idle (reset
     /// passed within one window length, no own usage since — the caller
     /// replaces an active or inferred tab beforehand via <see cref="Infer"/>); any other
-    /// resolution, including a missing live reset or duration, is
-    /// <see cref="WindowCardState.Unplaceable"/>.</summary>
+    /// resolution is <see cref="WindowCardState.Unplaceable"/>. On the live
+    /// path a missing live reset or duration leaves ChartSamples empty, which
+    /// answers <see cref="WindowCardState.NoQuotaHistory"/> first, so
+    /// Unplaceable there is a reset out of range or the store-fallback path.</summary>
     public static WindowCardState State(
         WindowCardTab? tab, WindowEquivalence.FetchOutcome outcome, DateTimeOffset now,
         LocalScan? localScan = null)

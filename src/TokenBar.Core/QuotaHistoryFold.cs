@@ -499,7 +499,9 @@ public static class QuotaHistoryFold
     /// the series is missing or has no samples) or a payload with no reset or
     /// duration gives <c>[]</c> and NO live point: nothing recorded is
     /// "no quota history", not a one-point chart. Distinct from
-    /// <see cref="Active"/>, which still decides PLACEMENT and still feeds
+    /// <see cref="Active"/>: on the live path PLACEMENT comes from the
+    /// payload (Resolve == Active) or Infer, and Active decides it only on
+    /// the store-fallback path; Active still feeds
     /// <see cref="QuotaEquivalenceFold.BoundFromMs"/>.
     /// </para>
     /// </summary>
