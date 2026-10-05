@@ -210,6 +210,17 @@ public static class QuotaLensProjection
     /// is a product decision, not a defect to fix on sight — noted here so
     /// the next reader finds it recorded rather than rediscovers it.
     /// </para>
+    /// <para>
+    /// <paramref name="quota"/> null (no agent-usage payload yet): macOS
+    /// draws no rows then (its curve reads need the payload,
+    /// DashboardModel.swift:1543/:1663; :1509 is the prune guard). Windows
+    /// deliberately differs, by the maintainer's decision: it draws the
+    /// retained series at once, minus tab-hidden and limits-hidden clients
+    /// by settings. <paramref name="quotaAttempted"/>
+    /// (<c>Snapshot.QuotaAttempted</c>, macOS <c>usageAttempted</c>) decides
+    /// Loading vs NoCompletedWindows/NoMovement when nothing retained is
+    /// left to draw, by folding NotAttempted into <c>Overview.Outcome</c>.
+    /// </para>
     /// </summary>
     public static Model Build(
         IReadOnlyList<QuotaHistorySeries>? history,
@@ -223,11 +234,12 @@ public static class QuotaLensProjection
         Selection selection,
         IReadOnlyDictionary<string, Interop.WindowUsage>? accountWindowUsage = null,
         bool quotaHistoryReadFailed = false,
+        bool quotaAttempted = true,
         DateTimeOffset? now = null)
     {
         var overview = BuildOverview(
             history, quota, windowUsage, windowUsageOutcome, quotaHistoryOutcome, confirmed, selection,
-            quotaHistoryReadFailed);
+            quotaHistoryReadFailed, quotaAttempted);
         var (trend, pastYearSelected) = BuildTrend(graph, confirmed, year);
         var client = selection.ActiveClientTab == ClientRegistry.OverviewTab
             ? null
@@ -246,15 +258,62 @@ public static class QuotaLensProjection
         WindowEquivalence.FetchOutcome quotaHistoryOutcome,
         UsageAttribution.Table confirmed,
         Selection selection,
-        bool quotaHistoryReadFailed)
+        bool quotaHistoryReadFailed,
+        bool quotaAttempted)
     {
+        // macOS reads ONLY visibleAgents' history-key card windows
+        // (DashboardModel.swift:1684-1712, behind `if let payload = agentUsage`
+        // at :1543/:1663), then prunes summaries, heatmap windows, heatmaps and
+        // equivalences to visibleAgents' window keys (:1509-1526, guarded by
+        // `quotaVisibility != nil, agentUsage != nil` at :1509), so a
+        // tab-hidden or limits-hidden client's retained series draws nothing.
+        // With a payload, a stored series of a visible single-account client
+        // under a FORMER account scope is dropped too, as on macOS (it reads
+        // only historyReadAccountKey's curve).
+        // Before the first payload macOS has no rows at all (they only come
+        // from those curve reads). Windows deliberately differs, as the
+        // maintainer decided: it draws the retained series right away, as the
+        // client lens already does (round 16), excluding by settings what
+        // visibleAgents would drop once a payload names the agents — a
+        // tab-hidden client (folded to its group) and a limits-hidden client.
+        // Without a payload a limits-hidden client's extra accounts cannot be
+        // told from its primary, so all of its series wait for the payload.
+        // Filtered ONCE; everything below derives from this slice.
+        if (quota is null)
+        {
+            var excluded = ClientRegistry.QuotaExcludedClients(
+                selection.TabHidden ?? new HashSet<string>(), selection.LimitsHidden ?? new HashSet<string>());
+            history = history?.Where(s => !excluded.Contains(s.ProviderId)).ToList();
+            // Until the agent-usage fetch has been attempted (macOS
+            // usageAttempted) a card with nothing to draw says Loading — the
+            // strip when no retained row is left, the heatmap when its
+            // selected window has no grid — then NoCompleted/NoMovement.
+            // Loading while EITHER that fetch or the history read is
+            // unattempted: the history outcome already drives Loading.
+            if (!quotaAttempted)
+            {
+                quotaHistoryOutcome = WindowEquivalence.FetchOutcome.NotAttempted;
+            }
+        }
+        else
+        {
+            var visible = VisibleAgents(quota, selection);
+            history = history?.Where(s => visible.Any(a => ReadsSeries(a, s))).ToList();
+        }
+
         var (summaries, windows, grids) = QuotaLensData.Build(history, quota);
         // Absent (not merely empty) unless the fetch actually SUCCEEDED — not
         // "was attempted", which a failed pass also satisfies while retaining
         // stale (or no) messages. The strip/heatmap draw no line for a window
         // with no key rather than computing one from a read that did not
         // land; see this method's own doc comment on `windowUsageOutcome`.
-        var equivalences = windowUsageOutcome == WindowEquivalence.FetchOutcome.Succeeded
+        // Also absent before the first payload: without it no series can be
+        // narrowed to its account or model scope (LocalUsageScopable and
+        // ModelScope.Of pass everything through for a null quota), so an
+        // extra account's or a model-scoped window's estimate would be priced
+        // from the whole unscoped scan and overstated. macOS has no rows to
+        // price before a payload either.
+        var equivalences = quota is not null && windowUsageOutcome == WindowEquivalence.FetchOutcome.Succeeded
             ? QuotaEquivalenceFold.Build(
                 [.. (history ?? []).Where(s => LocalUsageScopable(quota, s))],
                 windowUsage?.Messages ?? [], confirmed,
@@ -302,16 +361,33 @@ public static class QuotaLensProjection
             return new HashSet<string>();
         }
 
-        var cardClients = ClientRegistry.QuotaClients(
-            selection.PresentClients ?? [], quota?.ConfiguredClientIds ?? [], selection.TabHidden ?? new HashSet<string>());
-        var limitsHidden = selection.LimitsHidden ?? new HashSet<string>();
-        return (quota?.Agents ?? [])
-            .Where(a => cardClients.Contains(a.ClientId)
-                && (a.AccountKey is not null || !limitsHidden.Contains(a.ClientId))
-                && a.UniqueCardWindows.Any(w => HasHistoryKey(w) && !Drawn(a, w, summaries)))
+        return VisibleAgents(quota, selection)
+            .Where(a => a.UniqueCardWindows.Any(w => HasHistoryKey(w) && !Drawn(a, w, summaries)))
             .Select(a => a.ClientId)
             .ToHashSet();
     }
+
+    /// <summary>macOS <c>visibleAgents</c> (DashboardModel.swift:1502-1508):
+    /// payload agents in <see cref="ClientRegistry.QuotaClients"/> (tab-hidden
+    /// already excluded), minus a limits-hidden PRIMARY (extra accounts stay).
+    /// The one definition the strip/heatmap filter and
+    /// <see cref="UnreadableClients"/> share.</summary>
+    internal static IReadOnlyList<AgentUsageSnapshot> VisibleAgents(AgentUsagePayload? quota, Selection selection)
+    {
+        var cardClients = ClientRegistry.QuotaClients(
+            selection.PresentClients ?? [], quota?.ConfiguredClientIds ?? [], selection.TabHidden ?? new HashSet<string>());
+        var limitsHidden = selection.LimitsHidden ?? new HashSet<string>();
+        return [.. (quota?.Agents ?? []).Where(a => cardClients.Contains(a.ClientId)
+            && (a.AccountKey is not null || !limitsHidden.Contains(a.ClientId)))];
+    }
+
+    // Whether a visible agent's history-key card window is this stored series
+    // (same identity match as Drawn: client + window key, plus the agent's
+    // history scope when it has one).
+    private static bool ReadsSeries(AgentUsageSnapshot agent, QuotaHistorySeries series) =>
+        series.ProviderId == agent.ClientId
+        && (agent.HistoryReadScope?.Scope is not { } scope || series.AccountScope == scope)
+        && agent.UniqueCardWindows.Any(w => HasHistoryKey(w) && w.PaceStatus.WindowKey == series.WindowKey);
 
     private static bool Drawn(AgentUsageSnapshot agent, UsageWindow window, IReadOnlyList<QuotaWindowSummary> summaries) =>
         summaries.Any(s => s.Id.ProviderId == agent.ClientId
