@@ -118,6 +118,14 @@ public class AntigravityAccountsTests
             HistoryScope: new AccountScopeStatus(Error: "noTrustedEvidence"),
             AgyLoginMarker: marker);
 
+    /// <summary>The production shape of a failed primary: an error card
+    /// carries neither the agy source nor a login marker.</summary>
+    private static AgentUsageSnapshot ErroredPrimary(bool lastGood = false) => new(
+        "antigravity", "oauth", "2026-10-04T00:00:00Z",
+        lastGood ? [Window("antigravity.weekly", 60)] : [],
+        Identity: lastGood ? new AgentIdentity(Plan: "Free") : null, // remote_identity(plan): no email
+        Error: "timeout", HistoryScope: new AccountScopeStatus(Error: "noTrustedEvidence"));
+
     private static AgentUsageSnapshot Captured(
         string key = KeyA, string? error = null, bool windows = true) =>
         new("antigravity", "oauth", "2026-10-04T00:00:00Z",
@@ -279,6 +287,37 @@ public class AntigravityAccountsTests
         var payload = Payload(primary, Captured(failing == "noCapturedSnapshot" ? KeyB : KeyA));
 
         Assert.Same(payload, AntigravityDedup.Apply(payload, key, marker));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)] // the core's cached last-good card, error attached
+    public void AnErroredPrimaryIsNeverReplacedOrMerged(bool lastGood)
+    {
+        var payload = Payload(ErroredPrimary(lastGood), Captured());
+
+        Assert.Same(payload, AntigravityDedup.Apply(payload, KeyA, "M1"));
+    }
+
+    [Fact]
+    public void MergedPrimaryTakesTheCapturedPlanWhenItHasNone()
+    {
+        var noPlan = Primary() with { Identity = new AgentIdentity("primary@example.com") };
+        var captured = Captured() with { Identity = new AgentIdentity("a@example.com", "Google AI Pro") };
+
+        var card = Assert.Single(AntigravityDedup.Apply(Payload(noPlan, captured), KeyA, "M1").Agents);
+        Assert.Equal("Google AI Pro", card.Identity?.Plan);
+    }
+
+    [Fact]
+    public void TheCapturedPlanIsTakenEvenWhenTheCapturedIdentityHasNoEmail()
+    {
+        var noPlan = Primary() with { Identity = new AgentIdentity("primary@example.com") };
+        var captured = Captured() with { Identity = new AgentIdentity(null, "Google AI Pro") };
+
+        var card = Assert.Single(AntigravityDedup.Apply(Payload(noPlan, captured), KeyA, "M1").Agents);
+        Assert.Equal("Google AI Pro", card.Identity?.Plan);
+        Assert.Equal("primary@example.com", card.Identity?.Email);
     }
 
     // ---- 5. history adoption --------------------------------------------------
