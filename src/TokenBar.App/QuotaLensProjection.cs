@@ -509,7 +509,7 @@ public static class QuotaLensProjection
             windowUsageOutcome = WindowEquivalence.FetchOutcome.Succeeded;
         }
 
-        var tabs = WindowCardText.Tabs(history, quota, owner, account).ToList();
+        var tabs = WindowCardText.Tabs(history, quota, owner, account, now.ToUnixTimeMilliseconds()).ToList();
         var selected = tabs.FirstOrDefault(tab => WindowId(tab.Id) == windowCardTab)
             ?? DefaultTab(tabs);
         IReadOnlyList<WindowMessage> messages = unattributed ? [] : windowUsage?.Messages ?? [];

@@ -62,7 +62,13 @@ public enum WindowCardState
 /// LearningDuration). Null on the store-fallback path.</param>
 /// <param name="Inferred">True when <see cref="Active"/> was not read from the
 /// store but inferred from the first own usage after the live reset
-/// (<see cref="WindowCardText.Infer"/>); such a cycle has no samples.</param>
+/// (<see cref="WindowCardText.Infer"/>); such a cycle carries
+/// <paramref name="ChartSamples"/>.</param>
+/// <param name="ChartSamples">The readings the chart draws on the live path
+/// (<see cref="QuotaHistoryFold.RangeSamples"/>: stored readings inside the
+/// payload window plus the live reading). Empty means macOS's
+/// <c>noQuotaHistory</c>; null on the store-fallback path, which has no
+/// payload window to range by.</param>
 /// <param name="RemainingPercent">The live window's own remaining percent,
 /// for <see cref="QuotaLensProjection"/>'s "most depleted" default-selection
 /// tiebreak — mirroring macOS's <c>$0.remainingPercent</c> scan in
@@ -71,7 +77,8 @@ public enum WindowCardState
 public sealed record WindowCardTab(
     QuotaWindowIdentity Id, string? Label, QuotaActiveCycle? Active, bool HasHistory,
     double? RemainingPercent = null,
-    long? LiveResetMs = null, long? LiveDurationMs = null, bool Inferred = false);
+    long? LiveResetMs = null, long? LiveDurationMs = null, bool Inferred = false,
+    IReadOnlyList<QuotaSample>? ChartSamples = null);
 
 /// <summary>
 /// Every state choice and every string on the Session-window card (port of
@@ -306,8 +313,10 @@ public static class WindowCardText
         IReadOnlyList<QuotaHistorySeries>? history,
         AgentUsagePayload? quota,
         string clientId,
-        string? accountKey = null)
+        string? accountKey = null,
+        long? nowMs = null)
     {
+        var now = nowMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         // The snapshot is selected by (clientId, accountKey); accountKey null
         // is the primary. A stored series belongs to it only when
         // series.AccountScope == its HistoryScope.Scope. A non-primary
@@ -395,6 +404,19 @@ public static class WindowCardText
                 var series = window.PaceStatus.WindowKey is { } key
                     ? byWindowKey.GetValueOrDefault(key)
                     : null;
+                long? liveResetMs = window.ResetsAt is { } resetsAt
+                    && UsagePace.ParseRfc3339(resetsAt) is { } reset
+                    ? reset.ToUnixTimeMilliseconds()
+                    : null;
+                long? liveDurationMs = window.DurationSeconds * 1000;
+                // Placement stays with QuotaHistoryFold.Active; the SAMPLES are
+                // macOS's curveSamples (range of the payload window + live
+                // reading), not the active group.
+                var chartSamples = series is null
+                    ? null
+                    : QuotaHistoryFold.RangeSamples(
+                        series.Samples, liveResetMs, liveDurationMs, window.UsedPercent, now);
+                var active = series is null ? null : QuotaHistoryFold.Active(series.Samples);
                 tabs.Add(new WindowCardTab(
                     // The store's own WindowKey when a series was found — that is
                     // what BuildWindowHistoryCard joins back against to find this
@@ -413,14 +435,12 @@ public static class WindowCardText
                         series?.AccountScope ?? liveScope ?? PrimaryAccountScope,
                         series?.WindowKey ?? window.PaceStatus.WindowKey ?? window.CardId),
                     window.Label,
-                    series is null ? null : QuotaHistoryFold.Active(series.Samples),
+                    active is null ? null : active with { Samples = chartSamples! },
                     HasHistory: series is not null,
                     RemainingPercent: window.RemainingPercent,
-                    LiveResetMs: window.ResetsAt is { } resetsAt
-                        && UsagePace.ParseRfc3339(resetsAt) is { } reset
-                        ? reset.ToUnixTimeMilliseconds()
-                        : null,
-                    LiveDurationMs: window.DurationSeconds * 1000));
+                    LiveResetMs: liveResetMs,
+                    LiveDurationMs: liveDurationMs,
+                    ChartSamples: chartSamples));
             }
         }
 
@@ -571,10 +591,8 @@ public static class WindowCardText
     /// before the next history read records it) is placed at
     /// [reset - duration, reset), the interval macOS resolves. <paramref name="subscription"/>
     /// is attribution-scoped only, never model-scoped (macOS <c>isMine</c>).
-    /// The cycle has no samples: the store has recorded none for it. Unlike
-    /// macOS, no live reading is added (macOS <c>liveReading</c>,
-    /// WindowCardLoader.swift:539-548, appends the payload's used percent to
-    /// every chart), so the headline reads "No quota reading".</summary>
+    /// The cycle carries the tab's <see cref="WindowCardTab.ChartSamples"/>
+    /// (range of the payload window plus the live reading, as macOS).</summary>
     public static WindowCardTab? Infer(
         WindowCardTab tab, IReadOnlyList<WindowMessage> subscription, long nowMs)
     {
@@ -597,7 +615,7 @@ public static class WindowCardText
         return resolved.Kind is WindowResolutionKind.Inferred or WindowResolutionKind.Active
             ? tab with
             {
-                Active = new QuotaActiveCycle(resolved.End, resolved.Start, []),
+                Active = new QuotaActiveCycle(resolved.End, resolved.Start, tab.ChartSamples ?? []),
                 Inferred = resolved.Kind == WindowResolutionKind.Inferred,
             }
             : null;
@@ -617,8 +635,10 @@ public static class WindowCardText
         // No tab at all (nothing to select) and a tab with no stored series
         // (a live window the store has nothing recorded for) are the same
         // fact from this card's point of view, and `outcome` still decides
-        // whether that is a wait, a failure, or an answer either way.
-        if (tab is null || !tab.HasHistory)
+        // whether that is a wait, a failure, or an answer either way. A series
+        // whose readings are all empty after range + live reading joins them
+        // (macOS: `guard !samples.isEmpty else { return .noQuotaHistory }`).
+        if (tab is null || !tab.HasHistory || tab.ChartSamples is { Count: 0 })
         {
             return outcome switch
             {

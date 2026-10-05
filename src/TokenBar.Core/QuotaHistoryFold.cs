@@ -488,6 +488,51 @@ public static class QuotaHistoryFold
     }
 
     /// <summary>
+    /// The readings the Session-window card draws, built the way macOS
+    /// <c>WindowCardLoader.curveSamples</c> (:470-521) builds them: bounded by
+    /// the PAYLOAD window <c>[reset - duration, now]</c>, not by
+    /// <c>IsActiveGroup</c> or the reset cycle, then sorted, then the payload's
+    /// own reading appended (<c>liveReading</c>, :539-548) because the store
+    /// keeps one sample per 48th of a cycle and lags the headline.
+    /// <para>
+    /// An empty <paramref name="stored"/> (macOS: the core returns null when
+    /// the series is missing or has no samples) or a payload with no reset or
+    /// duration gives <c>[]</c> and NO live point: nothing recorded is
+    /// "no quota history", not a one-point chart. Distinct from
+    /// <see cref="Active"/>, which still decides PLACEMENT and still feeds
+    /// <see cref="QuotaEquivalenceFold.BoundFromMs"/>.
+    /// </para>
+    /// </summary>
+    public static IReadOnlyList<QuotaSample> RangeSamples(
+        IReadOnlyList<QuotaHistorySample> stored,
+        long? resetMs, long? durationMs, double usedPercent, long nowMs)
+    {
+        if (stored.Count == 0 || resetMs is not { } reset || durationMs is not { } duration)
+        {
+            return [];
+        }
+
+        long lo = (reset - duration) / 1000, hi = nowMs / 1000;
+        var persisted = stored
+            .Where(sample => sample.SampledAt >= lo && sample.SampledAt <= hi)
+            .OrderBy(sample => sample.SampledAt)
+            .Select(sample => new QuotaSample(sample.SampledAt * 1000, sample.UsedPercent))
+            .ToList();
+        // Same admission rule as the engine recorder (0 < used <= 100); a flat
+        // segment to a value the newest sample already carries would claim a
+        // measurement nobody took.
+        if (usedPercent > 0 && usedPercent <= 100
+            && !(persisted.Count > 0
+                && (persisted[^1].AtMs >= nowMs
+                    || Math.Abs(persisted[^1].UsedPercent - usedPercent) < 0.000_001)))
+        {
+            persisted.Add(new QuotaSample(nowMs, usedPercent));
+        }
+
+        return persisted;
+    }
+
+    /// <summary>
     /// The newest cycles a scan-paying surface may look at. Applied by the
     /// consumers whose cost grows with the answer: the history card's cycle list,
     /// which bounds the union scan through its oldest entry's
