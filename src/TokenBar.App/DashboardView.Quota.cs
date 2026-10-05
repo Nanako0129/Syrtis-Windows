@@ -258,10 +258,13 @@ public sealed partial class DashboardView
         // First: this is the one card that answers "on which subscription", and
         // the two below it answer "where has the allowance gone".
         stack.Children.Add(BuildSubscriptionTrendCard(model.Trend, model.TrendPastYearSelected));
+        // All-clients lens: unreadable = any client unreadable (macOS QuotaView.swift:125, :132).
+        var overviewUnreadable = model.Overview.UnreadableClients.Count > 0;
         stack.Children.Add(BuildQuotaStripCard(
-            model.Overview.Summaries, model.Overview.Outcome, model.Overview.Equivalences));
+            model.Overview.Summaries, model.Overview.Outcome, model.Overview.Equivalences, overviewUnreadable));
         stack.Children.Add(BuildQuotaHeatmapCard(
-            model.Overview.Windows, model.Overview.Grids, model.Overview.Outcome, model.Overview.Equivalences));
+            model.Overview.Windows, model.Overview.Grids, model.Overview.Outcome, model.Overview.Equivalences,
+            overviewUnreadable));
         // The Agent-limits card closes the lens on macOS, below the heatmap.
         // The same builder the Overview uses, deliberately: this card answers
         // "where does the allowance stand right now" while the two above answer
@@ -601,14 +604,18 @@ public sealed partial class DashboardView
             // macOS QuotaView.swift:85-100: nothing to list a history for, so the
             // all-clients strip and heatmap filtered to this tab's own clients
             // (macOS clientIds, the tab's slice; on the opencode tab the limits
-            // card draws the routed list, this stays the slice). Windows has no
-            // `unreadable` flag on either builder; not ported.
+            // card draws the routed list, this stays the slice).
+            // `unreadable` is the tab's slice intersected with the unreadable
+            // clients (macOS QuotaView.swift:87, :92:
+            // `!stripUnreadableClients.isDisjoint(with: clientIds)`).
             var slice = ClientRegistry.TabSlice(ClientRegistry.QuotaOwner(singleClient));
+            var unreadable = overview.UnreadableIn(slice);
             stack.Children.Add(BuildQuotaStripCard(
-                QuotaOverviewFold.ForClients(overview.Summaries, slice), overview.Outcome, overview.Equivalences));
+                QuotaOverviewFold.ForClients(overview.Summaries, slice), overview.Outcome, overview.Equivalences,
+                unreadable));
             stack.Children.Add(BuildQuotaHeatmapCard(
                 QuotaOverviewFold.ForClients(overview.Windows, slice), overview.Grids, overview.Outcome,
-                overview.Equivalences));
+                overview.Equivalences, unreadable));
         }
 
         return stack;
@@ -1428,10 +1435,10 @@ public sealed partial class DashboardView
 
     private FrameworkElement BuildQuotaStripCard(
         IReadOnlyList<QuotaWindowSummary> summaries, WindowEquivalence.FetchOutcome outcome,
-        IReadOnlyDictionary<QuotaWindowIdentity, WindowEquivalence.Row> equivalences)
+        IReadOnlyDictionary<QuotaWindowIdentity, WindowEquivalence.Row> equivalences, bool unreadable)
     {
         var body = new StackPanel { Spacing = 10 };
-        switch (QuotaLensText.StripState(summaries, outcome))
+        switch (QuotaLensText.StripState(summaries, outcome, unreadable))
         {
             case QuotaStripState.Rows:
                 foreach (var summary in summaries)
@@ -1547,7 +1554,8 @@ public sealed partial class DashboardView
         IReadOnlyList<QuotaHeatmapWindow> windows,
         IReadOnlyDictionary<QuotaWindowIdentity, QuotaHeatmap> grids,
         WindowEquivalence.FetchOutcome outcome,
-        IReadOnlyDictionary<QuotaWindowIdentity, WindowEquivalence.Row> equivalences)
+        IReadOnlyDictionary<QuotaWindowIdentity, WindowEquivalence.Row> equivalences,
+        bool unreadable)
     {
         // The list already excludes windows with no movement and leads with the
         // heaviest, so the fallback is simply "the first one" rather than a
@@ -1558,7 +1566,7 @@ public sealed partial class DashboardView
 
         var equivalence = selected is null ? null : equivalences.GetValueOrDefault(selected.Id);
         var body = new StackPanel { Spacing = 4 };
-        switch (QuotaLensText.HeatmapState(grid, outcome))
+        switch (QuotaLensText.HeatmapState(grid, outcome, unreadable, windows.Count == 0))
         {
             case QuotaHeatmapState.Grid:
                 body.Children.Add(Heatmap(grid!, equivalence));

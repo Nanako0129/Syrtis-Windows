@@ -32,30 +32,30 @@ public class QuotaLensTextTests
     {
         Assert.Equal(
             QuotaHeatmapState.Grid,
-            QuotaLensText.HeatmapState(Grid(total: 12), WindowEquivalence.FetchOutcome.Succeeded));
+            QuotaLensText.HeatmapState(Grid(total: 12), WindowEquivalence.FetchOutcome.Succeeded, unreadable: true, windowsEmpty: true));
 
         // Total == 0 with movement that could not be placed. This must NOT fall
         // through to "nothing recorded yet": that states the opposite of the
         // truth and hides the one line explaining it.
         Assert.Equal(
             QuotaHeatmapState.Unplaced,
-            QuotaLensText.HeatmapState(Grid(total: 0, unplaced: 7), WindowEquivalence.FetchOutcome.Succeeded));
+            QuotaLensText.HeatmapState(Grid(total: 0, unplaced: 7), WindowEquivalence.FetchOutcome.Succeeded, unreadable: true, windowsEmpty: true));
 
         // The trio that differs only in the outcome, which is the whole point:
         // a card that has lost the distinction passes every assertion above.
         Assert.Equal(
             QuotaHeatmapState.NoMovement,
-            QuotaLensText.HeatmapState(Grid(), WindowEquivalence.FetchOutcome.Succeeded));
+            QuotaLensText.HeatmapState(Grid(), WindowEquivalence.FetchOutcome.Succeeded, unreadable: true, windowsEmpty: true));
         Assert.Equal(
             QuotaHeatmapState.Loading,
-            QuotaLensText.HeatmapState(Grid(), WindowEquivalence.FetchOutcome.NotAttempted));
+            QuotaLensText.HeatmapState(Grid(), WindowEquivalence.FetchOutcome.NotAttempted, unreadable: true, windowsEmpty: true));
         // The round-9 finding: a failed read must not render as "nothing
         // recorded yet" (NoMovement) or as "still asking" (Loading) — it is
         // neither, and it used to fall into whichever of those two the old
         // `bool attempted` collapsed it into.
         Assert.Equal(
             QuotaHeatmapState.Failed,
-            QuotaLensText.HeatmapState(Grid(), WindowEquivalence.FetchOutcome.Failed));
+            QuotaLensText.HeatmapState(Grid(), WindowEquivalence.FetchOutcome.Failed, unreadable: true, windowsEmpty: true));
     }
 
     // A lazy lens fetches on first visit, so a null grid before the fetch is the
@@ -63,9 +63,9 @@ public class QuotaLensTextTests
     [Fact]
     public void NoGridYetIsLoadingUntilTheFetchHasBeenAttempted()
     {
-        Assert.Equal(QuotaHeatmapState.Loading, QuotaLensText.HeatmapState(null, WindowEquivalence.FetchOutcome.NotAttempted));
-        Assert.Equal(QuotaHeatmapState.NoMovement, QuotaLensText.HeatmapState(null, WindowEquivalence.FetchOutcome.Succeeded));
-        Assert.Equal(QuotaHeatmapState.Failed, QuotaLensText.HeatmapState(null, WindowEquivalence.FetchOutcome.Failed));
+        Assert.Equal(QuotaHeatmapState.Loading, QuotaLensText.HeatmapState(null, WindowEquivalence.FetchOutcome.NotAttempted, unreadable: true, windowsEmpty: true));
+        Assert.Equal(QuotaHeatmapState.NoMovement, QuotaLensText.HeatmapState(null, WindowEquivalence.FetchOutcome.Succeeded, unreadable: true, windowsEmpty: true));
+        Assert.Equal(QuotaHeatmapState.Failed, QuotaLensText.HeatmapState(null, WindowEquivalence.FetchOutcome.Failed, unreadable: true, windowsEmpty: true));
     }
 
     [Fact]
@@ -73,18 +73,18 @@ public class QuotaLensTextTests
     {
         Assert.Equal(
             QuotaStripState.Rows,
-            QuotaLensText.StripState([Summary(40)], WindowEquivalence.FetchOutcome.Succeeded));
+            QuotaLensText.StripState([Summary(40)], WindowEquivalence.FetchOutcome.Succeeded, unreadable: true));
         Assert.Equal(
             QuotaStripState.NoCompletedWindows,
-            QuotaLensText.StripState([], WindowEquivalence.FetchOutcome.Succeeded));
+            QuotaLensText.StripState([], WindowEquivalence.FetchOutcome.Succeeded, unreadable: true));
         Assert.Equal(
             QuotaStripState.Loading,
-            QuotaLensText.StripState([], WindowEquivalence.FetchOutcome.NotAttempted));
+            QuotaLensText.StripState([], WindowEquivalence.FetchOutcome.NotAttempted, unreadable: true));
         // Round-9 finding, strip half: same failed-vs-loading-vs-empty
         // distinction as the heatmap's.
         Assert.Equal(
             QuotaStripState.Failed,
-            QuotaLensText.StripState([], WindowEquivalence.FetchOutcome.Failed));
+            QuotaLensText.StripState([], WindowEquivalence.FetchOutcome.Failed, unreadable: true));
     }
 
     [Fact]
