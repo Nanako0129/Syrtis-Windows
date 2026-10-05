@@ -278,7 +278,8 @@ public static class QuotaLensProjection
     /// failure signal, so partial unreadability ("A failed, B read") cannot
     /// arise here. The faithful analog: when the whole read FAILED (nothing
     /// retained, so nothing is drawn) every visible agent with at least one
-    /// card window is unreadable; otherwise none is.</para></summary>
+    /// card window that has a history key is unreadable; otherwise none
+    /// is.</para></summary>
     internal static IReadOnlySet<string> UnreadableClients(
         AgentUsagePayload? quota, WindowEquivalence.FetchOutcome quotaHistoryOutcome, Selection selection)
     {

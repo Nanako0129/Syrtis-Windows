@@ -13,8 +13,8 @@ namespace TokenBar.Core.Tests;
 /// <para>Windows reads quota history in ONE call and has no per-window read
 /// failure, so partial unreadability ("A failed, B read") is not reachable
 /// here. These tests use the whole-fetch-failure analog: outcome Failed means
-/// nothing is retained, and every visible agent with a card window is
-/// unreadable.</para>
+/// nothing is retained, and every visible agent with a card window that has a
+/// history key is unreadable.</para>
 /// </summary>
 public class QuotaUnreadableTests
 {
@@ -143,6 +143,10 @@ public class QuotaUnreadableTests
 
         Assert.Empty(o.UnreadableClients);
         Assert.Equal(QuotaStripState.NoCompletedWindows, Strip(o, o.UnreadableClients.Count > 0));
+        // Control: the same agent with a readable window is unreadable, so the
+        // empty set above is the history-key rule, not an agent left out.
+        Assert.Equal(["antigravity"],
+            Overview(Payload(Agent("antigravity", null, Window("antigravity|weekly.v1"))), Failed).UnreadableClients);
     }
 
     [Theory]
