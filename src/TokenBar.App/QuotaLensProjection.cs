@@ -573,9 +573,10 @@ public static class QuotaLensProjection
             scopeMatchedNothing = !mine.Any(Inside) && subscription.Any(Inside);
         }
 
-        // Only when the selected tab has a placed running cycle — the same
-        // condition WindowCardText.State resolves to WindowCardState.Chart
-        // for, which is the only state the view draws this line under.
+        // Only when the selected tab has a placed running cycle: State is
+        // Chart exactly for a placed Active (barring the scan-pending arm of an
+        // inferred one), and Chart is the only state the view draws this line
+        // under. Null otherwise (no card body to put it under).
         WindowEquivalence.Row? liveEquivalence = null;
         // Only readings inside the placed window count (macOS
         // WindowUsageCard filters to [interval.start, interval.end], no
@@ -595,12 +596,15 @@ public static class QuotaLensProjection
             var clippedSamples = active.Samples
                 .Where(sample => sample.AtMs >= active.StartMs!.Value && sample.AtMs <= active.ResetAtMs!.Value)
                 .ToList();
-            if (clippedSamples.Count > 0)
-            {
-                var declared = QuotaEquivalenceFold.DeclaredSpan(
+            // macOS always renders the row (WindowUsageCard.swift:167): an empty
+            // in-window list is .unavailable ("Not enough quota readings yet",
+            // WindowEquivalence.swift:164/:202), never a ratio carried over from
+            // another cycle. LiveRow answers Loading / ScanFailed / <2 samples
+            // before it reads `declared`, so the empty list needs no special case.
+            var declared = clippedSamples.Count > 0
+                && QuotaEquivalenceFold.DeclaredSpan(
                     clippedSamples[0].AtMs, clippedSamples[^1].AtMs, owner, messages, confirmed.Records);
-                liveEquivalence = WindowCardText.LiveEquivalence(clippedSamples, mine, declared, windowUsageOutcome);
-            }
+            liveEquivalence = WindowCardText.LiveEquivalence(clippedSamples, mine, declared, windowUsageOutcome);
         }
 
         var windowHistory = BuildHistory(

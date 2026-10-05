@@ -673,48 +673,84 @@ public class QuotaLensProjectionTests
     [Fact]
     public void LiveEquivalenceClipsToTheActiveCyclesOwnStartNotTheFullSampleSpan()
     {
+        // Inferred window: start = the first own message (NowMs - 1_800_000), well
+        // after the payload range start (reset - 5 h), so the chart samples
+        // carry a reading (NowMs - 3_000_000) from before the window start that
+        // RangeSamples keeps and only the projection clip can drop. That
+        // reading plus the message at the window start are the only evidence the
+        // UNCLIPPED span [-3_000_000, -600_000] would hold; clipped to
+        // [-1_800_000, now] the span [-1_200_000, -600_000] holds none, so the
+        // row is Undeclared, not a computed ratio.
+        var first = NowMs - 1_800_000;
+        var client = InferenceClient(
+            -3_600_000,
+            [
+                Sample(5, (NowMs - 3_000_000) / 1_000, 2_000, active: false),
+                Sample(8, (NowMs - 1_200_000) / 1_000, 2_000, active: false),
+                Sample(10, (NowMs - 600_000) / 1_000, 2_000, active: false),
+            ],
+            Message(first, "codex", "openai", 10, 0.1));
+
+        Assert.True(client.Selected!.Inferred);
+        Assert.Equal(
+            [5d, 8d, 10d], client.Selected.Active!.Samples.Select(sample => sample.UsedPercent).ToArray());
+        Assert.IsType<WindowEquivalence.Row.Undeclared>(client.LiveEquivalence);
+    }
+
+    // The upper bound (`<= ResetAtMs`): the engine keeps a group open for its
+    // rollover grace, so the store-fallback Active can carry a reading past the
+    // window's reset (the next cycle's first). It is not this window's evidence.
+    // In-window readings are flat (10, 10) => NotMoved; counting the 50 taken
+    // after the reset would give a 40-point rise instead.
+    [Fact]
+    public void LiveEquivalenceDropsAReadingTakenAfterTheWindowsReset()
+    {
         var history = new[]
         {
             Series(
                 "codex", "primary", "weekly.v1",
-                // Old active sample, taken before the newest sample's
-                // shorter duration moves StartMs forward past it.
-                Sample(5, sampledAt: 4_000, resetAt: 6_000, duration: 20 * 3_600),
-                // Sits exactly at the new StartMs (6_000 - 1_000 = 5_000) —
-                // the earliest reading the clip should still keep.
-                Sample(10, sampledAt: 5_000, resetAt: 6_000, duration: 20 * 3_600),
-                // Newest sample: its own short duration is what places
-                // StartMs at 5_000_000ms, past the first sample above.
-                Sample(15, sampledAt: 5_900, resetAt: 6_000, duration: 1_000)),
+                Sample(10, sampledAt: 5_000, resetAt: 6_000, duration: 1_000),
+                Sample(10, sampledAt: 5_900, resetAt: 6_000, duration: 1_000),
+                Sample(50, sampledAt: 6_100, resetAt: 6_000, duration: 1_000)),
         };
-        // The only evidence, and it sits strictly before the clipped start
-        // (5_000_000ms) though inside the old, unclipped span
-        // (4_000_000ms onward) — exactly the gap this finding closes.
-        var messages = new[] { Message(4_500_000, "codex", "openai", 5_000, 25.0) };
+        var messages = new[] { Message(5_500_000, "codex", "openai", 5_000, 25.0) };
         var confirmed = Confirmed(
             new UsageAttribution.Record("codex", "openai", UsageAttribution.State.Assigned("codex")));
-        // The payload now places the cycle (Q37), so it carries the shortened
-        // 1_000 s duration: window [5_000, 6_000]. Range and clip both drop the
-        // 4_000 reading; used 0 adds no live point.
-        var quota = Quota("codex", Window("codex|weekly.v1", "Weekly", "weekly.v1") with
-        {
-            UsedPercent = 0,
-            ResetsAt = DateTimeOffset.FromUnixTimeSeconds(6_000).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
-            DurationSeconds = 1_000,
-        });
 
         var model = QuotaLensProjection.Build(
-            history, quota, EmptyGraph(),
+            history, quota: null, EmptyGraph(),
             windowUsage: new WindowUsage(messages, 0, 0),
             windowUsageOutcome: WindowEquivalence.FetchOutcome.Succeeded,
             quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded, confirmed, year: null,
             new QuotaLensProjection.Selection("codex", string.Empty));
 
-        Assert.NotNull(model.Client);
-        // Undeclared, not a computed ratio: once clipped, the message before
-        // the new StartMs is no longer evidence for this window at all — the
-        // same span the chart above this line draws nothing over either.
-        Assert.IsType<WindowEquivalence.Row.Undeclared>(model.Client!.LiveEquivalence);
+        Assert.Equal(6_000_000, model.Client!.Selected!.Active!.ResetAtMs);
+        Assert.IsType<WindowEquivalence.Row.NotMoved>(model.Client.LiveEquivalence);
+    }
+
+    // State's `{ IsPlaced: false } => Unplaceable` arm on the store-fallback
+    // path (no payload, so ChartSamples is null and the stored Active stands):
+    // the newest active sample reports duration 0, so no start can be derived.
+    [Fact]
+    public void AStoredActiveCycleWithNoDurationOnTheFallbackPathIsUnplaceable()
+    {
+        var history = new[]
+        {
+            Series("codex", "primary", "weekly.v1", Sample(10, sampledAt: 5_000, resetAt: 6_000, duration: 0)),
+        };
+
+        var model = QuotaLensProjection.Build(
+            history, quota: null, EmptyGraph(), windowUsage: null,
+            WindowEquivalence.FetchOutcome.Succeeded, quotaHistoryOutcome: WindowEquivalence.FetchOutcome.Succeeded,
+            UsageAttribution.Table.Empty, year: null,
+            new QuotaLensProjection.Selection("codex", string.Empty));
+
+        var selected = model.Client!.Selected!;
+        Assert.Null(selected.ChartSamples);
+        Assert.False(selected.Active!.IsPlaced);
+        Assert.Equal(
+            WindowCardState.Unplaceable,
+            WindowCardText.State(selected, WindowEquivalence.FetchOutcome.Succeeded, DateTimeOffset.FromUnixTimeMilliseconds(NowMs)));
     }
 
     // ---- round 8 finding 2: the collapsed row must show the WHOLE-WINDOW
@@ -1078,7 +1114,7 @@ public class QuotaLensProjectionTests
     // [first, first + 5 h]. The line must not borrow it (macOS
     // WindowUsageCard.swift:540-549: strict [start, end], no fallback).
     [Fact]
-    public void AnInferredWindowWhoseOnlyReadingPredatesItHasNoEquivalenceLine()
+    public void AnInferredWindowWhoseOnlyReadingPredatesItSaysNotEnoughReadings()
     {
         var first = NowMs - 1_800_000;
         var client = InferenceClient(
@@ -1089,8 +1125,13 @@ public class QuotaLensProjectionTests
         Assert.True(client.Selected!.Inferred);
         Assert.Equal(first, client.Selected.Active!.StartMs);
         Assert.Equal([10d], client.Selected.Active.Samples.Select(sample => sample.UsedPercent).ToArray());
-        Assert.Null(client.LiveEquivalence);
-        Assert.Null(WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence));
+        // macOS WindowUsageCard.swift:167 always renders the row; an empty
+        // in-window list is .unavailable (WindowEquivalence.swift:164). Never a
+        // ratio, and never the previous cycle's.
+        Assert.IsType<WindowEquivalence.Row.Unavailable>(client.LiveEquivalence);
+        Assert.Equal(
+            "Not enough quota readings yet",
+            WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence));
     }
 
     // H1 control: the same shape with a reading inside the window gives a row.
@@ -1105,6 +1146,63 @@ public class QuotaLensProjectionTests
 
         Assert.NotNull(client.LiveEquivalence);
         Assert.NotNull(WindowCardText.LiveLine(client.LocalUsageUnattributed, client.LiveEquivalence));
+    }
+
+    // ---- placement follows the payload's resolution, not the store's group --
+    // WindowCardLoader.swift:122-129 -> WindowResolver.resolve: the engine keeps
+    // the store's active group for its rollover grace after the payload's reset
+    // passes, but the window is over; the store must not place it.
+
+    private static QuotaHistorySample[] OpenGroupAroundReset(long resetOffsetMs) =>
+        [Sample(40, (NowMs + resetOffsetMs - 600_000) / 1_000, (NowMs + resetOffsetMs) / 1_000, active: true, duration: FiveHours)];
+
+    [Fact]
+    public void AStoredOpenGroupDoesNotKeepAnEndedWindowOnTheChart()
+    {
+        var client = InferenceClient(-3_600_000, OpenGroupAroundReset(-3_600_000));
+
+        Assert.Null(client.Selected!.Active);
+        Assert.Equal(WindowCardState.Idle, CardState(client));
+    }
+
+    [Fact]
+    public void AnEndedWindowWhoseScanHasNotLandedIsPlacementPendingNotChart()
+    {
+        var client = InferenceClient(
+            -3_600_000, OpenGroupAroundReset(-3_600_000), WindowEquivalence.FetchOutcome.NotAttempted, null, false);
+
+        Assert.Equal(WindowCardState.PlacementPending, CardState(client));
+    }
+
+    [Fact]
+    public void AnEndedWindowWithOwnUsageSinceTheResetIsInferredNotStoredActive()
+    {
+        var first = NowMs - 1_800_000;
+        var client = InferenceClient(
+            -3_600_000, OpenGroupAroundReset(-3_600_000), Message(first, "codex", "openai", 10, 0.1));
+
+        Assert.True(client.Selected!.Inferred);
+        Assert.Equal(first, client.Selected.Active!.StartMs);
+    }
+
+    [Fact]
+    public void AStoredOpenGroupWithAResetMoreThanOneDurationAheadIsUnplaceable()
+    {
+        var client = InferenceClient(DurationMs + 3_600_000, OpenGroupAroundReset(DurationMs + 3_600_000));
+
+        Assert.Null(client.Selected!.Active);
+        Assert.Equal(WindowCardState.Unplaceable, CardState(client));
+    }
+
+    [Fact]
+    public void AStoredOpenGroupWithAFutureResetIsPlacedAtThePayloadWindow()
+    {
+        var client = InferenceClient(3_600_000, OpenGroupAroundReset(3_600_000));
+
+        Assert.Equal(WindowCardState.Chart, CardState(client));
+        Assert.Equal(NowMs + 3_600_000, client.Selected!.Active!.ResetAtMs);
+        Assert.Equal(NowMs + 3_600_000 - DurationMs, client.Selected.Active.StartMs);
+        Assert.False(client.Selected.Inferred);
     }
 
     // macOS `.active` (WindowResolution.swift:29-31): the quota payload shows

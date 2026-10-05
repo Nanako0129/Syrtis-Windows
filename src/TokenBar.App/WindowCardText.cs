@@ -149,8 +149,8 @@ public static class WindowCardText
 
     /// <summary>The line under the window chart: rule 6 for an account whose
     /// usage cannot be attributed, else the live equivalence. Null when there
-    /// is no equivalence row (the projection builds none when no chart reading
-    /// lies inside the placed window); the card then draws no line.</summary>
+    /// is no equivalence row (the projection builds none without a placed
+    /// running cycle); the card then draws no line.</summary>
     public static string? LiveLine(bool unattributed, WindowEquivalence.Row? row) =>
         unattributed ? LocalUsageUnattributed()
         : row is { } live ? WindowEquivalenceText.Line(live)
@@ -442,23 +442,28 @@ public static class WindowCardText
                     : null;
                 long? liveDurationMs = window.DurationSeconds * 1000;
                 // Placement follows macOS WindowCardLoader.resolution(window:)
-                // (WindowCardLoader.swift:122-129; called at :220-228): reset and
-                // duration come from the payload window, never the store.
-                // The SAMPLES are macOS's curveSamples (range of the payload
-                // window + live reading), and the running cycle is PLACED from
-                // that same payload window (macOS WindowCardLoader.resolution
-                // takes reset/duration from the payload, never the store), so
-                // a lagging history lane cannot leave the samples outside the
-                // placement. The store's Active only decides whether a cycle
-                // exists and is the placement when the payload has no window.
+                // (WindowCardLoader.swift:122-129, called at :220-228): reset and
+                // duration come from the payload window, never the store, and
+                // the running cycle is placed from them ONLY when
+                // WindowResolver.resolve says Active (reset ahead within one
+                // duration). Past that moment the store's group may still be
+                // open (the engine keeps it for its rollover grace), but the
+                // window is over: Active stays null so Infer and State's
+                // Active==null branch decide idle / inferred / pending /
+                // unplaceable. The samples are macOS's curveSamples (range of
+                // the payload window + live reading). The store-fallback path
+                // above has no payload and keeps the stored Active.
                 var chartSamples = series is null
                     ? null
                     : QuotaHistoryFold.RangeSamples(
                         series.Samples, liveResetMs, liveDurationMs, window.UsedPercent, now);
                 var active = series is null ? null : QuotaHistoryFold.Active(series.Samples);
-                if (active is not null && liveResetMs is { } placeReset && liveDurationMs is > 0 and var placeDuration)
+                if (active is not null)
                 {
-                    active = active with { ResetAtMs = placeReset, StartMs = placeReset - placeDuration };
+                    active = Resolve(liveResetMs, liveDurationMs, now, null) is
+                        { Kind: WindowResolutionKind.Active } placed
+                        ? active with { ResetAtMs = placed.End, StartMs = placed.Start }
+                        : null;
                 }
 
                 tabs.Add(new WindowCardTab(
