@@ -72,7 +72,8 @@ public class QuotaLensProjectionTests
     // A payload with a codex primary whose history scope matches
     // TwoCycleSeries("codex", "primary", ...). Deliberately not null: with no
     // payload the overview draws nothing from history (macOS
-    // DashboardModel.swift:1509), so the equivalence tests below would have no
+    // DashboardModel.swift:1543/:1663 read curves only with a payload; :1509
+    // is the prune guard), so the equivalence tests below would have no
     // series to fold and could not tell their outcomes apart.
     private static AgentUsagePayload CodexPrimaryQuota() =>
         new("2026-01-01T00:00:00Z",
