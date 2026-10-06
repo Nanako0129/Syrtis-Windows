@@ -116,6 +116,13 @@ public sealed class OpencodeRoutesTests
             withExtra.Agents, OpencodeRoutes.LimitsClients(OpencodeTab, withExtra),
             new HashSet<string> { "opencode", "codex" }, attempted: false,
             OpencodeRoutes.HideClients(OpencodeTab, withExtra)));
+        // So does an extra account of a FORWARDED client (macOS allHidden
+        // checks every id in clients + forwarded for an extra account).
+        var forwardedExtra = Payload(["Codex"], Card("codex"), Card("codex", "acct"));
+        Assert.False(LimitsCardFilter.HidesClientCard(
+            forwardedExtra.Agents, OpencodeRoutes.LimitsClients(OpencodeTab, forwardedExtra),
+            new HashSet<string> { "opencode", "codex" }, attempted: false,
+            OpencodeRoutes.HideClients(OpencodeTab, forwardedExtra)));
     }
 
     /// <summary>Before the first payload nothing is forwarded, so a

@@ -1339,7 +1339,7 @@ public sealed partial class DashboardView : UserControl
                         limitsClients,
                         ClientRegistry.HiddenLimitsClients(AppSettings.Store),
                         snapshot.QuotaAttempted,
-                        OpencodeRoutes.HideClients(tabClients, snapshot.Quota))
+                        OpencodeRoutes.HideClients(tabClients!, snapshot.Quota))
                     ? null
                     : Ui.Card(
                         // macOS "%@ limits" over tabDisplayName(singleClient)
