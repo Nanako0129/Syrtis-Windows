@@ -316,11 +316,74 @@ public static class QuotaEquivalenceFold
     }
 
     /// <summary>The bound a window-usage pass records for coverage
-    /// (<c>LocalScan.Covers</c>): the real fetch bound, or — with no history to
-    /// bound a fetch by, so nothing is scanned — <paramref name="nowMs"/>, which
-    /// covers no past window.</summary>
-    public static long ScanFromMs(IReadOnlyList<QuotaHistorySeries> history, long nowMs) =>
-        history.Count == 0 ? nowMs : BoundFromMs(history, nowMs);
+    /// (<c>LocalScan.Covers</c>): the earlier of the store's fetch bound and the
+    /// payload windows' start (<see cref="PayloadStartMs"/>). With neither — no
+    /// history and no placeable payload window, so nothing is scanned — it is
+    /// <paramref name="nowMs"/>, which covers no past window. A payload start is
+    /// at or before now (an active window starts one duration before a reset
+    /// within one duration, equal to now only when reset - now == duration; a
+    /// past one starts before its reset, equal to now only when the duration is
+    /// 0 and reset == now), so a from at or past now means "nothing to scan",
+    /// never a range to scan.</summary>
+    public static long ScanFromMs(
+        IReadOnlyList<QuotaHistorySeries> history, long nowMs, AgentUsagePayload? payload = null)
+    {
+        var store = history.Count == 0 ? nowMs : BoundFromMs(history, nowMs);
+        return PayloadStartMs(payload, nowMs) is { } start ? Math.Min(store, start) : store;
+    }
+
+    /// <summary>Whether a new payload's start reaches back past the bound the
+    /// published window usage was scanned from (or none was published yet), so
+    /// the scan must be redone.</summary>
+    public static bool NeedsRescan(long? payloadStart, long? publishedFrom) =>
+        payloadStart is { } start && (publishedFrom is not { } from || start < from);
+
+    /// <summary>Port of macOS <c>WindowCardLoader.unionStart</c>
+    /// (WindowCardLoader.swift:237-269): the minimum of <c>reset - duration</c>
+    /// over each unique card window carrying both a reset and a duration, so a
+    /// client with no stored cycle (new, or its first window) is scanned from
+    /// its window start. A window <c>WindowResolver.resolve</c> calls
+    /// unavailable (reset more than one duration ahead, or more than one
+    /// duration past) is skipped, as is any agent with an error. Skipping errored
+    /// agents relies on #230: it makes the Windows card show blocked for an
+    /// errored agent, as macOS does, so such a card never needs a scan.
+    /// macOS scans per client and passes one client; Windows scans once for every client
+    /// (and every extra account), so this takes the union over the whole
+    /// payload. Null without a payload or any qualifying window.</summary>
+    public static long? PayloadStartMs(AgentUsagePayload? payload, long nowMs)
+    {
+        long? earliest = null;
+        foreach (var agent in payload?.Agents ?? [])
+        {
+            if (agent.Error is not null)
+            {
+                continue;
+            }
+
+            foreach (var window in agent.UniqueCardWindows)
+            {
+                if (window.ResetsAt is not { } raw
+                    || UsagePace.ParseRfc3339(raw) is not { } parsed
+                    || window.DurationSeconds is not { } seconds)
+                {
+                    continue;
+                }
+
+                var reset = parsed.ToUnixTimeMilliseconds();
+                var duration = seconds * 1000;
+                // WindowCardText.Resolve's Unavailable branches (App, not Core).
+                if (reset > nowMs ? reset - nowMs > duration : nowMs - reset > duration)
+                {
+                    continue;
+                }
+
+                var start = reset - duration;
+                earliest = earliest is { } e ? Math.Min(e, start) : start;
+            }
+        }
+
+        return earliest;
+    }
 
     /// <summary>The earliest instant any window's admitted cycles need
     /// messages for — the lower bound a caller should pass to

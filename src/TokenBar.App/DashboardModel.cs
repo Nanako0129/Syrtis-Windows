@@ -619,11 +619,15 @@ public sealed class DashboardModel
         if (windowUsage)
         {
             var forBound = history ?? Current?.QuotaHistory ?? [];
-            if (forBound.Count == 0)
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            // The store's bound or the payload windows' start, whichever is
+            // earlier (a new client has no stored cycle yet).
+            var fromMs = QuotaEquivalenceFold.ScanFromMs(forBound, now, _latestQuota ?? Current?.Quota);
+            if (fromMs >= now)
             {
                 usage = new Interop.WindowUsage([], 0, 0);
                 // Nothing scanned: must not read as covering.
-                scanFromMs = QuotaEquivalenceFold.ScanFromMs(forBound, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                scanFromMs = now;
             }
             else
             {
@@ -631,8 +635,6 @@ public sealed class DashboardModel
                 // like the quota-history read above — the same reason the
                 // hourly/agents fetch above it boosts.
                 using var boost = ProcessPower.Boost();
-                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                var fromMs = QuotaEquivalenceFold.ScanFromMs(forBound, now);
                 scanFromMs = fromMs;
                 accountFromMs = fromMs;
                 usage = TryFetch(() => TbCore.WindowUsage(fromMs, now), "windowUsage");
@@ -1161,6 +1163,7 @@ public sealed class DashboardModel
         var epoch = QuotaEpoch.Current;
         bool StillCurrent() => QuotaEpoch.Current == epoch;
         var accountsChanged = false;
+        var scanNeeded = false;
         var failures = 0;
         if (quota is not null)
         {
@@ -1177,6 +1180,14 @@ public sealed class DashboardModel
                     AppSettings.Store.SetString(key, scope);
                 }
             }
+            // The new payload may start earlier than the published scan
+            // reached. Only while the Quota lens wants window usage: no other
+            // view publishes a scan bound, so the predicate would see null and
+            // re-run that view's lazy lanes on every quota tick. Switching to
+            // the Quota lens already requests a lazy pass (SetActiveView).
+            scanNeeded = _windowUsageWanted && QuotaEquivalenceFold.NeedsRescan(
+                QuotaEquivalenceFold.PayloadStartMs(quota, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
+                Current?.WindowUsageFromMs);
         }
         else
         {
@@ -1189,10 +1200,11 @@ public sealed class DashboardModel
         if (quota is not null)
         {
             Publish(s => s with { Quota = quota, QuotaAttempted = true }, graph: null, StillCurrent);
-            // An extra Claude account appeared or went: its window
-            // scan keys off these cards, so fetch it now rather than
-            // after the next graph publication.
-            if (accountsChanged)
+            // An extra Claude account appeared or went (its window scan
+            // keys off these cards), or the new payload starts before the
+            // published scan bound: fetch now rather than after the next
+            // graph publication.
+            if (accountsChanged || scanNeeded)
             {
                 RequestLazyRefresh();
             }
