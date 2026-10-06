@@ -93,22 +93,58 @@ public sealed class OpencodeRoutesTests
             payload.Agents, ids, new HashSet<string> { "codex" }, attempted: false, OpencodeTab));
     }
 
-    /// <summary>macOS allRestrictedClientsHidden (:502-510) reads the card's
-    /// own `clients` ["opencode"], not the routed list: opencode switched off
-    /// (and no extra account) hides the whole card although codex would draw.</summary>
+    /// <summary>macOS #480 (AgentLimitsCard.swift :357-383, :520-545): the
+    /// switched-off test reads opencode plus the subscriptions it forwards, so
+    /// switching off opencode's own card keeps the forwarded cards; the card
+    /// hides only when opencode and every forwarded client are switched off.
+    /// Before #480 (and #221 here) opencode alone hid the whole card.</summary>
     [Fact]
-    public void ASwitchedOffOpencodeHidesTheWholeCardAsOnMacOS()
+    public void ASwitchedOffOpencodeKeepsTheCardsItForwards()
     {
         var payload = Payload(["Codex"], Card("codex"));
         var ids = OpencodeRoutes.LimitsClients(OpencodeTab, payload);
+        var hide = OpencodeRoutes.HideClients(OpencodeTab, payload);
+        Assert.Equal(["opencode", "codex"], hide);
+        Assert.False(LimitsCardFilter.HidesClientCard(
+            payload.Agents, ids, new HashSet<string> { "opencode" }, attempted: false, hide));
+        // Opencode and every forwarded client switched off: the card hides.
         Assert.True(LimitsCardFilter.HidesClientCard(
-            payload.Agents, ids, new HashSet<string> { "opencode" }, attempted: false, OpencodeTab));
-        // An extra account of opencode is exempt from the hide.
+            payload.Agents, ids, new HashSet<string> { "opencode", "codex" }, attempted: false, hide));
+        // An extra account of opencode is still exempt from the hide.
         var withExtra = Payload(["Codex"], Card("codex"), Card("opencode", "acct"));
         Assert.False(LimitsCardFilter.HidesClientCard(
             withExtra.Agents, OpencodeRoutes.LimitsClients(OpencodeTab, withExtra),
-            new HashSet<string> { "opencode" }, attempted: false, OpencodeTab));
+            new HashSet<string> { "opencode", "codex" }, attempted: false,
+            OpencodeRoutes.HideClients(OpencodeTab, withExtra)));
+        // So does an extra account of a FORWARDED client (macOS allHidden
+        // checks every id in clients + forwarded for an extra account).
+        var forwardedExtra = Payload(["Codex"], Card("codex"), Card("codex", "acct"));
+        Assert.False(LimitsCardFilter.HidesClientCard(
+            forwardedExtra.Agents, OpencodeRoutes.LimitsClients(OpencodeTab, forwardedExtra),
+            new HashSet<string> { "opencode", "codex" }, attempted: false,
+            OpencodeRoutes.HideClients(OpencodeTab, forwardedExtra)));
     }
+
+    /// <summary>Before the first payload nothing is forwarded, so a
+    /// switched-off opencode hides the card until the payload arrives (macOS's
+    /// accepted trade-off, :529-530); a forwarded label without a snapshot
+    /// does not keep the card either.</summary>
+    [Fact]
+    public void BeforeThePayloadOrWithoutASnapshotOpencodeAloneDecides()
+    {
+        var off = new HashSet<string> { "opencode" };
+        Assert.Equal(["opencode"], OpencodeRoutes.HideClients(OpencodeTab, null));
+        Assert.True(LimitsCardFilter.HidesClientCard(
+            [], OpencodeRoutes.LimitsClients(OpencodeTab, null), off, attempted: false,
+            OpencodeRoutes.HideClients(OpencodeTab, null)));
+        var noSnapshot = Payload(["Codex"]);
+        Assert.Equal(["opencode"], OpencodeRoutes.HideClients(OpencodeTab, noSnapshot));
+    }
+
+    /// <summary>Other tabs read their own clients only.</summary>
+    [Fact]
+    public void HideClientsIsTheTabsOwnListOffTheOpencodeTab() =>
+        Assert.Equal(["codex"], OpencodeRoutes.HideClients(["codex"], Payload(["Claude"], Card("claude"))));
 
     [Fact]
     public void HeaderAndEmptyStateTextFollowMacOS()

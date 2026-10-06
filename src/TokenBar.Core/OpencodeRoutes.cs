@@ -35,15 +35,38 @@ public static class OpencodeRoutes
     /// (not the raw label mapper: <c>Xai</c> is keyed <c>grok</c> in snapshots),
     /// keep those with a primary snapshot, then <see cref="CardClients"/>.</summary>
     public static IReadOnlyList<string> Clients(
-        IReadOnlyList<AgentUsageSnapshot> agents, IEnumerable<string>? subscriptionLabels)
-    {
-        bool HasPrimary(string id) => agents.Any(a => a.ClientId == id && a.Account.AccountKey is null);
-        var subs = (subscriptionLabels ?? [])
+        IReadOnlyList<AgentUsageSnapshot> agents, IEnumerable<string>? subscriptionLabels) =>
+        CardClients(HasPrimary(agents, ClientId), Forwarded(agents, subscriptionLabels));
+
+    /// <summary>macOS <c>opencodeForwardedClients(labels:hasSnapshot:)</c>
+    /// (AgentLimitsCard.swift :357-370, #480): the subscriptions opencode
+    /// forwards that have a primary snapshot to draw, resolved through the
+    /// subscription-owner mapping. One list for the card's rows
+    /// (<see cref="Clients"/>) and its hide decision
+    /// (<see cref="HideClients"/>), so the two cannot drift.</summary>
+    public static IReadOnlyList<string> Forwarded(
+        IReadOnlyList<AgentUsageSnapshot> agents, IEnumerable<string>? subscriptionLabels) =>
+        [.. (subscriptionLabels ?? [])
             .Select(UsageAttributionSettings.SubscriptionClientForLabel)
             .OfType<string>()
-            .Where(HasPrimary);
-        return CardClients(HasPrimary(ClientId), subs);
-    }
+            .Where(id => HasPrimary(agents, id))];
+
+    private static bool HasPrimary(IReadOnlyList<AgentUsageSnapshot> agents, string id) =>
+        agents.Any(a => a.ClientId == id && a.Account.AccountKey is null);
+
+    /// <summary>The clients the switched-off test reads (macOS
+    /// <c>allRestrictedClientsHidden</c> :520-545 over <c>allHidden</c>
+    /// :372-383, #480): the tab's own clients, plus on the opencode tab the
+    /// forwarded subscriptions, so switching off opencode's own card no longer
+    /// hides the cards it forwards — the whole card hides only when opencode
+    /// and every forwarded client with a snapshot are limits-hidden and none
+    /// has an extra account. Before the first payload nothing is forwarded, so
+    /// a switched-off opencode hides the card until the payload arrives
+    /// (macOS's accepted trade-off).</summary>
+    public static IReadOnlyList<string> HideClients(IReadOnlyList<string> tabClients, AgentUsagePayload? quota) =>
+        IsView(tabClients)
+            ? [.. tabClients, .. Forwarded(quota?.Agents ?? [], quota?.OpencodeSubscriptions)]
+            : tabClients;
 
     /// <summary>The clients the limits card draws for a tab: the tab's own
     /// clients, or on the opencode tab the routed list.</summary>

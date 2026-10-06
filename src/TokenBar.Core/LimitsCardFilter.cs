@@ -40,15 +40,15 @@ public static class LimitsCardFilter
 
     /// <summary>Whether a client tab draws no Agent-limits card at all: the
     /// ONE rule both call sites (Overview lens, Quota lens) ask. Ported from
-    /// macOS AgentLimitsCard.swift <c>body</c> (:526-530): the card is not
+    /// macOS AgentLimitsCard.swift <c>body</c> (:559-563): the card is not
     /// drawn when
     /// <list type="bullet">
-    /// <item><c>allRestrictedClientsHidden</c> (:502-510): the list is
+    /// <item><c>allRestrictedClientsHidden</c> (:524-545, over <c>allHidden</c> :372-383): the list is
     /// non-empty, every client in it is limits-hidden, and none has an extra
     /// account (an extra account is exempt from the hide, so its row still
     /// renders); decided from settings alone, so a switched-off card goes at
     /// once instead of waiting on the network; or</item>
-    /// <item><c>restrict, visibleClients.isEmpty, usageAttempted</c> (:529):
+    /// <item><c>restrict, visibleClients.isEmpty, usageAttempted</c> (:561):
     /// once the quota fetch has been attempted, a card with nothing to draw
     /// (no visible snapshot row and no placeholder row) is not drawn. Before
     /// the attempt it waits and shows its loading state (:547). "Nothing to
@@ -57,15 +57,15 @@ public static class LimitsCardFilter
     /// ports <c>baseClients</c> :444-447, <c>known</c> :437-439 and the
     /// placeholders :784-787), so the card and this decision cannot disagree.</item>
     /// </list>
-    /// An empty client list hides nothing (:502-504). On the opencode tab the
+    /// An empty client list hides nothing (<c>allHidden</c>'s guard, :375-383). On the opencode tab the
     /// list the card draws is the routed one (<see cref="OpencodeRoutes"/>,
-    /// :421-440) while <c>allRestrictedClientsHidden</c> reads the card's
-    /// <c>clients</c> — the tab's own <c>["opencode"]</c> — so
-    /// <paramref name="restricted"/> carries that, and a limits-hidden opencode
-    /// hides the whole card even when routed cards would draw (macOS does the
-    /// same).</summary>
-    /// <param name="restricted">The tab's own clients (macOS <c>clients</c>),
-    /// read by the switched-off test; null = <paramref name="clientIds"/>.
+    /// :421-440), and the switched-off test reads opencode plus the
+    /// subscriptions it forwards (<see cref="OpencodeRoutes.HideClients"/>,
+    /// macOS #480 <c>allRestrictedClientsHidden</c> :520-545), so switching
+    /// off opencode's own card keeps the forwarded cards.</summary>
+    /// <param name="restricted">The clients the switched-off test reads
+    /// (macOS <c>clients</c>, plus the forwarded subscriptions on the opencode
+    /// tab); null = <paramref name="clientIds"/>.
     /// <paramref name="clientIds"/> is the list the card draws.</param>
     /// <param name="attempted">The quota fetch has completed once, successfully
     /// or not (<c>DashboardModel.Snapshot.QuotaAttempted</c>; macOS
