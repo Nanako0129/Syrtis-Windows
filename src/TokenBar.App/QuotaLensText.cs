@@ -120,7 +120,7 @@ public static class QuotaLensText
     public static string WindowCount(int cycles) => "{0} windows".Localized(cycles);
 
     public static string NoCompletedWindows() =>
-        "No completed windows recorded yet. They accumulate as TokenBar runs.".Localized();
+        "No completed windows recorded yet. They accumulate as Syrtis runs.".Localized();
 
     /// <summary>The strip is oldest-to-newest, so counting back from the end is
     /// what turns a bar into "how many windows ago".</summary>
@@ -167,7 +167,7 @@ public static class QuotaLensText
             : null;
 
     public static string NoMovement() =>
-        "No allowance movement recorded yet. It accumulates as TokenBar runs.".Localized();
+        "No allowance movement recorded yet. It accumulates as Syrtis runs.".Localized();
 
     public static string Loading() => "Reading quota history…".Localized();
 

@@ -73,7 +73,7 @@ public static class TrayModes
         TrayMode.TotalCost => "Total cost".Localized(),
         TrayMode.TokensPerMin => "Tokens / min".Localized(),
         TrayMode.QuotaLeft => "Quota left".Localized(),
-        _ => "TokenBar".Localized(),
+        _ => "Syrtis".Localized(),
     };
 
     /// <summary>The icon-sized short form of a title (parity table #1's

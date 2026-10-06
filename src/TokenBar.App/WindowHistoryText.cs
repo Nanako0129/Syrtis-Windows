@@ -208,12 +208,12 @@ public static class WindowHistoryText
     {
         WindowHistoryState.Loading => "Reading quota history…".Localized(),
         WindowHistoryState.Failed => "Quota history could not be read. It will be retried.".Localized(),
-        _ => "No earlier windows recorded yet. They accumulate as TokenBar runs.".Localized(),
+        _ => "No earlier windows recorded yet. They accumulate as Syrtis runs.".Localized(),
     };
 
     public static string? ThinObservationNote(WindowHistoryRow row) =>
         row.ThinObservation
-            ? "TokenBar observed {0}% of this window, so its usage figure is a floor.".Localized(
+            ? "Syrtis observed {0}% of this window, so its usage figure is a floor.".Localized(
                 (int)Math.Round(row.ObservedFraction * 100, MidpointRounding.AwayFromZero))
             : null;
 
