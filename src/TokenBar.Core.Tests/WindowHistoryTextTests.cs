@@ -237,7 +237,7 @@ public class WindowHistoryTextTests
 
         Assert.True(rows[0].ThinObservation);
         Assert.Equal(
-            "TokenBar observed 20% of this window, so its usage figure is a floor.",
+            "Syrtis observed 20% of this window, so its usage figure is a floor.",
             WindowHistoryText.ThinObservationNote(rows[0]));
         Assert.False(rows[1].ThinObservation);
         Assert.Null(WindowHistoryText.ThinObservationNote(rows[1]));

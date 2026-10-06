@@ -75,6 +75,21 @@ public class StringsTableTests
         Assert.Equal(hant.Keys.OrderBy(k => k), hans.Keys.OrderBy(k => k));
     }
 
+    // The product is Syrtis; "TokenBar" is the retired name and must not
+    // reach users in either table (the keys are the English copy).
+    [Fact]
+    public void NoKeyOrValueUsesTheRetiredProductName()
+    {
+        foreach (var path in new[] { HantPath, HansPath })
+        {
+            foreach (var (key, value) in Load(path))
+            {
+                Assert.DoesNotContain("TokenBar", key, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("TokenBar", value, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+    }
+
     [Fact]
     public void EveryEntryInBothTablesIsNonEmpty()
     {
