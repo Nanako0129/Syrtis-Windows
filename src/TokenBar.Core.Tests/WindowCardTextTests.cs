@@ -163,7 +163,8 @@ public class WindowCardTextTests
         var tabs = WindowCardText.Tabs(
             [Series("codex", "session.v1", Sample(40, ResetAt - 600))],
             quota: null,
-            clientId: "codex");
+            clientId: "codex",
+            nowMs: (ResetAt - 300) * 1_000);
 
         var tab = Assert.Single(tabs);
         Assert.True(tab.HasHistory);
@@ -190,33 +191,172 @@ public class WindowCardTextTests
         Assert.Empty(tabs);
     }
 
-    // Round 17's finding: a non-null payload is not the same fact as this
-    // client's own live windows being usable. Rust's `empty_error_snapshot`
-    // (Error set, Windows empty — an identity-verification failure, a
-    // terminal fetch failure, or a transient one with no last-good cache to
-    // fall back to) must fall back to the stored series the same way a null
-    // `quota` already does, or a per-provider failure discards a series this
-    // client's own history read had already retrieved successfully.
+    // Q39 (macOS WindowCardLoader.swift:174-176): an agent carrying an error
+    // is a blocked card with the error text itself, never stored history.
+    // Replaces round 17's fallback to the stored series for the empty-error
+    // snapshot.
     [Fact]
-    public void AnErrorSnapshotWithNoLiveWindowsFallsBackToTheStoredSeries()
+    public void AnErrorSnapshotBlocksTheCardWithTheErrorText()
     {
         var quota = new AgentUsagePayload(
             "2026-01-01T00:00:00Z",
             [new AgentUsageSnapshot(
                 "codex", "oauth", "2026-01-01T00:00:00Z", Windows: [], Error: "Codex could not be reached.")]);
 
-        var tabs = WindowCardText.Tabs(
-            [Series("codex", "session.v1", Sample(40, ResetAt - 600))],
-            quota,
-            "codex");
+        Assert.Equal("Codex could not be reached.", WindowCardText.Blocked(quota, "codex", null, true, []));
+        Assert.Empty(WindowCardText.Tabs(
+            [Series("codex", "session.v1", Sample(40, ResetAt - 600))], quota, "codex"));
+    }
 
-        var tab = Assert.Single(tabs);
-        Assert.True(tab.HasHistory);
-        Assert.NotNull(tab.Active);
-        Assert.Equal([40d], tab.Active!.Samples.Select(s => s.UsedPercent).ToArray());
+    [Fact]
+    public void AnErrorSnapshotWithLastGoodWindowsStillBlocksTheCard()
+    {
+        var quota = new AgentUsagePayload(
+            "2026-01-01T00:00:00Z",
+            [new AgentUsageSnapshot(
+                "codex", "oauth", "2026-01-01T00:00:00Z",
+                Windows: [Window("codex|session.v1", "Session", "session.v1")],
+                Error: "Codex could not be reached; showing the last known values.")]);
+
         Assert.Equal(
-            WindowCardState.Chart,
-            WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded, Now));
+            "Codex could not be reached; showing the last known values.",
+            WindowCardText.Blocked(quota, "codex", null, true, []));
+    }
+
+    [Fact]
+    public void NoErrorAndNoWindowsBlocksWithNoQuotaWindows()
+    {
+        var quota = new AgentUsagePayload(
+            "2026-01-01T00:00:00Z",
+            [new AgentUsageSnapshot("codex", "oauth", "2026-01-01T00:00:00Z", Windows: [])]);
+
+        Assert.Equal(
+            "This agent reported no quota windows.",
+            WindowCardText.Blocked(quota, "codex", null, true, []));
+    }
+
+    // macOS WindowUsageCard.swift:94 titles the blocked card by the client's
+    // display name; the grouped "grok" tab's name is "Grok Build & Bot".
+    [Fact]
+    public void TheBlockedTitleNamesTheClientNotItsTab() =>
+        Assert.Equal("Grok Build window", WindowCardText.BlockedTitle("grok"));
+
+    [Fact]
+    public void AClientMissingFromThePayloadBlocksAsNotInTheReport()
+    {
+        var quota = Quota("claude", Window("claude|session.v1", "Session", "session.v1"));
+
+        Assert.Equal(
+            "Not in the latest quota report.",
+            WindowCardText.Blocked(quota, "codex", null, true, []));
+    }
+
+    [Fact]
+    public void AHealthyAgentIsNotBlocked() =>
+        Assert.Null(WindowCardText.Blocked(
+            Quota("codex", Window("codex|session.v1", "Session", "session.v1")), "codex", null, true, []));
+
+    // No payload: attempted with no running retained cycle says so (mac :154-157)...
+    [Fact]
+    public void NoPayloadAttemptedWithNoRunningRetainedCycleBlocks()
+    {
+        var now = (ResetAt + 600) * 1_000; // the stored cycle ended
+        var ended = WindowCardText.Tabs(
+            [Series("codex", "session.v1", Sample(40, ResetAt - 600))], null, "codex", nowMs: now);
+
+        Assert.Equal("Quota could not be loaded.", WindowCardText.Blocked(null, "codex", null, true, ended));
+        Assert.Equal("Quota could not be loaded.", WindowCardText.Blocked(null, "codex", null, true, []));
+    }
+
+    // ...Windows deviation (pin): retained history is drawn before the first
+    // payload and while offline, when a cycle is still running or not attempted.
+    [Fact]
+    public void NoPayloadDrawsRetainedHistoryWhenNotAttemptedOrWhenACycleStillRuns()
+    {
+        var running = WindowCardText.Tabs(
+            [Series("codex", "session.v1", Sample(40, ResetAt - 600))], null, "codex",
+            nowMs: (ResetAt - 300) * 1_000);
+
+        Assert.Null(WindowCardText.Blocked(null, "codex", null, attempted: true, running));
+        Assert.Null(WindowCardText.Blocked(null, "codex", null, attempted: false, []));
+        Assert.NotNull(Assert.Single(running).Active);
+    }
+
+    // Rule (a): an ended retained cycle is never drawn as a chart ("Resets in now").
+    [Fact]
+    public void AnEndedRetainedCycleOnTheFallbackPathDrawsNoChart()
+    {
+        var now = DateTimeOffset.FromUnixTimeSeconds(ResetAt + 600);
+        var tab = Assert.Single(WindowCardText.Tabs(
+            [Series("codex", "session.v1", Sample(40, ResetAt - 600))], null, "codex",
+            nowMs: now.ToUnixTimeMilliseconds()));
+
+        Assert.Null(tab.Active);
+        Assert.Equal(
+            WindowCardState.PlacementPending,
+            WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded, now,
+                new LocalScan(WindowEquivalence.FetchOutcome.NotAttempted, null, false)));
+        Assert.Equal(
+            WindowCardState.Idle,
+            WindowCardText.State(tab, WindowEquivalence.FetchOutcome.Succeeded, now, LocalScan.Covering));
+        Assert.DoesNotContain("Resets in", WindowCardText.EmptyBody(WindowCardState.Idle));
+    }
+
+    // Pills before the payload: the remembered primary scope picks ONE
+    // account's series, one tab per WindowKey.
+    private static QuotaHistorySeries[] ThreeScopes() =>
+    [
+        Series("claude", "scope-a", "session.v1", Sample(10, ResetAt - 900)),
+        Series("claude", "scope-a", "weekly.v1", Sample(11, ResetAt - 900)),
+        Series("claude", "scope-b", "session.v1", Sample(20, ResetAt - 600)),
+        Series("claude", "scope-b", "weekly.v1", Sample(21, ResetAt - 600)),
+        Series("claude", "scope-c", "session.v1", Sample(30, ResetAt - 300)),
+        Series("claude", "scope-c", "weekly.v1", Sample(31, ResetAt - 300)),
+    ];
+
+    [Fact]
+    public void APersistedPrimaryScopeGivesOneTabPerWindowKeyFromThatScopeOnly()
+    {
+        var tabs = WindowCardText.Tabs(
+            ThreeScopes(), null, "claude", nowMs: (ResetAt - 100) * 1_000, persistedPrimaryScope: "scope-b");
+
+        Assert.Equal(["session.v1", "weekly.v1"], tabs.Select(t => t.Id.WindowKey).Order());
+        Assert.All(tabs, tab => Assert.Equal("scope-b", tab.Id.AccountScope));
+    }
+
+    [Fact]
+    public void OtherScopesDoNotAppearBeforeThePayload()
+    {
+        var tabs = WindowCardText.Tabs(
+            ThreeScopes(), null, "claude", nowMs: (ResetAt - 100) * 1_000, persistedPrimaryScope: "scope-b");
+
+        Assert.DoesNotContain(tabs, t => t.Id.AccountScope is "scope-a" or "scope-c");
+        Assert.Empty(WindowCardText.Tabs(
+            ThreeScopes(), null, "claude", persistedPrimaryScope: "scope-gone"));
+    }
+
+    [Fact]
+    public void WithoutAPersistedScopeEachWindowKeyTakesItsMostRecentlySampledSeries()
+    {
+        var tabs = WindowCardText.Tabs(ThreeScopes(), null, "claude", nowMs: (ResetAt - 100) * 1_000);
+
+        Assert.Equal(2, tabs.Count);
+        Assert.All(tabs, tab => Assert.Equal("scope-c", tab.Id.AccountScope));
+    }
+
+    [Fact]
+    public void PrimaryScopesNamesOnlyPrimaryAgentsScopes()
+    {
+        var quota = new AgentUsagePayload(
+            "2026-01-01T00:00:00Z",
+            [
+                new AgentUsageSnapshot("claude", "s", "t", [], HistoryScope: new AccountScopeStatus("scope-a")),
+                new AgentUsageSnapshot("claude", "s", "t", [], HistoryScope: new AccountScopeStatus("scope-x"),
+                    AccountKey: "claude-desktop"),
+                new AgentUsageSnapshot("codex", "s", "t", [], HistoryScope: new AccountScopeStatus(Error: "e")),
+            ]);
+
+        Assert.Equal([("claude", "scope-a")], WindowCardText.PrimaryScopes(quota));
     }
 
     // The sibling shape that must NOT fall back: a transient failure that DID
@@ -383,32 +523,6 @@ public class WindowCardTextTests
         var tab = Assert.Single(tabs);
         Assert.Equal("account-a", tab.Id.AccountScope);
         Assert.Equal([40d, 10d], tab.Active!.Samples.Select(s => s.UsedPercent).ToArray());
-    }
-
-    // Round 19's finding: the store-only fallback (no live windows to
-    // enumerate) used to join through `byWindowKey` — keyed on WindowKey
-    // alone — so two accounts' series sharing one WindowKey collapsed into
-    // whichever TryAdd saw first, the same bug already fixed for the live
-    // join above but left standing in this second path. There is no live
-    // window here to join against at all, so both accounts' distinct
-    // history must surface as two tabs, not one chosen by input order.
-    [Fact]
-    public void FallbackTabsKeepBothAccountsSeriesForTheSameWindowKey()
-    {
-        var tabs = WindowCardText.Tabs(
-            [
-                Series("claude", "account-a", "session.v1", Sample(40, ResetAt - 600)),
-                Series("claude", "account-b", "session.v1", Sample(90, ResetAt - 600)),
-            ],
-            quota: null,
-            clientId: "claude");
-
-        Assert.Equal(2, tabs.Count);
-        Assert.Equal(
-            new[] { "account-a", "account-b" }.OrderBy(s => s),
-            tabs.Select(tab => tab.Id.AccountScope).OrderBy(s => s));
-        Assert.Contains(tabs, tab => tab.Id.AccountScope == "account-a" && tab.Active!.Samples.Select(s => s.UsedPercent).SequenceEqual([40d]));
-        Assert.Contains(tabs, tab => tab.Id.AccountScope == "account-b" && tab.Active!.Samples.Select(s => s.UsedPercent).SequenceEqual([90d]));
     }
 
     // The window key is the store's own, and ProviderId is already a registered
