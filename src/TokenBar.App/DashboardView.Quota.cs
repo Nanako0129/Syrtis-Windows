@@ -244,7 +244,9 @@ public sealed partial class DashboardView
                 // The window-card owner's inputs (macOS PopoverView.quotaGate).
                 (_selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet)).PresentClients,
                 ClientRegistry.HiddenClients(AppSettings.Store),
-                ClientRegistry.HiddenLimitsClients(AppSettings.Store)),
+                ClientRegistry.HiddenLimitsClients(AppSettings.Store),
+                AppSettings.Store.GetString(
+                    WindowCardText.PrimaryScopeKeyPrefix + ClientRegistry.QuotaOwner(_activeClientTab))),
             snapshot.AccountWindowUsage,
             snapshot.QuotaHistoryReadFailed,
             snapshot.QuotaAttempted,
@@ -627,6 +629,14 @@ public sealed partial class DashboardView
 
     private FrameworkElement BuildWindowCard(QuotaLensProjection.Client client)
     {
+        if (client.BlockedReason is { } reason)
+        {
+            var blockedLine = Ui.Dim(reason);
+            blockedLine.TextWrapping = TextWrapping.Wrap;
+            return Ui.Card(
+                WindowCardText.BlockedTitle(client.Owner), blockedLine, WindowCardText.BlockedSubtitle());
+        }
+
         var tabs = client.Tabs;
         var selected = client.Selected;
         var state = WindowCardText.State(selected, client.QuotaHistoryOutcome, DateTimeOffset.Now, client.Scan);

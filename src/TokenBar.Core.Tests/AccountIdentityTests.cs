@@ -603,8 +603,11 @@ public class AccountIdentityTests
     {
         var history = new[] { Series("P"), Series("S") };
 
-        Assert.Equal(2, WindowCardText.Tabs(history, null, "claude", null).Count);
-        Assert.Equal(2, WindowCardText.Tabs(history, null, "claude", "").Count);
+        // One tab per WindowKey (Q39): both accounts share a key, so not two.
+        Assert.Single(WindowCardText.Tabs(history, null, "claude", null));
+        Assert.Single(WindowCardText.Tabs(history, null, "claude", ""));
+        Assert.Equal("S", Assert.Single(WindowCardText.Tabs(
+            history, null, "claude", null, persistedPrimaryScope: "S")).Id.AccountScope);
         // A primary agent with a scope filters by it, "" being the primary.
         var tab = Assert.Single(WindowCardText.Tabs(history, TwoAccounts(), "claude", ""));
         Assert.Equal("P", tab.Id.AccountScope);

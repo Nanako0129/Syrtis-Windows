@@ -142,6 +142,66 @@ public static class WindowCardText
     /// is the account key, "" = primary. Append the quota OWNER client id.</summary>
     public const string AccountKeyPrefix = "tokenbar.windowcard.account.";
 
+    /// <summary>Per-client memory of the PRIMARY agent's history scope from the
+    /// last payload (append the quota owner client id). The value is the same
+    /// opaque string the quota-history store already writes as
+    /// <c>AccountScope</c> (a keyed digest, never an email, key or path). It
+    /// lets the store-fallback card, which has no payload to name the scope,
+    /// show one account's series instead of every account's.</summary>
+    public const string PrimaryScopeKeyPrefix = "tokenbar.windowcard.primaryscope.";
+
+    /// <summary>The (client, scope) pairs a payload names for primary agents,
+    /// for persisting under <see cref="PrimaryScopeKeyPrefix"/>.</summary>
+    public static IEnumerable<(string ClientId, string Scope)> PrimaryScopes(AgentUsagePayload quota) =>
+        quota.Agents
+            .Where(a => a.Account.AccountKey is null && a.HistoryReadScope?.Scope is { Length: > 0 })
+            .Select(a => (a.ClientId, a.HistoryReadScope!.Scope!));
+
+    /// <summary>The card's blocked body, or null when it draws tabs. Ports
+    /// macOS <c>WindowCardLoader.quotaHalf</c> (WindowCardLoader.swift:148-189)
+    /// and its blocked card (WindowUsageCard.swift:89-101): no usable payload
+    /// once the fetch was attempted, agent missing from the report, the agent's
+    /// own error text (even when the core re-sent last-good windows, :174-176),
+    /// or no window. Windows deviation: with no payload the retained history is
+    /// still drawn (before the first payload, or offline) when a cycle in it
+    /// is still running — <paramref name="fallbackTabs"/> is
+    /// <see cref="Tabs"/>' answer for a null payload.</summary>
+    public static string? Blocked(
+        AgentUsagePayload? quota, string clientId, string? accountKey, bool attempted,
+        IReadOnlyList<WindowCardTab> fallbackTabs)
+    {
+        if (quota is null)
+        {
+            return attempted && !fallbackTabs.Any(tab => tab.Active is not null)
+                ? "Quota could not be loaded.".Localized()
+                : null;
+        }
+
+        var identity = AccountIdentity.Of(clientId, accountKey);
+        if (quota.Agents.FirstOrDefault(a => a.Account == identity) is not { } agent)
+        {
+            return "Not in the latest quota report.".Localized();
+        }
+
+        if (agent.Error is { } error)
+        {
+            return error;
+        }
+
+        return agent.UniqueCardWindows.Count == 0
+            ? "This agent reported no quota windows.".Localized()
+            : null;
+    }
+
+    /// <summary>The CLIENT's display name, not the tab's (macOS
+    /// WindowUsageCard.swift:94 <c>ClientRegistry.style(clientId).displayName</c>):
+    /// the card is the owner's, so a grouped tab reads "Grok Build window",
+    /// not "Grok Build &amp; Bot window".</summary>
+    public static string BlockedTitle(string ownerClientId) =>
+        "{0} window".Localized(ClientRegistry.Style(ownerClientId).DisplayName);
+
+    public static string BlockedSubtitle() => "Quota unavailable".Localized();
+
     /// <summary>Rule 6: Windows has no per-account transcript scan, so local
     /// usage can only be attributed to the primary account.</summary>
     public static string LocalUsageUnattributed() =>
@@ -213,15 +273,13 @@ public static class WindowCardText
     /// <para>
     /// A stored series with no live window (the provider stopped reporting
     /// it) deliberately produces no tab: macOS cannot show a window its own
-    /// live payload no longer offers either, and a history-only tab would
-    /// have no live label to show. That rule assumes this client's own live
-    /// data actually landed, though — see <see cref="LiveWindowsUnavailable"/>
-    /// for the two shapes in which it did not, and what this falls back to
-    /// when it did not: enumerating the store's own window keys directly —
-    /// one tab per stored series, no live label, its running cycle read
-    /// purely off the stored samples — so a successfully-read series stays
-    /// visible while the live lane is down. A window the store has nothing
-    /// under either still produces no tab, exactly as it does today.
+    /// live payload no longer offers either. Only with NO payload at all
+    /// (pending, or the fetch produced none) does this enumerate the store's
+    /// own series instead: one tab per WindowKey, from the primary's
+    /// remembered scope (<see cref="PrimaryScopeKeyPrefix"/>) or, with none,
+    /// the most recently sampled series. A payload that is present but names
+    /// no usable agent (missing, errored, no windows) is not a tab question:
+    /// <see cref="Blocked"/> answers it and the card draws no tabs.
     /// </para>
     /// <para>
     /// <see cref="QuotaHistorySeries.ProviderId"/> is — despite the field name
@@ -271,82 +329,14 @@ public static class WindowCardText
     /// at all, so every series is kept and the live join below falls back to
     /// first-wins.
     /// </para>
-    /// <para>
-    /// Round 19's finding: that "no account signal" case still went through
-    /// <c>byWindowKey</c> — keyed on <c>WindowKey</c> alone — for the
-    /// no-live-windows fallback below, so two accounts' series sharing one
-    /// <c>WindowKey</c> collapsed into whichever <c>TryAdd</c> saw first, the
-    /// same first-wins bug this doc comment used to describe as fixed. The
-    /// fallback now enumerates the scope-filtered set directly
-    /// (<c>matching</c>) instead of going through that collapsed dictionary,
-    /// which stays reserved for the live join below, where joining by
-    /// <c>WindowKey</c> alone is the live payload's own limitation
-    /// (<c>PaceStatus</c> carries no <c>AccountScope</c>), not a shortcut
-    /// taken here.
-    /// </para>
     /// </summary>
-    ///
-    /// <remarks>
-    /// <para>
-    /// Round 17's finding: <paramref name="quota"/> being null is not the
-    /// only shape in which this client's live windows are unusable. Rust's
-    /// <c>agent_usage.rs</c> was read end to end (<c>AgentUsagePayload</c>,
-    /// <c>AgentUsageSnapshot</c> and every producer of one) to enumerate every
-    /// shape rather than add a second condition beside the first:
-    /// </para>
-    /// <list type="bullet">
-    /// <item>The whole payload is null (fetch pending or the last attempt
-    /// threw before producing anything at all). Handled by the <c>quota is
-    /// null</c> half of the condition below, unchanged since round 16.</item>
-    /// <item>This client's snapshot IS present but is Rust's own
-    /// <c>empty_error_snapshot</c> placeholder — <c>Error</c> set,
-    /// <c>Windows</c> empty. Built at three sites: an account-identity
-    /// verification failure, a terminal fetch failure, and a transient
-    /// failure with no last-good cache entry to fall back to. This is the
-    /// shape round 17 actually reported, and <see cref="LiveWindowsUnavailable"/>
-    /// below is what now catches it.</item>
-    /// <item>This client's snapshot is present, <c>Error</c> is set, but
-    /// <c>Windows</c> is NOT empty — a transient failure that DID find a
-    /// last-good cache entry to fall back to (Rust re-uses that cached
-    /// snapshot's windows and stamps the new failure's <c>Error</c> onto it
-    /// as a staleness note). This is real, previously-live data, merely
-    /// stale — not the shape this fix targets, and
-    /// <see cref="LiveWindowsUnavailable"/> deliberately answers false for
-    /// it so the live loop below keeps drawing those windows rather than
-    /// discarding them for a store fallback that would be a step backward,
-    /// not forward.</item>
-    /// <item>This client has no entry in <c><paramref name="quota"/>.Agents</c>
-    /// at all — Rust's <c>ProviderFetchOutcome::Absent</c> (no credential
-    /// found for this provider). Deliberately NOT treated as unavailable
-    /// here: unlike every shape above, Absent carries no <c>Error</c> string
-    /// to swallow, and it does not mean "attempted and failed" the way the
-    /// other three do — it means "not authenticated for this provider right
-    /// now". Falling back to old stored tabs for a client the user may have
-    /// logged out of would present retired history as if it were still an
-    /// active subscription. Pre-existing behaviour (zero tabs, same as
-    /// before round 16) is left as is.</item>
-    /// <item>A provider present with windows but no stored series matching
-    /// its live history scope — already excluded by the <c>liveScope</c>
-    /// filter above <c>byWindowKey</c> is built from; not a new shape, and not
-    /// unavailability, it is data recorded under a different key being
-    /// correctly kept out.</item>
-    /// </list>
-    /// <para>
-    /// The <c>Error</c> string on the true-unavailable shapes is not
-    /// swallowed by this fallback: <c>DashboardView.xaml.cs</c>'s
-    /// <c>BuildLimits</c> already reads <c>agent.Error</c> directly off the
-    /// same <see cref="AgentUsageSnapshot"/> and shows it in the Agent-limits
-    /// card, independently of what this method returns — checked, and it
-    /// does not read through <see cref="Tabs"/> at all, so this fallback
-    /// cannot make that message any less visible than it already is today.
-    /// </para>
-    /// </remarks>
     public static IReadOnlyList<WindowCardTab> Tabs(
         IReadOnlyList<QuotaHistorySeries>? history,
         AgentUsagePayload? quota,
         string clientId,
         string? accountKey = null,
-        long? nowMs = null)
+        long? nowMs = null,
+        string? persistedPrimaryScope = null)
     {
         var now = nowMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         // The snapshot is selected by (clientId, accountKey); accountKey null
@@ -354,13 +344,16 @@ public static class WindowCardText
         // series.AccountScope == its HistoryScope.Scope. A non-primary
         // account is STRICT: no scope, no series, never "every series". The
         // primary filters by its scope whenever it has one (the core gives
-        // the Claude primary one on every outcome); with no payload yet, or
-        // no such agent, it falls back to every stored series of the client.
-        // Ceiling: until the first payload arrives, a multi-account user's
-        // primary window card may show other accounts' series.
+        // the Claude primary one on every outcome), else by the scope
+        // remembered from the last payload; with neither (fresh install, no
+        // payload yet) one series per WindowKey is chosen below.
         var identity = AccountIdentity.Of(clientId, accountKey);
         var agent = quota?.Agents.FirstOrDefault(a => a.Account == identity);
         var liveScope = agent?.HistoryReadScope?.Scope;
+        // With no payload the primary's scope is the one remembered from the
+        // last payload (PrimaryScopeKeyPrefix); only that account's series are
+        // eligible, so other accounts' series do not appear before the payload.
+        var filterScope = liveScope ?? (quota is null ? persistedPrimaryScope : null);
         var strict = identity.AccountKey is not null;
 
         // Every stored series this client's own scope-filtered set contains —
@@ -378,7 +371,7 @@ public static class WindowCardText
                 continue;
             }
 
-            if ((liveScope is not null || strict) && series.AccountScope != liveScope)
+            if ((filterScope is not null || strict) && series.AccountScope != filterScope)
             {
                 continue;
             }
@@ -404,29 +397,43 @@ public static class WindowCardText
         }
 
         var tabs = new List<WindowCardTab>();
-        if (quota is null || LiveWindowsUnavailable(agent))
+        if (quota is null)
         {
-            // Either shape of "this client's own live windows are not there
-            // to enumerate" — see LiveWindowsUnavailable's doc comment. That
-            // must not mean this client's own stored history goes
-            // undisplayed too: fall back to the store's own series directly
-            // (already scope-filtered above, same as the live path would
-            // have been) — `matching`, not `byWindowKey.Values`, so two
-            // stored series for the same WindowKey under different accounts
-            // both still produce a tab instead of the second silently losing
-            // to dictionary iteration order (round 19's finding). No live
-            // label exists for these, so `Title` falls back to the window
-            // key, and there is no `PaceStatus` to read a running cycle off
-            // — `Active` comes from the stored samples alone, same as the
-            // live path already does for a window the store has a series
-            // for.
-            foreach (var series in matching)
+            // No payload (pending, or the fetch failed before producing one):
+            // draw the store's own series, one tab per WindowKey. With a
+            // remembered scope `matching` already holds that account only;
+            // without one (fresh install) the series with the most recent
+            // sample wins each WindowKey, so accounts never multiply the pills.
+            // No live label exists, so the title falls back to the window key.
+            foreach (var group in matching.GroupBy(series => series.WindowKey))
             {
+                var series = group.OrderByDescending(s => s.Samples.Count == 0 ? 0 : s.Samples.Max(x => x.SampledAt)).First();
+                var active = QuotaHistoryFold.Active(series.Samples);
+                long? endedReset = null;
+                long? endedDuration = null;
+                // An ended stored cycle is never drawn as a chart ("Resets in
+                // now"): placed by its own reset/duration, it is Active only
+                // while Resolve says so. Otherwise the tab keeps no Active and
+                // carries the ended reset, so State answers Idle / pending /
+                // unplaceable exactly as it does for a live window.
+                if (active is { IsPlaced: true } stored)
+                {
+                    var duration = stored.ResetAtMs!.Value - stored.StartMs!.Value;
+                    if (Resolve(stored.ResetAtMs, duration, now, null).Kind != WindowResolutionKind.Active)
+                    {
+                        endedReset = stored.ResetAtMs;
+                        endedDuration = duration;
+                        active = null;
+                    }
+                }
+
                 tabs.Add(new WindowCardTab(
                     new QuotaWindowIdentity(clientId, series.AccountScope, series.WindowKey),
                     Label: null,
-                    QuotaHistoryFold.Active(series.Samples),
-                    HasHistory: true));
+                    active,
+                    HasHistory: true,
+                    LiveResetMs: endedReset,
+                    LiveDurationMs: endedDuration));
             }
         }
         else
@@ -539,21 +546,6 @@ public static class WindowCardText
     internal static bool IsSessionClass(string? windowKey) =>
         windowKey is not null && windowKey.Split('.').Contains("session");
 
-    /// <summary>
-    /// The one predicate every "does this client have live windows worth
-    /// enumerating" question in <see cref="Tabs"/> asks — named once so a new
-    /// shape of unavailability is a change to this method, not a new
-    /// disjunct at the call site. True precisely for Rust's
-    /// <c>empty_error_snapshot</c> shape: <see cref="AgentUsageSnapshot.Error"/>
-    /// is set AND <see cref="AgentUsageSnapshot.Windows"/> is empty. See
-    /// <see cref="Tabs"/>'s own remarks for the full enumeration this was
-    /// checked against, including the shapes that deliberately answer false
-    /// here (a stale-but-populated fallback snapshot, and an agent absent
-    /// from the payload altogether).
-    /// </summary>
-    private static bool LiveWindowsUnavailable(AgentUsageSnapshot? agent) =>
-        agent is not null && agent.Error is not null && agent.Windows.Count == 0;
-
     /// <summary>Messages this window's own subscription is answerable for.
     /// Same rule as <see cref="QuotaEquivalenceFold.Cycles"/>: a message is
     /// this window's evidence precisely when the user's confirmed
@@ -645,7 +637,11 @@ public static class WindowCardText
     public static WindowCardTab? Infer(
         WindowCardTab tab, IReadOnlyList<WindowMessage> subscription, long nowMs)
     {
-        if (tab.Active is not null || !tab.HasHistory || tab.LiveResetMs is not { } reset)
+        // ChartSamples is null only on the store-fallback path: with no payload
+        // there is no live reset to infer from, and the ended stored reset a
+        // fallback tab carries must stay Idle/Unplaceable, not become an empty chart.
+        if (tab.Active is not null || !tab.HasHistory || tab.ChartSamples is null
+            || tab.LiveResetMs is not { } reset)
         {
             return null;
         }
