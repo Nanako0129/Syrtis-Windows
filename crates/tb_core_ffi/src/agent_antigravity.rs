@@ -180,7 +180,9 @@ const AGY_PAUSED_MESSAGE: &str =
 /// host (agy 1.2.16, 2026-10-03): with a stale credential `agy --print /usage`
 /// printed "Authentication required. Please visit the URL to log in:" on
 /// stderr and kept waiting past its own `--print-timeout 30s`, so a timeout is
-/// most likely agy waiting for a browser sign-in.
+/// most likely agy waiting for a browser sign-in. A run that timed out but had
+/// already printed a complete usage JSON is a success, not this (see
+/// `read_agy_stdout`); this is the no-usable-output case.
 #[cfg(any(windows, test))]
 const AGY_TIMED_OUT_MESSAGE: &str =
     "Antigravity CLI quota check timed out; agy was probably waiting for a sign-in. Sign in to agy again, or restart Syrtis, to retry.";
@@ -189,7 +191,7 @@ const AGY_TIMED_OUT_MESSAGE: &str =
 /// and the captured-account path (`agy_read_call`) for the blob.
 const AGY_CREDENTIAL_TARGET: &str = "gemini:antigravity";
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const AGY_STDOUT_CAP: u64 = 1 << 20;
 
 /// Why the `agy` leg produced no windows. Only the two pauses are ever shown;
@@ -511,36 +513,91 @@ fn agy_command(executable: &Path, bin_dir: &Path) -> tokio::process::Command {
     command
 }
 
+/// How long a complete usage JSON may sit without EOF before it is taken as
+/// the answer. Hypothesis, UNMEASURED: agy prints the JSON but a child it
+/// leaves behind keeps the stdout pipe open, so EOF never comes (an external
+/// v1.0.0 user saw the timeout while agy answered in 5.6 s in a terminal). The
+/// JSON arrives in one burst, so a few seconds is generous.
 #[cfg(windows)]
-async fn run_agy_cli(executable: PathBuf) -> Result<Vec<u8>, AgyRunFailure> {
+const AGY_EOF_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[cfg(windows)]
+const AGY_RUN_LIMIT: std::time::Duration = std::time::Duration::from_secs(35);
+
+/// The time limit fired with `bytes` received: a complete usage JSON is the
+/// answer (whatever kept the process alive), anything else is a timeout.
+#[cfg(any(windows, test))]
+fn agy_timeout_outcome(bytes: Vec<u8>, now: DateTime<Utc>) -> Result<Vec<u8>, AgyRunFailure> {
+    if parse_agy_usage(&bytes, now).is_ok() {
+        Ok(bytes)
+    } else {
+        Err(AgyRunFailure::TimedOut)
+    }
+}
+
+/// Reads agy's stdout until EOF, the cap, `limit`, or `grace` after the bytes
+/// first parse as usage. The bool is whether EOF was seen; without it the
+/// exit status was never observed and the caller must not wait for one.
+#[cfg(any(windows, test))]
+async fn read_agy_stdout<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    now: DateTime<Utc>,
+    limit: std::time::Duration,
+    grace: std::time::Duration,
+) -> Result<(Vec<u8>, bool), AgyRunFailure> {
     use tokio::io::AsyncReadExt as _;
 
+    let mut output = Vec::new();
+    let read = async {
+        let mut chunk = [0u8; 8192];
+        let mut complete = false;
+        loop {
+            let n = if complete {
+                match tokio::time::timeout(grace, reader.read(&mut chunk)).await {
+                    Ok(n) => n,
+                    Err(_) => return Ok(false),
+                }
+            } else {
+                reader.read(&mut chunk).await
+            }
+            .map_err(|_| AgyRunFailure::Failed)?;
+            if n == 0 {
+                return Ok(true);
+            }
+            output.extend_from_slice(&chunk[..n]);
+            if output.len() as u64 > AGY_STDOUT_CAP {
+                return Err(AgyRunFailure::Failed);
+            }
+            complete = parse_agy_usage(&output, now).is_ok();
+        }
+    };
+    match tokio::time::timeout(limit, read).await {
+        Ok(eof) => eof.map(|eof| (output, eof)),
+        Err(_) => agy_timeout_outcome(output, now).map(|bytes| (bytes, false)),
+    }
+}
+
+#[cfg(windows)]
+async fn run_agy_cli(executable: PathBuf) -> Result<Vec<u8>, AgyRunFailure> {
     let bin_dir = executable.parent().ok_or(AgyRunFailure::NotStarted)?;
     let mut child = agy_command(&executable, bin_dir)
         .spawn()
         .map_err(|_| AgyRunFailure::NotStarted)?;
-    // `child` moves into the future, so a timeout or an early return drops it
+    let stdout = child.stdout.take().ok_or(AgyRunFailure::Failed)?;
+    let now = Utc::now();
+    let started = tokio::time::Instant::now();
+    // `child` lives to the end of this function, so an early return drops it
     // and `kill_on_drop` ends the process.
-    let run = async move {
-        let stdout = child.stdout.take().ok_or(AgyRunFailure::Failed)?;
-        let mut output = Vec::new();
-        stdout
-            .take(AGY_STDOUT_CAP + 1)
-            .read_to_end(&mut output)
-            .await
-            .map_err(|_| AgyRunFailure::Failed)?;
-        if output.len() as u64 > AGY_STDOUT_CAP {
-            return Err(AgyRunFailure::Failed);
-        }
-        let status = child.wait().await.map_err(|_| AgyRunFailure::Failed)?;
-        if !status.success() {
-            return Err(AgyRunFailure::Failed);
-        }
-        Ok(output)
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(35), run)
-        .await
-        .map_err(|_| AgyRunFailure::TimedOut)?
+    let (output, eof) = read_agy_stdout(stdout, now, AGY_RUN_LIMIT, AGY_EOF_GRACE).await?;
+    if !eof {
+        return Ok(output);
+    }
+    let remaining = AGY_RUN_LIMIT.saturating_sub(started.elapsed());
+    match tokio::time::timeout(remaining, child.wait()).await {
+        Ok(status) if status.map_err(|_| AgyRunFailure::Failed)?.success() => Ok(output),
+        Ok(_) => Err(AgyRunFailure::Failed),
+        Err(_) => agy_timeout_outcome(output, now),
+    }
 }
 
 // ── Local IDE API ───────────────────────────────────────────────────────────
@@ -5853,6 +5910,77 @@ mod tests {
         let paused = removed.poll_with(&latch, agy_success).await;
         assert_eq!(paused.unwrap_err(), AgyFailure::Paused);
         assert_eq!(removed.runs.get(), 1);
+    }
+
+    const TEST_LIMIT: std::time::Duration = std::time::Duration::from_millis(400);
+    const TEST_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+
+    /// A writer that stays open models a child holding the stdout pipe: no EOF.
+    async fn read_with_open_pipe(
+        bytes: &[u8],
+        grace: std::time::Duration,
+    ) -> (Result<(Vec<u8>, bool), AgyRunFailure>, std::time::Duration) {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut writer, reader) = tokio::io::duplex(1 << 16);
+        writer.write_all(bytes).await.unwrap();
+        let start = std::time::Instant::now();
+        let result = read_agy_stdout(reader, agy_now(), TEST_LIMIT, grace).await;
+        let elapsed = start.elapsed();
+        drop(writer);
+        (result, elapsed)
+    }
+
+    /// Hypothesis shape: JSON printed, pipe never closes. The grace ends the
+    /// wait before the limit, and the bytes make a card and clear the latch.
+    #[tokio::test]
+    async fn agy_json_without_eof_succeeds_after_the_grace() {
+        let (result, elapsed) = read_with_open_pipe(AGY_WINDOWS_USAGE, TEST_GRACE).await;
+        let (bytes, eof) = result.expect("complete JSON is the answer");
+        assert!(!eof);
+        assert!(elapsed >= TEST_GRACE && elapsed < TEST_LIMIT, "{elapsed:?}");
+        let fakes = AgyFakes::signed_in(1);
+        let latch = AgyLatch::new();
+        let fetched = fakes.poll_with(&latch, || Ok(bytes)).await;
+        assert!(!fetched.expect("parsed").windows.is_empty());
+        assert!(fakes.poll_with(&latch, agy_success).await.is_ok(), "latch clear");
+    }
+
+    /// The limit itself fires with complete JSON (grace out of the way).
+    #[tokio::test]
+    async fn agy_limit_fired_with_complete_json_succeeds() {
+        let day = std::time::Duration::from_secs(86_400);
+        let (result, elapsed) = read_with_open_pipe(AGY_WINDOWS_USAGE, day).await;
+        let (bytes, eof) = result.expect("complete JSON at the limit is the answer");
+        assert!(!eof);
+        assert!(elapsed >= TEST_LIMIT, "{elapsed:?}");
+        assert_eq!(bytes, AGY_WINDOWS_USAGE);
+    }
+
+    #[tokio::test]
+    async fn agy_limit_fired_without_usable_output_times_out_and_latches() {
+        let truncated = &AGY_WINDOWS_USAGE[..AGY_WINDOWS_USAGE.len() / 2];
+        for bytes in [&b""[..], truncated, &b"Authentication required."[..]] {
+            let (result, elapsed) = read_with_open_pipe(bytes, TEST_GRACE).await;
+            let failure = result.expect_err("no usable JSON");
+            assert!(matches!(failure, AgyRunFailure::TimedOut));
+            assert!(elapsed >= TEST_LIMIT, "{elapsed:?}");
+            let fakes = AgyFakes::signed_in(1);
+            let latch = AgyLatch::new();
+            let failed = fakes.poll_with(&latch, || Err(failure)).await;
+            assert_eq!(failed.unwrap_err(), AgyFailure::TimedOut);
+            let paused = fakes.poll_with(&latch, agy_success).await;
+            assert_eq!(paused.unwrap_err(), AgyFailure::TimedOut);
+            assert_eq!(fakes.runs.get(), 1);
+        }
+    }
+
+    #[test]
+    fn agy_timeout_outcome_keeps_only_parseable_bytes() {
+        assert!(agy_timeout_outcome(AGY_WINDOWS_USAGE.to_vec(), agy_now()).is_ok());
+        assert!(matches!(
+            agy_timeout_outcome(Vec::new(), agy_now()),
+            Err(AgyRunFailure::TimedOut)
+        ));
     }
 
     #[tokio::test]
