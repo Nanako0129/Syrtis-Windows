@@ -375,6 +375,7 @@ public class CursorSyncTests
         await syncNow;
         await Until(() => core.Pushes.Count == 2);
         Assert.Equal(0, core.UserSyncs);
+        Assert.DoesNotContain("sync:auto", core.Log);
     }
 
     // A reconfigure whose push lands just as a sync ends (here: from the

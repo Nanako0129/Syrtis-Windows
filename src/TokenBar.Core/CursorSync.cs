@@ -355,9 +355,11 @@ public sealed class CursorSyncController
 
     /// <summary>One sync, on the thread pool. Single-flight here as well as in
     /// the core: a request while a sync runs is dropped, since that sync's
-    /// result is current. A reconfigure during a sync makes its result stale;
-    /// it is discarded and the sync reruns, so the new settings get a fresh
-    /// result.</summary>
+    /// result is current. Before calling the core it waits for the newest
+    /// config push; a reconfigure during that wait makes it wait again, and if
+    /// sync was turned off meanwhile it returns without calling the core. A
+    /// reconfigure while the core runs makes the result stale; it is discarded
+    /// and the sync reruns, so the new settings get a fresh result.</summary>
     public async Task RunSync(bool userInitiated)
     {
         if (_io is not { } io || !CursorSync.ShouldSync(_store))
@@ -375,7 +377,6 @@ public sealed class CursorSyncController
             _syncing = true;
         }
 
-        StateChanged?.Invoke();
         // Set once _syncing has been cleared under the lock that decided this
         // pass was the last, so a sync started right after (the new loop of a
         // reconfigure whose push landed meanwhile) is not refused as "already
@@ -383,6 +384,8 @@ public sealed class CursorSyncController
         var released = false;
         try
         {
+            // Inside the try, so a throwing handler cannot leave _syncing set.
+            StateChanged?.Invoke();
             while (true)
             {
                 int started;

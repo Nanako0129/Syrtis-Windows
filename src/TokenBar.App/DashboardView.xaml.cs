@@ -147,7 +147,10 @@ public sealed partial class DashboardView : UserControl
         // Re-render only when that visibility flips, not on every sync tick.
         if (CursorSyncController.Shared is { } cursorSync)
         {
-            var noticeShown = false;
+            // Start from the real visibility: the probe and the launch push may
+            // already have answered before this subscription exists.
+            var noticeShown = CursorSync.NoticeVisible(
+                AppSettings.Store, Environment.GetCommandLineArgs(), () => cursorSync.CursorPresent);
             cursorSync.StateChanged += () => DispatcherQueue.TryEnqueue(() =>
             {
                 var visible = CursorSync.NoticeVisible(
