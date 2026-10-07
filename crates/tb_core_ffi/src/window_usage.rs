@@ -194,7 +194,10 @@ fn scoped_context(
     // and the publish of a window computed under the old one is dropped.
     let held = context.resolved().scanner_settings();
     let (config_dirs, _) = crate::claude_config_dirs::snapshot();
-    if account.is_none() && held.extra_scan_paths.is_empty() && config_dirs.is_empty() {
+    // Only Claude's roots make the primary differ from the process scan: the
+    // Cursor takeover's extra root is part of the process scan and stays in it.
+    let claude_roots = held.extra_scan_paths.get(CLAUDE).is_some_and(|roots| !roots.is_empty());
+    if account.is_none() && !claude_roots && config_dirs.is_empty() {
         return Ok(context.clone());
     }
     let memo_key = (context.generation(), account.as_deref().map(account_identity));
@@ -210,18 +213,16 @@ fn scoped_context(
             let mut excluded: Vec<std::path::PathBuf> =
                 config_dirs.iter().map(std::path::PathBuf::from).collect();
             excluded.extend(held.extra_scan_paths.get(CLAUDE).into_iter().flatten().cloned());
-            tokscale_core::ResolvedLocalSourceContext::capture(
-                crate::user_home_dir(),
-                true,
-                tokscale_core::ScannerSettings {
-                    extra_scan_paths: held.extra_scan_paths.clone(),
-                    excluded_scan_paths: std::collections::BTreeMap::from([(
-                        CLAUDE.to_string(),
-                        excluded,
-                    )]),
-                    ..Default::default()
-                },
-            )
+            // Merged into the held exclusions, never replacing them: the
+            // Cursor takeover excludes the CLI's Cursor root there, and a
+            // Claude-only map would count that usage twice (Plan W-2).
+            let mut settings = held.clone();
+            settings
+                .excluded_scan_paths
+                .entry(CLAUDE.to_string())
+                .or_default()
+                .extend(excluded);
+            tokscale_core::ResolvedLocalSourceContext::capture(crate::user_home_dir(), true, settings)
         }
         Some(dir) => {
             let own = registered_roots_under(dir, &registry);

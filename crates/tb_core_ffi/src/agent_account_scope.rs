@@ -1495,6 +1495,26 @@ fn encode_digest(bytes: &[u8; DIGEST_BYTES]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// A keyed, domain-separated name for `value` (64 lowercase hex), from this
+/// installation's key. The Cursor sync names its file with it (W9), so the
+/// file name says nothing about the account without the key.
+pub(crate) fn installation_digest_hex(
+    domain: &str,
+    value: &[u8],
+) -> Result<String, AccountScopeError> {
+    let key = ensure_installation_key(&SystemBackend, &ACCOUNT_SCOPE_PROCESS_LOCK)?;
+    keyed_digest_hex(&key, domain, value)
+}
+
+pub(crate) fn keyed_digest_hex(
+    key: &[u8; INSTALLATION_KEY_BYTES],
+    domain: &str,
+    value: &[u8],
+) -> Result<String, AccountScopeError> {
+    let digest = hmac_digest(key, &[b"keyed-digest-hex-v1", domain.as_bytes(), value])?;
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 fn hmac_digest(key: &[u8], fields: &[&[u8]]) -> Result<[u8; DIGEST_BYTES], AccountScopeError> {
     let encoded = encode_fields(fields)?;
     let mut mac =

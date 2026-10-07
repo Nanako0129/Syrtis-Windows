@@ -28,6 +28,8 @@ mod agent_storage_windows;
 mod agent_usage;
 mod agents_report;
 mod claude_config_dirs;
+mod cursor_desktop;
+mod cursor_sync;
 mod extra_scan_paths;
 mod filter_parity_probe;
 mod hourly_report;
@@ -47,7 +49,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use usage_tail::UsageTailer;
@@ -114,7 +116,10 @@ impl LocalSourceContext {
         // (W4's launch push) does not leave the cell permanently behind the
         // atomic, which would make every gated publisher drop its result.
         let generation = ROOT_GENERATION.load(Ordering::SeqCst);
-        let resolved = Arc::new(capture_process_context(extra_scan_paths::snapshot())?);
+        let resolved = Arc::new(capture_process_context(
+            extra_scan_paths::snapshot(),
+            &cursor_takeover(),
+        )?);
         *cell = Some((generation, Arc::clone(&resolved)));
         Ok(Self {
             resolved,
@@ -183,14 +188,30 @@ impl LocalSourceContext {
 static ROOT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// `(generation, context)`, or `None` before the first `process()`.
-/// Lock order: `ROOTS_SETTER` → (config-dir path: `CLAUDE_ACCOUNT_STATE_LOCK`)
-/// → this cell → the scan-root registry. Never taken while holding a cache,
+/// Lock order: `ROOTS_SETTER` → (config-dir path: `CLAUDE_ACCOUNT_STATE_LOCK`;
+/// Cursor recheck: the `cursor_sync` registry, read and released) → this cell
+/// → the scan-root registry / `CURSOR_TAKEOVER`. Never taken while holding a cache,
 /// memo, tail or `COMPUTE` lock, and never held while taking one.
 static PROCESS_SOURCE_CONTEXT: Mutex<Option<(u64, Arc<tokscale_core::ResolvedLocalSourceContext>)>> =
     Mutex::new(None);
 
-/// Serializes the two root setters, so a capture and its commit are one step.
+/// Serializes the root setters and the Cursor takeover recheck, so a capture
+/// and its commit are one step.
 static ROOTS_SETTER: Mutex<()> = Mutex::new(());
+
+/// The Cursor takeover the process context was (or will lazily be) captured
+/// with (Plan W5). Written only by `recheck_cursor_takeover`, under
+/// `ROOTS_SETTER` and the cell lock, in the same commit as the context it
+/// describes; read under either. A plain read, so capture does no takeover
+/// file I/O under the cell lock (V-2b).
+static CURSOR_TAKEOVER: RwLock<cursor_sync::Takeover> = RwLock::new(cursor_sync::Takeover::Off);
+
+fn cursor_takeover() -> cursor_sync::Takeover {
+    CURSOR_TAKEOVER
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
 
 fn lock_context_cell(
 ) -> std::sync::MutexGuard<'static, Option<(u64, Arc<tokscale_core::ResolvedLocalSourceContext>)>> {
@@ -199,17 +220,19 @@ fn lock_context_cell(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The process scan: the C#-owned scan-root registry plus, from Rust state
+/// only, the Cursor takeover (W5, S-2: Cursor never goes through the
+/// registry). Windows fixes scanner settings here, not in report options.
 fn capture_process_context(
     extra_scan_paths: std::collections::BTreeMap<String, Vec<PathBuf>>,
+    takeover: &cursor_sync::Takeover,
 ) -> Result<tokscale_core::ResolvedLocalSourceContext, tokscale_core::SourceContextUnavailable> {
-    tokscale_core::ResolvedLocalSourceContext::capture(
-        user_home_dir(),
-        true,
-        tokscale_core::ScannerSettings {
-            extra_scan_paths,
-            ..Default::default()
-        },
-    )
+    let mut settings = tokscale_core::ScannerSettings {
+        extra_scan_paths,
+        ..Default::default()
+    };
+    cursor_sync::apply_takeover(&mut settings, takeover);
+    tokscale_core::ResolvedLocalSourceContext::capture(user_home_dir(), true, settings)
 }
 
 /// Serve `tb_graph` from cache when the last computation is at most this old;
@@ -896,17 +919,58 @@ fn set_extra_scan_paths(raw: &str) -> Result<serde_json::Value, String> {
 fn apply_scan_roots(
     registry: std::collections::BTreeMap<String, Vec<PathBuf>>,
 ) -> Result<(), String> {
-    let resolved = capture_process_context(registry.clone())
+    let resolved = capture_process_context(registry.clone(), &cursor_takeover())
         .map_err(|_| "sourceContextUnavailable".to_string())?;
+    commit_process_context(resolved, || extra_scan_paths::commit(registry));
+    Ok(())
+}
+
+/// The one commit for a re-captured process context: under the cell lock,
+/// `commit_inputs` stores what the context was captured from, the cell gets
+/// the context and the next generation; then every scan cache is cleared,
+/// because cached graph and window reads do not check the generation.
+/// Caller holds `ROOTS_SETTER`.
+fn commit_process_context(
+    resolved: tokscale_core::ResolvedLocalSourceContext,
+    commit_inputs: impl FnOnce(),
+) {
     {
         let mut cell = lock_context_cell();
-        extra_scan_paths::commit(registry);
+        commit_inputs();
         let next = ROOT_GENERATION.load(Ordering::SeqCst).wrapping_add(1);
         *cell = Some((next, Arc::new(resolved)));
         ROOT_GENERATION.store(next, Ordering::SeqCst);
     }
     invalidate_scan_caches();
-    Ok(())
+}
+
+/// W5 recheck: recompute the Cursor takeover from the sync registry and the
+/// files, and when it differs from the one the process context carries,
+/// re-capture and commit through `commit_process_context`. Returns the
+/// takeover now in effect and whether it changed. Called at every
+/// `tb_set_cursor_sync` (the caller re-applies its stored answer at launch,
+/// so launch is a recheck point) and at every `tb_cursor_sync` status, after
+/// the walk.
+///
+/// Lock order (V-2b): takes `ROOTS_SETTER`, so it must never run while
+/// `cursor_sync`'s `IN_FLIGHT` or its commit lock is held; the takeover is
+/// computed here with neither held. A failed capture commits nothing.
+fn recheck_cursor_takeover() -> (cursor_sync::Takeover, bool) {
+    let _setter = ROOTS_SETTER.lock().unwrap_or_else(|p| p.into_inner());
+    let computed = cursor_sync::current_takeover(user_home_dir().as_deref());
+    let held = cursor_takeover();
+    if computed == held {
+        return (computed, false);
+    }
+    let Ok(resolved) = capture_process_context(extra_scan_paths::snapshot(), &computed) else {
+        return (held, false);
+    };
+    commit_process_context(resolved, || {
+        *CURSOR_TAKEOVER
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = computed.clone();
+    });
+    (computed, true)
 }
 
 /// Test seam: install already-validated roots through the setter's commit
@@ -1227,6 +1291,81 @@ pub unsafe extern "C" fn tb_antigravity_remove(key: *const c_char) -> *mut c_cha
                 .code()
                 .to_string()),
         })
+    })
+}
+
+/// Configure Cursor desktop sync (see the `cursor_sync` module doc). `json`
+/// is `{"enabled":bool,"cliTakeoverConfirmed":bool}`; any other key (a `dir`
+/// included) is `invalidJson`: Rust chooses the dir (Plan W1),
+/// `<%APPDATA%>\com.nyanako.tokenbar[.secure]\cursor-cache[.secure]`. Full
+/// replace, in-memory, default off: the caller re-applies it at launch.
+/// Success data is `{"enabled","dir","cliTakeoverConfirmed","removedFiles":N}`
+/// with the resolved `dir` while enabled, `null` when disabled. Disabling
+/// deletes Syrtis usage files from every existing candidate dir (both roots
+/// × both child names) and creates no directory. Errors are fixed codes:
+/// `nullPayload`, `invalidUtf8`, `invalidJson` (nothing changed),
+/// `storageUnavailable` (enabling: registry unchanged, but directories the
+/// resolution already created may remain), `cleanupFailed` (disabling: sync
+/// IS off and the takeover removed, but a Syrtis usage file could not be
+/// deleted, W7). Rechecks the takeover (W5).
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_set_cursor_sync(json: *const c_char) -> *mut c_char {
+    guarded("tb_set_cursor_sync", || {
+        envelope(unsafe { json_arg(json) }.and_then(|raw| set_cursor_sync(&raw)))
+    })
+}
+
+fn set_cursor_sync(raw: &str) -> Result<serde_json::Value, String> {
+    let result = cursor_sync::set_from_json(raw);
+    // Also after an error: `cleanupFailed` has already turned sync off.
+    recheck_cursor_takeover();
+    result
+}
+
+/// Run one Cursor desktop sync now. Blocking (SQLite read + network, up to
+/// 10 min): never call on the UI thread. `user_initiated` non-zero = the
+/// user's "Sync now" (10 min budget); zero = background (10 min until a
+/// complete file exists, then 60 s). Single-flight: a call made while one
+/// runs waits for it and returns its status. Success data is
+/// `{"state":"ok|partial|expired|notSignedIn|offline|error|disabled|cliPresent",
+/// "events":N,"lastSuccessMs":ms|null,"reason"?:"<fixed code>"}`. After the
+/// walk the takeover is rechecked (W5); `cliPresent` = the walk completed but
+/// CLI Cursor files exist and the takeover is not confirmed, so reports read
+/// the CLI's files.
+#[no_mangle]
+pub extern "C" fn tb_cursor_sync(user_initiated: i32) -> *mut c_char {
+    guarded("tb_cursor_sync", || {
+        envelope(Ok(cursor_sync_then_recheck(|| {
+            cursor_sync::sync_now(user_initiated != 0)
+        })))
+    })
+}
+
+/// `sync` holds and releases `cursor_sync`'s single-flight lock; the recheck
+/// runs after it returns (V-2b).
+fn cursor_sync_then_recheck(
+    sync: impl FnOnce() -> (serde_json::Value, bool),
+) -> serde_json::Value {
+    let (status, changed) = sync();
+    let (takeover, recaptured) = recheck_cursor_takeover();
+    if changed && !recaptured {
+        // Same takeover, new file content: no stale graph or window may stay.
+        invalidate_scan_caches();
+    }
+    cursor_sync::status_for(status, &takeover)
+}
+
+/// Whether Cursor desktop's `state.vscdb` exists (the app's one-time notice,
+/// W6/W-10): `{"present":bool}`. Metadata only; nothing in it is read.
+#[no_mangle]
+pub extern "C" fn tb_cursor_present() -> *mut c_char {
+    guarded("tb_cursor_present", || {
+        let present = cursor_desktop::state_db_path()
+            .is_some_and(|path| cursor_desktop::is_present(&path));
+        envelope(Ok(serde_json::json!({ "present": present })))
     })
 }
 
