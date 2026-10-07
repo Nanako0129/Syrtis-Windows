@@ -451,6 +451,11 @@ fn commit_file(
         let _ = secure::remove_file(&temp_path);
         return Err(failed());
     }
+    // Superseded files and orphan temps go. A Syrtis-named file that fails
+    // the storage contract (planted, or written by something else) is left
+    // in place and not reported here: putting one in this protected dir
+    // needs a process running as the same user, which is out of scope
+    // (Plan threat model). Disable-time cleanup does report it (W7).
     let _ = remove_usage_files(dir, Some(&final_name));
     Ok(())
 }

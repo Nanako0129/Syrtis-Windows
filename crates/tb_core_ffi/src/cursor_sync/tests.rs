@@ -1266,18 +1266,18 @@ fn a_junction_at_the_sync_dir_is_refused() {
     assert!(names(&target).is_empty(), "wrote through the junction");
 }
 
-/// Plan B1 acceptance and threat-model row "concurrent writers/readers": a
-/// Rust std reader (the engine's scan) opens with FILE_SHARE_DELETE, and the
-/// replace is expected to succeed while it holds the file.
+/// A Rust std reader (the engine's scan; it opens with FILE_SHARE_DELETE)
+/// holding the usage file makes that walk fail cleanly: `write_failed`, the
+/// old bytes intact, no temp left. The next walk writes it.
 ///
-/// MEASURED ON 188 (Windows 10.0.26200, NTFS) THE OTHER WAY: the secure
-/// replace (`tokscale_core::fs_atomic::replace_file`, `MoveFileExW`
-/// REPLACE_EXISTING, 5 attempts) returns ERROR_ACCESS_DENIED while such a
-/// reader is open, and the walk reports `write_failed`; `std::fs::rename` of
-/// the same files succeeds. Kept failing as the regression check for that
-/// finding until the Plan decides (B1 stop condition).
+/// Measured on 188 (Windows 10.0.26200, NTFS): the secure replace
+/// (`tokscale_core::fs_atomic::replace_file`, `MoveFileExW`
+/// REPLACE_EXISTING|WRITE_THROUGH, 5 attempts) returns ERROR_ACCESS_DENIED
+/// (code 5) while such a reader is open, whereas `std::fs::rename` of the
+/// same files succeeds. Accepted as transient (Plan B1 decision
+/// 2026-10-08); `agent_storage_windows` and `fs_atomic` stay as they are.
 #[test]
-fn replace_while_a_share_delete_reader_holds_the_file() {
+fn a_std_reader_holding_the_file_fails_the_walk_cleanly() {
     let f = fixture();
     let (url, _) = serve(vec![json_ok(&page(1, &["a"]))]);
     assert_eq!(run_with(&f.db, &f.dir, &url, limits(), &|| true).stop.state, State::Ok);
@@ -1292,7 +1292,17 @@ fn replace_while_a_share_delete_reader_holds_the_file() {
     drop(reader);
     eprintln!("measured: replace with a share-delete reader open -> {outcome:?}");
     assert_eq!(held, old, "the reader sees the bytes it opened");
-    assert_eq!(outcome.stop.state, State::Ok);
+    assert_eq!(outcome, stop(State::Error, Some("write_failed")));
+    assert_eq!(std::fs::read(&path).unwrap(), old, "the old file must stay intact");
+    assert!(
+        names(&f.dir).iter().all(|n| !n.starts_with(TEMP_FILE_PREFIX)),
+        "{:?}",
+        names(&f.dir)
+    );
+
+    // Control: with the reader gone the same walk replaces the file.
+    let (url, _) = serve(vec![json_ok(&page(1, &["b"]))]);
+    assert_eq!(run_with(&f.db, &f.dir, &url, limits(), &|| true).stop.state, State::Ok);
     assert_ne!(std::fs::read(&path).unwrap(), old, "the file was replaced");
 }
 
