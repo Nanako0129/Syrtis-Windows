@@ -487,6 +487,74 @@ mod tests {
         assert!((report.total_cost - 0.6).abs() < f64::EPSILON);
     }
 
+    /// Cursor usage-events JSON (`usage.json`, engine #67) reaches the report
+    /// through the production source-context path, and the CSV lane the old
+    /// pins read is unchanged (control). Same child-process shape as the mux
+    /// test above: the capture reads HOME, so each fixture runs in its own
+    /// process. Both fixtures describe the same usage, so the asserted figures
+    /// are equal; the JSON cost is `tokenUsage.totalCents` / 100, the CSV cost
+    /// is dollars.
+    #[test]
+    fn cursor_usage_json_and_csv_reach_the_report() {
+        const CHILD_HOME: &str = "TB_MODEL_REPORT_CURSOR_FIXTURE_HOME";
+        if let Some(home) = std::env::var_os(CHILD_HOME) {
+            let home = std::path::Path::new(&home);
+            let context = crate::LocalSourceContext::capture(
+                Some(home.to_path_buf()),
+                false,
+                tokscale_core::ScannerSettings::default(),
+            )
+            .unwrap();
+            let mut options = report_options(&context, None);
+            options.clients = Some(vec!["cursor".to_string()]);
+            let report = load_report(&context, options).unwrap();
+            assert_eq!(report.entries.len(), 1, "one cursor row");
+            let entry = &report.entries[0];
+            assert_eq!(entry.client, "cursor");
+            assert_eq!(
+                (entry.input, entry.output, entry.cache_read, entry.cache_write),
+                (100, 20, 300, 40)
+            );
+            assert_eq!(entry.message_count, 1);
+            assert!((report.total_cost - 0.015).abs() < 1e-9, "{}", report.total_cost);
+            return;
+        }
+
+        let json = r#"{"totalUsageEventsCount":1,"usageEventsDisplay":[{"timestamp":"1700000000000","model":"claude-4-sonnet","kind":"USAGE_EVENT_KIND_INCLUDED_IN_PRO","tokenUsage":{"inputTokens":100,"outputTokens":20,"cacheReadTokens":300,"cacheWriteTokens":40,"totalCents":1.5},"chargedCents":1.5,"usageBasedCosts":"$0.02","conversationId":"c1"}]}"#;
+        let csv = "Date,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost\n\"2023-11-14T22:13:20.000Z\",\"On-Demand\",\"claude-4-sonnet\",\"No\",\"40\",\"100\",\"300\",\"20\",\"460\",\"$0.015\"\n";
+        for (name, file, body) in [("json", "usage.json", json), ("csv", "usage.csv", csv)] {
+            let root = std::env::temp_dir().join(format!(
+                "tb-core-ffi-cursor-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let cache = root.join(".config/tokscale/cursor-cache");
+            std::fs::create_dir_all(&cache).unwrap();
+            std::fs::write(cache.join(file), body).unwrap();
+
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("model_report::tests::cursor_usage_json_and_csv_reach_the_report")
+                .arg("--exact")
+                .env(CHILD_HOME, &root)
+                .env("HOME", &root)
+                .env("USERPROFILE", &root)
+                .env("TOKSCALE_CONFIG_DIR", root.join("tokscale-config"))
+                .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
+                .output()
+                .unwrap();
+            std::fs::remove_dir_all(&root).unwrap();
+            assert!(
+                output.status.success(),
+                "cursor {name} fixture failed:\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     // MARK: - Implausible-cost guard (ported from TokenBar macOS)
 
     /// A hermetic stand-in for the LiteLLM table: one priced model at
