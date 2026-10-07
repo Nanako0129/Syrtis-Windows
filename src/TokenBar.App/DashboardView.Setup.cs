@@ -66,6 +66,14 @@ public sealed partial class DashboardView
             cards.Add(attribution);
         }
 
+        // The Cursor sync notice: a consent, not a setup step, so it is not in
+        // Remaining (the header count). Same slot as macOS (after attribution).
+        if (CursorSyncController.Shared is { } cursor
+            && CursorSync.NoticeVisible(store, args, () => cursor.CursorPresent))
+        {
+            cards.Add(BuildCursorSyncNoticeCard(cursor));
+        }
+
         if (Shows(OnboardingStep.Login))
         {
             cards.Add(BuildSetupLoginCard());
@@ -316,6 +324,24 @@ public sealed partial class DashboardView
         }
 
         return Ui.Card(OnboardingSetup.Copy.LoginTitle.Localized(), body);
+    }
+
+    // macOS CursorSyncNoticeCardView: the privacy paragraph, a plain Turn Off
+    // and a prominent Continue.
+    private FrameworkElement BuildCursorSyncNoticeCard(CursorSyncController cursor)
+    {
+        var body = new StackPanel { Spacing = 8 };
+        body.Children.Add(SetupBody(CursorSync.Copy.Privacy));
+        void Answer(bool continuing)
+        {
+            cursor.AnswerNotice(continuing);
+            RenderContent(animated: false);
+        }
+
+        body.Children.Add(SetupButtonRow(
+            SetupButton(CursorSync.Copy.TurnOff, accent: false, () => Answer(false)),
+            SetupButton(CursorSync.Copy.Continue, accent: true, () => Answer(true))));
+        return Ui.Card(CursorSync.Copy.Title.Localized(), body);
     }
 
     // Two buttons of equal weight, neither accent: a prominent "set up" next

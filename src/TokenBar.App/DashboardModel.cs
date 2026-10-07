@@ -265,7 +265,22 @@ public sealed class DashboardModel
         }
 
         AntigravityAccounts.Changed += OnAntigravityAccountsChanged;
+        if (CursorSyncController.Shared is { } cursor)
+        {
+            cursor.DataChanged += OnCursorSyncDataChanged;
+        }
     }
+
+    /// <summary>A Cursor sync wrote new usage, or a switch / D6 answer moved
+    /// the takeover: the core already dropped its scan caches (lib.rs
+    /// recheck_cursor_takeover), so ask again the way an extra-roots push
+    /// does, forced so an in-flight scan of the old roots cannot absorb it.</summary>
+    private void OnCursorSyncDataChanged() => _dispatcher.TryEnqueue(() =>
+    {
+        Volatile.Write(ref _forceRequested, 1);
+        RefreshSlow();
+        RequestLazyRefresh();
+    });
 
     /// <summary>A changed captured-account list reached the core, or agy's
     /// current account changed: refetch the quota so the cards and the dedup
@@ -824,6 +839,10 @@ public sealed class DashboardModel
         }
 
         AntigravityAccounts.Changed -= OnAntigravityAccountsChanged;
+        if (CursorSyncController.Shared is { } cursor)
+        {
+            cursor.DataChanged -= OnCursorSyncDataChanged;
+        }
     }
 
     private void RefreshSlow()

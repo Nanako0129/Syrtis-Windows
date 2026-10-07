@@ -1129,6 +1129,10 @@ public sealed partial class SettingsWindow : Window
 
         panel.Children.Add(Section(AntigravityAccountsCopy.Section.Localized(), BuildAntigravityAccounts(store)));
 
+        // macOS puts this between Antigravity accounts and Language; Windows
+        // has Discord between those two, so it goes directly after Antigravity.
+        panel.Children.Add(Section(CursorSync.Copy.Title.Localized(), BuildCursorSync(store)));
+
         // ── Discord (macOS SettingsPanel :944-1007) ─────────────────────
         _discordSection = Section(DiscordCopy.Section.Localized(), BuildDiscord(store));
         panel.Children.Add(_discordSection);

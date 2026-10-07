@@ -66,6 +66,7 @@ public partial class App : Application
         // lanes that do not).
         StartClaudeExtraRoots();
         StartAntigravityAccounts();
+        StartCursorSync();
 
         // The core's consent registry is in-memory and empty at launch; a
         // stored "yes" for reading the Grok Bot sign-in is re-installed before
@@ -729,6 +730,24 @@ public partial class App : Application
         // more fetch; the consumers' own refresh would be dropped by their
         // in-flight guard.
         Core.AntigravityAccounts.Changed += Core.AgentUsageFetchCoordinator.Shared.RequestFollowUp;
+    }
+
+    /// <summary>Cursor desktop sync. The core switch is in-memory and starts
+    /// off, so the stored preference is re-applied here and the 30-minute
+    /// schedule starts if the one-time notice was answered. In a non-user run
+    /// the controller holds no native calls (its constructor), so nothing below
+    /// reaches the core; <c>--dump-tray-icons</c> returns in Program.Main
+    /// before this, and TokenBar.Smoke never constructs a controller.</summary>
+    private static void StartCursorSync()
+    {
+        var controller = new Core.CursorSyncController(
+            Core.CursorSyncController.Native,
+            AppSettings.Store,
+            Environment.GetCommandLineArgs(),
+            DevLog.Write);
+        Core.CursorSyncController.Shared = controller;
+        controller.Reconfigure(refresh: false);
+        _ = controller.ProbeCursorPresent();
     }
 
     private static void StartClaudeExtraRoots()

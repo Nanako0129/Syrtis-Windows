@@ -311,7 +311,7 @@ public class OnboardingSetupTests : IDisposable
         Assert.Equal(
             [OnboardingSetup.Card.Header, OnboardingSetup.Card.Agents, OnboardingSetup.Card.Icon,
              OnboardingSetup.Card.Title, OnboardingSetup.Card.Pace, OnboardingSetup.Card.Attribution,
-             OnboardingSetup.Card.Login, OnboardingSetup.Card.Discord],
+             OnboardingSetup.Card.CursorSync, OnboardingSetup.Card.Login, OnboardingSetup.Card.Discord],
             OnboardingSetup.RenderOrder);
 
     // ---- agents -----------------------------------------------------------------
