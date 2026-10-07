@@ -37,10 +37,16 @@ fn fresh_root(label: &str) -> PathBuf {
 /// Run `test` (this module's test of that name) in an env-cleared child whose
 /// home is a fresh fixture root, and fail if the child failed.
 fn run_in_child(test: &str, label: &str) {
+    run_in_child_at(&format!("roots_acceptance::{test}"), label);
+}
+
+/// [`run_in_child`] for a test anywhere in the crate, by its full path.
+pub(crate) fn run_in_child_at(test_path: &str, label: &str) {
+    let test = test_path;
     let root = fresh_root(label);
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
     command
-        .arg(format!("roots_acceptance::{test}"))
+        .arg(test_path)
         .arg("--exact")
         .arg("--nocapture")
         .env_clear()
@@ -73,7 +79,7 @@ fn run_in_child(test: &str, label: &str) {
     );
 }
 
-fn child_root() -> Option<PathBuf> {
+pub(crate) fn child_root() -> Option<PathBuf> {
     std::env::var_os(CHILD_ROOT).map(PathBuf::from)
 }
 
