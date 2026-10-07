@@ -68,7 +68,7 @@ Measured on this advance, not relayed:
 
 ## Historical: `726efd70`, lazy cache namespaces (engine PRs #63, #64)
 
-The reviewed pin is the merge commit of tokscale-core PR #64 on the engine's
+The pin was the merge commit of tokscale-core PR #64 on the engine's
 `main`, two merges after `6712ed8a`. The diff touches `src/lib.rs`,
 `src/message_cache.rs` and `UPSTREAM.md` only.
 
