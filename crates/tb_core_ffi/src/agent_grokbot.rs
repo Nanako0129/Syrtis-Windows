@@ -46,19 +46,20 @@ use crate::agent_usage::{
     provider_http_client_builder, read_response_body, AgentIdentity, ProviderCacheBinding,
     ProviderFetchFailure, ResponseReadFailure, TransportErrorFacts, TransportPhase, UsageWindow,
 };
+// The Cursor reader is shared with `cursor_sync`; these names keep the
+// Cursor-route code and its tests below unchanged.
+use crate::cursor_desktop::state_db_path_under as cursor_state_db_path;
+#[cfg(test)]
+use crate::cursor_desktop::{extract_user_id, normalized_stored_string};
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 pub(crate) const GROK_BOT_USAGE_URL: &str =
     "https://cursor.com/api/dashboard/get-sand-usage-status";
 pub(crate) const GROK_BOT_DESKTOP_USAGE_URL: &str =
     "https://api2.cursor.sh/aiserver.v1.DashboardService/GetSandUsageStatus";
-/// `state.vscdb` can be briefly locked by a running Cursor; wait rather than
-/// fail the poll.
-const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_millis(3000);
 pub(crate) const WEEKLY_WINDOW_KEY: &str = "weekly.v1";
 
 /// Marker error for "a desktop login is here, but the user has not agreed to
@@ -572,14 +573,6 @@ fn desktop_secrets_path(config_dir: &Path) -> PathBuf {
     config_dir.join("Grok Bot").join("sand-secrets.json")
 }
 
-fn cursor_state_db_path(config_dir: &Path) -> PathBuf {
-    config_dir
-        .join("Cursor")
-        .join("User")
-        .join("globalStorage")
-        .join("state.vscdb")
-}
-
 /// `Local State` is the secrets file's sibling (R6-16): Electron keeps both in
 /// the app's `userData` folder.
 fn local_state_path(desktop_path: &Path) -> PathBuf {
@@ -758,84 +751,16 @@ fn decode_desktop_secret(
 }
 
 fn load_credentials_from(db_path: &Path) -> Result<Option<CursorCredentials>, String> {
-    if !db_path.is_file() {
-        return Ok(None);
-    }
-    let conn =
-        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|_| "Could not read the Cursor login database.".to_string())?;
-    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
-        .map_err(|_| "Could not read the Cursor login database.".to_string())?;
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT key, value FROM ItemTable WHERE key IN \
-             ('cursorAuth/accessToken','glass.lastSignedInAuthId','cursorAuth/cachedScopedProfile')",
-        )
-        .map_err(|_| "Could not read the Cursor login database.".to_string())?;
-    let rows: Vec<(String, String)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(|_| "Could not read the Cursor login database.".to_string())?
-        .collect::<Result<_, _>>()
-        .map_err(|_| "Could not read the Cursor login database.".to_string())?;
-
-    let mut token: Option<String> = None;
-    let mut identity: Option<String> = None;
-    let mut profile: Option<String> = None;
-    for (key, value) in &rows {
-        let normalized = normalized_stored_string(value);
-        match key.as_str() {
-            "cursorAuth/accessToken" => token = normalized,
-            "glass.lastSignedInAuthId" => identity = normalized,
-            "cursorAuth/cachedScopedProfile" => profile = normalized,
-            _ => {}
-        }
-    }
-
-    let (Some(token), user_id) = (
-        token.filter(|t| !t.is_empty()),
-        identity
-            .as_deref()
-            .and_then(extract_user_id)
-            .or_else(|| profile.as_deref().and_then(extract_user_id)),
-    ) else {
+    let Some(login) = crate::cursor_desktop::read_login(db_path)? else {
         return Ok(None);
     };
-    let Some(user_id) = user_id.filter(|id| !id.is_empty()) else {
+    let Some(user_id) = login.stored_user_id().map(str::to_string) else {
         return Ok(None);
     };
     Ok(Some(CursorCredentials {
         user_id,
-        access_token: token,
+        access_token: login.access_token,
     }))
-}
-
-/// Values in `state.vscdb` are sometimes JSON-encoded strings (wrapped in an
-/// extra layer of quotes) — unwrap one layer when present, else use as-is.
-fn normalized_stored_string(value: &str) -> Option<String> {
-    if value.is_empty() {
-        return None;
-    }
-    if value.starts_with('"') {
-        if let Ok(Value::String(inner)) = serde_json::from_str(value) {
-            return if inner.is_empty() { None } else { Some(inner) };
-        }
-    }
-    Some(value.to_string())
-}
-
-/// Cursor user ids look like `user_...` (20+ alphanumerics). Scan for the
-/// first occurrence rather than depending on the surrounding JSON shape.
-fn extract_user_id(text: &str) -> Option<String> {
-    let start = text.find("user_")?;
-    let rest = &text[start + "user_".len()..];
-    let len = rest
-        .char_indices()
-        .take_while(|(_, c)| c.is_ascii_alphanumeric())
-        .map(|(i, c)| i + c.len_utf8())
-        .last()
-        .unwrap_or(0);
-    (len >= 20).then(|| format!("user_{}", &rest[..len]))
 }
 
 /// The Cursor route's wording, which the decoding tests exercise.
