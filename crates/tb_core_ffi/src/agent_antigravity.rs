@@ -594,8 +594,10 @@ async fn run_agy_cli(executable: PathBuf) -> Result<Vec<u8>, AgyRunFailure> {
     }
     let remaining = AGY_RUN_LIMIT.saturating_sub(started.elapsed());
     match tokio::time::timeout(remaining, child.wait()).await {
-        Ok(status) if status.map_err(|_| AgyRunFailure::Failed)?.success() => Ok(output),
-        Ok(_) => Err(AgyRunFailure::Failed),
+        Ok(status) => match status {
+            Ok(status) if status.success() => Ok(output),
+            _ => Err(AgyRunFailure::Failed),
+        },
         Err(_) => agy_timeout_outcome(output, now),
     }
 }
