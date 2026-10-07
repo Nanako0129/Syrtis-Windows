@@ -2174,8 +2174,11 @@ where
         work.extend(accounts.into_iter().map(each));
         return join_bounded_ordered(work, MAX_ACCOUNT_FETCHES_IN_FLIGHT).await;
     };
-    // The bound account first: the primary's decision needs its raw result.
-    // Its card is still its own, in its registry position.
+    // Only the primary waits for the bound account (its decision needs that
+    // raw result); the other captured accounts run alongside the chain, so a
+    // slow bound fetch delays the primary alone. The chain holds one of the
+    // in-flight slots. The bound card is still its own, in its registry
+    // position.
     let key = bound_account.key.clone();
     let index = accounts.iter().position(|account| account.key == key);
     let others: Vec<_> = accounts
@@ -2183,10 +2186,17 @@ where
         .filter(|account| account.key != key)
         .collect();
     let position = 1 + index.unwrap_or(others.len());
-    let (bound_card, oauth) = bound_each(bound_account, marker_pre).await;
-    let mut work = vec![primary(oauth)];
-    work.extend(others.into_iter().map(each));
-    let mut snapshots = join_bounded_ordered(work, MAX_ACCOUNT_FETCHES_IN_FLIGHT).await;
+    let chain = async move {
+        let (bound_card, oauth) = bound_each(bound_account, marker_pre).await;
+        (bound_card, primary(oauth).await)
+    };
+    let rest: Vec<_> = others.into_iter().map(each).collect();
+    let ((bound_card, primary_card), rest) = tokio::join!(
+        chain,
+        join_bounded_ordered(rest, MAX_ACCOUNT_FETCHES_IN_FLIGHT - 1)
+    );
+    let mut snapshots = vec![primary_card];
+    snapshots.extend(rest);
     snapshots.insert(position, bound_card);
     snapshots
 }
@@ -16379,12 +16389,22 @@ mod kiro_tests {
                 )
                 .await
             };
+            // The primary waits for the bound account; the other accounts do
+            // not (they are started alongside the chain).
+            let chain: Vec<String> =
+                events.borrow().iter().filter(|e| *e != "each").cloned().collect();
             assert_eq!(
-                events.borrow()[..2],
+                chain,
                 [
                     format!("bound {PLAN_E_MARKER}"),
                     format!("primary offered={offered}")
                 ]
+            );
+            assert_eq!(events.borrow().iter().filter(|e| *e == "each").count(), 2);
+            assert_eq!(
+                events.borrow().first().map(String::as_str),
+                Some("each"),
+                "the other captured accounts start before the bound fetch finishes"
             );
             let keys: Vec<Option<&str>> =
                 snapshots.iter().map(|s| s.account_key.as_deref()).collect();
