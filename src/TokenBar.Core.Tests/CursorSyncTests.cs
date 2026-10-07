@@ -330,7 +330,7 @@ public class CursorSyncTests
     }
 
     [Fact]
-    public async Task AConfigChangeWhileASyncWaitsForThePreviousPushReruns()
+    public async Task AConfigChangeWhileASyncWaitsForAPushWaitsForTheNewestOne()
     {
         var store = TempStore();
         store.SetBool(CursorSync.NoticeKey, true);
@@ -351,8 +351,58 @@ public class CursorSyncTests
         await Task.Delay(150);
         second.Set();
         await running;
-        Assert.Equal(2, core.UserSyncs);
-        Assert.Equal(2, controller.LastSuccessMs); // the accepted result saw the newest config
+        // No walk under the superseded config: the pass waited for the
+        // newest push and synced once, under it.
+        Assert.Equal(1, core.UserSyncs);
+        Assert.Equal(2, controller.LastSuccessMs);
+    }
+
+    // Consent: Sync Now pressed while the "on" push is still pending, then the
+    // switch turned off before that push lands. Nothing may be sent.
+    [Fact]
+    public async Task SyncNowWaitingOnAnOnPushDoesNotSyncAfterTurningOff()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore();
+        using var slowOn = new ManualResetEventSlim(false);
+        core.PushGate = enabled => enabled ? slowOn : null;
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        controller.Reconfigure(refresh: false);                // on push, held
+        var syncNow = controller.RunSync(userInitiated: true); // waits on that push
+        controller.SetEnabled(false);                          // the user turns it off
+        slowOn.Set();
+        await syncNow;
+        await Until(() => core.Pushes.Count == 2);
+        Assert.Equal(0, core.UserSyncs);
+    }
+
+    // A reconfigure whose push lands just as a sync ends (here: from the
+    // DataChanged that sync raises) starts a loop whose first sync must not be
+    // refused as "already running": that pass has decided it is the last, so
+    // no rerun is owed and the new config would wait a whole interval.
+    [Fact]
+    public async Task ASyncStartingAsTheLastPassEndsIsNotRefused()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore { Result = () => Status("ok", 5) };
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var reconfigured = 0;
+        controller.DataChanged += () =>
+        {
+            if (Interlocked.Exchange(ref reconfigured, 1) != 0)
+            {
+                return;
+            }
+
+            // The new loop's sync runs while this pass is still unwinding.
+            store.SetBool(CursorSync.TakeoverKey, true);
+            controller.Reconfigure(refresh: false);
+            SpinWait.SpinUntil(() => core.Log.Contains("sync:auto"), TimeSpan.FromMilliseconds(500));
+        };
+        await controller.RunSync(userInitiated: true);
+        await Until(() => core.Log.Contains("sync:auto"));
     }
 
     [Fact]

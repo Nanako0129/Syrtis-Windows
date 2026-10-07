@@ -290,7 +290,9 @@ public sealed class CursorSyncController
         }
 
         StateChanged?.Invoke();
-        _ = Loop(push, refresh, run, token);
+        _ = Loop(push, refresh, run, token).ContinueWith(
+            t => _log($"cursor-sync: schedule failed {t.Exception?.GetBaseException().GetType().Name}"),
+            CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
     }
 
     private void Push(Io io, bool enabled, bool takeover)
@@ -374,10 +376,14 @@ public sealed class CursorSyncController
         }
 
         StateChanged?.Invoke();
+        // Set once _syncing has been cleared under the lock that decided this
+        // pass was the last, so a sync started right after (the new loop of a
+        // reconfigure whose push landed meanwhile) is not refused as "already
+        // running" with no rerun owed.
+        var released = false;
         try
         {
-            bool again;
-            do
+            while (true)
             {
                 int started;
                 Task push;
@@ -392,6 +398,28 @@ public sealed class CursorSyncController
 
                 // Sync against the newest configuration the core was given.
                 await push.ConfigureAwait(false);
+                bool waitAgain;
+                lock (_gate)
+                {
+                    // Re-checked after the wait, before anything is sent: the
+                    // switch may have been turned off while this waited (a Sync
+                    // Now pressed during a pending "on" push), and that answer
+                    // wins. Still on but reconfigured: wait for the newer push.
+                    if (!CursorSync.ShouldSync(_store))
+                    {
+                        _syncing = false;
+                        released = true;
+                        return;
+                    }
+
+                    waitAgain = started != _generation;
+                }
+
+                if (waitAgain)
+                {
+                    continue;
+                }
+
                 CursorSyncStatus? result;
                 try
                 {
@@ -404,6 +432,7 @@ public sealed class CursorSyncController
                 }
 
                 var refresh = false;
+                bool again;
                 lock (_gate)
                 {
                     if (started != _generation || !CursorSync.ShouldSync(_store))
@@ -429,20 +458,32 @@ public sealed class CursorSyncController
                     }
 
                     again = _rerunPending && CursorSync.ShouldSync(_store);
+                    if (!again)
+                    {
+                        _syncing = false;
+                        released = true;
+                    }
                 }
 
                 if (refresh)
                 {
                     DataChanged?.Invoke();
                 }
+
+                if (!again)
+                {
+                    return;
+                }
             }
-            while (again);
         }
         finally
         {
-            lock (_gate)
+            if (!released)
             {
-                _syncing = false;
+                lock (_gate)
+                {
+                    _syncing = false;
+                }
             }
 
             StateChanged?.Invoke();
