@@ -222,6 +222,24 @@ public static class TbCore
     public static void AntigravityRemove(string key) =>
         Unwrap<AntigravityRemoved>(NativeMethods.tb_antigravity_remove(key));
 
+    /// <summary>Configure Cursor desktop sync (in-memory, default off: re-apply
+    /// at launch). The native side chooses the directory. Turning sync off
+    /// deletes Syrtis's synced usage; when that cleanup cannot finish this
+    /// throws <see cref="TbCoreException"/> <c>cleanupFailed</c> and sync is
+    /// off all the same. Disk-bound: call off the UI thread.</summary>
+    public static CursorSyncConfig SetCursorSync(bool enabled, bool cliTakeoverConfirmed) =>
+        Unwrap<CursorSyncConfig>(NativeMethods.tb_set_cursor_sync(
+            CursorSyncRequest.Json(enabled, cliTakeoverConfirmed)));
+
+    /// <summary>One Cursor sync now. Blocking (SQLite read + network, up to
+    /// 10 minutes): never on the UI thread. Single-flight.</summary>
+    public static CursorSyncStatus CursorSync(bool userInitiated) =>
+        Unwrap<CursorSyncStatus>(NativeMethods.tb_cursor_sync(userInitiated ? 1 : 0));
+
+    /// <summary>Whether Cursor desktop's state.vscdb exists (metadata only).</summary>
+    public static bool CursorPresent() =>
+        Unwrap<CursorPresence>(NativeMethods.tb_cursor_present()).Present;
+
     /// <summary>
     /// Decodes the standard FFI envelope, returning the payload or throwing
     /// the embedded error. Pure logic, split out (like TBCore.decodeEnvelope)

@@ -84,6 +84,15 @@ internal static partial class NativeMethods
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial nint tb_antigravity_remove(string key);
 
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_set_cursor_sync(string json);
+
+    [LibraryImport(Lib)]
+    internal static partial nint tb_cursor_sync(int userInitiated);
+
+    [LibraryImport(Lib)]
+    internal static partial nint tb_cursor_present();
+
     [LibraryImport(Lib)]
     internal static partial void tb_free(nint ptr);
 }

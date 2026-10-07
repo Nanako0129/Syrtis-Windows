@@ -214,6 +214,31 @@ char *tb_antigravity_auto_capture(const char *removed_keys_json);
 // {"removed":true}; errors invalid_key, keychain_delete_failed.
 char *tb_antigravity_remove(const char *key);
 
+// Configure Cursor desktop sync. `json` is {"enabled":bool,
+// "cliTakeoverConfirmed":bool}; any other key (a "dir" included) is
+// invalidJson. The sync dir is chosen here:
+// %APPDATA%\com.nyanako.tokenbar[.secure]\cursor-cache[.secure]. Full replace,
+// in-memory, default off: the caller re-applies it at launch. Success data:
+// {"enabled","dir","cliTakeoverConfirmed","removedFiles":N} (dir null when
+// off and no sync dir exists). Errors: nullPayload, invalidUtf8, invalidJson,
+// storageUnavailable (enabling; nothing changed), cleanupFailed (disabling:
+// sync is off and the takeover removed, but a Syrtis usage file could not be
+// deleted). Rechecks the takeover.
+char *tb_set_cursor_sync(const char *json);
+
+// Sync Cursor usage from the signed-in Cursor desktop app now. Blocking
+// (SQLite read + network, up to 10 min): never on the UI thread.
+// `user_initiated` non-zero = the user's "Sync now". Single-flight. Success
+// data: {"state":"ok|partial|expired|notSignedIn|offline|error|disabled|
+// cliPresent","events":N,"lastSuccessMs":ms|null,"reason"?:"<fixed code>"}.
+// cliPresent = the walk completed but tokscale CLI Cursor files exist and the
+// takeover is not confirmed, so reports read the CLI's files.
+char *tb_cursor_sync(int32_t user_initiated);
+
+// Whether Cursor desktop's state.vscdb exists: {"present":bool}. Metadata
+// only; nothing in the file is read.
+char *tb_cursor_present(void);
+
 // Release a string returned by any tb_* entry point.
 void tb_free(char *p);
 

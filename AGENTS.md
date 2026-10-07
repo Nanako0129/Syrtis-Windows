@@ -10,6 +10,7 @@ Routing only. This file says where things are written down, not what to do.
 | Which release channels exist and what they promise | [`docs/lite-distribution.md`](docs/lite-distribution.md) |
 | How a release is cut, and the post-release steps | [`docs/release-velopack.md`](docs/release-velopack.md) |
 | Which gate proved which claim, and when | [`docs/verification-history.md`](docs/verification-history.md) |
+| How Cursor desktop sync works, its takeover rule and threat model | [`docs/cursor-sync.md`](docs/cursor-sync.md) |
 | What ships inside the binary that isn't ours | [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) |
 | Package-manager manifests and what remains before submission | [`packaging/winget/README.md`](packaging/winget/README.md), [`bucket/syrtis.json`](bucket/syrtis.json) |
 
