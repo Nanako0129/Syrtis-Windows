@@ -219,11 +219,14 @@ char *tb_antigravity_remove(const char *key);
 // invalidJson. The sync dir is chosen here:
 // %APPDATA%\com.nyanako.tokenbar[.secure]\cursor-cache[.secure]. Full replace,
 // in-memory, default off: the caller re-applies it at launch. Success data:
-// {"enabled","dir","cliTakeoverConfirmed","removedFiles":N} (dir null when
-// off and no sync dir exists). Errors: nullPayload, invalidUtf8, invalidJson,
-// storageUnavailable (enabling; nothing changed), cleanupFailed (disabling:
-// sync is off and the takeover removed, but a Syrtis usage file could not be
-// deleted). Rechecks the takeover.
+// {"enabled","dir","cliTakeoverConfirmed","removedFiles":N} (dir is the
+// resolved sync dir while enabled, null when disabled). Disabling deletes
+// Syrtis usage files from every existing candidate dir (both roots x both
+// child names) and creates none. Errors: nullPayload, invalidUtf8,
+// invalidJson (nothing changed), storageUnavailable (enabling; the registry
+// is unchanged, but directories the resolution already created may remain),
+// cleanupFailed (disabling: sync is off and the takeover removed, but a
+// Syrtis usage file could not be deleted). Rechecks the takeover.
 char *tb_set_cursor_sync(const char *json);
 
 // Sync Cursor usage from the signed-in Cursor desktop app now. Blocking

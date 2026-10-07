@@ -8,8 +8,7 @@ namespace TokenBar.Interop;
 // State and Reason are fixed codes.
 
 /// <summary>Result of <c>tb_set_cursor_sync</c>. <see cref="Dir"/> is the
-/// directory the native side resolved (null when sync is off and none
-/// exists).</summary>
+/// directory the native side resolved while enabled, null when disabled.</summary>
 public sealed record CursorSyncConfig(bool Enabled, string? Dir, bool CliTakeoverConfirmed, int RemovedFiles);
 
 /// <summary>Result of <c>tb_cursor_sync</c>. <see cref="State"/> is one of

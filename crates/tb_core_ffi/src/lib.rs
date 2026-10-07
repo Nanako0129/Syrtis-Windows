@@ -948,8 +948,9 @@ fn commit_process_context(
 /// files, and when it differs from the one the process context carries,
 /// re-capture and commit through `commit_process_context`. Returns the
 /// takeover now in effect and whether it changed. Called at every
-/// `tb_set_cursor_sync` (which the app sends at launch, so launch is a
-/// recheck point) and at every `tb_cursor_sync` status, after the walk.
+/// `tb_set_cursor_sync` (the caller re-applies its stored answer at launch,
+/// so launch is a recheck point) and at every `tb_cursor_sync` status, after
+/// the walk.
 ///
 /// Lock order (V-2b): takes `ROOTS_SETTER`, so it must never run while
 /// `cursor_sync`'s `IN_FLIGHT` or its commit lock is held; the takeover is
@@ -1299,11 +1300,14 @@ pub unsafe extern "C" fn tb_antigravity_remove(key: *const c_char) -> *mut c_cha
 /// `<%APPDATA%>\com.nyanako.tokenbar[.secure]\cursor-cache[.secure]`. Full
 /// replace, in-memory, default off: the caller re-applies it at launch.
 /// Success data is `{"enabled","dir","cliTakeoverConfirmed","removedFiles":N}`
-/// with the resolved `dir` (null when sync is off and no sync dir exists).
-/// Errors are fixed codes: `nullPayload`, `invalidUtf8`, `invalidJson`,
-/// `storageUnavailable` (enabling, registry unchanged), `cleanupFailed`
-/// (disabling: sync IS off and the takeover removed, but a Syrtis usage file
-/// could not be deleted, W7). Rechecks the takeover (W5).
+/// with the resolved `dir` while enabled, `null` when disabled. Disabling
+/// deletes Syrtis usage files from every existing candidate dir (both roots
+/// × both child names) and creates none. Errors are fixed codes:
+/// `nullPayload`, `invalidUtf8`, `invalidJson` (nothing changed),
+/// `storageUnavailable` (enabling: registry unchanged, but directories the
+/// resolution already created may remain), `cleanupFailed` (disabling: sync
+/// IS off and the takeover removed, but a Syrtis usage file could not be
+/// deleted, W7). Rechecks the takeover (W5).
 ///
 /// # Safety
 /// `json` must be NULL or a valid NUL-terminated string.

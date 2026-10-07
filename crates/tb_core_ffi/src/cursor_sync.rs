@@ -49,9 +49,6 @@ const TEMP_FILE_PREFIX: &str = ".cursor-sync.tmp-";
 /// Same root as quota history and account scope.
 const APP_DIR_NAME: &str = "com.nyanako.tokenbar";
 const SYNC_DIR_NAME: &str = "cursor-cache";
-/// `agent_storage_windows`'s sticky fallback suffix. Only used to look for an
-/// existing dir without creating one (`sync_dir_may_exist`).
-const SECURE_FALLBACK_SUFFIX: &str = ".secure";
 
 const PAGE_SIZE: u32 = 500;
 /// Upstream's per-page timeout (`CURSOR_HTTP_TIMEOUT`), clamped to the budget.
@@ -123,26 +120,65 @@ fn resolve_sync_dir() -> io::Result<PathBuf> {
     secure::resolve_dir(&root.join(SYNC_DIR_NAME))
 }
 
-/// Whether any sync dir could exist (either root name, either child name),
-/// checked without creating anything: turning sync off on a PC that never
-/// synced must not create the directory.
-fn sync_dir_may_exist() -> bool {
+/// Every sync dir Syrtis could have written to: root ∈ {preferred,
+/// `.secure`} × child ∈ {`cursor-cache`, `cursor-cache.secure`}. The
+/// fallbacks are sticky, so the dir in use can move after files were written
+/// elsewhere; disabling cleans them all.
+fn sync_dir_candidates(base: &Path) -> Vec<PathBuf> {
+    let suffix = secure::FALLBACK_SUFFIX;
+    let mut candidates = Vec::new();
+    for root in [APP_DIR_NAME.to_string(), format!("{APP_DIR_NAME}{suffix}")] {
+        for child in [SYNC_DIR_NAME.to_string(), format!("{SYNC_DIR_NAME}{suffix}")] {
+            candidates.push(base.join(&root).join(child));
+        }
+    }
+    candidates
+}
+
+/// Disable-time cleanup of every EXISTING candidate; nothing is created
+/// (a candidate is opened only after it was seen to exist, so only a dir
+/// deleted in between could be re-created, empty). Each candidate that meets
+/// the storage contract is cleaned under its secure lock with the secure
+/// delete. A candidate that is a real dir but fails the contract was never
+/// written by Syrtis; it fails the cleanup only when it holds a Syrtis-named
+/// file, which then cannot be deleted safely. Non-directories (a junction
+/// included) are skipped: Syrtis never wrote through one. Every candidate is
+/// tried; any failure makes the whole cleanup an error.
+fn remove_usage_files_everywhere() -> io::Result<usize> {
     let Some(base) = data_root() else {
-        return false;
+        return Ok(0);
     };
-    let roots = [
-        APP_DIR_NAME.to_string(),
-        format!("{APP_DIR_NAME}{SECURE_FALLBACK_SUFFIX}"),
-    ];
-    let children = [
-        SYNC_DIR_NAME.to_string(),
-        format!("{SYNC_DIR_NAME}{SECURE_FALLBACK_SUFFIX}"),
-    ];
-    roots.iter().any(|root| {
-        children
-            .iter()
-            .any(|child| std::fs::symlink_metadata(base.join(root).join(child)).is_ok())
-    })
+    let mut removed = 0;
+    let mut failed = false;
+    for dir in sync_dir_candidates(&base) {
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                failed = true;
+                continue;
+            }
+        }
+        if secure::ensure_dir(&dir).is_err() {
+            let ours = std::fs::read_dir(&dir).map(|entries| {
+                entries
+                    .flatten()
+                    .any(|entry| is_ours(&entry.file_name().to_string_lossy()))
+            });
+            failed |= !matches!(ours, Ok(false));
+            continue;
+        }
+        match remove_usage_files_locked(&dir) {
+            Ok(count) => removed += count,
+            Err(_) => failed = true,
+        }
+    }
+    if failed {
+        Err(io::Error::other("a Syrtis usage file could not be deleted"))
+    } else {
+        Ok(removed)
+    }
 }
 
 /// `<HOME>\.config\tokscale\cursor-cache`, the CLI's Cursor root (engine
@@ -153,10 +189,12 @@ pub(crate) fn cli_root(home: &Path) -> PathBuf {
 
 /// Replace the registry from `{"enabled":bool,"cliTakeoverConfirmed":bool}`.
 /// Enabling resolves (and creates) the sync dir; invalid input or an
-/// unavailable dir is an error and leaves the registry unchanged. Disabling
-/// always commits `enabled: false` first, then deletes the Syrtis usage files
-/// (P3-7); a cleanup that cannot finish is the error `cleanupFailed` (W7),
-/// never a success with `removedFiles: 0`.
+/// unavailable dir is an error and leaves the registry unchanged (dirs the
+/// resolution already created stay). Disabling always commits
+/// `enabled: false` first, then deletes the Syrtis usage files from every
+/// existing candidate dir without creating any (P3-7,
+/// `remove_usage_files_everywhere`); a cleanup that cannot finish is the
+/// error `cleanupFailed` (W7), never a success with `removedFiles: 0`.
 pub(crate) fn set_from_json(raw: &str) -> Result<serde_json::Value, String> {
     let input: SetInput = serde_json::from_str(raw).map_err(|_| "invalidJson".to_string())?;
     let enabled_dir = if input.enabled {
@@ -172,16 +210,14 @@ pub(crate) fn set_from_json(raw: &str) -> Result<serde_json::Value, String> {
     *CONFIG
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = new.clone();
-    let mut dir = new.dir.clone();
-    let mut removed = 0;
-    if !new.enabled && sync_dir_may_exist() {
-        let resolved = resolve_sync_dir().map_err(|_| "cleanupFailed".to_string())?;
-        removed = remove_usage_files_locked(&resolved).map_err(|_| "cleanupFailed".to_string())?;
-        dir = Some(resolved);
-    }
+    let removed = if new.enabled {
+        0
+    } else {
+        remove_usage_files_everywhere().map_err(|_| "cleanupFailed".to_string())?
+    };
     Ok(serde_json::json!({
         "enabled": new.enabled,
-        "dir": dir.as_deref().map(|d| d.to_string_lossy()),
+        "dir": new.dir.as_deref().map(|d| d.to_string_lossy()),
         "cliTakeoverConfirmed": new.cli_takeover_confirmed,
         "removedFiles": removed,
     }))
@@ -302,6 +338,8 @@ mod secure {
     use std::io;
     use std::path::{Path, PathBuf};
 
+    pub(super) const FALLBACK_SUFFIX: &str = storage::SECURE_STORAGE_FALLBACK_SUFFIX;
+
     pub(super) fn resolve_dir(preferred: &Path) -> io::Result<PathBuf> {
         storage::resolve_secure_storage_directory(preferred)
     }
@@ -340,6 +378,8 @@ mod secure {
     use std::fs::File;
     use std::io;
     use std::path::{Path, PathBuf};
+
+    pub(super) const FALLBACK_SUFFIX: &str = ".secure";
 
     fn unsupported() -> io::Error {
         io::Error::from(io::ErrorKind::Unsupported)

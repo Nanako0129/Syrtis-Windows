@@ -1121,7 +1121,7 @@ fn disable_deletes_only_syrtis_usage_files() {
     }
     let off = set(serde_json::json!({"enabled": false})).unwrap();
     assert_eq!(off["removedFiles"], 2);
-    assert_eq!(off["dir"], dir.to_string_lossy().as_ref());
+    assert!(off["dir"].is_null());
     assert!(!synced.exists() && !temp.exists());
     assert!(
         unrelated.exists(),
@@ -1215,6 +1215,79 @@ fn a_loose_sync_dir_falls_back_to_the_secure_sibling() {
     assert!(meets_contract(&fallback, true));
     assert_eq!(names(&planted), ["marker.txt"], "the planted dir was written");
     assert!(!meets_contract(&planted, true), "the planted dir was tightened");
+
+    // A loose candidate with nothing of Syrtis's in it does not fail the
+    // disable (control for the test below).
+    let off = set(serde_json::json!({"enabled": false})).unwrap();
+    assert_eq!(off["removedFiles"], 0);
+    assert_eq!(names(&planted), ["marker.txt"]);
+}
+
+/// Every directory under `root`, recursively (files ignored).
+fn dir_tree(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            if entry.file_type().unwrap().is_dir() {
+                found.push(entry.path());
+                stack.push(entry.path());
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The fallbacks are sticky, so the dir in use can move after a file was
+/// written: disabling cleans every existing candidate, counts what it
+/// removed, and creates no directory.
+#[test]
+fn disable_cleans_a_sync_dir_left_behind_when_the_root_moved() {
+    let root = DataRoot::new();
+    set(serde_json::json!({"enabled": true})).unwrap();
+    let first = root.sync_dir();
+    let stranded = first.join(format!("usage.{}.json", "a".repeat(64)));
+    write_secure(&stranded, b"{}");
+
+    // The root now resolves to its `.secure` sibling (sticky once it exists).
+    let secure_root = root
+        .path()
+        .join(format!("{APP_DIR_NAME}{}", secure::FALLBACK_SUFFIX));
+    drop(secure::ensure_dir(&secure_root).unwrap());
+    let on = set(serde_json::json!({"enabled": true})).unwrap();
+    let moved = secure_root.join(SYNC_DIR_NAME);
+    assert_eq!(on["dir"], moved.to_string_lossy().as_ref(), "fixture is inert");
+    let current = moved.join(format!("usage.{}.json", "b".repeat(64)));
+    write_secure(&current, b"{}");
+
+    let before = dir_tree(root.path());
+    let off = set(serde_json::json!({"enabled": false})).unwrap();
+    assert_eq!(off["removedFiles"], 2, "{off}");
+    assert!(!stranded.exists(), "the file under the old root survived");
+    assert!(!current.exists());
+    assert_eq!(dir_tree(root.path()), before, "disable created a directory");
+}
+
+/// A candidate that is a real dir failing the contract and holds a
+/// Syrtis-named file cannot be cleaned safely: `cleanupFailed`, sync off,
+/// the file left.
+#[test]
+fn a_loose_candidate_holding_a_syrtis_file_fails_the_cleanup() {
+    let root = DataRoot::new();
+    drop(secure::resolve_dir(&root.path().join(APP_DIR_NAME)).unwrap());
+    let planted = root.sync_dir();
+    std::fs::create_dir(&planted).unwrap();
+    let loose = planted.join(format!("usage.{}.json", "e".repeat(64)));
+    std::fs::write(&loose, b"{}").unwrap();
+    set(serde_json::json!({"enabled": true})).unwrap();
+
+    assert_eq!(
+        set(serde_json::json!({"enabled": false})),
+        Err("cleanupFailed".to_string())
+    );
+    assert!(!config().enabled);
+    assert!(loose.exists());
 }
 
 /// Under the root's `.secure` fallback the sync dir is its child.
@@ -1495,6 +1568,11 @@ fn only_an_ok_walk_blocked_by_d6_reads_cli_present() {
 
 /// Two events of one usage history: 300 input, 60 output, 30 cache read.
 fn e2e_body() -> String {
+    e2e_body_times(1)
+}
+
+/// The same history with every token count multiplied by `k`.
+fn e2e_body_times(k: i64) -> String {
     let event = |id: &str, ts: &str, input: i64, output: i64, cache_read: i64, cents: f64| {
         serde_json::json!({
             "conversationId": id, "timestamp": ts, "model": "gpt-5",
@@ -1507,8 +1585,8 @@ fn e2e_body() -> String {
     serde_json::json!({
         "totalUsageEventsCount": 2,
         "usageEventsDisplay": [
-            event("conv-a", "1788256800000", 100, 20, 30, 50.0),
-            event("conv-b", "1788260400000", 200, 40, 0, 25.0),
+            event("conv-a", "1788256800000", 100 * k, 20 * k, 30 * k, 50.0),
+            event("conv-b", "1788260400000", 200 * k, 40 * k, 0, 25.0),
         ],
     })
     .to_string()
@@ -1675,6 +1753,35 @@ fn the_takeover_reaches_the_process_context_and_counts_once() {
     assert_eq!(cursor_report().0, CLI_OUTPUT);
     assert_eq!(graph_cursor_output(), CLI_OUTPUT);
     assert!(cli.join("usage.csv").exists(), "the CLI's file was touched");
+}
+
+/// A second complete walk with new content while the takeover is already on
+/// (no recapture) still clears the cached graph and window.
+#[test]
+fn a_new_walk_under_the_same_takeover_refreshes_the_caches() {
+    let Some(root) = crate::roots_acceptance::child_root() else {
+        return crate::roots_acceptance::run_in_child_at(
+            "cursor_sync::tests::a_new_walk_under_the_same_takeover_refreshes_the_caches",
+            "cursor-refresh",
+        );
+    };
+    let db = child_setup(&root);
+    assert_eq!(call_set(r#"{"enabled":true}"#)["ok"], true);
+    let (url, _) = serve(vec![json_ok(&e2e_body())]);
+    assert_eq!(walk_now(&db, &url)["state"], "ok");
+    assert_eq!(graph_cursor_output(), SYNCED_OUTPUT);
+    assert_eq!(window_cursor_output(), SYNCED_OUTPUT);
+
+    let generation = crate::LocalSourceContext::process().unwrap().generation();
+    let (url, _) = serve(vec![json_ok(&e2e_body_times(2))]);
+    assert_eq!(walk_now(&db, &url)["state"], "ok");
+    assert_eq!(
+        crate::LocalSourceContext::process().unwrap().generation(),
+        generation,
+        "fixture is inert: the takeover changed"
+    );
+    assert_eq!(graph_cursor_output(), 2 * SYNCED_OUTPUT, "stale graph served");
+    assert_eq!(window_cursor_output(), 2 * SYNCED_OUTPUT, "stale window served");
 }
 
 /// W-2: with an extra Claude root registered the primary window is a scoped

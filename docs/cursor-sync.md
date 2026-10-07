@@ -39,17 +39,20 @@ Cursor's refresh token is never used.
 The synced file and the CLI's cache (`%USERPROFILE%\.config\tokscale\cursor-cache`)
 can hold the same usage. Only one is counted:
 
-| Sync on | Complete synced file | CLI Cursor files | User confirmed | Reports read | Status after a walk |
+| Sync on | Complete synced file | CLI Cursor files | User confirmed | Reports read | Status after a completed walk |
 | --- | --- | --- | --- | --- | --- |
 | no | – | – | – | CLI | `disabled` |
-| yes | no | – | – | CLI | per walk |
+| yes | no | – | – | CLI | – (no walk has completed) |
 | yes | yes | no | – | synced file only | `ok` |
 | yes | yes | yes | no | CLI only (D6) | `cliPresent` |
 | yes | yes | yes | yes | synced file only | `ok` |
 
 "CLI Cursor files" means any `usage*.csv` / `usage*.json` up to four levels
 under the CLI root, and an unreadable root counts as present, so the guard
-errs toward asking. The CLI's files are never moved, hidden or deleted.
+errs toward asking. The CLI's files are never moved, hidden or deleted. The
+last column is for a walk that completed; a walk that stops early reports its
+own state (`partial`, `expired`, `notSignedIn`, `offline`, `error`,
+`disabled`) whatever the takeover.
 
 On Windows the scanner settings are fixed when the process source context is
 captured, so the takeover lives there (`capture_process_context`), from Rust
@@ -64,8 +67,8 @@ The takeover is recomputed, and on a change the process context is
 re-captured, the root generation bumped and every scan cache cleared (the same
 commit as the scan-root setter), at:
 
-- every `tb_set_cursor_sync`, which the app sends at launch (the Rust registry
-  starts off every launch), so launch is a recheck point;
+- every `tb_set_cursor_sync`; the Rust registry starts off every launch and
+  the caller re-applies its stored answer then, so launch is a recheck point;
 - the end of every `tb_cursor_sync` walk, whatever its outcome.
 
 So CLI files that appear after an automatic takeover turn it off at the next
@@ -84,7 +87,15 @@ walk (at most one sync interval), and the status then says `cliPresent`.
 - Writes: secure lock (`.cursor-sync.lock`), secure temp
   (`.cursor-sync.tmp-*`, never matching `usage*`), flush, secure replace.
 - Only a complete walk replaces the file. Turning sync off deletes the synced
-  file and temps. A Syrtis-named file that fails the storage contract is never
+  file and temps from every sync dir that exists: both roots
+  (`com.nyanako.tokenbar`, `com.nyanako.tokenbar.secure`) times both child
+  names (`cursor-cache`, `cursor-cache.secure`), because the `.secure`
+  fallbacks are sticky and the dir in use can move after a file was written
+  elsewhere. Nothing is created on the way. A candidate that meets the
+  contract is cleaned under its own secure lock; one that is a real dir but
+  fails the contract was never written by Syrtis and only fails the cleanup
+  if it holds a Syrtis-named file; a junction or other non-directory is
+  skipped. A Syrtis-named file that fails the storage contract is never
   deleted; at disable time that is the error `cleanupFailed` (sync is off all
   the same), and during a walk it is left in place without a report. Putting
   such a file into the protected dir needs a process running as the same
