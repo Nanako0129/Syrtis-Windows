@@ -20,7 +20,10 @@ namespace TokenBar.Core;
 /// </para>
 /// <para>
 /// <see cref="Current"/> is the key of the account agy is signed into, bound
-/// to the marker it was confirmed under; it drives <see cref="AntigravityDedup"/>.
+/// to the marker it was confirmed under; it drives <see cref="AntigravityDedup"/>
+/// and is handed to the engine before every fetch (<see cref="AntigravityFetch"/>),
+/// which then fills the primary card from that account's OAuth result instead
+/// of running agy while the marker still holds.
 /// While automatic capture is on it is cleared the moment a new marker is seen
 /// (before the attempt) and on a pause, and set by a <c>captured</c> /
 /// <c>unchanged</c> attempt. A successful manual Capture sets it whether or not
@@ -56,8 +59,11 @@ public sealed class AntigravityAutoCapture
     public const string EnabledKey = "tokenbar.antigravity.autoCapture";
 
     /// <summary><c>{"key","marker"}</c>: a hash and a FILETIME, no secret.
-    /// Safe to restore without re-reading agy's login, because dedup also
-    /// requires the primary card to have been fetched under that marker.</summary>
+    /// Safe to restore without re-reading agy's login: the engine
+    /// (<c>tb_set_antigravity_binding</c>, plan E) uses the binding only while
+    /// agy's live marker, read before and again after its fetch, equals the
+    /// stored one, and the dedup merges only a primary that carries that same
+    /// marker.</summary>
     public const string CurrentKey = "tokenbar.antigravity.currentAgy";
 
     /// <summary>The error code recorded for a failure that carried no core
