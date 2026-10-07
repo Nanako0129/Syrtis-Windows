@@ -10,20 +10,65 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `726efd7038727055bf8915d98939b973c3db17fe` |
-| TokenBar alignment | macOS `main` pins `6712ed8a` (engine PR #62), an ancestor of this pin |
-| Engine alignment | `6712ed8a0ff67bf1b2d0a97c41d2d94821b507fa` → `726efd7038727055bf8915d98939b973c3db17fe` (engine `main`) |
+| Reviewed pin | `8fc63cedfaf4aeec73c9a4e65711c280e7add15e` |
+| TokenBar alignment | macOS `main` pins `8fc63ced` (same pin) |
+| Engine alignment | `726efd7038727055bf8915d98939b973c3db17fe` → `8fc63cedfaf4aeec73c9a4e65711c280e7add15e` (engine `main`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/726efd7038727055bf8915d98939b973c3db17fe/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/8fc63cedfaf4aeec73c9a4e65711c280e7add15e/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `726efd70`, lazy cache namespaces (engine PRs #63, #64)
+## Current pin: `8fc63ced`, Cursor usage-events JSON (engine PRs #65, #67)
 
-The reviewed pin is the merge commit of tokscale-core PR #64 on the engine's
+The reviewed pin is the merge commit of tokscale-core PR #67 on the engine's
+`main`, covering `726efd70` → `8fc63ced`. The gitlink moved to `a024eb7` (#65)
+earlier without an update to this file; this entry covers both merges. The
+diff touches `src/scanner.rs`, `src/sessions/cursor.rs`, `src/source_context.rs`,
+`src/clients.rs`, `src/message_cache.rs`, `src/lib.rs` (tests) and `UPSTREAM.md`.
+
+- #65 (`a024eb7`): the source-context scan now honours `excluded_scan_paths`.
+  `retain_unexcluded_scan_tasks` runs in `scan_all_clients_resolved_inner`
+  (scanner.rs), which every `*_with_source_context` report, parse and change
+  token goes through; before, only the context-free scan applied it. A relative
+  exclusion is bound to the capture cwd, and a remote context requires absolute
+  ones. `window_usage.rs` already relies on this for the primary account window.
+- #67 (`8fc63ced`): Cursor's scan pattern becomes `usage*.json|usage*.csv` and
+  a usage-events JSON parser (`parse_cursor_events_json`) reads the
+  `usage.json` / `usage.<account>.json` the current tokscale CLI writes, which
+  this tree did not read before, so a CLI-current user saw no Cursor usage.
+  When a JSON and a CSV sit in the same directory with the same stem the JSON
+  wins and the CSV is not counted. Cost is `tokenUsage.totalCents`, else
+  `chargedCents`, divided by 100 and provider-reported.
+
+Measured on this advance, not relayed:
+
+- `CACHE_FORMAT_VERSION` stays 4 and Cursor's `parser_version` stays 3 (#67
+  adds a comment saying why: the source cache is keyed per path, so a new
+  `usage*.json` has no entry to be stale). No namespace re-parses. `ClientId`
+  is unchanged. `RESOLVER_CONTRACT_VERSION` stays 3.
+- `pub` items: `sessions::cursor::parse_cursor_events_json` is added
+  (`parse_cursor_file` keeps its signature and now dispatches on the extension);
+  this crate uses neither. `crates/tb_core_ffi` needed no production change.
+- Source-context identity changes once. The scan pattern is part of the
+  descriptor, so the new Cursor pattern moves every identity (the engine's
+  `descriptor_has_fixed_sha256_and_native_path_vectors` golden moved on macOS
+  and Linux). #65 adds field 16 only when a context carries a non-empty
+  exclusion, so it moves nothing by itself. Here, `tb_source_context_id` is
+  persisted: `GraphSnapshotStore` writes it into each snapshot envelope and a
+  differing id reads as `ContextMismatch` (a miss), so the first launch after
+  this advance rescans instead of serving the old graph snapshot. Nothing
+  else in this repo stores one.
+- Effect on figures: Cursor usage that exists only as `usage.json` is now
+  counted, in tokens and cost. CSV-only installs are unchanged, covered by a
+  control in `model_report::tests::cursor_usage_json_and_csv_reach_the_report`.
+  Not compared against a real Windows corpus.
+
+## Historical: `726efd70`, lazy cache namespaces (engine PRs #63, #64)
+
+The pin was the merge commit of tokscale-core PR #64 on the engine's
 `main`, two merges after `6712ed8a`. The diff touches `src/lib.rs`,
 `src/message_cache.rs` and `UPSTREAM.md` only.
 
