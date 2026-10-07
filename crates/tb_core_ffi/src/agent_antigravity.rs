@@ -55,7 +55,7 @@ const ANTIGRAVITY_UNREADABLE_ERROR: &str =
 /// re-login in Antigravity would sign in the wrong account.
 const ANTIGRAVITY_AUTH_EXPIRED: &str = "Antigravity Google auth expired. Re-login in Antigravity.";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Fetched {
     pub source: String,
     pub identity: Option<AgentIdentity>,
@@ -63,8 +63,11 @@ pub(crate) struct Fetched {
     pub history_scope: Result<HistoryScope, AccountScopeError>,
     pub cache_binding: Option<ProviderCacheBinding>,
     pub windows: Vec<UsageWindow>,
-    /// Set only by the agy route (`fetch_agy_cli_gated`): the login marker of
-    /// agy's credential as read BEFORE the run. `None` on every other route.
+    /// Set by the agy route (`fetch_agy_cli_gated`): the login marker of agy's
+    /// credential as read BEFORE the run; and by the bound substitution
+    /// (`BoundOAuth::substitute`): the marker read before this fetch. `None` on
+    /// every other route, so `source == "oauth"` with a marker can only be the
+    /// substitution (the `oauth_creds.json` route never sets it).
     pub agy_login_marker: Option<String>,
 }
 
@@ -130,8 +133,14 @@ where
 
 /// Auto: prefer the live Local IDE API, then the OAuth remote API, and finally
 /// (Windows only) the `agy` CLI usage command when the earlier routes are
-/// unavailable.
-pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
+/// unavailable. With `bound` (plan E: agy's current account is a captured
+/// account bound under agy's current login), the agy leg is replaced by that
+/// account's OAuth result when the login is still the same at the decision
+/// point (`with_agy_fallback`).
+pub(crate) async fn fetch(
+    now: DateTime<Utc>,
+    bound: Option<BoundOAuth>,
+) -> Result<Fetched, ProviderFetchFailure> {
     let primary = fetch_with(
         || async move {
             match fetch_local_ide(now).await {
@@ -143,23 +152,26 @@ pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFa
         |context| fetch_oauth_secondary(context, now),
     )
     .await;
-    agy_leg(primary, now).await
+    agy_leg(primary, now, bound).await
 }
 
 #[cfg(windows)]
 async fn agy_leg(
     primary: Result<Fetched, ProviderFetchFailure>,
     now: DateTime<Utc>,
+    bound: Option<BoundOAuth>,
 ) -> Result<Fetched, ProviderFetchFailure> {
-    with_agy_fallback(primary, || fetch_agy_cli(now)).await
+    with_agy_fallback(primary, bound, login_marker, || fetch_agy_cli(now)).await
 }
 
 /// This repository ships Windows only; its non-Windows build exists to run the
-/// tests, so the CLI leg is not wired there.
+/// tests, so the CLI leg (and the substitution that replaces it) is not wired
+/// there.
 #[cfg(not(windows))]
 async fn agy_leg(
     primary: Result<Fetched, ProviderFetchFailure>,
     _now: DateTime<Utc>,
+    _bound: Option<BoundOAuth>,
 ) -> Result<Fetched, ProviderFetchFailure> {
     primary
 }
@@ -226,6 +238,13 @@ pub(crate) struct CredentialUnreadable;
 /// message names only restart and re-login. No timed re-arm, on purpose: with
 /// a dead credential each re-arm is another sign-in page.
 ///
+/// Plan E: while agy's current account is a captured account bound under its
+/// current login, the agy route is skipped entirely (`with_agy_fallback` takes
+/// the bound OAuth result before this latch is consulted), so a latched route
+/// does not block that card. A user with no bound captured account who hits a
+/// timeout keeps this rule (Q15 (c)): the route stays latched until agy is
+/// signed in again or Syrtis restarts.
+///
 /// Check-then-set is not atomic across the await on the run. That is safe
 /// because there is at most one in-flight agent-usage fetch per process:
 /// `with_publication_gate` (lib.rs) is held across `agent_usage::run`, and the
@@ -265,24 +284,179 @@ static AGY_LATCH: AgyLatch = AgyLatch::new();
 /// the ORIGINAL failure rather than the CLI's (as on macOS), with one Windows
 /// exception: a latched route says so, instead of the misleading
 /// "not logged in" the earlier routes produce for a CLI-only user.
+///
+/// Plan E: only where agy would run (the earlier routes ended in a Terminal
+/// failure), a `bound` captured OAuth result replaces the run when agy's live
+/// login marker, read here and now (`post_marker`), still equals the one read
+/// before this fetch. An `Ok` or Transient primary is returned exactly as
+/// before, and nothing is read for the substitution without `bound`. A
+/// substituted poll never calls `agy`, so it neither sets nor clears the latch.
 #[cfg(any(windows, test))]
-async fn with_agy_fallback<Agy, AgyFuture>(
+async fn with_agy_fallback<Marker, Agy, AgyFuture>(
     primary: Result<Fetched, ProviderFetchFailure>,
+    bound: Option<BoundOAuth>,
+    post_marker: Marker,
     agy: Agy,
 ) -> Result<Fetched, ProviderFetchFailure>
 where
+    Marker: FnOnce() -> Option<String>,
     Agy: FnOnce() -> AgyFuture,
     AgyFuture: std::future::Future<Output = Result<Fetched, AgyFailure>>,
 {
     match primary {
         Ok(fetched) => Ok(fetched),
-        Err(primary_failure) if should_try_agy_fallback(&primary_failure) => match agy().await {
-            Ok(fetched) => Ok(fetched),
-            Err(AgyFailure::Paused) => Err(ProviderFetchFailure::terminal(AGY_PAUSED_MESSAGE)),
-            Err(AgyFailure::TimedOut) => Err(ProviderFetchFailure::terminal(AGY_TIMED_OUT_MESSAGE)),
-            Err(AgyFailure::Unavailable) => Err(primary_failure),
-        },
+        Err(primary_failure) if should_try_agy_fallback(&primary_failure) => {
+            if let Some(fetched) = bound.and_then(|bound| bound.substitute(post_marker())) {
+                return Ok(fetched);
+            }
+            match agy().await {
+                Ok(fetched) => Ok(fetched),
+                Err(AgyFailure::Paused) => Err(ProviderFetchFailure::terminal(AGY_PAUSED_MESSAGE)),
+                Err(AgyFailure::TimedOut) => {
+                    Err(ProviderFetchFailure::terminal(AGY_TIMED_OUT_MESSAGE))
+                }
+                Err(AgyFailure::Unavailable) => Err(primary_failure),
+            }
+        }
         Err(primary_failure) => Err(primary_failure),
+    }
+}
+
+// ── Plan E: the bound captured account instead of an agy run ───────────────
+//
+// agy's current account, once captured, is fetched anyway as its own card
+// through its OAuth copy. When the host has bound that account to agy's login
+// marker (`AntigravityAutoCapture.Current`, set only under a stable marker),
+// the primary takes that result instead of spawning agy, under conditions 1–5
+// of the plan: a binding naming one login write, its key registered, the live
+// marker equal to it before the fetch and again at the decision point, and the
+// captured fetch's RAW result Ok with windows. Any miss: today's agy route.
+// No secret is involved: the binding is a key hash and a FILETIME.
+
+/// The host's binding (`tb_set_antigravity_binding`): agy's current account and
+/// the login marker it was confirmed under. Never logged.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct AntigravityBinding {
+    pub key: String,
+    pub marker: String,
+}
+
+static ANTIGRAVITY_BINDING: std::sync::Mutex<Option<AntigravityBinding>> =
+    std::sync::Mutex::new(None);
+
+fn lock_binding() -> std::sync::MutexGuard<'static, Option<AntigravityBinding>> {
+    ANTIGRAVITY_BINDING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The binding as last set; read once at the start of each agent-usage fetch.
+pub(crate) fn antigravity_binding() -> Option<AntigravityBinding> {
+    lock_binding().clone()
+}
+
+/// A login marker that names one login write: what `agy_login_marker` makes of
+/// a present credential on Windows, a non-zero FILETIME in canonical decimal.
+/// `"absent"` (no login) and macOS's bare `"present"` (any login) never pass.
+fn valid_login_marker(marker: &str) -> bool {
+    (1..=20).contains(&marker.len())
+        && marker.bytes().all(|b| b.is_ascii_digit())
+        && marker
+            .parse::<u64>()
+            .is_ok_and(|filetime| filetime != 0 && filetime.to_string() == marker)
+}
+
+const BINDING_INVALID_JSON: &str = "invalid_binding_json";
+const BINDING_INVALID_KEY: &str = "invalid_key";
+const BINDING_INVALID_MARKER: &str = "invalid_marker";
+
+/// `tb_set_antigravity_binding`. `None` (a NULL pointer) or `{"key":null}`
+/// clears. Anything that is not a valid `{"key","marker"}` clears too, before
+/// the fixed error code is returned: a bad input never leaves an older binding
+/// in force. The input is never echoed.
+pub(crate) fn set_antigravity_binding(raw: Option<&[u8]>) -> Result<Value, String> {
+    let mut stored = lock_binding();
+    *stored = None;
+    let Some(raw) = raw else {
+        return Ok(json!({ "bound": false }));
+    };
+    let parsed = parse_binding(raw).map_err(str::to_string)?;
+    let bound = parsed.is_some();
+    *stored = parsed;
+    Ok(json!({ "bound": bound }))
+}
+
+fn parse_binding(raw: &[u8]) -> Result<Option<AntigravityBinding>, &'static str> {
+    // `from_slice` also rejects bytes that are not UTF-8.
+    let input: Value = serde_json::from_slice(raw).map_err(|_| BINDING_INVALID_JSON)?;
+    let object = input.as_object().ok_or(BINDING_INVALID_JSON)?;
+    match (object.get("key"), object.get("marker")) {
+        (Some(Value::Null), None) => Ok(None),
+        (Some(Value::Null), Some(_)) => Err(BINDING_INVALID_KEY),
+        (Some(Value::String(key)), _) if !valid_captured_key(key) => Err(BINDING_INVALID_KEY),
+        (Some(Value::String(key)), Some(Value::String(marker))) if valid_login_marker(marker) => {
+            Ok(Some(AntigravityBinding {
+                key: key.clone(),
+                marker: marker.clone(),
+            }))
+        }
+        (Some(Value::String(_)), Some(Value::String(_)) | None) => Err(BINDING_INVALID_MARKER),
+        _ => Err(BINDING_INVALID_JSON),
+    }
+}
+
+/// Conditions 1–3, once per fetch: the binding names one login write and a
+/// registered captured account, and agy's live marker, read only then, equals
+/// it. Returns that account and the marker as read (the pre-fetch marker).
+/// An unreadable or absent live marker never matches.
+pub(crate) fn bound_account(
+    binding: Option<&AntigravityBinding>,
+    accounts: &[CapturedAccount],
+    live_marker: impl FnOnce() -> Option<String>,
+) -> Option<(CapturedAccount, String)> {
+    let binding =
+        binding.filter(|binding| valid_captured_key(&binding.key) && valid_login_marker(&binding.marker))?;
+    let account = accounts.iter().find(|account| account.key == binding.key)?;
+    let marker_pre = live_marker()?;
+    (marker_pre == binding.marker).then(|| (account.clone(), marker_pre))
+}
+
+/// The bound account's captured OAuth result, carried to the primary's agy leg.
+/// No `Debug`: it is never logged.
+pub(crate) struct BoundOAuth {
+    marker_pre: String,
+    fetched: Fetched,
+}
+
+impl BoundOAuth {
+    /// Condition 4: the RAW captured result decides, Ok with at least one
+    /// window. Never the card after last-good, which may be a stand-in.
+    pub(crate) fn from_raw(
+        marker_pre: String,
+        raw: &Result<Fetched, ProviderFetchFailure>,
+    ) -> Option<Self> {
+        let fetched = raw.as_ref().ok().filter(|fetched| !fetched.windows.is_empty())?;
+        Some(Self {
+            marker_pre,
+            fetched: fetched.clone(),
+        })
+    }
+
+    /// Condition 5 at the decision point: the live marker still equals the
+    /// pre-fetch one. The result reads as the captured card does (`oauth`),
+    /// carries the pre-fetch marker (which is what lets the C# dedup tell it
+    /// from the `oauth_creds.json` route), and has no cache binding, so the
+    /// primary slot's last-good is cleared as after an agy-route success.
+    #[cfg(any(windows, test))]
+    pub(crate) fn substitute(self, post_marker: Option<String>) -> Option<Fetched> {
+        if post_marker.as_deref() != Some(self.marker_pre.as_str()) {
+            return None;
+        }
+        let mut fetched = self.fetched;
+        fetched.source = "oauth".to_string();
+        fetched.agy_login_marker = Some(self.marker_pre);
+        fetched.cache_binding = None;
+        Some(fetched)
     }
 }
 
@@ -5660,9 +5834,9 @@ mod tests {
         last_written: std::cell::Cell<Option<u64>>,
         unreadable: std::cell::Cell<bool>,
         resolves: std::cell::Cell<bool>,
-        credential_reads: std::cell::Cell<u32>,
+        pub(super) credential_reads: std::cell::Cell<u32>,
         dns_probes: std::cell::Cell<u32>,
-        runs: std::cell::Cell<u32>,
+        pub(super) runs: std::cell::Cell<u32>,
     }
 
     impl AgyFakes {
@@ -5719,6 +5893,12 @@ mod tests {
 
     pub(super) fn agy_success() -> Result<Vec<u8>, AgyRunFailure> {
         Ok(AGY_WINDOWS_USAGE.to_vec())
+    }
+
+    /// The post-fetch marker reader for a poll with no bound account: plan E
+    /// must not read agy's marker then.
+    fn unread_marker() -> Option<String> {
+        panic!("no bound account: the marker is not read")
     }
 
     /// The card carries the marker of the login it was fetched under: agy's
@@ -5895,7 +6075,7 @@ mod tests {
         let fakes = AgyFakes::signed_in(1);
         let latch = AgyLatch::new();
         latch.set(Some((1, false)));
-        let paused = with_agy_fallback(primary(), || fakes.poll_with(&latch, agy_success)).await;
+        let paused = with_agy_fallback(primary(), None, unread_marker, || fakes.poll_with(&latch, agy_success)).await;
         assert_eq!(
             display(paused),
             "Antigravity CLI quota check paused after a failed attempt. Restart Syrtis, or sign in to agy again, to retry."
@@ -5906,19 +6086,19 @@ mod tests {
         absent.last_written.set(None);
         let latch = AgyLatch::new();
         let unchanged =
-            with_agy_fallback(primary(), || absent.poll_with(&latch, agy_success)).await;
+            with_agy_fallback(primary(), None, unread_marker, || absent.poll_with(&latch, agy_success)).await;
         assert_eq!(display(unchanged), "primary terminal");
 
         let failing = AgyFakes::signed_in(1);
         // The failing run itself already reports the pause.
-        let failed = with_agy_fallback(primary(), || {
+        let failed = with_agy_fallback(primary(), None, unread_marker, || {
             failing.poll_with(&latch, || Err(AgyRunFailure::Failed))
         })
         .await;
         assert_eq!(display(failed), AGY_PAUSED_MESSAGE);
 
         let working = AgyFakes::signed_in(5);
-        let fetched = with_agy_fallback(primary(), || working.poll_with(&latch, agy_success))
+        let fetched = with_agy_fallback(primary(), None, unread_marker, || working.poll_with(&latch, agy_success))
             .await
             .unwrap();
         assert_eq!(fetched.source, "agy");
@@ -5944,7 +6124,7 @@ mod tests {
         assert_eq!(first.unwrap_err(), AgyFailure::TimedOut);
         assert_eq!(fakes.runs.get(), 1);
 
-        let shown = with_agy_fallback(primary(), || fakes.poll_with(&latch, agy_success)).await;
+        let shown = with_agy_fallback(primary(), None, unread_marker, || fakes.poll_with(&latch, agy_success)).await;
         assert_eq!(display(shown), AGY_TIMED_OUT_MESSAGE);
         assert_eq!(fakes.runs.get(), 1, "the same credential is not respawned after a timeout");
 
@@ -5954,12 +6134,12 @@ mod tests {
         assert_eq!(fakes.runs.get(), 2);
 
         // Control: a non-timeout failure keeps the generic pause.
-        let failed = with_agy_fallback(primary(), || {
+        let failed = with_agy_fallback(primary(), None, unread_marker, || {
             fakes.poll_with(&latch, || Err(AgyRunFailure::Failed))
         })
         .await;
         assert_eq!(display(failed), AGY_PAUSED_MESSAGE);
-        let still = with_agy_fallback(primary(), || fakes.poll_with(&latch, agy_success)).await;
+        let still = with_agy_fallback(primary(), None, unread_marker, || fakes.poll_with(&latch, agy_success)).await;
         assert_eq!(display(still), AGY_PAUSED_MESSAGE);
     }
 
@@ -7405,5 +7585,340 @@ mod captured_account_tests {
             !server.await.unwrap(),
             "the redirect target was never contacted"
         );
+    }
+}
+
+/// Plan E (agy primary takes the bound captured account's OAuth result).
+/// Every seam is injected: the marker reader, the captured result and the agy
+/// runner, so no test reads Credential Manager, reaches Google or spawns agy.
+#[cfg(test)]
+mod plan_e_tests {
+    use super::captured_test_support::FakeIo;
+    use super::tests::{agy_success, AgyFakes};
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    const MARKER: &str = "134037498000000000";
+    const OTHER_MARKER: &str = "134037498000000001";
+
+    fn account(sub: &str) -> CapturedAccount {
+        CapturedAccount {
+            key: captured_key(sub),
+            label: format!("{sub}@example.com"),
+        }
+    }
+
+    fn binding_for(account: &CapturedAccount, marker: &str) -> AntigravityBinding {
+        AntigravityBinding {
+            key: account.key.clone(),
+            marker: marker.to_string(),
+        }
+    }
+
+    fn no_read() -> Option<String> {
+        panic!("the marker must not be read for plan E here")
+    }
+
+    /// A live marker reader returning `answers` in order and counting reads.
+    struct Reader {
+        answers: RefCell<Vec<Option<String>>>,
+        reads: Cell<u32>,
+    }
+
+    impl Reader {
+        fn new(answers: &[Option<&str>]) -> Self {
+            Self {
+                answers: RefCell::new(
+                    answers.iter().rev().map(|a| a.map(str::to_string)).collect(),
+                ),
+                reads: Cell::new(0),
+            }
+        }
+
+        fn read(&self) -> Option<String> {
+            self.reads.set(self.reads.get() + 1);
+            self.answers.borrow_mut().pop().expect("an unexpected marker read")
+        }
+    }
+
+    /// The captured account's own result, as `fetch_captured_with` returns it:
+    /// `oauth`, the key's scopes, a cache binding and one window.
+    async fn captured_ok(io: &FakeIo, key: &str) -> Fetched {
+        let (account_scope, history_scope) = io.scopes(key);
+        io.quota(
+            "ya29.test".to_string(),
+            account_scope.expect("a test scope"),
+            history_scope,
+            Utc::now(),
+        )
+        .await
+        .expect("the fake quota answers")
+    }
+
+    fn terminal() -> Result<Fetched, ProviderFetchFailure> {
+        Err(ProviderFetchFailure::terminal("primary terminal"))
+    }
+
+    /// T1, T10 (engine side), T16: binding holds, pre == bound == post,
+    /// captured Ok. The primary is the captured result relabelled, agy is not
+    /// run, and the marker is read exactly twice (pre and post).
+    #[tokio::test]
+    async fn t1_a_bound_account_replaces_the_agy_run_while_the_login_holds() {
+        let io = FakeIo::new("plan-e-t1");
+        let a = account("sub-a");
+        let reader = Reader::new(&[Some(MARKER), Some(MARKER)]);
+        let (bound, marker_pre) =
+            bound_account(Some(&binding_for(&a, MARKER)), std::slice::from_ref(&a), || reader.read())
+                .expect("conditions 1-3 hold");
+        assert_eq!(bound, a);
+        let captured = captured_ok(&io, &a.key).await;
+        assert!(captured.cache_binding.is_some());
+        let expected_history = captured.history_scope.clone();
+        let oauth = BoundOAuth::from_raw(marker_pre, &Ok(captured)).expect("condition 4 holds");
+
+        let agy = AgyFakes::signed_in(1);
+        let latch = AgyLatch::new();
+        let primary = with_agy_fallback(terminal(), Some(oauth), || reader.read(), || {
+            agy.poll_with(&latch, agy_success)
+        })
+        .await
+        .expect("the substitution is a card");
+
+        assert_eq!(agy.runs.get(), 0, "agy is not run");
+        assert_eq!(agy.credential_reads.get(), 0);
+        assert_eq!(reader.reads.get(), 2, "one pre and one post read");
+        assert_eq!(primary.source, "oauth");
+        assert_eq!(primary.agy_login_marker.as_deref(), Some(MARKER));
+        assert!(primary.cache_binding.is_none(), "T16: no last-good binding");
+        assert_eq!(primary.history_scope, expected_history);
+        assert_eq!(primary.windows.len(), 1);
+        assert_eq!(latch.blocks(1), None, "the latch is untouched");
+    }
+
+    /// T2, T10: agy switched accounts between the pre and the post read.
+    #[tokio::test]
+    async fn t2_a_marker_change_during_the_fetch_takes_the_agy_route() {
+        let io = FakeIo::new("plan-e-t2");
+        let a = account("sub-a");
+        let reader = Reader::new(&[Some(MARKER), Some(OTHER_MARKER)]);
+        let (_, marker_pre) =
+            bound_account(Some(&binding_for(&a, MARKER)), std::slice::from_ref(&a), || reader.read())
+                .expect("conditions 1-3 hold");
+        let oauth = BoundOAuth::from_raw(marker_pre, &Ok(captured_ok(&io, &a.key).await));
+
+        let agy = AgyFakes::signed_in(1);
+        let latch = AgyLatch::new();
+        let primary = with_agy_fallback(terminal(), oauth, || reader.read(), || {
+            agy.poll_with(&latch, agy_success)
+        })
+        .await
+        .expect("the agy route answers");
+        assert_eq!(agy.runs.get(), 1, "today's path: agy runs once");
+        assert_eq!(primary.source, "agy");
+        assert_eq!(reader.reads.get(), 2);
+    }
+
+    /// An unreadable live marker at the decision point never matches.
+    #[tokio::test]
+    async fn an_unreadable_post_marker_fails_closed() {
+        let io = FakeIo::new("plan-e-post-unreadable");
+        let a = account("sub-a");
+        let oauth = BoundOAuth::from_raw(MARKER.to_string(), &Ok(captured_ok(&io, &a.key).await));
+        let agy = AgyFakes::signed_in(1);
+        let latch = AgyLatch::new();
+        let primary = with_agy_fallback(terminal(), oauth, || None, || {
+            agy.poll_with(&latch, agy_success)
+        })
+        .await
+        .unwrap();
+        assert_eq!(agy.runs.get(), 1);
+        assert_eq!(primary.source, "agy");
+    }
+
+    /// T3: the live marker before the fetch is not the bound one (agy is on
+    /// another login, or it is absent or unreadable): no substitution.
+    #[tokio::test]
+    async fn t3_a_pre_fetch_marker_other_than_the_bound_one_takes_the_agy_route() {
+        let a = account("sub-a");
+        let binding = binding_for(&a, MARKER);
+        for live in [Some(OTHER_MARKER), Some("absent"), None] {
+            let reader = Reader::new(&[live]);
+            assert_eq!(bound_account(Some(&binding), std::slice::from_ref(&a), || reader.read()), None);
+            assert_eq!(reader.reads.get(), 1);
+        }
+        let agy = AgyFakes::signed_in(1);
+        let latch = AgyLatch::new();
+        let primary =
+            with_agy_fallback(terminal(), None, no_read, || agy.poll_with(&latch, agy_success))
+                .await
+                .unwrap();
+        assert_eq!((agy.runs.get(), primary.source.as_str()), (1, "agy"));
+    }
+
+    /// T4: the bound key is not a registered captured account; the marker is
+    /// not read.
+    #[test]
+    fn t4_a_bound_key_that_is_not_registered_is_ignored_without_a_marker_read() {
+        let a = account("sub-a");
+        let b = account("sub-b");
+        assert_eq!(bound_account(Some(&binding_for(&a, MARKER)), &[b], no_read), None);
+        assert_eq!(bound_account(Some(&binding_for(&a, MARKER)), &[], no_read), None);
+    }
+
+    /// T5: the captured fetch failed, or answered without a window.
+    #[tokio::test]
+    async fn t5_a_failed_or_empty_captured_result_is_not_offered() {
+        let io = FakeIo::new("plan-e-t5");
+        let a = account("sub-a");
+        assert!(BoundOAuth::from_raw(
+            MARKER.to_string(),
+            &Err(ProviderFetchFailure::terminal("captured failed"))
+        )
+        .is_none());
+        let mut empty = captured_ok(&io, &a.key).await;
+        empty.windows.clear();
+        assert!(BoundOAuth::from_raw(MARKER.to_string(), &Ok(empty)).is_none());
+    }
+
+    /// T6: an earlier route (local IDE, `oauth_creds.json`) succeeded: it wins,
+    /// with neither the substitution nor agy, and no post read.
+    #[tokio::test]
+    async fn t6_an_earlier_route_that_succeeds_wins() {
+        let io = FakeIo::new("plan-e-t6");
+        let a = account("sub-a");
+        let oauth = BoundOAuth::from_raw(MARKER.to_string(), &Ok(captured_ok(&io, &a.key).await));
+        let mut earlier = captured_ok(&io, &account("sub-local").key).await;
+        earlier.source = "cli".to_string();
+        let agy = AgyFakes::signed_in(1);
+        let latch = AgyLatch::new();
+        let primary = with_agy_fallback(Ok(earlier), oauth, no_read, || {
+            agy.poll_with(&latch, agy_success)
+        })
+        .await
+        .unwrap();
+        assert_eq!(primary.source, "cli");
+        assert_eq!(primary.agy_login_marker, None);
+        assert_eq!(agy.runs.get(), 0);
+    }
+
+    /// T6b / T14: the earlier routes ended in a Transient failure. It comes
+    /// back unchanged (so that route's own last-good still serves), with no
+    /// substitution, no agy run and no marker read.
+    #[tokio::test]
+    async fn t6b_t14_a_transient_primary_failure_is_not_substituted() {
+        let io = FakeIo::new("plan-e-t6b");
+        let a = account("sub-a");
+        let oauth = BoundOAuth::from_raw(MARKER.to_string(), &Ok(captured_ok(&io, &a.key).await));
+        let agy = AgyFakes::signed_in(1);
+        let latch = AgyLatch::new();
+        let transient = ProviderFetchFailure::transient(
+            "primary transient",
+            None,
+            SafeTransportDiagnostic::server_error(503),
+        );
+        let result = with_agy_fallback(Err(transient), oauth, no_read, || {
+            agy.poll_with(&latch, agy_success)
+        })
+        .await;
+        match result {
+            Err(ProviderFetchFailure::Transient { display, .. }) => {
+                assert_eq!(display, "primary transient")
+            }
+            other => panic!("expected the transient failure unchanged, got {other:?}"),
+        }
+        assert_eq!(agy.runs.get(), 0);
+    }
+
+    /// T7 (regression guard): no binding, no marker read, today's route.
+    #[test]
+    fn t7_no_binding_reads_nothing() {
+        assert_eq!(bound_account(None, &[account("sub-a")], no_read), None);
+    }
+
+    /// T13: a binding whose marker names no single login write never binds,
+    /// even forced past the setter; nor does a malformed key.
+    #[test]
+    fn t13_a_marker_naming_no_login_never_binds() {
+        let a = account("sub-a");
+        for marker in ["absent", "present", "", "0", "00134037498000000000", "+1", "18446744073709551616"] {
+            assert_eq!(
+                bound_account(Some(&binding_for(&a, marker)), std::slice::from_ref(&a), no_read),
+                None,
+                "{marker:?}"
+            );
+        }
+        let bad_key = AntigravityBinding {
+            key: a.key.to_uppercase(),
+            marker: MARKER.to_string(),
+        };
+        let registered = CapturedAccount {
+            key: bad_key.key.clone(),
+            label: String::new(),
+        };
+        assert_eq!(bound_account(Some(&bad_key), &[registered], no_read), None);
+        assert!(valid_login_marker(MARKER));
+        assert!(valid_login_marker(&u64::MAX.to_string()));
+    }
+
+    /// T11, T13: the setter. Every bad input clears the stored binding first
+    /// and answers one fixed code, never echoing the input; NULL and
+    /// `{"key":null}` clear with ok.
+    #[test]
+    fn t11_t13_the_binding_setter_clears_on_every_bad_input() {
+        let _guard = CAPTURED_ACCOUNTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let a = account("sub-a");
+        let valid = format!(r#"{{"key":"{}","marker":"{MARKER}"}}"#, a.key);
+        let set = set_antigravity_binding;
+
+        assert_eq!(set(Some(valid.as_bytes())).unwrap(), json!({ "bound": true }));
+        assert!(antigravity_binding() == Some(binding_for(&a, MARKER)));
+
+        let cases: Vec<(Vec<u8>, &str)> = vec![
+            (b"{not json SENTINEL".to_vec(), "invalid_binding_json"),
+            (vec![b'"', 0xff, 0xfe, b'"'], "invalid_binding_json"),
+            (b"null".to_vec(), "invalid_binding_json"),
+            (b"[]".to_vec(), "invalid_binding_json"),
+            (b"{}".to_vec(), "invalid_binding_json"),
+            (format!(r#"{{"key":7,"marker":"{MARKER}"}}"#).into_bytes(), "invalid_binding_json"),
+            (format!(r#"{{"key":"{}","marker":7}}"#, a.key).into_bytes(), "invalid_binding_json"),
+            (format!(r#"{{"key":null,"marker":"{MARKER}"}}"#).into_bytes(), "invalid_key"),
+            (format!(r#"{{"key":"SENTINEL","marker":"{MARKER}"}}"#).into_bytes(), "invalid_key"),
+            (format!(r#"{{"key":"{}"}}"#, a.key).into_bytes(), "invalid_marker"),
+            (format!(r#"{{"key":"{}","marker":""}}"#, a.key).into_bytes(), "invalid_marker"),
+            (format!(r#"{{"key":"{}","marker":"absent"}}"#, a.key).into_bytes(), "invalid_marker"),
+            (format!(r#"{{"key":"{}","marker":"present"}}"#, a.key).into_bytes(), "invalid_marker"),
+            (format!(r#"{{"key":"{}","marker":"SENTINEL1"}}"#, a.key).into_bytes(), "invalid_marker"),
+        ];
+        for (raw, code) in cases {
+            set(Some(valid.as_bytes())).unwrap();
+            assert_eq!(set(Some(&raw)), Err(code.to_string()), "{}", String::from_utf8_lossy(&raw));
+            assert!(antigravity_binding().is_none(), "cleared: {}", String::from_utf8_lossy(&raw));
+        }
+
+        for clear in [None, Some(&br#"{"key":null}"#[..])] {
+            set(Some(valid.as_bytes())).unwrap();
+            assert_eq!(set(clear).unwrap(), json!({ "bound": false }));
+            assert!(antigravity_binding().is_none());
+        }
+    }
+
+    /// The setter's "cleared" is what the fetch reads: after a refused input
+    /// the next fetch finds no binding and takes the agy route.
+    #[test]
+    fn t11_a_refused_binding_leaves_the_next_fetch_unbound() {
+        let _guard = CAPTURED_ACCOUNTS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let a = account("sub-a");
+        let valid = format!(r#"{{"key":"{}","marker":"{MARKER}"}}"#, a.key);
+        set_antigravity_binding(Some(valid.as_bytes())).unwrap();
+        let reader = Reader::new(&[Some(MARKER)]);
+        assert!(bound_account(antigravity_binding().as_ref(), std::slice::from_ref(&a), || reader.read()).is_some());
+        let refused = format!(r#"{{"key":"{}","marker":"absent"}}"#, a.key);
+        assert!(set_antigravity_binding(Some(refused.as_bytes())).is_err());
+        assert_eq!(bound_account(antigravity_binding().as_ref(), &[a], no_read), None);
+        set_antigravity_binding(None).unwrap();
     }
 }

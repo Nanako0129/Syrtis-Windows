@@ -124,10 +124,12 @@ pub struct AgentUsageSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     transport_diagnostic: Option<SafeTransportDiagnostic>,
     /// agy's login marker (`agent_antigravity::agy_login_marker`) read BEFORE
-    /// the agy run that fetched this card; set only on the primary Antigravity
-    /// card served by the agy route. Lets C# merge it only with a captured card
-    /// fetched under the same agy login. Omitted otherwise, so every other
-    /// card's payload is byte-identical to one produced before this field.
+    /// the fetch; set only on the primary Antigravity card, and only when the
+    /// agy route served it (source `agy`) or the bound captured account's OAuth
+    /// result replaced that route (source `oauth`, plan E). Lets C# merge it
+    /// only with a captured card fetched under the same agy login. Omitted
+    /// otherwise, so every other card's payload is byte-identical to one
+    /// produced before this field.
     #[serde(skip_serializing_if = "Option::is_none")]
     agy_login_marker: Option<String>,
 }
@@ -2083,9 +2085,9 @@ async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
     apply_provider_outcome("copilot", "oauth", outcome)
 }
 
-async fn fetch_antigravity() -> AgentUsageSnapshot {
+async fn fetch_antigravity(bound: Option<agent_antigravity::BoundOAuth>) -> AgentUsageSnapshot {
     let now = Utc::now();
-    let outcome = match agent_antigravity::fetch(now).await {
+    let outcome = match agent_antigravity::fetch(now, bound).await {
         Ok(fetched) => primary_antigravity_success(fetched, now),
         Err(failure) => ProviderFetchOutcome::Failure(failure),
     };
@@ -2094,8 +2096,9 @@ async fn fetch_antigravity() -> AgentUsageSnapshot {
         .expect("Antigravity is a required provider card")
 }
 
-/// The primary card carries the route's `agy_login_marker` (set only by the
-/// agy route); a captured card (`captured_antigravity_outcome`) never does.
+/// The primary card carries the route's `agy_login_marker` (set by the agy
+/// route and by the bound substitution); a captured card
+/// (`captured_antigravity_outcome`) never does.
 fn primary_antigravity_success(
     fetched: agent_antigravity::Fetched,
     now: DateTime<Utc>,
@@ -2120,36 +2123,72 @@ fn primary_antigravity_success(
     }
 }
 
-/// Every Antigravity card: the primary route (unchanged), then one card per
-/// captured account (`agent_antigravity::captured_accounts`), keyed by its
-/// hashed key. With none registered this is the single `fetch_antigravity`
-/// call it was before. Bounded and ordered like `fetch_claude_accounts`.
+/// Every Antigravity card: the primary route, then one card per captured
+/// account (`agent_antigravity::captured_accounts`), keyed by its hashed key.
+/// With none registered this is the single `fetch_antigravity` call it was
+/// before. Bounded and ordered like `fetch_claude_accounts`.
+///
+/// Plan E: the host's binding is read once here. When it names a registered
+/// captured account and agy's live marker equals it (conditions 1-3; the
+/// marker is read only then), that account is fetched first and its raw
+/// result is offered to the primary's agy leg (`BoundOAuth`).
 async fn fetch_antigravity_accounts() -> Vec<AgentUsageSnapshot> {
+    let accounts = agent_antigravity::captured_accounts();
+    let bound = agent_antigravity::bound_account(
+        agent_antigravity::antigravity_binding().as_ref(),
+        &accounts,
+        agent_antigravity::login_marker,
+    );
     antigravity_accounts_with(
-        agent_antigravity::captured_accounts(),
-        || Box::pin(fetch_antigravity()),
+        accounts,
+        bound,
+        |oauth| Box::pin(fetch_antigravity(oauth)),
         |account| Box::pin(fetch_antigravity_captured(account)),
+        |account, marker_pre| Box::pin(fetch_antigravity_bound(account, marker_pre)),
     )
     .await
 }
 
 type SnapshotFuture<'a> = Pin<Box<dyn Future<Output = AgentUsageSnapshot> + 'a>>;
+type BoundSnapshotFuture<'a> = Pin<
+    Box<dyn Future<Output = (AgentUsageSnapshot, Option<agent_antigravity::BoundOAuth>)> + 'a>,
+>;
 
-async fn antigravity_accounts_with<'a, Primary, Each>(
+async fn antigravity_accounts_with<'a, Primary, Each, Bound>(
     accounts: Vec<agent_antigravity::CapturedAccount>,
+    bound: Option<(agent_antigravity::CapturedAccount, String)>,
     primary: Primary,
     each: Each,
+    bound_each: Bound,
 ) -> Vec<AgentUsageSnapshot>
 where
-    Primary: FnOnce() -> SnapshotFuture<'a>,
+    Primary: FnOnce(Option<agent_antigravity::BoundOAuth>) -> SnapshotFuture<'a>,
     Each: Fn(agent_antigravity::CapturedAccount) -> SnapshotFuture<'a>,
+    Bound: FnOnce(agent_antigravity::CapturedAccount, String) -> BoundSnapshotFuture<'a>,
 {
     if accounts.is_empty() {
-        return vec![primary().await];
+        return vec![primary(None).await];
     }
-    let mut work = vec![primary()];
-    work.extend(accounts.into_iter().map(each));
-    join_bounded_ordered(work, MAX_ACCOUNT_FETCHES_IN_FLIGHT).await
+    let Some((bound_account, marker_pre)) = bound else {
+        let mut work = vec![primary(None)];
+        work.extend(accounts.into_iter().map(each));
+        return join_bounded_ordered(work, MAX_ACCOUNT_FETCHES_IN_FLIGHT).await;
+    };
+    // The bound account first: the primary's decision needs its raw result.
+    // Its card is still its own, in its registry position.
+    let key = bound_account.key.clone();
+    let index = accounts.iter().position(|account| account.key == key);
+    let others: Vec<_> = accounts
+        .into_iter()
+        .filter(|account| account.key != key)
+        .collect();
+    let position = 1 + index.unwrap_or(others.len());
+    let (bound_card, oauth) = bound_each(bound_account, marker_pre).await;
+    let mut work = vec![primary(oauth)];
+    work.extend(others.into_iter().map(each));
+    let mut snapshots = join_bounded_ordered(work, MAX_ACCOUNT_FETCHES_IN_FLIGHT).await;
+    snapshots.insert(position, bound_card);
+    snapshots
 }
 
 async fn fetch_antigravity_captured(
@@ -2158,14 +2197,59 @@ async fn fetch_antigravity_captured(
     let result = agent_antigravity::fetch_captured(&account.key, &account.label, Utc::now()).await;
     // Same as `apply_provider_outcome`: the clock is read after the outcome.
     let now = Utc::now();
+    captured_card_with(&PROVIDER_LAST_GOOD, &account, result, now, |snapshot| {
+        enrich_snapshot(snapshot, now.timestamp())
+    })
+}
+
+/// The bound account: its card exactly as `fetch_antigravity_captured` makes
+/// it, plus the substitution candidate taken from the same raw result.
+async fn fetch_antigravity_bound(
+    account: agent_antigravity::CapturedAccount,
+    marker_pre: String,
+) -> (AgentUsageSnapshot, Option<agent_antigravity::BoundOAuth>) {
+    let result = agent_antigravity::fetch_captured(&account.key, &account.label, Utc::now()).await;
+    let now = Utc::now();
+    captured_card_and_substitute(&PROVIDER_LAST_GOOD, &account, marker_pre, result, now, |snapshot| {
+        enrich_snapshot(snapshot, now.timestamp())
+    })
+}
+
+/// Condition 4: the RAW result decides whether the primary may use it, before
+/// `apply_account_outcome_with` can turn a failure into a last-good stand-in.
+fn captured_card_and_substitute<F>(
+    cache: &Mutex<ProviderLastGoodCache>,
+    account: &agent_antigravity::CapturedAccount,
+    marker_pre: String,
+    result: Result<agent_antigravity::Fetched, ProviderFetchFailure>,
+    now: DateTime<Utc>,
+    enrich: F,
+) -> (AgentUsageSnapshot, Option<agent_antigravity::BoundOAuth>)
+where
+    F: FnMut(&mut AgentUsageSnapshot),
+{
+    let oauth = agent_antigravity::BoundOAuth::from_raw(marker_pre, &result);
+    (captured_card_with(cache, account, result, now, enrich), oauth)
+}
+
+fn captured_card_with<F>(
+    cache: &Mutex<ProviderLastGoodCache>,
+    account: &agent_antigravity::CapturedAccount,
+    result: Result<agent_antigravity::Fetched, ProviderFetchFailure>,
+    now: DateTime<Utc>,
+    enrich: F,
+) -> AgentUsageSnapshot
+where
+    F: FnMut(&mut AgentUsageSnapshot),
+{
     apply_account_outcome_with(
-        &PROVIDER_LAST_GOOD,
+        cache,
         "antigravity",
         Some(&account.key),
         "oauth",
         now,
         captured_antigravity_outcome(result, now),
-        |snapshot| enrich_snapshot(snapshot, now.timestamp()),
+        enrich,
     )
     .expect("a captured Antigravity account always produces a card")
 }
@@ -16116,6 +16200,201 @@ mod kiro_tests {
         empty_error_snapshot(client_id, "stub", Utc::now(), "stub".to_string(), None)
     }
 
+    const PLAN_E_MARKER: &str = "134037498000000000";
+
+    /// A captured account's raw result as `fetch_captured_with` returns it,
+    /// plus its account scope (for seeding last-good bindings).
+    async fn plan_e_captured(
+        io: &crate::agent_antigravity::captured_test_support::FakeIo,
+        key: &str,
+    ) -> (agent_antigravity::Fetched, AccountScope) {
+        use crate::agent_antigravity::CapturedIo;
+        let (account_scope, history_scope) = io.scopes(key);
+        let account_scope = account_scope.expect("a test scope");
+        let fetched = io
+            .quota("ya29.test".to_string(), account_scope.clone(), history_scope, Utc::now())
+            .await
+            .expect("the fake quota answers");
+        (fetched, account_scope)
+    }
+
+    fn plan_e_account(sub: &str) -> agent_antigravity::CapturedAccount {
+        agent_antigravity::CapturedAccount {
+            key: agent_antigravity::captured_key(sub),
+            label: format!("{sub}@example.com"),
+        }
+    }
+
+    /// Plan E T10 (engine side) and T16: the substituted primary is a primary
+    /// card (no account key) reading `oauth`, carrying the pre-fetch marker on
+    /// the wire, and its success clears the primary slot's last-good instead
+    /// of writing one. Control: an agy-route primary still reads `agy`.
+    #[tokio::test]
+    async fn plan_e_a_substituted_primary_reads_oauth_and_clears_the_primary_last_good() {
+        let io = crate::agent_antigravity::captured_test_support::FakeIo::new("usage-plan-e-t16");
+        let a = plan_e_account("sub-a");
+        let (fetched, account_scope) = plan_e_captured(&io, &a.key).await;
+        let substituted =
+            agent_antigravity::BoundOAuth::from_raw(PLAN_E_MARKER.to_string(), &Ok(fetched))
+                .expect("condition 4 holds")
+                .substitute(Some(PLAN_E_MARKER.to_string()))
+                .expect("condition 5 holds");
+
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        let primary_slot = account_slot("antigravity", None);
+        lock_last_good(&cache).replace(
+            &primary_slot,
+            ProviderCacheBinding::primary(account_scope),
+            stub("antigravity"),
+        );
+        let now = Utc::now();
+        let snapshot = apply_provider_outcome_with(
+            &cache,
+            "antigravity",
+            "oauth",
+            now,
+            primary_antigravity_success(substituted, now),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(snapshot.source, "oauth");
+        assert_eq!(snapshot.account_key, None);
+        assert!(snapshot.error.is_none());
+        assert_eq!(snapshot.windows.len(), 1);
+        assert_eq!(snapshot.agy_login_marker.as_deref(), Some(PLAN_E_MARKER));
+        assert!(serde_json::to_string(&snapshot)
+            .unwrap()
+            .contains(&format!(r#""agyLoginMarker":"{PLAN_E_MARKER}""#)));
+        assert!(
+            !lock_last_good(&cache).entries.contains_key(&primary_slot),
+            "T16: the primary slot keeps no last-good after a substitution"
+        );
+
+        let agy = agent_antigravity::Fetched {
+            source: "agy".to_string(),
+            identity: None,
+            account_scope: Err(AccountScopeError::NoTrustedEvidence),
+            history_scope: Err(AccountScopeError::NoTrustedEvidence),
+            cache_binding: None,
+            windows: Vec::new(),
+            agy_login_marker: Some(PLAN_E_MARKER.to_string()),
+        };
+        match primary_antigravity_success(agy, now) {
+            ProviderFetchOutcome::Success { snapshot, .. } => assert_eq!(snapshot.source, "agy"),
+            _ => panic!("a fetched card is a success"),
+        }
+    }
+
+    /// Plan E T17 and T5: the RAW captured result decides. A transient failure
+    /// served from last-good still shows the account's card with windows, but
+    /// offers no substitution; a terminal failure is its own error card and
+    /// offers none either; only a raw success does.
+    #[tokio::test]
+    async fn plan_e_the_raw_captured_result_decides_not_its_last_good_card() {
+        let io = crate::agent_antigravity::captured_test_support::FakeIo::new("usage-plan-e-t17");
+        let a = plan_e_account("sub-a");
+        let (fetched, account_scope) = plan_e_captured(&io, &a.key).await;
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        let now = Utc::now();
+        let marker = || PLAN_E_MARKER.to_string();
+
+        let (card, oauth) =
+            captured_card_and_substitute(&cache, &a, marker(), Ok(fetched), now, |_| {});
+        assert!(card.error.is_none() && !card.windows.is_empty());
+        assert!(oauth.is_some(), "a raw success is offered");
+
+        let transient = ProviderFetchFailure::transient(
+            "captured transient",
+            Some(ProviderCacheBinding::primary(account_scope)),
+            SafeTransportDiagnostic::server_error(503),
+        );
+        let (card, oauth) =
+            captured_card_and_substitute(&cache, &a, marker(), Err(transient), now, |_| {});
+        assert_eq!(card.account_key.as_deref(), Some(a.key.as_str()));
+        assert!(!card.windows.is_empty(), "served from last-good");
+        assert_eq!(card.error.as_deref(), Some("captured transient"));
+        assert!(oauth.is_none(), "T17: a last-good stand-in is never substituted");
+
+        let (card, oauth) = captured_card_and_substitute(
+            &cache,
+            &a,
+            marker(),
+            Err(ProviderFetchFailure::terminal("captured terminal")),
+            now,
+            |_| {},
+        );
+        assert_eq!(card.account_key.as_deref(), Some(a.key.as_str()));
+        assert_eq!(card.error.as_deref(), Some("captured terminal"));
+        assert!(oauth.is_none(), "T5: an error card is still shown, and not offered");
+    }
+
+    /// Plan E orchestration: the bound account is fetched first, its offer
+    /// (or none) reaches the primary, it is not fetched a second time, and its
+    /// card keeps its registry position.
+    #[tokio::test]
+    async fn plan_e_the_bound_account_is_fetched_first_and_keeps_its_position() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let io = crate::agent_antigravity::captured_test_support::FakeIo::new("usage-plan-e-order");
+        let (a, b, c) = (plan_e_account("sub-a"), plan_e_account("sub-b"), plan_e_account("sub-c"));
+        let (fetched, _) = plan_e_captured(&io, &b.key).await;
+        let card = |key: &str| {
+            let mut snapshot = stub("antigravity");
+            snapshot.account_key = Some(key.to_string());
+            snapshot
+        };
+
+        for offered in [true, false] {
+            let events: Rc<RefCell<Vec<String>>> = Rc::default();
+            let offer = offered.then(|| fetched.clone());
+            let snapshots = {
+                let (primary_events, each_events, bound_events) =
+                    (Rc::clone(&events), Rc::clone(&events), Rc::clone(&events));
+                let card = &card;
+                let b_key = b.key.clone();
+                antigravity_accounts_with(
+                    vec![a.clone(), b.clone(), c.clone()],
+                    Some((b.clone(), PLAN_E_MARKER.to_string())),
+                    move |oauth| {
+                        primary_events
+                            .borrow_mut()
+                            .push(format!("primary offered={}", oauth.is_some()));
+                        Box::pin(async { stub("antigravity") })
+                    },
+                    move |account| {
+                        assert_ne!(account.key, b_key, "the bound account is fetched once");
+                        each_events.borrow_mut().push("each".to_string());
+                        let snapshot = card(&account.key);
+                        Box::pin(async move { snapshot })
+                    },
+                    move |account, marker_pre| {
+                        bound_events.borrow_mut().push(format!("bound {marker_pre}"));
+                        let snapshot = card(&account.key);
+                        let oauth = offer.and_then(|fetched| {
+                            agent_antigravity::BoundOAuth::from_raw(marker_pre, &Ok(fetched))
+                        });
+                        Box::pin(async move { (snapshot, oauth) })
+                    },
+                )
+                .await
+            };
+            assert_eq!(
+                events.borrow()[..2],
+                [
+                    format!("bound {PLAN_E_MARKER}"),
+                    format!("primary offered={offered}")
+                ]
+            );
+            let keys: Vec<Option<&str>> =
+                snapshots.iter().map(|s| s.account_key.as_deref()).collect();
+            assert_eq!(
+                keys,
+                vec![None, Some(a.key.as_str()), Some(b.key.as_str()), Some(c.key.as_str())]
+            );
+        }
+    }
+
     /// W7b wire contract: the primary card serializes `agyLoginMarker` only
     /// when the agy route set it, and the key is the payload's only change;
     /// a captured card never carries it.
@@ -16161,8 +16440,13 @@ mod kiro_tests {
     async fn an_empty_antigravity_registry_fetches_only_the_primary() {
         let snapshots = antigravity_accounts_with(
             Vec::new(),
-            || Box::pin(async { stub("antigravity") }),
+            None,
+            |oauth| {
+                assert!(oauth.is_none());
+                Box::pin(async { stub("antigravity") })
+            },
             |_| panic!("no captured account is fetched"),
+            |_, _| panic!("no account is bound"),
         )
         .await;
         assert_eq!(snapshots.len(), 1);
@@ -16243,7 +16527,8 @@ mod kiro_tests {
             let enriched = Rc::clone(&enriched);
             antigravity_accounts_with(
                 accounts,
-                move || {
+                None,
+                move |_| {
                     Box::pin(async move {
                         apply_provider_outcome_with(
                             &primary_cache,
@@ -16284,6 +16569,7 @@ mod kiro_tests {
                         .unwrap()
                     })
                 },
+                |_, _| panic!("no account is bound"),
             )
             .await
         };

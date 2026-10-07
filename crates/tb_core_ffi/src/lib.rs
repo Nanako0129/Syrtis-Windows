@@ -1114,6 +1114,28 @@ unsafe fn set_antigravity_accounts_from_c(
     agent_antigravity::set_captured_accounts_from_json(raw)
 }
 
+/// Bind agy's current account for the next agent-usage fetches (plan E).
+/// `json` is `{"key":"<64 lowercase hex>","marker":"<agy login marker>"}` to
+/// set, or NULL / `{"key":null}` to clear. `marker` is exactly what
+/// `tb_antigravity_login_marker` returns for a present login (a non-zero
+/// FILETIME in decimal); `"absent"` is refused. Success data is
+/// `{"bound":true|false}`. Any other input clears the binding first, then
+/// fails with one fixed code (`invalid_binding_json`, `invalid_key`,
+/// `invalid_marker`); the input is never echoed. While the binding names a
+/// registered captured account and agy's live marker equals it before and
+/// after the fetch, the primary Antigravity card takes that account's OAuth
+/// result instead of running agy. Holds no secret.
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_set_antigravity_binding(json: *const c_char) -> *mut c_char {
+    guarded("tb_set_antigravity_binding", || {
+        let raw = (!json.is_null()).then(|| unsafe { CStr::from_ptr(json) }.to_bytes());
+        envelope(agent_antigravity::set_antigravity_binding(raw))
+    })
+}
+
 /// Copy agy's current Google login into a Syrtis-owned Credential Manager
 /// generic credential (target `com.nyanako.tokenbar.antigravity-account:<key>`,
 /// persist local machine). Reads agy's `gemini:antigravity` credential once and
@@ -1397,6 +1419,25 @@ mod tests {
         let clear = CString::new("[]").unwrap();
         unsafe { take(tb_set_antigravity_accounts(clear.as_ptr())) };
         assert!(agent_antigravity::captured_accounts().is_empty());
+
+        // Plan E binding: NULL and {"key":null} clear with ok; a bad input is
+        // one fixed code with no echo (the module tests cover every code and
+        // that each clears first).
+        let s = unsafe { take(tb_set_antigravity_binding(std::ptr::null())) };
+        assert_eq!(s, r#"{"data":{"bound":false},"ok":true}"#);
+        let bound = CString::new(format!(r#"{{"key":"{key}","marker":"134037498000000000"}}"#)).unwrap();
+        let s = unsafe { take(tb_set_antigravity_binding(bound.as_ptr())) };
+        assert_eq!(s, r#"{"data":{"bound":true},"ok":true}"#);
+        let bad = CString::new(r#"{"key":"SENTINEL","marker":"1"}"#).unwrap();
+        let s = unsafe { take(tb_set_antigravity_binding(bad.as_ptr())) };
+        assert_eq!(s, r#"{"err":"invalid_key","ok":false}"#);
+        assert!(agent_antigravity::antigravity_binding().is_none());
+        let not_utf8 = CString::new(vec![b'{', 0xff, b'}']).unwrap();
+        let s = unsafe { take(tb_set_antigravity_binding(not_utf8.as_ptr())) };
+        assert_eq!(s, r#"{"err":"invalid_binding_json","ok":false}"#);
+        let clear = CString::new(r#"{"key":null}"#).unwrap();
+        let s = unsafe { take(tb_set_antigravity_binding(clear.as_ptr())) };
+        assert_eq!(s, r#"{"data":{"bound":false},"ok":true}"#);
 
         // A NULL or malformed key is refused before Credential Manager is called.
         let s = unsafe { take(tb_antigravity_remove(std::ptr::null())) };
