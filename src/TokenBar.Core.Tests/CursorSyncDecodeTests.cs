@@ -44,7 +44,7 @@ public class CursorSyncDecodeTests
     public void StatusDecodesEveryState(string state)
     {
         var status = TbCore.DecodeEnvelope<CursorSyncStatus>(
-            $$"""{"ok":true,"data":{"state":"{{state}}","events":0,"lastSuccessMs":null}}""");
+            $$$"""{"ok":true,"data":{"state":"{{{state}}}","events":0,"lastSuccessMs":null}}""");
         Assert.Equal(new CursorSyncStatus(state, 0, null), status);
     }
 
