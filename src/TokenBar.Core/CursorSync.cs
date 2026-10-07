@@ -54,7 +54,7 @@ public static class CursorSync
     /// all is decided once, in <see cref="CursorSyncController"/>'s
     /// constructor (<see cref="IsUserRuntime"/>).</summary>
     public static bool ShouldSync(SettingsStore store) =>
-        ToggleShowsOn(Enabled(store), NoticeAcknowledged(store));
+        Enabled(store) && NoticeAcknowledged(store);
 
     /// <summary>Not one of the non-user run modes (the startup probe, the icon
     /// dump, the synthetic update dialog, the 3D harnesses):
