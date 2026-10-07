@@ -141,6 +141,25 @@ public sealed partial class DashboardView : UserControl
             }
         };
 
+        // The Cursor sync notice card: its visibility depends on the presence
+        // probe, which answers off the UI thread after launch (the Overview may
+        // already be drawn), and on the stored answer, which Settings can give.
+        // Re-render only when that visibility flips, not on every sync tick.
+        if (CursorSyncController.Shared is { } cursorSync)
+        {
+            var noticeShown = false;
+            cursorSync.StateChanged += () => DispatcherQueue.TryEnqueue(() =>
+            {
+                var visible = CursorSync.NoticeVisible(
+                    AppSettings.Store, Environment.GetCommandLineArgs(), () => cursorSync.CursorPresent);
+                if (visible != noticeShown)
+                {
+                    noticeShown = visible;
+                    RenderContent(animated: false);
+                }
+            });
+        }
+
         AppSettings.Store.Changed += key =>
         {
             if (key is ClientRegistry.TabHiddenKey or ClientRegistry.TabOrderKey)
