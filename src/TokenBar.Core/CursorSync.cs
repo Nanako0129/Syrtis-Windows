@@ -317,9 +317,8 @@ public sealed class CursorSyncController
         }
         catch (Exception ex)
         {
-            // Fixed codes only (never a path or a token): the type name for
-            // anything else.
-            _log($"cursor-sync: config push failed {(ex is TbCoreException ? ex.Message : ex.GetType().Name)}");
+            // The type name only: a native message can carry a panic payload.
+            _log($"cursor-sync: config push failed {ex.GetType().Name}");
         }
 
         StateChanged?.Invoke();
@@ -400,7 +399,7 @@ public sealed class CursorSyncController
                 }
                 catch (Exception ex)
                 {
-                    _log($"cursor-sync: sync failed {(ex is TbCoreException ? ex.Message : ex.GetType().Name)}");
+                    _log($"cursor-sync: sync failed {ex.GetType().Name}");
                     result = null;
                 }
 
