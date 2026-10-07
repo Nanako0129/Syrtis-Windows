@@ -135,14 +135,17 @@ fn sync_dir_candidates(base: &Path) -> Vec<PathBuf> {
     candidates
 }
 
-/// Disable-time cleanup of every EXISTING candidate; nothing is created
+/// Disable-time cleanup of every EXISTING candidate. No directory is created
 /// (a candidate is opened only after it was seen to exist, so only a dir
-/// deleted in between could be re-created, empty). Each candidate that meets
-/// the storage contract is cleaned under its secure lock with the secure
-/// delete. A candidate that is a real dir but fails the contract was never
-/// written by Syrtis; it fails the cleanup only when it holds a Syrtis-named
-/// file, which then cannot be deleted safely. Non-directories (a junction
-/// included) are skipped: Syrtis never wrote through one. Every candidate is
+/// deleted in between could be re-created, empty); the secure lock open
+/// leaves a `.cursor-sync.lock` in each cleaned candidate. Each candidate that
+/// meets the storage contract is cleaned under its secure lock with the secure
+/// delete. A candidate that is a real dir but fails the contract (never
+/// written by Syrtis, or loosened after it was) fails the cleanup when it
+/// holds a Syrtis-named file, which then cannot be deleted safely, or cannot
+/// be listed. A candidate that is itself a non-directory (a junction
+/// included) is skipped; ancestor junctions are followed, as the storage
+/// contract allows (same-user planting, out of scope). Every candidate is
 /// tried; any failure makes the whole cleanup an error.
 fn remove_usage_files_everywhere() -> io::Result<usize> {
     let Some(base) = data_root() else {

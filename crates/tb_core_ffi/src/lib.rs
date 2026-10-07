@@ -1302,7 +1302,7 @@ pub unsafe extern "C" fn tb_antigravity_remove(key: *const c_char) -> *mut c_cha
 /// Success data is `{"enabled","dir","cliTakeoverConfirmed","removedFiles":N}`
 /// with the resolved `dir` while enabled, `null` when disabled. Disabling
 /// deletes Syrtis usage files from every existing candidate dir (both roots
-/// × both child names) and creates none. Errors are fixed codes:
+/// × both child names) and creates no directory. Errors are fixed codes:
 /// `nullPayload`, `invalidUtf8`, `invalidJson` (nothing changed),
 /// `storageUnavailable` (enabling: registry unchanged, but directories the
 /// resolution already created may remain), `cleanupFailed` (disabling: sync

@@ -91,11 +91,15 @@ walk (at most one sync interval), and the status then says `cliPresent`.
   (`com.nyanako.tokenbar`, `com.nyanako.tokenbar.secure`) times both child
   names (`cursor-cache`, `cursor-cache.secure`), because the `.secure`
   fallbacks are sticky and the dir in use can move after a file was written
-  elsewhere. Nothing is created on the way. A candidate that meets the
-  contract is cleaned under its own secure lock; one that is a real dir but
-  fails the contract was never written by Syrtis and only fails the cleanup
-  if it holds a Syrtis-named file; a junction or other non-directory is
-  skipped. A Syrtis-named file that fails the storage contract is never
+  elsewhere. No directory is created on the way (a candidate deleted between
+  the existence check and the open could be re-created empty), but a cleaned
+  candidate that had no `.cursor-sync.lock` gets one. A candidate that meets
+  the contract is cleaned under its own secure lock. One that is a real dir
+  but fails the contract (never written by Syrtis, or written while it met the
+  contract and loosened since) fails the cleanup if it holds a Syrtis-named
+  file or cannot be listed. A candidate that is itself a junction or another
+  non-directory is skipped; a junction at an ancestor (a root) is followed,
+  as the storage contract allows, so only same-user planting reaches it. A Syrtis-named file that fails the storage contract is never
   deleted; at disable time that is the error `cleanupFailed` (sync is off all
   the same), and during a walk it is left in place without a report. Putting
   such a file into the protected dir needs a process running as the same

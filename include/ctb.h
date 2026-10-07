@@ -222,7 +222,7 @@ char *tb_antigravity_remove(const char *key);
 // {"enabled","dir","cliTakeoverConfirmed","removedFiles":N} (dir is the
 // resolved sync dir while enabled, null when disabled). Disabling deletes
 // Syrtis usage files from every existing candidate dir (both roots x both
-// child names) and creates none. Errors: nullPayload, invalidUtf8,
+// child names) and creates no directory. Errors: nullPayload, invalidUtf8,
 // invalidJson (nothing changed), storageUnavailable (enabling; the registry
 // is unchanged, but directories the resolution already created may remain),
 // cleanupFailed (disabling: sync is off and the takeover removed, but a
