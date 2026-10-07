@@ -535,6 +535,22 @@ fn agy_timeout_outcome(bytes: Vec<u8>, now: DateTime<Utc>) -> Result<Vec<u8>, Ag
     }
 }
 
+/// Usage JSON arrived but stdout never reached EOF (the grace or the limit
+/// ended the read). `exited` is `try_wait`: `Ok(Some(success))` once agy has
+/// exited, `Ok(None)` while it still runs. An agy that has already exited
+/// non-zero keeps the "non-zero exit is Failed" rule, whatever it printed; a
+/// status that cannot be read fails closed.
+#[cfg(any(windows, test))]
+fn agy_no_eof_outcome<E>(
+    output: Vec<u8>,
+    exited: Result<Option<bool>, E>,
+) -> Result<Vec<u8>, AgyRunFailure> {
+    match exited {
+        Ok(Some(true) | None) => Ok(output),
+        Ok(Some(false)) | Err(_) => Err(AgyRunFailure::Failed),
+    }
+}
+
 /// Reads agy's stdout until EOF, the cap, `limit`, or `grace` after the bytes
 /// first parse as usage. The bool is whether EOF was seen; without it the
 /// exit status was never observed and the caller must not wait for one.
@@ -590,7 +606,7 @@ async fn run_agy_cli(executable: PathBuf) -> Result<Vec<u8>, AgyRunFailure> {
     // and `kill_on_drop` ends the process.
     let (output, eof) = read_agy_stdout(stdout, now, AGY_RUN_LIMIT, AGY_EOF_GRACE).await?;
     if !eof {
-        return Ok(output);
+        return agy_no_eof_outcome(output, child.try_wait().map(|status| status.map(|s| s.success())));
     }
     let remaining = AGY_RUN_LIMIT.saturating_sub(started.elapsed());
     match tokio::time::timeout(remaining, child.wait()).await {
@@ -5983,6 +5999,21 @@ mod tests {
             agy_timeout_outcome(Vec::new(), agy_now()),
             Err(AgyRunFailure::TimedOut)
         ));
+    }
+
+    // JSON without EOF: a still-running agy (a child holding the pipe) is the
+    // answer; one that already exited non-zero, or whose status cannot be
+    // read, stays Failed.
+    #[test]
+    fn agy_no_eof_outcome_respects_an_exit_status() {
+        let json = || AGY_WINDOWS_USAGE.to_vec();
+        assert!(agy_no_eof_outcome::<()>(json(), Ok(None)).is_ok());
+        assert!(agy_no_eof_outcome::<()>(json(), Ok(Some(true))).is_ok());
+        assert!(matches!(
+            agy_no_eof_outcome::<()>(json(), Ok(Some(false))),
+            Err(AgyRunFailure::Failed)
+        ));
+        assert!(matches!(agy_no_eof_outcome(json(), Err(())), Err(AgyRunFailure::Failed)));
     }
 
     #[tokio::test]
