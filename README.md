@@ -84,6 +84,37 @@ before you go looking for a missing card:
 | Kiro | Bearer token from the Kiro IDE sign-in, expected at `~/.aws/sso/cache/kiro-auth-token.json` (not yet observed on a Windows device; read-only, never refreshed or copied; sent only to `codewhisperer.us-east-1.amazonaws.com`). Kiro CLI's own store is not read on Windows |
 | Antigravity | OAuth or local IDE credentials, whichever the installed client itself uses |
 
+## Claude Code usage in WSL
+
+Claude Code running inside WSL writes transcripts to the Linux home, not to
+`%USERPROFILE%\.claude`, so Syrtis may show 0 tokens today while quota still
+updates. Point the scanner at the WSL directories with `TOKSCALE_EXTRA_DIRS`
+(comma-separated `client:path` entries; this replaces any value you already have).
+
+In **Windows PowerShell**, replace `<distro>` with your WSL distribution name
+(see `wsl --list --quiet`) and `<user>` with your Linux username
+(see `wsl -d <distro> -e whoami`). First check that the path is reachable:
+
+```powershell
+Test-Path '\\wsl.localhost\<distro>\home\<user>\.claude\projects'
+```
+
+If it prints `False`, check the names. Some older Windows 10 / WSL setups expose
+the share only as `\\wsl$\<distro>\...`; use that form in both commands. Then set
+the variable:
+
+```powershell
+[Environment]::SetEnvironmentVariable('TOKSCALE_EXTRA_DIRS',
+  'claude:\\wsl.localhost\<distro>\home\<user>\.claude\projects,claude:\\wsl.localhost\<distro>\home\<user>\.claude\transcripts', 'User')
+```
+
+Fully quit Syrtis from the tray and relaunch it. To undo, run:
+```powershell
+[Environment]::SetEnvironmentVariable('TOKSCALE_EXTRA_DIRS', $null, 'User')
+```
+
+Then restart Syrtis.
+
 ## Architecture
 
 | Layer | Path | Notes |
