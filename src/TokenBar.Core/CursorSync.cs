@@ -73,8 +73,9 @@ public static class CursorSync
 
     /// <summary>The cleanupFailed line shows under the switch while the switch
     /// reads off. Its copy says sync is off, so it is not shown while the switch
-    /// reads on; the flag itself is cleared only by a later disable whose
-    /// cleanup succeeds (<see cref="CursorSyncController.CleanupFailed"/>).</summary>
+    /// reads on. <paramref name="cleanupFailed"/> is
+    /// <see cref="CursorSyncController.CleanupFailed"/>, which is false while a
+    /// newer off push is in flight and is then decided by that push alone.</summary>
     public static bool CleanupFailedVisible(bool toggleShowsOn, bool cleanupFailed) =>
         cleanupFailed && !toggleShowsOn;
 
@@ -105,9 +106,11 @@ public static class CursorSync
         public const string UseSyrtis = "Use Syrtis Sync";
         public const string KeepCli = "Keep tokscale CLI Data";
         /// <summary>Windows only (W7): a disable whose cleanup failed.
-        /// Approved 2026-10-08 (shared spec §2).</summary>
+        /// Approved 2026-10-08 (shared spec §2). "Restart", not "turn sync on
+        /// and off": turning it on would sync with cursor.com before the
+        /// retry. The launch off push is the retry (App.StartCursorSync).</summary>
         public const string CleanupFailed =
-            "Cursor sync is off, but some downloaded usage couldn't be deleted. Turn sync on and off again to retry.";
+            "Cursor sync is off, but some downloaded usage couldn't be deleted. Restart Syrtis to retry.";
 
         public static readonly string[] All =
         [
@@ -176,6 +179,7 @@ public sealed class CursorSyncController
     private long? _lastSuccessMs;
     private long? _lastRefreshedEvents;
     private bool _cleanupFailed;
+    private int _offPushesPending;
     private bool _cursorPresent;
 
     /// <summary>Raised after the state, Syncing, CleanupFailed or the Cursor
@@ -208,10 +212,13 @@ public sealed class CursorSyncController
 
     public bool Syncing { get { lock (_gate) { return _syncing; } } }
 
-    /// <summary>The last disable's cleanup failed. Set by a <c>cleanupFailed</c>
-    /// off push, cleared only by a later off push that succeeds; in memory
-    /// only — the next launch pushes off again and so retries the cleanup.</summary>
-    public bool CleanupFailed { get { lock (_gate) { return _cleanupFailed; } } }
+    /// <summary>The last finished off push failed its cleanup
+    /// (<c>cleanupFailed</c>) and no newer off push is in flight. A retry
+    /// therefore never shows the previous failure: the line is hidden while
+    /// the new push runs and then follows that push's outcome (a success
+    /// clears it). In memory only: the next launch pushes off again while sync
+    /// is off, which is the retry the copy ("Restart Syrtis to retry") names.</summary>
+    public bool CleanupFailed { get { lock (_gate) { return _cleanupFailed && _offPushesPending == 0; } } }
 
     /// <summary>Cursor desktop's state.vscdb exists; false until
     /// <see cref="ProbeCursorPresent"/> has answered.</summary>
@@ -276,6 +283,7 @@ public sealed class CursorSyncController
             // refresh even when it writes the same event count again.
             if (!run)
             {
+                _offPushesPending++;
                 _state = null;
                 _lastSuccessMs = null;
                 _lastRefreshedEvents = null;
@@ -297,30 +305,40 @@ public sealed class CursorSyncController
 
     private void Push(Io io, bool enabled, bool takeover)
     {
+        // The off push's cleanup outcome; null = no answer (another error),
+        // which keeps the previous one.
+        bool? failed = null;
         try
         {
             io.SetConfig(enabled, takeover);
-            if (!enabled)
-            {
-                lock (_gate)
-                {
-                    _cleanupFailed = false;
-                }
-            }
+            failed = false;
         }
         catch (TbCoreException ex) when (!enabled && ex.Message == CursorSync.CleanupFailedCode)
         {
-            lock (_gate)
-            {
-                _cleanupFailed = true;
-            }
-
+            failed = true;
             _log("cursor-sync: cleanupFailed");
         }
         catch (Exception ex)
         {
             // The type name only: a native message can carry a panic payload.
             _log($"cursor-sync: config push failed {ex.GetType().Name}");
+        }
+        finally
+        {
+            if (!enabled)
+            {
+                // Outcome and end of pending in one step, so the line never
+                // flashes the previous answer between them.
+                lock (_gate)
+                {
+                    if (failed is { } outcome)
+                    {
+                        _cleanupFailed = outcome;
+                    }
+
+                    _offPushesPending--;
+                }
+            }
         }
 
         StateChanged?.Invoke();

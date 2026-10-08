@@ -464,6 +464,86 @@ public class CursorSyncTests
         Assert.False(Shown()); // gone after a successful cleanup
     }
 
+    // "Restart Syrtis to retry": a new process over a store where sync was
+    // turned off pushes off at launch, which is the cleanup retry, and the
+    // line follows that launch push's outcome.
+    [Fact]
+    public async Task ALaunchWithSyncOffRetriesTheCleanupAndShowsItsOutcome()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        store.SetBool(CursorSync.EnabledKey, false);
+        bool Shown(CursorSyncController c) => CursorSync.CleanupFailedVisible(
+            CursorSync.ToggleShowsOn(CursorSync.Enabled(store), CursorSync.NoticeAcknowledged(store)),
+            c.CleanupFailed);
+
+        var failing = new FakeCore
+        {
+            PushError = (enabled, _) => enabled ? null : new TbCoreException(CursorSync.CleanupFailedCode),
+        };
+        var first = new CursorSyncController(failing.Io, store, User, interval: Never);
+        first.Reconfigure(refresh: false); // what App.StartCursorSync does
+        await Until(() => first.CleanupFailed);
+        Assert.Equal([false], failing.Pushes.Select(p => p.Enabled));
+        Assert.True(Shown(first));
+
+        // Next launch: the retry succeeds and the line is gone.
+        var succeeding = new FakeCore();
+        var second = new CursorSyncController(succeeding.Io, store, User, interval: Never);
+        second.Reconfigure(refresh: false);
+        await Until(() => succeeding.Pushes.Count == 1);
+        Assert.False(succeeding.Pushes.Single().Enabled);
+        await Task.Delay(50);
+        Assert.False(second.CleanupFailed);
+        Assert.False(Shown(second));
+    }
+
+    // A retry never shows the previous failure: while a new off push is in
+    // flight the line is hidden, and that push alone decides it.
+    [Fact]
+    public async Task TheCleanupFailedLineIsHiddenWhileANewOffPushRuns()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore();
+        var fail = true;
+        ManualResetEventSlim? hold = null;
+        core.PushError = (enabled, _) =>
+            !enabled && fail ? new TbCoreException(CursorSync.CleanupFailedCode) : null;
+        core.PushGate = enabled => enabled ? null : hold;
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        bool Shown() => CursorSync.CleanupFailedVisible(
+            CursorSync.ToggleShowsOn(CursorSync.Enabled(store), CursorSync.NoticeAcknowledged(store)),
+            controller.CleanupFailed);
+
+        controller.SetEnabled(false);
+        await Until(() => Shown()); // the previous failure
+
+        using (var failAgain = new ManualResetEventSlim(false))
+        {
+            hold = failAgain;
+            controller.SetEnabled(false); // retry, held
+            await Task.Delay(100);
+            Assert.False(Shown());
+            failAgain.Set();
+            await Until(() => core.Pushes.Count == 2);
+            await Until(() => Shown()); // it failed again: shown
+        }
+
+        using (var succeed = new ManualResetEventSlim(false))
+        {
+            hold = succeed;
+            fail = false;
+            controller.SetEnabled(false);
+            await Task.Delay(100);
+            Assert.False(Shown());
+            succeed.Set();
+            await Until(() => core.Pushes.Count == 3);
+            await Task.Delay(50);
+            Assert.False(Shown()); // it succeeded: hidden
+        }
+    }
+
     [Fact]
     public void TheCleanupFailedLineIsOnlyForTheOffSwitch()
     {
@@ -539,8 +619,8 @@ public class CursorSyncTests
             "這台電腦上也有 tokscale CLI 的 Cursor 用量。要改用 Syrtis 自己的同步嗎？只有在是同一個 Cursor 帳號時才選，否則那個帳號的用量就不會再顯示。",
         ["Use Syrtis Sync"] = "改用 Syrtis 同步",
         ["Keep tokscale CLI Data"] = "保留 tokscale CLI 的資料",
-        ["Cursor sync is off, but some downloaded usage couldn't be deleted. Turn sync on and off again to retry."] =
-            "Cursor 同步已關閉，但有部分已下載的用量無法刪除。重新開關一次即可再試。",
+        ["Cursor sync is off, but some downloaded usage couldn't be deleted. Restart Syrtis to retry."] =
+            "Cursor 同步已關閉，但有部分已下載的用量無法刪除。重新啟動 Syrtis 即可再試。",
     };
 
     private static Dictionary<string, string> Catalog(string tag) =>
