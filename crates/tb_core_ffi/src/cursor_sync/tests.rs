@@ -1107,6 +1107,25 @@ fn disabling_without_a_sync_dir_creates_nothing() {
     assert!(names(root.path()).is_empty(), "{:?}", names(root.path()));
 }
 
+/// The launch retry the app's "Restart Syrtis to retry" copy relies on: a
+/// fresh process (the registry at its default, never enabled here) pushes
+/// `enabled: false` at launch, and that alone deletes a usage file an
+/// earlier run left behind. The other disable tests enable first; this one
+/// must not.
+#[test]
+fn a_launch_off_push_from_the_default_registry_deletes_a_left_file() {
+    let root = DataRoot::new();
+    assert_eq!(config(), Config::default(), "fixture: a fresh launch");
+    drop(secure::ensure_dir(&root.path().join(APP_DIR_NAME)).unwrap());
+    let left = root.sync_dir().join(format!("usage.{}.json", "d".repeat(64)));
+    write_secure(&left, b"{}");
+
+    let off = set(serde_json::json!({"enabled": false, "cliTakeoverConfirmed": false})).unwrap();
+    assert_eq!(off["removedFiles"], 1, "{off}");
+    assert!(!left.exists(), "the launch off push left the file");
+    assert!(!config().enabled);
+}
+
 #[test]
 fn disable_deletes_only_syrtis_usage_files() {
     let root = DataRoot::new();
