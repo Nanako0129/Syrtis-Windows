@@ -487,15 +487,21 @@ public class CursorSyncTests
         Assert.Equal([false], failing.Pushes.Select(p => p.Enabled));
         Assert.True(Shown(first));
 
-        // Next launch: the retry succeeds and the line is gone.
-        var succeeding = new FakeCore();
-        var second = new CursorSyncController(succeeding.Io, store, User, interval: Never);
+        // Next launch: a new process starts with the flag clear, so only its
+        // own launch push can bring the line back. A retry that fails again
+        // must show it again. (A successful retry hiding it is covered in
+        // TheCleanupFailedLineIsHiddenWhileANewOffPushRuns; across processes
+        // "hidden" holds trivially, so it is not asserted here.)
+        var stillFailing = new FakeCore
+        {
+            PushError = (enabled, _) => enabled ? null : new TbCoreException(CursorSync.CleanupFailedCode),
+        };
+        var second = new CursorSyncController(stillFailing.Io, store, User, interval: Never);
+        Assert.False(second.CleanupFailed); // control: nothing carried over in memory
         second.Reconfigure(refresh: false);
-        await Until(() => succeeding.Pushes.Count == 1);
-        Assert.False(succeeding.Pushes.Single().Enabled);
-        await Task.Delay(50);
-        Assert.False(second.CleanupFailed);
-        Assert.False(Shown(second));
+        await Until(() => second.CleanupFailed);
+        Assert.Equal([false], stillFailing.Pushes.Select(p => p.Enabled));
+        Assert.True(Shown(second));
     }
 
     // A retry never shows the previous failure: while a new off push is in

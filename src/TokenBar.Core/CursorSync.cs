@@ -306,7 +306,10 @@ public sealed class CursorSyncController
     private void Push(Io io, bool enabled, bool takeover)
     {
         // The off push's cleanup outcome; null = no answer (another error),
-        // which keeps the previous one.
+        // which keeps the previous one. On off the core can only fail with
+        // cleanupFailed, invalidJson (not reachable: this side builds the JSON)
+        // or a panic; storageUnavailable is enable-only (cursor_sync.rs
+        // set_from_json), so "another error" here means a panic.
         bool? failed = null;
         try
         {
