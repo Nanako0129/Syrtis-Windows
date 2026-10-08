@@ -443,6 +443,50 @@ public class AntigravityAccountsTests
             calls);
     }
 
+    /// <summary>Plan E with automatic capture on: agy rewrote its credential
+    /// (routine refresh) since the binding was stored, so the stored marker is
+    /// stale. That poll's PrepareForFetch clears the binding and starts a
+    /// re-capture it does not wait for (W7b: the fetch is not held for a
+    /// capture), so THAT poll hands the engine no binding (agy route). Once
+    /// the re-capture (unchanged account) rebinds under the new marker, the
+    /// NEXT poll hands the engine (key, new marker), so E applies again. One
+    /// agy run per credential rewrite; with E in effect Syrtis itself no
+    /// longer runs agy, so rewrites come only from agy run elsewhere.</summary>
+    [Fact]
+    public async Task WithAutoCaptureOnARewrittenCredentialIsReboundForTheNextPoll()
+    {
+        var store = TempStore();
+        var io = new FakeIo();
+        io.Markers.Enqueue("M1");
+        io.Markers.Enqueue("M1");
+        var capture = new AntigravityAutoCapture(io.Io, store);
+        await capture.ManualCapture();
+        Assert.Equal((KeyA, "M1"), capture.Current);
+
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        io.AutoResult = () => new AntigravityAutoCaptureResult("unchanged", KeyA, "a@example.com");
+        io.Markers.Enqueue("M2");
+        var calls = new List<string>();
+        void Poll() => AntigravityFetch.Run(() => { calls.Add("fetch"); return Payload(); }, null, capture, json => calls.Add("bind:" + json));
+
+        Poll();
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (capture.Current != (KeyA, "M2") && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.Equal((KeyA, "M2"), capture.Current);
+        Poll();
+
+        Assert.Equal(
+            [
+                "bind:{\"key\":null}", "fetch",
+                "bind:{\"key\":\"" + KeyA + "\",\"marker\":\"M2\"}", "fetch",
+            ],
+            calls);
+    }
+
     [Fact]
     public void ARefusedBindingDoesNotStopTheFetch()
     {
