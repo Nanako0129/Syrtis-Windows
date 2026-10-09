@@ -10,20 +10,75 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `8fc63cedfaf4aeec73c9a4e65711c280e7add15e` |
-| TokenBar alignment | macOS `main` pins `8fc63ced` (same pin) |
-| Engine alignment | `726efd7038727055bf8915d98939b973c3db17fe` → `8fc63cedfaf4aeec73c9a4e65711c280e7add15e` (engine `main`) |
+| Reviewed pin | `fcb85923e5544488f98001cfa390740d0009b9da` |
+| TokenBar alignment | macOS `main` still pins `8fc63ced` (behind; its pin advance, E3 of the Grok Bot attribution plan, is pending) |
+| Engine alignment | `8fc63cedfaf4aeec73c9a4e65711c280e7add15e` → `fcb85923e5544488f98001cfa390740d0009b9da` (engine `main`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/8fc63cedfaf4aeec73c9a4e65711c280e7add15e/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/fcb85923e5544488f98001cfa390740d0009b9da/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `8fc63ced`, Cursor usage-events JSON (engine PRs #65, #67)
+## Current pin: `fcb85923`, Grok Bot attribution (engine PRs #68, #69)
 
-The reviewed pin is the merge commit of tokscale-core PR #67 on the engine's
+The reviewed pin is the merge commit of tokscale-core PR #69 on the engine's
+`main`, covering `8fc63ced` → `522ee8f2` (#68) → `fcb85923` (#69). The diff
+touches `src/sessions/cursor.rs`, `src/scanner.rs`, `src/lib.rs`,
+`src/message_cache.rs`, `UPSTREAM.md` and a new test module,
+`src/grok_bot_attribution_tests.rs`.
+
+- #69 (`fcb85923`): a Cursor usage event whose model starts with `grok-bot`
+  (ASCII case-insensitive; the only known name is `grok-bot-default`) is
+  tagged client `grok-bot` instead of `cursor`, in both the usage-events JSON
+  and the CSV parser (`cursor_client_for_model`). A request naming `grok-bot`
+  scans the Cursor lane (`enabled_clients` in both scanner builders), and the
+  default all-clients list of `resolve_report_clients` gains `grok-bot`.
+  Provider (`xai`) and cost (provider-reported cents) are unchanged.
+- #68 (`522ee8f2`): performance only. `prune_scan_result_by_mtime` stops
+  exempting Antigravity CLI dbs on macOS and Linux and prunes one when both
+  the db and its `-wal` are older than `modified_after`
+  (`antigravity_cli_db_mtime_ms`). Every db stays unpruned under
+  `cfg!(windows)`, so it changes nothing on this platform; the pin carries it
+  anyway.
+
+Measured on this advance, not relayed:
+
+- `CACHE_FORMAT_VERSION` stays 4. `RESOLVER_CONTRACT_VERSION` stays 3.
+  `ClientId` is unchanged (`clients.rs` is not in the diff); `grok-bot` is a
+  client string the Cursor parser emits, not a `ClientId`.
+- Cursor's `parser_version` moves 3 → 4, so every cached Cursor parse
+  re-parses once on first use: the synced and CLI `usage*.json|csv` files are
+  unchanged on disk, so only the bump delivers the new tag. Other namespaces
+  keep their cache.
+- `pub` items: none added or removed (the only widened item is
+  `message_cache::append_path_suffix`, now `pub(crate)`). `crates/tb_core_ffi`
+  needed no production change.
+- The source-context identity does not move: `source_context.rs` and
+  `clients.rs` are untouched, so the descriptor and its golden vectors are
+  unchanged. `GraphSnapshotStore` therefore still reads a pre-advance
+  snapshot as a hit, and that snapshot carries Grok Bot usage under `cursor`;
+  the live pass replaces it when it publishes (`SnapshotMaxAge` comment in
+  `GraphRequestCoordinator`), so the old attribution can show until then.
+- Effect on figures: the events whose model starts with `grok-bot` move from
+  client `cursor` to client `grok-bot`. Cursor totals drop by exactly those
+  events (tokens, messages, cost); "Grok Build & Bot" gains exactly them; the
+  all-clients total is unchanged. Covered hermetically by
+  `model_report::tests::grok_bot_usage_moves_from_cursor_to_the_grok_tab`
+  (fails on `8fc63ced`, passes here). Not compared against a real Windows
+  corpus.
+- Overview counts present clients minus tab-hidden ones, so a user who hid the
+  Cursor tab now sees Grok Bot usage in Overview, and a user who hid the Grok
+  tab no longer does (the hide set folds both members of the group).
+- Usage Attribution keys rows by (client, provider), so the moved rows become
+  `(grok-bot, xai)`; `UsageAttributionSettings.SubscriptionProviderMap` has a
+  `grok-bot` entry for this. A saved `cursor|xai` assignment stops covering
+  them.
+
+## Historical: `8fc63ced`, Cursor usage-events JSON (engine PRs #65, #67)
+
+The pin was the merge commit of tokscale-core PR #67 on the engine's
 `main`, covering `726efd70` → `8fc63ced`. The gitlink moved to `a024eb7` (#65)
 earlier without an update to this file; this entry covers both merges. The
 diff touches `src/scanner.rs`, `src/sessions/cursor.rs`, `src/source_context.rs`,

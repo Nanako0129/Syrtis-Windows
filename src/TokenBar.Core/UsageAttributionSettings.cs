@@ -127,6 +127,12 @@ public static class UsageAttributionSettings
             ["claude"] = Providers("anthropic"),
             ["codex"] = Providers("openai"),
             ["grok"] = Providers("xai"),
+            // Grok Bot usage reaches Syrtis through the Cursor usage API, which
+            // the engine re-tags from `cursor` to `grok-bot` (model `grok-bot*`).
+            // Those events are billed as a Cursor custom subscription on Grok
+            // Bot's own plan, so the row is that plan's spend, not SuperGrok's
+            // (user decision 2026-10-10).
+            ["grok-bot"] = Providers("xai"),
             ["kimi"] = Providers("moonshot"),
             ["micode"] = Providers("minimax"),
 
@@ -354,6 +360,14 @@ public static class UsageAttributionSettings
         return rows;
     }
 
+    /// <summary>Plans that cover only the rows their own client logs. They stay
+    /// in <see cref="SubscriptionProviderMap"/> (the own-subscription branch of
+    /// <see cref="SuggestionTarget"/> asks the table directly) but are never a
+    /// candidate for another client's row: Grok Bot's plan paid for Bot usage,
+    /// and offering it for a Codex row served by xai would make that row
+    /// ambiguous against SuperGrok.</summary>
+    private static readonly HashSet<string> OwnClientOnlyPlans = new(StringComparer.Ordinal) { "grok-bot" };
+
     /// <summary>Which subscription a source row could plausibly belong to, or
     /// null when nothing can be said.
     ///
@@ -374,7 +388,7 @@ public static class UsageAttributionSettings
         RoutedSubscriptions? routedSubscriptions = null)
     {
         var routes = routedSubscriptions ?? RoutedSubscriptions.None;
-        var owners = subscriptionClients.Where(Covers).ToList();
+        var owners = subscriptionClients.Where(id => Covers(id) && !OwnClientOnlyPlans.Contains(id)).ToList();
 
         // A client talking to its own provider is the plainest reading, and stays
         // unambiguous even when another subscription also accepts it. "Its own" is

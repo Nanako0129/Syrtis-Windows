@@ -555,6 +555,92 @@ mod tests {
         }
     }
 
+    /// Engine #69: a Cursor usage event whose model starts with `grok-bot` is
+    /// attributed to client `grok-bot`, so the Cursor tab no longer counts it
+    /// and the grouped "Grok Build & Bot" tab (`["grok","grok-bot"]`) does.
+    /// One `usage.json` holds a Bot event and a plain Cursor event with
+    /// different token counts, so each request names which events it saw. On
+    /// the pre-#69 pin `["cursor"]` returns both events and `["grok","grok-bot"]`
+    /// scans nothing, so the first assertion below fails.
+    #[test]
+    fn grok_bot_usage_moves_from_cursor_to_the_grok_tab() {
+        const CHILD_HOME: &str = "TB_MODEL_REPORT_GROKBOT_FIXTURE_HOME";
+        if let Some(home) = std::env::var_os(CHILD_HOME) {
+            let home = std::path::Path::new(&home);
+            let context = crate::LocalSourceContext::capture(
+                Some(home.to_path_buf()),
+                false,
+                tokscale_core::ScannerSettings::default(),
+            )
+            .unwrap();
+            let run = |clients: Option<Vec<&str>>| {
+                let mut options = report_options(&context, None);
+                options.clients = clients.map(|c| c.into_iter().map(str::to_string).collect());
+                load_report(&context, options).unwrap()
+            };
+            // (client, input, output, message_count) per row, sorted.
+            let rows = |report: &ModelReportData| {
+                let mut rows: Vec<_> = report
+                    .entries
+                    .iter()
+                    .map(|e| (e.client.clone(), e.input, e.output, e.message_count))
+                    .collect();
+                rows.sort();
+                rows
+            };
+            let bot = ("grok-bot".to_string(), 700, 70, 1);
+            let plain = ("cursor".to_string(), 100, 20, 1);
+
+            let cursor = run(Some(vec!["cursor"]));
+            assert_eq!(rows(&cursor), [plain.clone()], "cursor: plain event only");
+            assert!((cursor.total_cost - 0.015).abs() < 1e-9, "{}", cursor.total_cost);
+
+            let grok = run(Some(vec!["grok", "grok-bot"]));
+            assert_eq!(rows(&grok), [bot.clone()], "grok tab: Bot event only");
+            assert!((grok.total_cost - 2.0).abs() < 1e-9, "{}", grok.total_cost);
+
+            let all = run(None);
+            assert_eq!(rows(&all), [plain, bot], "None: both events once");
+            assert!(
+                (all.total_cost - (cursor.total_cost + grok.total_cost)).abs() < 1e-9,
+                "all = cursor + grok: {}",
+                all.total_cost
+            );
+            return;
+        }
+
+        let json = r#"{"totalUsageEventsCount":2,"usageEventsDisplay":[{"timestamp":"1700000000000","model":"claude-4-sonnet","kind":"USAGE_EVENT_KIND_INCLUDED_IN_PRO","tokenUsage":{"inputTokens":100,"outputTokens":20,"totalCents":1.5},"conversationId":"plain"},{"timestamp":"1700000100000","model":"grok-bot-default","kind":"USAGE_EVENT_KIND_CUSTOM_SUBSCRIPTION","tokenUsage":{"inputTokens":700,"outputTokens":70,"totalCents":200},"conversationId":"bot"}]}"#;
+        let root = std::env::temp_dir().join(format!(
+            "tb-core-ffi-grokbot-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cache = root.join(".config/tokscale/cursor-cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("usage.json"), json).unwrap();
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("model_report::tests::grok_bot_usage_moves_from_cursor_to_the_grok_tab")
+            .arg("--exact")
+            .env(CHILD_HOME, &root)
+            .env("HOME", &root)
+            .env("USERPROFILE", &root)
+            .env("TOKSCALE_CONFIG_DIR", root.join("tokscale-config"))
+            .env("TOKSCALE_PRICING_CACHE_ONLY", "1")
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(
+            output.status.success(),
+            "grok-bot fixture failed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     // MARK: - Implausible-cost guard (ported from TokenBar macOS)
 
     /// A hermetic stand-in for the LiteLLM table: one priced model at
