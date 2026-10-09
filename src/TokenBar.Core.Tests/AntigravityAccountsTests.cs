@@ -464,12 +464,21 @@ public class AntigravityAccountsTests
         Assert.Equal((KeyA, "M1"), capture.Current);
 
         store.SetBool(AntigravityAutoCapture.EnabledKey, true);
-        io.AutoResult = () => new AntigravityAutoCaptureResult("unchanged", KeyA, "a@example.com");
+        // Held until the first poll has handed over its binding: unheld, the
+        // re-capture could finish first (it is started, not awaited), and that
+        // poll would already be bound (seen on 188, 2026-10-09).
+        using var captureGate = new ManualResetEventSlim();
+        io.AutoResult = () =>
+        {
+            captureGate.Wait();
+            return new AntigravityAutoCaptureResult("unchanged", KeyA, "a@example.com");
+        };
         io.Markers.Enqueue("M2");
         var calls = new List<string>();
         void Poll() => AntigravityFetch.Run(() => { calls.Add("fetch"); return Payload(); }, null, capture, json => calls.Add("bind:" + json));
 
         Poll();
+        captureGate.Set();
         var deadline = DateTime.UtcNow.AddSeconds(10);
         while (capture.Current != (KeyA, "M2") && DateTime.UtcNow < deadline)
         {
