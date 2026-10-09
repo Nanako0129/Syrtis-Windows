@@ -213,8 +213,14 @@ internal sealed class UpdateDialog : Window
         };
         try
         {
-            _icon.Source = new BitmapImage(
-                new Uri("ms-appx:///Assets/syrtis.ico"));
+            // The 256 px PNG (the .ico's largest frame), decoded at the drawn
+            // size times the display scale. Given syrtis.ico instead, the
+            // icon drew blurry at 100%, 150% and 200% (188, 2026-10-10).
+            _icon.Source = new BitmapImage(new Uri("ms-appx:///Assets/syrtis-256.png"))
+            {
+                DecodePixelType = DecodePixelType.Logical,
+                DecodePixelWidth = IconSize,
+            };
         }
         catch (Exception ex)
         {
