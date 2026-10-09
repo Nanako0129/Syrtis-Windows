@@ -84,6 +84,19 @@ public class AgentLimitsTextTests
 
         Assert.Empty(AgentLimitsText.BarWindows(failed));
         Assert.Equal(new LimitsDetail(failed.Error!, IsError: true), AgentLimitsText.Detail(failed));
+        // Limits-card shared spec §1: no "Limit / No data" rows under it.
+        Assert.False(AgentLimitsText.DrawsPlaceholderRows(failed));
+    }
+
+    // No error and no windows yet: the placeholder rows ("Checking…" / "No
+    // data") still keep the card's shape.
+    [Fact]
+    public void NoErrorAndNoWindowsStillDrawsThePlaceholderRows()
+    {
+        var empty = Snap();
+
+        Assert.Empty(AgentLimitsText.BarWindows(empty));
+        Assert.True(AgentLimitsText.DrawsPlaceholderRows(empty));
     }
 
     [Fact]
