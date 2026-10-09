@@ -137,6 +137,20 @@ public class AntigravityAccountsTests
 
     private static AgentUsagePayload Payload(params AgentUsageSnapshot[] agents) => new("2026-10-04T00:00:00Z", agents);
 
+    /// <summary>A binding setter that ignores the binding (tests that are not
+    /// about plan E).</summary>
+    private static readonly Action<string> NoBinding = _ => { };
+
+    /// <summary>Plan E: the primary as the engine fills it from the bound
+    /// captured account's OAuth result: source <c>oauth</c>, the pre-fetch
+    /// marker, and that account's history scope.</summary>
+    private static AgentUsageSnapshot Substituted(string marker = "M1", string? scope = "scope-a") =>
+        new("antigravity", "oauth", "2026-10-04T00:00:00Z",
+            [Window("antigravity.weekly", 70, CapturedPace, new HistoricalPace(40, WillLastToReset: true))],
+            Identity: new AgentIdentity("a@example.com"),
+            HistoryScope: new AccountScopeStatus(Scope: scope),
+            AgyLoginMarker: marker);
+
     // ---- 1. launch reinstall --------------------------------------------------
 
     [Fact]
@@ -154,8 +168,8 @@ public class AntigravityAccountsTests
             },
             _ => { });
 
-        AntigravityFetch.Run(() => { calls.Add("fetch"); return Payload(); }, installer, null);
-        AntigravityFetch.Run(() => { calls.Add("fetch"); return Payload(); }, installer, null);
+        AntigravityFetch.Run(() => { calls.Add("fetch"); return Payload(); }, installer, null, NoBinding);
+        AntigravityFetch.Run(() => { calls.Add("fetch"); return Payload(); }, installer, null, NoBinding);
 
         Assert.Equal(
             ["set:[{\"key\":\"" + KeyA + "\",\"label\":\"a@example.com\"}]", "fetch", "fetch"],
@@ -235,7 +249,7 @@ public class AntigravityAccountsTests
 
         for (var i = 0; i < 3; i++)
         {
-            AntigravityFetch.Run(() => { fetches++; return Payload(Primary()); }, null, capture);
+            AntigravityFetch.Run(() => { fetches++; return Payload(Primary()); }, null, capture, NoBinding);
         }
 
         await Task.Delay(300); // a capture attempt is started, not awaited
@@ -382,7 +396,7 @@ public class AntigravityAccountsTests
         var capture = new AntigravityAutoCapture(io.Io, store);
 
         var run = Task.Run(() => AntigravityFetch.Run(
-            () => { io.Calls.Enqueue("fetch"); return Payload(Primary(), Captured()); }, null, capture));
+            () => { io.Calls.Enqueue("fetch"); return Payload(Primary(), Captured()); }, null, capture, NoBinding));
 
         Assert.Same(run, await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(5))));
         var calls = io.Calls.ToList();
@@ -400,9 +414,147 @@ public class AntigravityAccountsTests
         var capture = new AntigravityAutoCapture(io.Io, store);
         await capture.ManualCapture();
 
-        var payload = AntigravityFetch.Run(() => Payload(Primary(), Captured()), null, capture);
+        var payload = AntigravityFetch.Run(() => Payload(Primary(), Captured()), null, capture, NoBinding);
 
         Assert.Single(payload.Agents);
+    }
+
+    // ---- 6b. plan E: the bound substitution ----------------------------------
+
+    [Fact]
+    public async Task TheFetchHandsTheEngineTheCurrentBindingBeforeFetching()
+    {
+        var store = TempStore();
+        var io = new FakeIo();
+        io.Markers.Enqueue("M1");
+        io.Markers.Enqueue("M1");
+        var capture = new AntigravityAutoCapture(io.Io, store);
+        await capture.ManualCapture();
+        var calls = new List<string>();
+
+        AntigravityFetch.Run(() => { calls.Add("fetch"); return Payload(); }, null, capture, json => calls.Add("bind:" + json));
+        AntigravityFetch.Run(() => { calls.Add("fetch"); return Payload(); }, null, null, json => calls.Add("bind:" + json));
+
+        Assert.Equal(
+            [
+                "bind:{\"key\":\"" + KeyA + "\",\"marker\":\"M1\"}", "fetch",
+                "bind:{\"key\":null}", "fetch",
+            ],
+            calls);
+    }
+
+    /// <summary>Plan E with automatic capture on: agy rewrote its credential
+    /// (routine refresh) since the binding was stored, so the stored marker is
+    /// stale. That poll's PrepareForFetch clears the binding and starts a
+    /// re-capture it does not wait for (W7b: the fetch is not held for a
+    /// capture), so THAT poll hands the engine no binding (agy route). Once
+    /// the re-capture (unchanged account) rebinds under the new marker, the
+    /// NEXT poll hands the engine (key, new marker), so E applies again. One
+    /// agy run per credential rewrite; with E in effect Syrtis itself no
+    /// longer runs agy, so rewrites come only from agy run elsewhere.</summary>
+    [Fact]
+    public async Task WithAutoCaptureOnARewrittenCredentialIsReboundForTheNextPoll()
+    {
+        var store = TempStore();
+        var io = new FakeIo();
+        io.Markers.Enqueue("M1");
+        io.Markers.Enqueue("M1");
+        var capture = new AntigravityAutoCapture(io.Io, store);
+        await capture.ManualCapture();
+        Assert.Equal((KeyA, "M1"), capture.Current);
+
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        // Held until the first poll has handed over its binding: unheld, the
+        // re-capture could finish first (it is started, not awaited), and that
+        // poll would already be bound (seen on 188, 2026-10-09).
+        using var captureGate = new ManualResetEventSlim();
+        io.AutoResult = () =>
+        {
+            captureGate.Wait();
+            return new AntigravityAutoCaptureResult("unchanged", KeyA, "a@example.com");
+        };
+        io.Markers.Enqueue("M2");
+        var calls = new List<string>();
+        void Poll() => AntigravityFetch.Run(() => { calls.Add("fetch"); return Payload(); }, null, capture, json => calls.Add("bind:" + json));
+
+        Poll();
+        captureGate.Set();
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (capture.Current != (KeyA, "M2") && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.Equal((KeyA, "M2"), capture.Current);
+        Poll();
+
+        Assert.Equal(
+            [
+                "bind:{\"key\":null}", "fetch",
+                "bind:{\"key\":\"" + KeyA + "\",\"marker\":\"M2\"}", "fetch",
+            ],
+            calls);
+    }
+
+    [Fact]
+    public void ARefusedBindingDoesNotStopTheFetch()
+    {
+        var fetched = false;
+        AntigravityFetch.Run(
+            () => { fetched = true; return Payload(); }, null, null,
+            _ => throw new TbCoreException("invalid_marker"));
+        Assert.True(fetched);
+        Assert.Equal("{\"key\":null}", AntigravityFetch.BindingJson(KeyA, null));
+        Assert.Equal("{\"key\":null}", AntigravityFetch.BindingJson(null, "M1"));
+    }
+
+    /// <summary>T8, T10: a substituted primary with the current marker and the
+    /// captured card's history scope merges into one card under the captured
+    /// account's history, and reads OAUTH; an agy-route primary reads AGY.</summary>
+    [Fact]
+    public void DedupMergesASubstitutedPrimaryUnderTheCapturedHistory()
+    {
+        var merged = AntigravityDedup.Apply(Payload(Substituted(), Captured()), KeyA, "M1");
+
+        var card = Assert.Single(merged.Agents);
+        Assert.Null(card.AccountKey);
+        Assert.Equal("oauth", card.Source);
+        Assert.Equal(KeyA, card.HistoryAccountKey);
+        Assert.Equal("scope-a", card.HistoryReadScope?.Scope);
+        Assert.Equal("a@example.com", card.Identity?.Email);
+        Assert.Equal(merged, AntigravityDedup.Apply(merged, KeyA, "M1")); // idempotent
+        Assert.Equal(new LimitsBadge("OAUTH", LimitsTone.Secondary), AgentLimitsText.StatusBadge(card, isLive: false));
+        Assert.Equal(new LimitsBadge("AGY", LimitsTone.Secondary), AgentLimitsText.StatusBadge(Primary(), isLive: false));
+    }
+
+    /// <summary>T9: substituted, but not under agy's current marker.</summary>
+    [Fact]
+    public void DedupKeepsBothCardsForASubstitutedPrimaryUnderAnotherMarker()
+    {
+        var payload = Payload(Substituted(marker: "M2"), Captured());
+        Assert.Same(payload, AntigravityDedup.Apply(payload, KeyA, "M1"));
+    }
+
+    /// <summary>T12: the <c>oauth_creds.json</c> route also reads
+    /// <c>oauth</c> but never carries a marker: no merge, even with the
+    /// captured card's history scope (so the marker guard alone decides).</summary>
+    [Fact]
+    public void DedupNeverMergesAnOauthCredsPrimary()
+    {
+        var oauthCreds = Primary(source: "oauth", marker: null) with { HistoryScope = new AccountScopeStatus(Scope: "scope-a") };
+        var payload = Payload(oauthCreds, Captured());
+        Assert.Same(payload, AntigravityDedup.Apply(payload, KeyA, "M1"));
+    }
+
+    /// <summary>T15: the marker matches but the substituted primary is not the
+    /// current key's account (another history scope, or none).</summary>
+    [Theory]
+    [InlineData("scope-b")]
+    [InlineData(null)]
+    public void DedupKeepsBothCardsWhenTheSubstitutedHistoryScopeDiffers(string? scope)
+    {
+        var payload = Payload(Substituted(scope: scope), Captured());
+        Assert.Same(payload, AntigravityDedup.Apply(payload, KeyA, "M1"));
     }
 
     // ---- 7. manual capture binding -------------------------------------------
@@ -585,7 +737,8 @@ public class AntigravityAccountsTests
                 return Payload();
             },
             installer,
-            null));
+            null,
+            NoBinding));
         AntigravityAccounts.Changed += coordinator.RequestFollowUp;
         try
         {
@@ -783,7 +936,7 @@ public class AntigravityAccountsTests
         var capture = new AntigravityAutoCapture(io.Io, store, markerTimeout: TimeSpan.FromMilliseconds(200));
 
         var run = Task.Run(() => AntigravityFetch.Run(
-            () => { io.Calls.Enqueue("fetch"); return Payload(Primary()); }, null, capture));
+            () => { io.Calls.Enqueue("fetch"); return Payload(Primary()); }, null, capture, NoBinding));
 
         Assert.Same(run, await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(3))));
         Assert.Contains("fetch", io.Calls);

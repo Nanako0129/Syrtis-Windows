@@ -199,6 +199,13 @@ public static class TbCore
     public static RootsResult SetAntigravityAccounts(string json) =>
         Unwrap<RootsResult>(NativeMethods.tb_set_antigravity_accounts(json));
 
+    /// <summary>Bind agy's current account for the next agent-usage fetches,
+    /// <c>{"key","marker"}</c> or <c>{"key":null}</c> to clear (ctb.h). Holds
+    /// no secret. Throws <see cref="TbCoreException"/> with a fixed code on a
+    /// refused input, after the core has cleared its binding.</summary>
+    public static void SetAntigravityBinding(string json) =>
+        Unwrap<JsonElement>(NativeMethods.tb_set_antigravity_binding(json));
+
     /// <summary>Copy agy's current Google login into Syrtis's own Credential
     /// Manager entry (one refresh at Google first). Blocking, network. Throws
     /// <see cref="TbCoreException"/> carrying a fixed code (ctb.h). Does not

@@ -32,9 +32,11 @@ internal static class AntigravityAccountsCopy
     /// (2026-10-04, 13 samples over 2 h): agy rewrote gemini:antigravity's
     /// LastWritten every hour at the same minute (18:43:47, 19:43:47,
     /// 20:43:47 UTC), plus one extra write about two minutes before each
-    /// (19:41:25, 20:41:05).</summary>
+    /// (19:41:25, 20:41:05). Text: shared Mac/Windows spec §6 (approved
+    /// 2026-10-08) — plan E reads the primary through the captured sign-in
+    /// only while automatic capture keeps the binding fresh.</summary>
     internal const string MergeOnlyUntilRefresh =
-        "Turn this on to keep agy's current account merged into one card. With it off, a Capture merges it only until agy next refreshes its sign-in, usually within an hour.";
+        "Turn this on to keep reading agy's current account through its captured sign-in, shown as one OAUTH card, so Syrtis rarely needs to run agy. With it off, a Capture lasts only until agy next refreshes its sign-in (usually within an hour); after that the main card runs agy again.";
 
     internal const string WhenOn =
         "When on, Syrtis copies the sign-in of each account agy signs into to Windows Credential Manager: once when you turn this on, then each time agy rewrites its saved sign-in (including its routine refresh). Turning it off keeps the copies. An account you remove while this is on stays removed until you sign agy in to it and press Capture.";

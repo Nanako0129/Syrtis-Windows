@@ -186,6 +186,18 @@ char *tb_set_keychain_consent(const char *json);
 // changes nothing. Holds no secret.
 char *tb_set_antigravity_accounts(const char *json);
 
+// Bind agy's current account for the next tb_agent_usage calls:
+// {"key":"<64 lowercase hex>","marker":"<agy login marker>"} sets, NULL or
+// {"key":null} clears. marker is what tb_antigravity_login_marker returns for
+// a present login (non-zero decimal FILETIME; "absent" is refused). Success
+// data: {"bound":true|false}. Any other input clears the binding first, then
+// fails with a fixed code (invalid_binding_json, invalid_key, invalid_marker);
+// the input is never echoed. While the key is a registered captured account
+// and agy's live marker equals it before and after the fetch, the primary
+// Antigravity card takes that account's OAuth result (source "oauth", with
+// agyLoginMarker) instead of running agy. Holds no secret.
+char *tb_set_antigravity_binding(const char *json);
+
 // Copy agy's current Google login (Credential Manager gemini:antigravity,
 // read only) into a Syrtis generic credential
 // com.nyanako.tokenbar.antigravity-account:<key> (persist local machine),

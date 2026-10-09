@@ -208,19 +208,33 @@ public sealed class AntigravityAccountsInstaller(
 /// the stored list first, so the first fetch of a launch already carries the
 /// captured cards; when automatic capture is on, run its pre-fetch step (the
 /// capture attempt it starts is not awaited, so the fetch never waits on
-/// Google); then apply <see cref="AntigravityDedup"/> to the result.
+/// Google); hand the engine agy's current binding
+/// (<see cref="AntigravityAutoCapture.Current"/>, cleared when there is none);
+/// then apply <see cref="AntigravityDedup"/> to the result.
 /// </summary>
 public static class AntigravityFetch
 {
     public static AgentUsagePayload Run(
         Func<AgentUsagePayload> fetch,
         AntigravityAccountsInstaller? installer,
-        AntigravityAutoCapture? capture)
+        AntigravityAutoCapture? capture,
+        Action<string> setBinding)
     {
         installer?.InstallForFetch();
         if (capture is { IsEnabled: true })
         {
             _ = capture.PrepareForFetch().GetAwaiter().GetResult();
+        }
+
+        var (boundKey, boundMarker) = capture?.Current ?? default;
+        try
+        {
+            setBinding(BindingJson(boundKey, boundMarker));
+        }
+        catch (Exception)
+        {
+            // The engine clears its binding before refusing an input, so this
+            // poll takes the agy route; nothing from the binding is logged.
         }
 
         var payload = fetch();
@@ -232,6 +246,14 @@ public static class AntigravityFetch
         var (key, marker) = capture.Current;
         return AntigravityDedup.Apply(payload, key, marker);
     }
+
+    /// <summary>The <c>tb_set_antigravity_binding</c> payload:
+    /// <c>{"key","marker"}</c>, or <c>{"key":null}</c> (clear) unless both are
+    /// set. The engine validates both.</summary>
+    public static string BindingJson(string? key, string? marker) =>
+        key is null || marker is null
+            ? """{"key":null}"""
+            : JsonSerializer.Serialize(new Dictionary<string, string> { ["key"] = key, ["marker"] = marker });
 }
 
 /// <summary>
@@ -240,8 +262,14 @@ public static class AntigravityFetch
 /// drawn twice. This drops the captured card and labels the primary with its
 /// email (captured ?? primary) and plan (primary ?? captured) ONLY when all hold: <c>currentKey</c> set; its marker set and not
 /// <c>"present"</c>; the primary Antigravity snapshot (no account key) came
-/// from the agy route, was fetched under that same marker and has no error; a
-/// captured snapshot carries that key. Otherwise both are shown.
+/// from the agy route (<c>"agy"</c>) or from the engine's bound substitution
+/// (<c>"oauth"</c> with a marker, plan E; the <c>oauth_creds.json</c> route
+/// never carries one), was fetched under that same marker and has no error; a
+/// captured snapshot carries that key; and for a substituted primary, its
+/// history scope equals that captured snapshot's (the substitution carries the
+/// captured account's scopes, so this ties the merge to <c>currentKey</c> and
+/// not to the marker alone: the engine's binding was read before the fetch,
+/// <c>currentKey</c> after it). Otherwise both are shown.
 /// <para>
 /// The primary keeps its own windows and values, and takes the captured
 /// plan when it has none. When the captured snapshot
@@ -272,7 +300,10 @@ public static class AntigravityDedup
         }
 
         var primary = agents[primaryIndex];
-        if (primary.Source != "agy" || primary.AgyLoginMarker != currentMarker || primary.Error is not null)
+        var substituted = primary.Source == "oauth";
+        if ((primary.Source != "agy" && !substituted)
+            || primary.AgyLoginMarker != currentMarker
+            || primary.Error is not null)
         {
             return payload;
         }
@@ -284,6 +315,11 @@ public static class AntigravityDedup
         }
 
         var captured = agents[capturedIndex];
+        if (substituted && (primary.HistoryScope is not { Scope: not null } || primary.HistoryScope != captured.HistoryScope))
+        {
+            return payload;
+        }
+
         var merged = primary;
         // Email and plan are chosen independently. The agy route carries no
         // plan; the captured snapshot is the same account (marker-bound

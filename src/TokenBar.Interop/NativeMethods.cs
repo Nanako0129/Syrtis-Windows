@@ -72,6 +72,9 @@ internal static partial class NativeMethods
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial nint tb_set_antigravity_accounts(string json);
 
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_set_antigravity_binding(string json);
+
     [LibraryImport(Lib)]
     internal static partial nint tb_antigravity_capture();
 
