@@ -58,6 +58,9 @@ internal static class OnboardingSetup
         Title,
         Pace,
         Attribution,
+        /// <summary>The Cursor sync notice; never counted in
+        /// <see cref="Remaining"/>.</summary>
+        CursorSync,
         Login,
         Discord,
     }
@@ -65,7 +68,7 @@ internal static class OnboardingSetup
     internal static readonly Card[] RenderOrder =
     [
         Card.Header, Card.Agents, Card.Icon, Card.Title, Card.Pace,
-        Card.Attribution, Card.Login, Card.Discord,
+        Card.Attribution, Card.CursorSync, Card.Login, Card.Discord,
     ];
 
     internal static bool IsCompleted(SettingsStore store) => store.GetBool(CompletedKey, false);
