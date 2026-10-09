@@ -32,8 +32,8 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot "lib\MuiGuard.ps1")
 . (Join-Path $PSScriptRoot "lib\RuntimeConfig.ps1")
 
-$ExpectedSemanticVersion = "1.0.0"
-$ExpectedAssemblyVersion = "1.0.0.0"
+$ExpectedSemanticVersion = "1.1.0"
+$ExpectedAssemblyVersion = "1.1.0.0"
 $ExpectedDotnetVersion = "10.0.301"
 $ExpectedRustVersion = "1.96.1"
 
