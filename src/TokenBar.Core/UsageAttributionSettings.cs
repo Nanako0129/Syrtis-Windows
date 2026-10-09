@@ -127,6 +127,12 @@ public static class UsageAttributionSettings
             ["claude"] = Providers("anthropic"),
             ["codex"] = Providers("openai"),
             ["grok"] = Providers("xai"),
+            // Grok Bot usage reaches Syrtis through the Cursor usage API, which
+            // the engine re-tags from `cursor` to `grok-bot` (model `grok-bot*`).
+            // Those events are billed as a Cursor custom subscription on Grok
+            // Bot's own plan, so the row is that plan's spend, not SuperGrok's
+            // (user decision 2026-10-10).
+            ["grok-bot"] = Providers("xai"),
             ["kimi"] = Providers("moonshot"),
             ["micode"] = Providers("minimax"),
 

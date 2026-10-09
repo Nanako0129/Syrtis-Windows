@@ -149,6 +149,22 @@ public class UsageAttributionSettingsTests : IDisposable
     }
 
     [Fact]
+    public void GrokBotUsageIsItsOwnPlansSpendNotSuperGrok()
+    {
+        // The engine re-tags Grok Bot events from the Cursor usage API as
+        // (grok-bot, xai). Without a grok-bot row the page offered no suggestion;
+        // with it they are Grok Bot's own plan, even when a SuperGrok (grok)
+        // quota is present.
+        Assert.Equal(
+            UsageAttribution.State.Assigned("grok-bot"),
+            UsageAttributionSettings.SuggestionTarget("grok-bot", "xai", ["grok"]));
+        // Control: Grok Build's own rows are unchanged.
+        Assert.Equal(
+            UsageAttribution.State.Assigned("grok"),
+            UsageAttributionSettings.SuggestionTarget("grok", "xai", ["grok"]));
+    }
+
+    [Fact]
     public void TheCliFoldsOntoTheSubscriptionItSpends()
     {
         // quotaOwner is why this is not "API spend": antigravity-cli draws on the
