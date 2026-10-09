@@ -600,7 +600,7 @@ mod tests {
             assert!((grok.total_cost - 2.0).abs() < 1e-9, "{}", grok.total_cost);
 
             let all = run(None);
-            assert_eq!(rows(&all), [bot, plain], "None: both events once");
+            assert_eq!(rows(&all), [plain, bot], "None: both events once");
             assert!(
                 (all.total_cost - (cursor.total_cost + grok.total_cost)).abs() < 1e-9,
                 "all = cursor + grok: {}",
