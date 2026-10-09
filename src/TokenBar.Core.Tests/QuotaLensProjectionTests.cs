@@ -880,6 +880,18 @@ public class QuotaLensProjectionTests
         Assert.Equal("grok-bot", QuotaLensProjection.WindowCardOwner(botOnly, "grok", present: ["codex"]));
     }
 
+    // After engine #69 a Bot-only user's Cursor-billed Bot usage is a
+    // present usage client "grok-bot". No Grok Build records, no grok quota:
+    // the Bot's card should still own the tab (macOS quotaClients does not fold,
+    // tabSlice("grok-bot") == ["grok-bot"]). Windows QuotaClients folds
+    // grok-bot -> grok -> [grok, grok-bot], so grok wins with no windows.
+    [Fact]
+    public void BotOnlyUserWithBotUsageKeepsTheBotWindowCard()
+    {
+        var botOnly = Agents(Agent("grok-bot", Window("grok-bot|weekly.v1", "Weekly", "weekly.v1")));
+        Assert.Equal("grok-bot", QuotaLensProjection.WindowCardOwner(botOnly, "grok", present: ["grok-bot"]));
+    }
+
     // (iii) A limits-hidden Bot is not picked by the fallback: the grok tab's
     // owner is not a card client and the only member that is, grok-bot, is
     // excluded, so macOS draws no window card (WindowCardLoader.swift:625-639).

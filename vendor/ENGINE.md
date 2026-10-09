@@ -68,6 +68,9 @@ Measured on this advance, not relayed:
   `model_report::tests::grok_bot_usage_moves_from_cursor_to_the_grok_tab`
   (fails on `8fc63ced`, passes here). Not compared against a real Windows
   corpus.
+- Overview counts present clients minus tab-hidden ones, so a user who hid the
+  Cursor tab now sees Grok Bot usage in Overview, and a user who hid the Grok
+  tab no longer does (the hide set folds both members of the group).
 - Usage Attribution keys rows by (client, provider), so the moved rows become
   `(grok-bot, xai)`; `UsageAttributionSettings.SubscriptionProviderMap` has a
   `grok-bot` entry for this. A saved `cursor|xai` assignment stops covering

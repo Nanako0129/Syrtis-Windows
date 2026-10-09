@@ -347,6 +347,8 @@ public class ClientRegistryTests : IDisposable
     // Engine #69: Grok Bot usage arrives as a usage client "grok-bot" (it used
     // to be a `cursor` row). It folds into the Grok tab, is selected with the
     // grouped slice there, and no longer needs Cursor's tab.
+    // This pins existing tab behavior (it passes on origin/main as well); it is
+    // not an engine-pin detector. The Rust model_report test is that.
     [Fact]
     public void GrokBotUsageClientFoldsIntoTheGrokTabNotCursor()
     {

@@ -383,22 +383,24 @@ public static class ClientRegistry
     /// ClientRegistry.swift :255-263, without the display ordering, which does
     /// not change membership): every member of each present client's tab slice
     /// plus the payload's configured quota ids, minus tab-hidden, deduped.
-    /// A present MEMBER id is folded to its tab first (the memberToTabId
-    /// mapping of macOS <c>tabClients</c>, ClientRegistry.swift :247-251).
-    /// This is a deliberate deviation: macOS <c>quotaClients</c> does NOT
-    /// fold, it passes the raw presentClients straight to <c>tabSlice</c>;
-    /// do not remove the fold to "restore parity". <c>tabSlice</c> takes a
-    /// tab id, and Antigravity's local usage
-    /// is recorded under <c>antigravity-cli</c>, whose own slice would leave
-    /// out the <c>antigravity</c> owner and move the tab's window card off
-    /// its stored history until a payload names antigravity configured
-    /// (before the first fetch, or offline).</summary>
+    /// A present id is folded to its quota OWNER first
+    /// (<see cref="QuotaOwner"/>), not to its tab. This is a deliberate
+    /// deviation from macOS <c>quotaClients</c>, which passes the raw
+    /// presentClients straight to <c>tabSlice</c>; do not remove the fold to
+    /// "restore parity". Antigravity's local usage is recorded under
+    /// <c>antigravity-cli</c>, whose own slice would leave out the
+    /// <c>antigravity</c> owner and move the tab's window card off its stored
+    /// history until a payload names antigravity configured (before the first
+    /// fetch, or offline). Folding to the TAB would be wrong for grok-bot: its
+    /// usage (engine #69) would become <c>grok</c> and the grok slice, which
+    /// has no Bot window, would win over the Bot's own card; QuotaOwner leaves
+    /// grok-bot alone, as macOS does.</summary>
     public static IReadOnlyList<string> QuotaClients(
         IReadOnlyList<string> present, IReadOnlyList<string> quotaIds, IReadOnlySet<string> tabHidden)
     {
         var hidden = HiddenTabClients(tabHidden);
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        return [.. present.Select(id => FoldToTabId(CanonicalClient(id))).SelectMany(TabSlice)
+        return [.. present.Select(id => QuotaOwner(CanonicalClient(id))).SelectMany(TabSlice)
             .Concat(quotaIds).Where(id => !hidden.Contains(id) && seen.Add(id))];
     }
 

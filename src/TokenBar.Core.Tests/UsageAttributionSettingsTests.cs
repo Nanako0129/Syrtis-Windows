@@ -149,6 +149,20 @@ public class UsageAttributionSettingsTests : IDisposable
     }
 
     [Fact]
+    public void GrokBotCoversOnlyItsOwnRowsNotOtherClients()
+    {
+        // Grok Bot is an own-client-only plan: with both quotas present, a
+        // Codex row served by xai is still SuperGrok's (as before Grok Bot
+        // got a table entry), not ambiguous between grok and grok-bot.
+        Assert.Equal(
+            UsageAttribution.State.Assigned("grok"),
+            UsageAttributionSettings.SuggestionTarget("codex", "xai", ["grok", "grok-bot"]));
+        Assert.Equal(
+            UsageAttribution.State.Assigned("grok-bot"),
+            UsageAttributionSettings.SuggestionTarget("grok-bot", "xai", ["grok", "grok-bot"]));
+    }
+
+    [Fact]
     public void GrokBotUsageIsItsOwnPlansSpendNotSuperGrok()
     {
         // The engine re-tags Grok Bot events from the Cursor usage API as
