@@ -883,8 +883,9 @@ public class QuotaLensProjectionTests
     // After engine #69 a Bot-only user's Cursor-billed Bot usage is a
     // present usage client "grok-bot". No Grok Build records, no grok quota:
     // the Bot's card should still own the tab (macOS quotaClients does not fold,
-    // tabSlice("grok-bot") == ["grok-bot"]). Windows QuotaClients folds
-    // grok-bot -> grok -> [grok, grok-bot], so grok wins with no windows.
+    // tabSlice("grok-bot") == ["grok-bot"]). Before 0956928 Windows QuotaClients
+    // folded grok-bot -> grok -> [grok, grok-bot], so grok won with no windows;
+    // it now folds through QuotaOwner, which leaves grok-bot as itself.
     [Fact]
     public void BotOnlyUserWithBotUsageKeepsTheBotWindowCard()
     {
