@@ -36,7 +36,7 @@ internal static class AntigravityAccountsCopy
     /// 2026-10-08) — plan E reads the primary through the captured sign-in
     /// only while automatic capture keeps the binding fresh.</summary>
     internal const string MergeOnlyUntilRefresh =
-        "Turn this on to keep agy's current account on one card read through its captured sign-in (OAUTH), so Syrtis rarely needs to run agy. With it off, a Capture does this only until agy next refreshes its sign-in, usually within an hour; then the main card runs agy again.";
+        "Turn this on to keep reading agy's current account through its captured sign-in, shown as one OAUTH card, so Syrtis rarely needs to run agy. With it off, a Capture lasts only until agy next refreshes its sign-in (usually within an hour); after that the main card runs agy again.";
 
     internal const string WhenOn =
         "When on, Syrtis copies the sign-in of each account agy signs into to Windows Credential Manager: once when you turn this on, then each time agy rewrites its saved sign-in (including its routine refresh). Turning it off keeps the copies. An account you remove while this is on stays removed until you sign agy in to it and press Capture.";
