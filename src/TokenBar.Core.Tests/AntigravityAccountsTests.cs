@@ -263,7 +263,7 @@ public class AntigravityAccountsTests
     public static TheoryData<string> GuardCases() => new()
     {
         "noCurrentKey", "noMarker", "markerPresent", "markerMismatch",
-        "primaryError", "sourceNotAgy", "noCapturedSnapshot",
+        "sourceNotAgy", "noCapturedSnapshot",
     };
 
     [Fact]
@@ -297,20 +297,56 @@ public class AntigravityAccountsTests
                 "markerMismatch" => "M2",
                 _ => "M1",
             },
-            error: failing == "primaryError" ? "paused" : null);
+            error: null);
         var payload = Payload(primary, Captured(failing == "noCapturedSnapshot" ? KeyB : KeyA));
 
         Assert.Same(payload, AntigravityDedup.Apply(payload, key, marker));
     }
 
+    /// <summary>macOS 6dbd8cca (maintainer decision 2026-10-05, ported
+    /// 2026-10-10): agy's verified captured account takes an errored
+    /// primary's slot, so the error card, its empty rows and the duplicate
+    /// account card are gone.</summary>
     [Theory]
     [InlineData(false)]
     [InlineData(true)] // the core's cached last-good card, error attached
-    public void AnErroredPrimaryIsNeverReplacedOrMerged(bool lastGood)
+    public void AnErroredPrimaryIsReplacedByAgysVerifiedCapturedAccount(bool lastGood)
     {
-        var payload = Payload(ErroredPrimary(lastGood), Captured());
+        var captured = Captured() with { Identity = new AgentIdentity("a@example.com", "Google AI Pro") };
+        var payload = Payload(ErroredPrimary(lastGood), captured, Captured(KeyB));
 
-        Assert.Same(payload, AntigravityDedup.Apply(payload, KeyA, "M1"));
+        var agents = AntigravityDedup.Apply(payload, KeyA, "M1").Agents;
+
+        Assert.Equal(2, agents.Count);
+        var card = agents[0];
+        Assert.Null(card.AccountKey);
+        Assert.Null(card.Error);
+        Assert.Equal("oauth", card.Source);
+        Assert.Equal(new AgentIdentity("a@example.com", "Google AI Pro"), card.Identity);
+        Assert.Equal(captured.Windows, card.Windows);
+        Assert.Equal(KeyA, card.HistoryAccountKey);
+        Assert.Equal(new AccountScopeStatus(Scope: "scope-a"), card.HistoryReadScope);
+        Assert.Equal(KeyB, agents[1].AccountKey);
+    }
+
+    public static TheoryData<string> StandInControls() => new()
+    {
+        "capturedError", "capturedNoWindows", "noCurrentKey", "noCapturedSnapshot", "markerPresent",
+    };
+
+    [Theory]
+    [MemberData(nameof(StandInControls))]
+    public void AnErroredPrimaryStaysWhenAgysAccountIsNotVerifiedOrCannotStandIn(string failing)
+    {
+        var payload = Payload(
+            ErroredPrimary(),
+            Captured(
+                failing == "noCapturedSnapshot" ? KeyB : KeyA,
+                error: failing == "capturedError" ? "refresh_rejected" : null,
+                windows: failing != "capturedNoWindows"));
+
+        Assert.Same(payload, AntigravityDedup.Apply(
+            payload, failing == "noCurrentKey" ? null : KeyA, failing == "markerPresent" ? "present" : "M1"));
     }
 
     [Fact]
@@ -494,6 +530,64 @@ public class AntigravityAccountsTests
                 "bind:{\"key\":\"" + KeyA + "\",\"marker\":\"M2\"}", "fetch",
             ],
             calls);
+    }
+
+    /// <summary>The poll right after agy rewrote its credential runs agy
+    /// (its binding was cleared), and here agy fails. Whether agy's captured
+    /// account stands in depends only on whether the background re-capture
+    /// rebound it, under the new marker, before the fetch returned: dedup reads
+    /// the binding after the fetch. Rebound in time (the re-capture finished
+    /// during agy's run, up to its 35 s timeout): one card, the captured
+    /// account. Not yet: the error card stays, with the captured card beside
+    /// it (no account is verified for the new marker; limits-card shared spec
+    /// §2.3).</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AfterARewriteAnErroredAgyPollIsStoodInOnlyOnceTheReCaptureRebound(bool reboundInTime)
+    {
+        var store = TempStore();
+        var io = new FakeIo();
+        io.Markers.Enqueue("M1");
+        io.Markers.Enqueue("M1");
+        var capture = new AntigravityAutoCapture(io.Io, store);
+        await capture.ManualCapture();
+
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        io.AutoResult = () => new AntigravityAutoCaptureResult("unchanged", KeyA, "a@example.com");
+        using var captureGate = new ManualResetEventSlim();
+        io.AutoGate = captureGate;
+        io.Markers.Enqueue("M2");
+        string? bound = null;
+
+        var payload = AntigravityFetch.Run(
+            () =>
+            {
+                if (reboundInTime)
+                {
+                    captureGate.Set();
+                    SpinWait.SpinUntil(() => capture.Current == (KeyA, "M2"), TimeSpan.FromSeconds(10));
+                }
+
+                return Payload(ErroredPrimary(), Captured());
+            },
+            null,
+            capture,
+            json => bound = json);
+        captureGate.Set();
+
+        Assert.Equal("{\"key\":null}", bound); // this poll ran agy
+        if (reboundInTime)
+        {
+            var card = Assert.Single(payload.Agents);
+            Assert.Null(card.Error);
+            Assert.Equal(KeyA, card.HistoryAccountKey);
+        }
+        else
+        {
+            Assert.Equal(2, payload.Agents.Count);
+            Assert.Equal("timeout", payload.Agents[0].Error);
+        }
     }
 
     [Fact]

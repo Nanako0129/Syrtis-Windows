@@ -2146,8 +2146,8 @@ public sealed partial class DashboardView : UserControl
             // An error only colours the detail line and the badge: the core
             // returns the last-good windows with a transient error stamped on
             // them, and those still draw (macOS AgentLimitsCard.swift:771-787);
-            // with nothing cached there are no windows, and the placeholder
-            // rows below keep the card's shape.
+            // with nothing cached there are no windows, and the card shows the
+            // red line alone.
             //
             // Chart layout draws each window's recorded quota history as a
             // curve instead of a bar. WindowCardText.Tabs — the same fold the
@@ -2162,9 +2162,11 @@ public sealed partial class DashboardView : UserControl
             var windows = AgentLimitsText.BarWindows(agent);
             if (windows.Count == 0)
             {
-                // macOS draws the placeholder rows for a card with no windows,
-                // errored or not, so the card keeps its shape.
-                AddPlaceholderRows(section, id, classic, placeholderValue);
+                if (AgentLimitsText.DrawsPlaceholderRows(agent))
+                {
+                    AddPlaceholderRows(section, id, classic, placeholderValue);
+                }
+
                 continue;
             }
 

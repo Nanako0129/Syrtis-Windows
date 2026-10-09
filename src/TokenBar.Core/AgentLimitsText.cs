@@ -338,6 +338,11 @@ public static class AgentLimitsText
     public static IReadOnlyList<UsageWindow> BarWindows(AgentUsageSnapshot snapshot) =>
         snapshot.UniqueCardWindows;
 
+    /// <summary>Whether a card with no <see cref="BarWindows"/> draws the
+    /// placeholder rows ("Checking…" / "No data"). An errored card draws only
+    /// its red detail line (limits-card shared spec §1, both platforms).</summary>
+    public static bool DrawsPlaceholderRows(AgentUsageSnapshot snapshot) => snapshot.Error is null;
+
     /// <summary>Clients whose live tail shows activity right now.</summary>
     public static IReadOnlySet<string> LiveClients(IReadOnlyList<TraceBucket>? trace) =>
         (trace ?? []).Where(static b => b.TokensPerMin > 0)

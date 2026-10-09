@@ -271,6 +271,15 @@ public static class AntigravityFetch
 /// not to the marker alone: the engine's binding was read before the fetch,
 /// <c>currentKey</c> after it). Otherwise both are shown.
 /// <para>
+/// An errored primary (any route, e.g. agy timed out) is instead replaced by
+/// the captured snapshot carrying <c>currentKey</c>, promoted to the primary
+/// slot (<see cref="PromotedToPrimary"/>), when that snapshot has windows and
+/// no error (macOS 6dbd8cca): it is agy's current account, verified under
+/// agy's current marker by automatic capture, shown with its own data. With no
+/// such key (for example while a re-capture after a credential rewrite is
+/// still running) or a failing captured account, the error card stays.
+/// </para>
+/// <para>
 /// The primary keeps its own windows and values, and takes the captured
 /// plan when it has none. When the captured snapshot
 /// has no error and has windows, the merged primary adopts its pace status,
@@ -299,22 +308,32 @@ public static class AntigravityDedup
             return payload;
         }
 
-        var primary = agents[primaryIndex];
-        var substituted = primary.Source == "oauth";
-        if ((primary.Source != "agy" && !substituted)
-            || primary.AgyLoginMarker != currentMarker
-            || primary.Error is not null)
-        {
-            return payload;
-        }
-
         var capturedIndex = agents.FindIndex(a => a.ClientId == ClientId && a.AccountKey == currentKey);
         if (capturedIndex < 0)
         {
             return payload;
         }
 
+        var primary = agents[primaryIndex];
         var captured = agents[capturedIndex];
+        if (primary.Error is not null)
+        {
+            if (captured.Error is not null || captured.Windows.Count == 0)
+            {
+                return payload;
+            }
+
+            agents[primaryIndex] = PromotedToPrimary(captured);
+            agents.RemoveAt(capturedIndex);
+            return payload with { Agents = agents };
+        }
+
+        var substituted = primary.Source == "oauth";
+        if ((primary.Source != "agy" && !substituted) || primary.AgyLoginMarker != currentMarker)
+        {
+            return payload;
+        }
+
         if (substituted && (primary.HistoryScope is not { Scope: not null } || primary.HistoryScope != captured.HistoryScope))
         {
             return payload;
@@ -335,6 +354,18 @@ public static class AntigravityDedup
         agents.RemoveAt(capturedIndex);
         return payload with { Agents = agents };
     }
+
+    /// <summary><paramref name="captured"/> standing in for an errored primary
+    /// (macOS <c>promotedToPrimary</c>): the primary slot (no account key), its
+    /// own identity and windows, and every stored-series read still under its
+    /// own account's scope.</summary>
+    public static AgentUsageSnapshot PromotedToPrimary(AgentUsageSnapshot captured) =>
+        captured with
+        {
+            AccountKey = null,
+            HistoryAccountKey = captured.AccountKey,
+            HistoryAccountScope = captured.HistoryScope,
+        };
 
     /// <summary><paramref name="primary"/> with <paramref name="captured"/>'s
     /// pace per matching card id and its history identity, only when the
