@@ -19,12 +19,21 @@ public sealed record QuotaPick(AgentUsageSnapshot Agent, UsageWindow Window)
     /// the taskbar. So it names the account through
     /// <see cref="AccountLabel.OfPublic"/>: a captured Antigravity account is
     /// "Antigravity account {n}", every other kind as <see cref="AccountLabel.Of"/>.</summary>
-    public string TooltipLine(AgentUsagePayload? quota) =>
-        "{0} {1} {2}% left".Localized(
-            AccountLabel.OfPublic(AccountIdentity.Of(ClientId, AccountKey), quota),
-            Window.Label.Localized(),
-            Math.Clamp(Window.RemainingPercent, 0, 100)
-                .ToString("F0", System.Globalization.CultureInfo.CurrentCulture));
+    /// <summary>The tray tooltip's quota line. The window's length follows its
+    /// label when the engine knows it (provider, contract or confirmed
+    /// observation), so "Fable only (7d)" says which window the icon tracks;
+    /// the Windows tray icon is a fixed 16 px square with no room for the
+    /// letter macOS draws beside its gauge. No length, no parenthesis.</summary>
+    public string TooltipLine(AgentUsagePayload? quota)
+    {
+        var account = AccountLabel.OfPublic(AccountIdentity.Of(ClientId, AccountKey), quota);
+        var left = Math.Clamp(Window.RemainingPercent, 0, 100)
+            .ToString("F0", System.Globalization.CultureInfo.CurrentCulture);
+        return Window.DurationSeconds is { } seconds && seconds > 0
+            ? "{0} {1} ({2}) {3}% left".Localized(
+                account, Window.Label.Localized(), UsagePace.DurationText(seconds), left)
+            : "{0} {1} {2}% left".Localized(account, Window.Label.Localized(), left);
+    }
 }
 
 /// <summary>

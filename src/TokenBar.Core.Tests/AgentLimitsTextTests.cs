@@ -223,6 +223,28 @@ public class AgentLimitsTextTests
         Assert.Contains("80% left", line);
     }
 
+    // The tray icon is a fixed 16 px square, so the window's length lives in
+    // the tooltip line: after the label when the engine knows it, absent when not.
+    [Fact]
+    public void TheTrayLineNamesTheWindowLengthOnlyWhenItIsKnown()
+    {
+        UsageWindow Window(string label, long? seconds) => new(
+            label, 30, 70, CardId: label + ".v1",
+            PaceStatus: seconds is null
+                ? new PaceStatus(UsagePaceState.LearningDuration, WindowKey: label + ".v1")
+                : new PaceStatus(UsagePaceState.Available, WindowKey: label + ".v1", DurationSeconds: seconds));
+        string Line(UsageWindow window)
+        {
+            var agent = new AgentUsageSnapshot("claude", "oauth", "2026-10-04T00:00:00Z", [window]);
+            return new QuotaPick(agent, window).TooltipLine(new AgentUsagePayload("2026-10-04T00:00:00Z", [agent]));
+        }
+        Assert.Contains("(5h)", Line(Window("Session", 5 * 3600)));
+        Assert.Contains("(7d)", Line(Window("Fable only", 7 * 86400)));
+        var unknown = Line(Window("Gemini", null));
+        Assert.DoesNotContain("(", unknown);
+        Assert.Contains("70% left", unknown);
+    }
+
     // ---- Card order -------------------------------------------------------
 
     private static IReadOnlyList<string> Rows(IReadOnlyList<LimitsRow> rows) =>
