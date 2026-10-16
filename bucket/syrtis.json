@@ -1,5 +1,5 @@
 {
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "Tray monitor for AI coding-agent token usage, cost, and subscription quota. Windows port of TokenBar.",
     "homepage": "https://github.com/Nanako0129/Syrtis-Windows",
     "license": "MIT",
@@ -23,13 +23,13 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/Nanako0129/Syrtis-Windows/releases/download/v1.1.0/Nyanako.Syrtis-1.1.0-win-x64-full.nupkg#/syrtis.zip",
-            "hash": "5ecf9d20acd23aed885a620140e2f8daf6117d7f60d222bac11f4b99f3bf7e36",
+            "url": "https://github.com/Nanako0129/Syrtis-Windows/releases/download/v1.2.0/Nyanako.Syrtis-1.2.0-win-x64-full.nupkg#/syrtis.zip",
+            "hash": "80ba87eb3cc80812af3b3b2d0f95b411c2cdf68c33d5e5e6e26c0d5a729f98bb",
             "extract_dir": "lib\\app"
         },
         "arm64": {
-            "url": "https://github.com/Nanako0129/Syrtis-Windows/releases/download/v1.1.0/Nyanako.Syrtis-1.1.0-win-arm64-full.nupkg#/syrtis.zip",
-            "hash": "79fe06ed904323eebd732254e04b7f18db10db649ccd2b49d8da50ffb52d5d90",
+            "url": "https://github.com/Nanako0129/Syrtis-Windows/releases/download/v1.2.0/Nyanako.Syrtis-1.2.0-win-arm64-full.nupkg#/syrtis.zip",
+            "hash": "1e6fd1f91948c79c204f59057159cf833d637f8a09cf6368ea3ed218506599fb",
             "extract_dir": "lib\\app"
         }
     },
