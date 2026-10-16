@@ -40,6 +40,7 @@ public class AgentIconsTests
     [InlineData("kimchi", AgentIconKind.Full)]
     [InlineData("senpi", AgentIconKind.Full)]
     [InlineData("omp", AgentIconKind.Full)]
+    [InlineData("dsh", AgentIconKind.Full)]
     public void ResolvesKnownIdsToTheirExpectedKind(string clientId, AgentIconKind kind)
     {
         var info = AgentIcons.Resolve(clientId);
@@ -123,10 +124,10 @@ public class AgentIconsTests
     }
 
     [Fact]
-    public void AssetIdsCoverThirtyEightRegisteredIcons()
+    public void AssetIdsCoverThirtyNineRegisteredIcons()
     {
         // 5 mono + 25 full ported 1:1 from AgentIconView.swift's tables, plus
-        // the 8 full marks of the 2026-10-02 engine sync.
-        Assert.Equal(38, AgentIcons.AssetIds.Count);
+        // the 8 full marks of the 2026-10-02 engine sync and engine #66's dsh.
+        Assert.Equal(39, AgentIcons.AssetIds.Count);
     }
 }

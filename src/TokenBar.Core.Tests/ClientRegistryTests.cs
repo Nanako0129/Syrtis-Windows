@@ -104,6 +104,7 @@ public class ClientRegistryTests : IDisposable
     [InlineData("kimchi", "Kimchi", "#7f1d1d")]
     [InlineData("senpi", "Senpi", "#2f6f63")]
     [InlineData("omp", "Oh My Pi", "#d946ef")]
+    [InlineData("dsh", "DeepSeek Harness", "#001259")]
     public void EngineSyncClientsAreRegisteredWithUpstreamStyle(string id, string name, string color)
     {
         Assert.Contains(id, ClientRegistry.AllIds);
