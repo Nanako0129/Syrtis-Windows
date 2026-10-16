@@ -10,18 +10,56 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `fcb85923e5544488f98001cfa390740d0009b9da` |
-| TokenBar alignment | macOS `main` still pins `8fc63ced` (behind; its pin advance, E3 of the Grok Bot attribution plan, is pending) |
-| Engine alignment | `8fc63cedfaf4aeec73c9a4e65711c280e7add15e` → `fcb85923e5544488f98001cfa390740d0009b9da` (engine `main`) |
+| Reviewed pin | `2d64ec420e696486278e2190d1a1cef663008589` |
+| TokenBar alignment | macOS advances to the same `2d64ec42` in its own DSH registration PR; until that merges, macOS `main` pins `fcb85923` |
+| Engine alignment | `fcb85923e5544488f98001cfa390740d0009b9da` → `2d64ec420e696486278e2190d1a1cef663008589` (engine `main`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/fcb85923e5544488f98001cfa390740d0009b9da/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/2d64ec420e696486278e2190d1a1cef663008589/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `fcb85923`, Grok Bot attribution (engine PRs #68, #69)
+## Current pin: `2d64ec42`, DeepSeek Harness client (engine PR #66)
+
+The reviewed pin is the merge commit of tokscale-core PR #66 (an outside
+contribution) on the engine's `main`, covering `fcb85923` → `2d64ec42`. The
+diff touches `src/clients.rs`, a new `src/sessions/dsh.rs`, `src/scanner.rs`,
+`src/lib.rs`, `src/message_cache.rs`, `src/source_context.rs`,
+`src/sessions/mod.rs` and `UPSTREAM.md`.
+
+- New `ClientId::Dsh` (`dsh`, COUNT 41 → 42): DeepSeek Harness session event
+  logs under `<home>/.dsh/sessions/<project>/<session>/session.v4.jsonl.zstd`,
+  plus the pre-format-4 `session.jsonl.zstd` a migration leaves beside it,
+  decoded through `zstd` (decoded bytes capped at 1 GiB). One message per
+  `assistant/message` event: input is `usage.inputTokens` (already the
+  uncached slice), cache read `cacheReadTokens`, output `outputTokens`, cache
+  write `cacheWriteTokens`; provider and model from the step's
+  `data.message.source`. Each `compaction/summary` counts as one message;
+  subagent sessions count on their own, and steps a subagent inherits stay
+  under the parent session.
+- The Windows registry, icon and `Fixtures/engine-client-ids.json` gain `dsh`
+  in the same PR as this pin, so `engine_client_ids_match_the_fixture` and
+  `EveryEngineClientIsRegistered` stay green. Name "DeepSeek Harness", color
+  `#001259`, icon the DSH desktop app icon, all shared with macOS.
+
+Measured on this advance, not relayed:
+
+- `CACHE_FORMAT_VERSION` stays 4 and `RESOLVER_CONTRACT_VERSION` stays 3. The
+  only new cache namespace is `dsh` (`parser_version` 1); no existing
+  namespace's `parser_version` moves, so nothing re-parses.
+- The source-context descriptor moves: it includes every client's id, root
+  and pattern, and the engine's macOS and Linux goldens change with it. By the
+  code path (`GraphRequestCoordinator` keys `GraphSnapshotStore` on the
+  source-context id), the first launch after this update finds no matching
+  snapshot and waits for the live pass instead of drawing the restored
+  picture. Not observed on a Windows machine.
+- `crates/tb_core_ffi` needed no production change.
+- Not compared against a real Windows corpus: the DeepSeek Harness data used
+  to check this advance was recorded on the maintainer's Mac.
+
+## Historical: `fcb85923`, Grok Bot attribution (engine PRs #68, #69)
 
 The reviewed pin is the merge commit of tokscale-core PR #69 on the engine's
 `main`, covering `8fc63ced` → `522ee8f2` (#68) → `fcb85923` (#69). The diff
