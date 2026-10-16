@@ -1290,7 +1290,7 @@ public class AntigravityAccountsTests
         WithRegistry(() =>
         {
             var gone = Captured("c".PadRight(64, 'c'));
-            Assert.Equal("Antigravity account Weekly 70% left", Tooltip(gone, Payload(gone)));
+            Assert.Equal("Antigravity account Weekly (7d) 70% left", Tooltip(gone, Payload(gone)));
         });
     }
 
