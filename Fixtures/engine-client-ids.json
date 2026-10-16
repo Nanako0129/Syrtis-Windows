@@ -41,6 +41,7 @@
     "reasonix",
     "kimchi",
     "senpi",
-    "omp"
+    "omp",
+    "dsh"
   ]
 }

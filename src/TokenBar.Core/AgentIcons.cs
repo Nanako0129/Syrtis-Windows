@@ -38,6 +38,9 @@ public static class AgentIcons
         // and upstream assets; hindsight and omp cropped from the vendors'
         // banners), all full-colour.
         "zcode", "augment", "hindsight", "muse", "reasonix", "kimchi", "senpi", "omp",
+        // Engine #66: the DeepSeek Harness desktop app icon, cropped to its
+        // rounded square (same file as macOS agent-icons/dsh.png).
+        "dsh",
     ];
 
     // AgentIconView.swift:29-33 — clients that share another client's icon.

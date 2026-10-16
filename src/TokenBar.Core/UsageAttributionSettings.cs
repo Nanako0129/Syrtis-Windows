@@ -161,10 +161,10 @@ public static class UsageAttributionSettings
 
             // Deliberately absent: the clients added by the 2026-10-02 engine
             // sync (zcode, augment, hindsight, muse, reasonix, kimchi, senpi,
-            // omp). Which vendors their plans pay for, if they are plans at
-            // all, has not been verified, and an unverified row here would
-            // misattribute spend; they attribute like any unmapped client
-            // until it is.
+            // omp) and engine #66's dsh. Which vendors their plans pay for, if
+            // they are plans at all, has not been verified, and an unverified
+            // row here would misattribute spend; they attribute like any
+            // unmapped client until it is.
         };
 
     /// <summary>Clients that route through subscriptions they do not own, keyed
