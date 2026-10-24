@@ -4448,14 +4448,141 @@ const CLAUDE_DESKTOP_MAX_REPORTED_KEYS: usize = 10;
 
 /// The Claude Desktop login (Windows only; its own card). `Ok(None)` means no
 /// Desktop login is stored; `Err` carries a failure with a fixed display
-/// string. Only this function resolves the real `%APPDATA%\Claude` paths.
+/// string. Candidate roots cover the traditional profile path and the two
+/// Windows MSIX data layouts observed in the field. Never choose a credential
+/// by config-file mtime alone: Desktop may leave stale copies behind.
 #[cfg(target_os = "windows")]
 fn load_claude_desktop_login() -> Result<Option<ClaudeCredentials>, ProviderFetchFailure> {
-    let Some(root) = dirs::config_dir() else {
-        return Ok(None);
-    };
-    let root = root.join("Claude");
-    load_claude_desktop_credentials_from(&root.join("config.json"), &root.join("Local State"))
+    let candidate_roots = claude_desktop_candidate_roots(
+        dirs::config_dir().as_deref(),
+        dirs::data_local_dir().as_deref(),
+    );
+    let now = Utc::now();
+    let mut candidates = Vec::new();
+    let mut first_error = None;
+
+    for root in candidate_roots {
+        let config = root.join("config.json");
+        let modified = fs::metadata(&config)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        match load_claude_desktop_credentials_from(&config, &root.join("Local State")) {
+            Ok(Some(credentials)) => candidates.push((credentials, modified)),
+            Ok(None) => {}
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+
+    if let Some(credentials) = select_claude_desktop_candidate(candidates, now) {
+        return Ok(Some(credentials));
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
+}
+
+/// Find Claude Desktop's per-user data roots without assuming one package
+/// family suffix. The `Claude-Data` layout is used by newer MSIX builds; older
+/// MSIX builds place Roaming data inside the package's LocalCache.
+fn claude_desktop_candidate_roots(
+    config_root: Option<&Path>,
+    local_root: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut canonical_roots = HashSet::new();
+
+    if let Some(config_root) = config_root {
+        push_claude_desktop_root(config_root.join("Claude"), &mut roots, &mut canonical_roots);
+    }
+    if let Some(local_root) = local_root {
+        let packages = local_root.join("Packages");
+        if let Ok(entries) = fs::read_dir(packages) {
+            let mut entries: Vec<_> = entries.flatten().collect();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.starts_with("claude_") {
+                    push_claude_desktop_root(
+                        entry
+                            .path()
+                            .join("LocalCache")
+                            .join("Roaming")
+                            .join("Claude"),
+                        &mut roots,
+                        &mut canonical_roots,
+                    );
+                }
+            }
+        }
+
+        let data_root = local_root.join("Claude-Data");
+        if let Ok(entries) = fs::read_dir(data_root) {
+            let mut entries: Vec<_> = entries.flatten().collect();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.starts_with("claude_") {
+                    push_claude_desktop_root(entry.path(), &mut roots, &mut canonical_roots);
+                }
+            }
+        }
+    }
+    roots
+}
+
+fn push_claude_desktop_root(
+    root: PathBuf,
+    roots: &mut Vec<PathBuf>,
+    canonical_roots: &mut HashSet<PathBuf>,
+) {
+    if !root.is_dir() {
+        return;
+    }
+    // Canonicalization collapses junctions/symlinks so the same data tree is
+    // never considered twice under `%APPDATA%` and its package path.
+    let identity = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+    if canonical_roots.insert(identity) {
+        roots.push(root);
+    }
+}
+
+fn claude_desktop_expiry_rank(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> u8 {
+    match expires_at {
+        Some(expires_at)
+            if now + chrono::Duration::seconds(CLAUDE_READ_ONLY_EXPIRY_SKEW_SECS) >= expires_at =>
+        {
+            0
+        }
+        Some(_) => 2,
+        None => 1,
+    }
+}
+
+fn claude_desktop_candidate_rank(
+    expires_at: Option<DateTime<Utc>>,
+    modified: Option<std::time::SystemTime>,
+    now: DateTime<Utc>,
+) -> (u8, Option<DateTime<Utc>>, Option<std::time::SystemTime>) {
+    (
+        claude_desktop_expiry_rank(expires_at, now),
+        expires_at,
+        modified,
+    )
+}
+
+fn select_claude_desktop_candidate(
+    candidates: Vec<(ClaudeCredentials, Option<std::time::SystemTime>)>,
+    now: DateTime<Utc>,
+) -> Option<ClaudeCredentials> {
+    candidates
+        .into_iter()
+        .max_by_key(|(credentials, modified)| {
+            claude_desktop_candidate_rank(credentials.expires_at, *modified, now)
+        })
+        .map(|(credentials, _)| credentials)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -10402,6 +10529,123 @@ mod tests {
         fs::create_dir(&path).unwrap();
         assert_eq!(read(&path), Err(retry));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn claude_desktop_candidate_roots_cover_legacy_and_msix_layouts() {
+        let base = std::env::temp_dir().join(format!(
+            "tb-claude-roots-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let roaming = base.join("Roaming");
+        let local = base.join("Local");
+        let legacy = roaming.join("Claude");
+        let package = local
+            .join("Packages")
+            .join("Claude_testfamily_1")
+            .join("LocalCache")
+            .join("Roaming")
+            .join("Claude");
+        let newer = local.join("Claude-Data").join("claude_testfamily");
+        let unrelated = local
+            .join("Packages")
+            .join("OtherApp_testfamily")
+            .join("LocalCache")
+            .join("Roaming")
+            .join("Claude");
+        for root in [&legacy, &package, &newer, &unrelated] {
+            fs::create_dir_all(root).unwrap();
+        }
+
+        let roots = claude_desktop_candidate_roots(Some(&roaming), Some(&local));
+        assert!(roots.contains(&legacy));
+        assert!(roots.contains(&package));
+        assert!(roots.contains(&newer));
+        assert!(!roots.contains(&unrelated));
+        assert_eq!(roots.len(), 3);
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn claude_desktop_candidate_roots_deduplicate_canonical_paths() {
+        let base = std::env::temp_dir().join(format!(
+            "tb-claude-dedupe-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let mut roots = Vec::new();
+        let mut identities = HashSet::new();
+        push_claude_desktop_root(base.clone(), &mut roots, &mut identities);
+        push_claude_desktop_root(base.clone(), &mut roots, &mut identities);
+        assert_eq!(roots, vec![base.clone()]);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn claude_desktop_candidate_selection_prefers_unexpired_login_over_newer_stale_copy() {
+        let now = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+        let credentials = |label: &str, expires_at| ClaudeCredentials {
+            access_token: label.to_string(),
+            refresh_token: None,
+            expires_at,
+            scopes: Vec::new(),
+            rate_limit_tier: None,
+            subscription_type: None,
+            source: ClaudeCredentialSource::Desktop,
+            raw_root: None,
+            keychain_account: None,
+            scope_slot: CredentialSlot {
+                semantic_source: "claude-desktop-safestorage",
+                canonical_location: label.to_string(),
+            },
+        };
+        let selected = select_claude_desktop_candidate(
+            vec![
+                (
+                    credentials("stale", Some(now - chrono::Duration::hours(1))),
+                    Some(std::time::SystemTime::now()),
+                ),
+                (
+                    credentials("active", Some(now + chrono::Duration::hours(1))),
+                    None,
+                ),
+            ],
+            now,
+        )
+        .unwrap();
+        assert_eq!(selected.access_token, "active");
+    }
+
+    #[test]
+    fn claude_desktop_unexpired_candidate_outranks_stale_copy() {
+        let now = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+        assert_eq!(
+            claude_desktop_expiry_rank(Some(now + chrono::Duration::hours(1)), now),
+            2
+        );
+        assert_eq!(claude_desktop_expiry_rank(None, now), 1);
+        assert_eq!(
+            claude_desktop_expiry_rank(Some(now - chrono::Duration::hours(1)), now),
+            0
+        );
+        assert_eq!(
+            claude_desktop_expiry_rank(
+                Some(now + chrono::Duration::seconds(CLAUDE_READ_ONLY_EXPIRY_SKEW_SECS)),
+                now
+            ),
+            0
+        );
+        let expired_but_recent = claude_desktop_candidate_rank(
+            Some(now - chrono::Duration::hours(1)),
+            Some(std::time::SystemTime::now()),
+            now,
+        );
+        let valid_but_older =
+            claude_desktop_candidate_rank(Some(now + chrono::Duration::hours(1)), None, now);
+        assert!(valid_but_older > expired_but_recent);
     }
 
     /// End to end on synthetic files: DPAPI-wrapped key in `Local State`, a
