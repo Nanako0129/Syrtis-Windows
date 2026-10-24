@@ -4504,7 +4504,7 @@ fn claude_desktop_candidate_roots(
             entries.sort_by_key(|entry| entry.file_name());
             for entry in entries {
                 let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-                if name.starts_with("claude_") {
+                if name.starts_with("claude_") || name.starts_with("anthropicpbc.claude_") {
                     push_claude_desktop_root(
                         entry
                             .path()
@@ -4524,7 +4524,7 @@ fn claude_desktop_candidate_roots(
             entries.sort_by_key(|entry| entry.file_name());
             for entry in entries {
                 let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-                if name.starts_with("claude_") {
+                if name.starts_with("claude_") || name.starts_with("anthropicpbc.claude_") {
                     push_claude_desktop_root(entry.path(), &mut roots, &mut canonical_roots);
                 }
             }
@@ -10547,23 +10547,41 @@ mod tests {
             .join("LocalCache")
             .join("Roaming")
             .join("Claude");
+        let anthropic_package = local
+            .join("Packages")
+            .join("AnthropicPBC.Claude_1")
+            .join("LocalCache")
+            .join("Roaming")
+            .join("Claude");
         let newer = local.join("Claude-Data").join("claude_testfamily");
+        let newer_anthropic_family = local
+            .join("Claude-Data")
+            .join("AnthropicPBC.Claude_testfamily");
         let unrelated = local
             .join("Packages")
             .join("OtherApp_testfamily")
             .join("LocalCache")
             .join("Roaming")
             .join("Claude");
-        for root in [&legacy, &package, &newer, &unrelated] {
+        for root in [
+            &legacy,
+            &package,
+            &anthropic_package,
+            &newer,
+            &newer_anthropic_family,
+            &unrelated,
+        ] {
             fs::create_dir_all(root).unwrap();
         }
 
         let roots = claude_desktop_candidate_roots(Some(&roaming), Some(&local));
         assert!(roots.contains(&legacy));
         assert!(roots.contains(&package));
+        assert!(roots.contains(&anthropic_package));
         assert!(roots.contains(&newer));
+        assert!(roots.contains(&newer_anthropic_family));
         assert!(!roots.contains(&unrelated));
-        assert_eq!(roots.len(), 3);
+        assert_eq!(roots.len(), 5);
 
         fs::remove_dir_all(base).unwrap();
     }
