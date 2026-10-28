@@ -4496,7 +4496,7 @@ fn load_claude_desktop_candidates(
         first_error,
     ) {
         (Some(credentials), Some(error))
-            if claude_desktop_expiry_rank(credentials.expires_at, now) == 0 =>
+            if claude_read_only_credentials_expired(&credentials, now) =>
         {
             Err(error)
         }
@@ -4563,8 +4563,8 @@ fn push_claude_desktop_root(
     if !root.is_dir() {
         return;
     }
-    // Canonicalization collapses junctions/symlinks so the same data tree is
-    // never considered twice under `%APPDATA%` and its package path.
+    // Roots are deduplicated by canonical path, falling back to the raw path
+    // when canonicalization fails. Only the same spelling pushed twice is tested.
     let identity = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
     if canonical_roots.insert(identity) {
         roots.push(root);
@@ -4573,14 +4573,17 @@ fn push_claude_desktop_root(
 
 fn claude_desktop_expiry_rank(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> u8 {
     match expires_at {
-        Some(expires_at)
-            if now + chrono::Duration::seconds(CLAUDE_READ_ONLY_EXPIRY_SKEW_SECS) >= expires_at =>
-        {
-            0
-        }
+        Some(expires_at) if claude_read_only_expiry_within_skew(expires_at, now) => 0,
         Some(_) => 2,
         None => 1,
     }
+}
+
+/// TokenBar cannot renew a read-only token, so it stops using one
+/// `CLAUDE_READ_ONLY_EXPIRY_SKEW_SECS` early rather than sending a token that
+/// expires in flight.
+fn claude_read_only_expiry_within_skew(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    now + chrono::Duration::seconds(CLAUDE_READ_ONLY_EXPIRY_SKEW_SECS) >= expires_at
 }
 
 fn claude_desktop_candidate_rank(
@@ -7173,15 +7176,13 @@ fn jwt_expiration(token: &str) -> Option<DateTime<Utc>> {
     Utc.timestamp_opt(seconds, 0).single()
 }
 
-/// TokenBar cannot renew a read-only token, so it stops using one a minute
-/// early rather than sending a token that expires in flight.
 fn claude_read_only_credentials_expired(
     credentials: &ClaudeCredentials,
     now: DateTime<Utc>,
 ) -> bool {
-    credentials.expires_at.is_some_and(|expires_at| {
-        now + chrono::Duration::seconds(CLAUDE_READ_ONLY_EXPIRY_SKEW_SECS) >= expires_at
-    })
+    credentials
+        .expires_at
+        .is_some_and(|expires_at| claude_read_only_expiry_within_skew(expires_at, now))
 }
 
 /// The terminal message for an expired read-only credential, or `None` for a
@@ -10609,7 +10610,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_desktop_candidate_roots_deduplicate_canonical_paths() {
+    fn claude_desktop_candidate_roots_skip_same_spelling_pushed_twice() {
         let base = std::env::temp_dir().join(format!(
             "tb-claude-dedupe-{}-{}",
             std::process::id(),
