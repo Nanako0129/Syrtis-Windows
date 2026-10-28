@@ -4448,9 +4448,9 @@ const CLAUDE_DESKTOP_MAX_REPORTED_KEYS: usize = 10;
 
 /// The Claude Desktop login (Windows only; its own card). `Ok(None)` means no
 /// Desktop login is stored; `Err` carries a failure with a fixed display
-/// string. Candidate roots cover the traditional profile path and the two
-/// Windows MSIX data layouts observed in the field. Never choose a credential
-/// by config-file mtime alone: Desktop may leave stale copies behind.
+/// string. Candidate roots cover the traditional profile path and reported
+/// Windows package-data layouts. Never choose a credential by config-file mtime
+/// alone: Desktop may leave stale copies behind.
 #[cfg(target_os = "windows")]
 fn load_claude_desktop_login() -> Result<Option<ClaudeCredentials>, ProviderFetchFailure> {
     let candidate_roots = claude_desktop_candidate_roots(
@@ -4458,16 +4458,32 @@ fn load_claude_desktop_login() -> Result<Option<ClaudeCredentials>, ProviderFetc
         dirs::data_local_dir().as_deref(),
     );
     let now = Utc::now();
-    let mut candidates = Vec::new();
-    let mut first_error = None;
-
-    for root in candidate_roots {
+    load_claude_desktop_candidates(candidate_roots, now, |root| {
         let config = root.join("config.json");
         let modified = fs::metadata(&config)
             .and_then(|metadata| metadata.modified())
             .ok();
-        match load_claude_desktop_credentials_from(&config, &root.join("Local State")) {
-            Ok(Some(credentials)) => candidates.push((credentials, modified)),
+        load_claude_desktop_credentials_from(&config, &root.join("Local State"))
+            .map(|credentials| credentials.map(|credentials| (credentials, modified)))
+    })
+}
+
+fn load_claude_desktop_candidates(
+    candidate_roots: impl IntoIterator<Item = PathBuf>,
+    now: DateTime<Utc>,
+    mut load_candidate: impl FnMut(
+        &Path,
+    ) -> Result<
+        Option<(ClaudeCredentials, Option<std::time::SystemTime>)>,
+        ProviderFetchFailure,
+    >,
+) -> Result<Option<ClaudeCredentials>, ProviderFetchFailure> {
+    let mut candidates = Vec::new();
+    let mut first_error = None;
+
+    for root in candidate_roots {
+        match load_candidate(&root) {
+            Ok(Some(candidate)) => candidates.push(candidate),
             Ok(None) => {}
             Err(error) => {
                 first_error.get_or_insert(error);
@@ -4475,18 +4491,24 @@ fn load_claude_desktop_login() -> Result<Option<ClaudeCredentials>, ProviderFetc
         }
     }
 
-    if let Some(credentials) = select_claude_desktop_candidate(candidates, now) {
-        return Ok(Some(credentials));
-    }
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(None),
+    match (
+        select_claude_desktop_candidate(candidates, now),
+        first_error,
+    ) {
+        (Some(credentials), Some(error))
+            if claude_desktop_expiry_rank(credentials.expires_at, now) == 0 =>
+        {
+            Err(error)
+        }
+        (Some(credentials), _) => Ok(Some(credentials)),
+        (None, Some(error)) => Err(error),
+        (None, None) => Ok(None),
     }
 }
 
 /// Find Claude Desktop's per-user data roots without assuming one package
-/// family suffix. The `Claude-Data` layout is used by newer MSIX builds; older
-/// MSIX builds place Roaming data inside the package's LocalCache.
+/// family suffix. Package `LocalCache` holds the MSIX roaming data. The separate
+/// `Claude-Data` layout has been reported but is not a published standard.
 fn claude_desktop_candidate_roots(
     config_root: Option<&Path>,
     local_root: Option<&Path>,
@@ -10635,6 +10657,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(selected.access_token, "active");
+    }
+
+    #[test]
+    fn claude_desktop_candidate_loader_retries_when_only_loaded_candidate_is_expired() {
+        let now = Utc.timestamp_opt(1_800_000_000, 0).single().unwrap();
+        let expired = ClaudeCredentials {
+            access_token: "stale".to_string(),
+            refresh_token: None,
+            expires_at: Some(now - chrono::Duration::hours(1)),
+            scopes: Vec::new(),
+            rate_limit_tier: None,
+            subscription_type: None,
+            source: ClaudeCredentialSource::Desktop,
+            raw_root: None,
+            keychain_account: None,
+            scope_slot: CredentialSlot {
+                semantic_source: "claude-desktop-safestorage",
+                canonical_location: "stale".to_string(),
+            },
+        };
+        let retry = claude_read_retry_failure(CLAUDE_DESKTOP_READ_RETRY_ERROR);
+        let mut outcomes = [Err(retry), Ok(Some((expired, None)))].into_iter();
+
+        let result = load_claude_desktop_candidates(
+            [PathBuf::from("msix"), PathBuf::from("legacy")],
+            now,
+            |_| outcomes.next().unwrap(),
+        );
+
+        assert_eq!(
+            desktop_failure_kind(result.unwrap_err()),
+            (true, CLAUDE_DESKTOP_READ_RETRY_ERROR.to_string())
+        );
     }
 
     #[test]
