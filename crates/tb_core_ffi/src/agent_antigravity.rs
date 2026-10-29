@@ -38,6 +38,12 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 const LANG_SERVICE: &str = "/exa.language_server_pb.LanguageServerService/GetUserStatus";
+const LANG_QUOTA_SUMMARY: &str =
+    "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
+/// A chosen bound, not a measured latency: the weekly request runs after
+/// `GetUserStatus` on every local poll, and the client's 8 s would let a slow
+/// answer hold up the whole refresh.
+const LOCAL_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const CODE_ASSIST_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const REFRESH_SAFETY_SECS: i64 = 60;
@@ -770,6 +776,9 @@ async fn fetch_local_ide(now: DateTime<Utc>) -> Result<Fetched, String> {
         };
         match parse_user_status(&text, now) {
             Ok(mut fetched) if !fetched.windows.is_empty() => {
+                fetched
+                    .windows
+                    .extend(fetch_local_weekly(&client, port, &csrf, &body, now).await);
                 fetched.account_scope = resolve_local_account_scope(fetched.identity.as_ref());
                 fetched.history_scope = resolve_local_history_scope(fetched.identity.as_ref());
                 fetched.cache_binding = fetched
@@ -785,6 +794,51 @@ async fn fetch_local_ide(now: DateTime<Utc>) -> Result<Fetched, String> {
         }
     }
     Err(last_err)
+}
+
+/// `GetUserStatus` carries per-model quotas only, so the weekly allowance
+/// (#256) comes from the same server's `RetrieveUserQuotaSummary`, asked on the
+/// port and CSRF token that just answered. Only the weekly buckets are added,
+/// which is what #256 asks for; whether the per-model quotas track the group 5h
+/// buckets has not been measured. Any failure adds nothing, after at most
+/// `LOCAL_SUMMARY_TIMEOUT` on top of the `GetUserStatus` round trip.
+async fn fetch_local_weekly(
+    client: &reqwest::Client,
+    port: u16,
+    csrf: &str,
+    body: &Value,
+    now: DateTime<Utc>,
+) -> Vec<UsageWindow> {
+    let resp = client
+        .post(format!("https://127.0.0.1:{port}{LANG_QUOTA_SUMMARY}"))
+        .timeout(LOCAL_SUMMARY_TIMEOUT)
+        .header("X-Codeium-Csrf-Token", csrf)
+        .header("Connect-Protocol-Version", "1")
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(body)
+        .send()
+        .await;
+    let Ok(resp) = resp else {
+        return Vec::new();
+    };
+    if !resp.status().is_success() {
+        return Vec::new();
+    }
+    match resp.text().await {
+        Ok(text) => local_weekly_windows(&text, now),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Measured on the Windows test machine (Antigravity desktop, 2026-10-29): the
+/// local server answers `{"response": {"groups": [...]}}`, the Code Assist
+/// `retrieveUserQuotaSummary` shape wrapped in `response`. An unwrapped answer
+/// is read too, so a build that drops the wrapper keeps the weekly rows.
+fn local_weekly_windows(body: &str, now: DateTime<Utc>) -> Vec<UsageWindow> {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    quota_summary_windows(value.get("response").unwrap_or(&value), now, true)
 }
 
 fn local_api_candidates(processes: Vec<(ProcInfo, Vec<u16>)>) -> Vec<(u16, String)> {
@@ -3126,6 +3180,14 @@ fn windows_from_quota_summary(body: &str, now: DateTime<Utc>) -> Vec<UsageWindow
     let Ok(response) = serde_json::from_str::<Value>(body) else {
         return Vec::new();
     };
+    quota_summary_windows(&response, now, false)
+}
+
+fn quota_summary_windows(
+    response: &Value,
+    now: DateTime<Utc>,
+    weekly_only: bool,
+) -> Vec<UsageWindow> {
     let mut windows = Vec::new();
     for group in response
         .get("groups")
@@ -3143,6 +3205,12 @@ fn windows_from_quota_summary(body: &str, now: DateTime<Utc>) -> Vec<UsageWindow
             let Some(id) = non_empty_str(bucket, "bucketId") else {
                 continue;
             };
+            let window = bucket.get("window").and_then(Value::as_str);
+            if weekly_only
+                && agy_window_duration(window).map(|d| d.duration_seconds) != Some(7 * 86_400)
+            {
+                continue;
+            }
             let Some(fraction) = bucket.get("remainingFraction").and_then(Value::as_f64) else {
                 continue;
             };
@@ -3155,14 +3223,7 @@ fn windows_from_quota_summary(body: &str, now: DateTime<Utc>) -> Vec<UsageWindow
                 non_empty_str(bucket, "displayName").unwrap_or("Limit")
             );
             let card_id = format!("agy.{id}.v1");
-            if let Some(window) = agy_bucket_window(
-                label,
-                fraction,
-                reset,
-                now,
-                card_id,
-                bucket.get("window").and_then(Value::as_str),
-            ) {
+            if let Some(window) = agy_bucket_window(label, fraction, reset, now, card_id, window) {
                 windows.push(window);
             }
         }
@@ -7540,6 +7601,60 @@ mod captured_account_tests {
         assert_eq!(durations, [Some(7 * 86_400), Some(5 * 3_600), None]);
         assert!(windows_from_quota_summary("not json", now).is_empty());
         assert!(windows_from_quota_summary("{}", now).is_empty());
+    }
+
+    /// #256: the local server's summary adds only its weekly buckets. The body
+    /// is the shape measured on the Windows test machine (2026-10-29),
+    /// descriptions left out.
+    #[test]
+    fn local_quota_summary_adds_only_weekly_buckets() {
+        let now = DateTime::parse_from_rfc3339("2026-10-29T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let body = json!({ "response": { "groups": [
+            { "displayName": "Gemini Models", "buckets": [
+                { "bucketId": "gemini-weekly", "displayName": "Weekly Limit Remaining",
+                  "window": "weekly", "remainingFraction": 0.99982035, "resetTime": "2026-11-04T09:32:38Z" },
+                { "bucketId": "gemini-5h", "displayName": "Five Hour Limit Remaining",
+                  "window": "5h", "remainingFraction": 1, "resetTime": "2026-10-29T06:01:37Z" }
+            ]},
+            { "displayName": "Claude and GPT models", "buckets": [
+                { "bucketId": "3p-weekly", "displayName": "Weekly Limit Remaining",
+                  "window": "weekly", "remainingFraction": 0.999894, "resetTime": "2026-10-30T00:36:49Z" },
+                { "bucketId": "3p-5h", "displayName": "Five Hour Limit Remaining",
+                  "window": "5h", "remainingFraction": 1, "resetTime": "2026-10-29T06:01:37Z" }
+            ]},
+            { "displayName": "Gemini 4 Argon", "buckets": [
+                { "bucketId": "gemini-argon-wtu-weekly", "displayName": "Gemini 4 Argon Weekly Limit",
+                  "window": "weekly", "remainingFraction": 0.1598688, "resetTime": "2026-10-31T15:50:17Z" }
+            ]}
+        ]}});
+        let windows = local_weekly_windows(&body.to_string(), now);
+        let keys: Vec<_> = windows
+            .iter()
+            .map(|w| w.pace_window_key_for_test())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                Some("agy.gemini-weekly.v1"),
+                Some("agy.3p-weekly.v1"),
+                Some("agy.gemini-argon-wtu-weekly.v1"),
+            ]
+        );
+        assert_eq!(
+            windows[0].label_for_test(),
+            "Gemini Models · Weekly Limit Remaining"
+        );
+        // In use with its cycle started (reset 11-04, start 10-28): the 7-day
+        // contract pace reads.
+        assert_eq!(windows[0].duration_seconds_for_test(), Some(7 * 86_400));
+        // Control: the Code Assist parser keeps all five buckets of the same
+        // groups, and an unwrapped local answer still yields the weekly three.
+        let unwrapped = body["response"].to_string();
+        assert_eq!(windows_from_quota_summary(&unwrapped, now).len(), 5);
+        assert_eq!(local_weekly_windows(&unwrapped, now).len(), 3);
+        assert!(local_weekly_windows("not json", now).is_empty());
     }
 
     /// The captured client never follows a redirect, which would resend the
