@@ -10,10 +10,6 @@ public sealed class TrayForceCreatePolicyTests
         Assert.True(
             TrayForceCreatePolicy.EpisodeDeadlineMilliseconds >= 10_000,
             "Episode deadline must cover a multi-second logon shell window.");
-        Assert.True(
-            TrayForceCreatePolicy.StartupSmokeTimeoutMilliseconds
-            > TrayForceCreatePolicy.EpisodeDeadlineMilliseconds,
-            "Smoke wait must have slack beyond the episode deadline.");
         Assert.Equal(
             TrayForceCreatePolicy.EpisodeDeadlineMilliseconds,
             TrayForceCreatePolicy.MinProductionRetryWindowMilliseconds);
@@ -359,5 +355,58 @@ public sealed class TrayForceCreatePolicyTests
 
         clock.Ticks = 10_000;
         Assert.True(episode.IsExhausted);
+    }
+
+    [Fact]
+    public async Task Ready_wait_has_no_timer_and_reports_the_episodes_own_terminal_result()
+    {
+        // Fake clock + manual TCS stand in for the DispatcherQueueTimer: the
+        // terminal tick is "queued" for as long as the test withholds it, with
+        // no real time passing. The wait must neither fault nor complete early.
+        var elapsed = TimeSpan.Zero;
+        var episode = new TrayForceCreateEpisode(
+            deadline: TimeSpan.FromMilliseconds(TrayForceCreatePolicy.EpisodeDeadlineMilliseconds),
+            getElapsed: () => elapsed);
+        var terminal = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var wait = TrayReadyWait.AwaitAsync(terminal.Task, CancellationToken.None);
+
+        // Dispatcher congested far past the episode deadline plus any margin.
+        elapsed = TimeSpan.FromMilliseconds(TrayForceCreatePolicy.EpisodeDeadlineMilliseconds)
+            + TimeSpan.FromMinutes(5);
+        Assert.False(wait.IsCompleted);
+
+        // The delayed terminal tick finally runs and publishes Exhausted.
+        var result = episode.Tick(() => throw new InvalidOperationException("soft"));
+        Assert.Equal(TrayForceCreateTickResult.Exhausted, result);
+        terminal.SetException(new InvalidOperationException("episode exhausted"));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => wait);
+        Assert.Equal("episode exhausted", ex.Message);
+    }
+
+    [Fact]
+    public async Task Ready_wait_returns_when_readiness_lands_after_the_deadline_instant()
+    {
+        var terminal = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var wait = TrayReadyWait.AwaitAsync(terminal.Task, CancellationToken.None);
+        Assert.False(wait.IsCompleted);
+
+        terminal.SetResult(true);
+        await wait;
+    }
+
+    [Fact]
+    public async Task Ready_wait_ends_early_only_through_the_callers_token()
+    {
+        var terminal = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cts = new CancellationTokenSource();
+        var wait = TrayReadyWait.AwaitAsync(terminal.Task, cts.Token);
+        Assert.False(wait.IsCompleted);
+
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => wait);
     }
 }

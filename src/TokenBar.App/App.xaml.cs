@@ -587,11 +587,8 @@ public partial class App : Application
                     "--startup-smoke sentinel path is missing");
             }
 
-            // Hard gate: await per-episode ForceCreate ticks with bounded timeout.
-            await _tray!.AssertTrayReadyAsync(
-                TimeSpan.FromMilliseconds(
-                    TrayForceCreatePolicy.StartupSmokeTimeoutMilliseconds))
-                .ConfigureAwait(true);
+            // Hard gate: await the episode's single terminal result (it owns the deadline).
+            await _tray!.AssertTrayReadyAsync().ConfigureAwait(true);
 
             WriteStartupSmokeSentinel(path);
             Environment.ExitCode = 0;

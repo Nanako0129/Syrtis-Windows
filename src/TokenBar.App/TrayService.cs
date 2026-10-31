@@ -140,10 +140,9 @@ public sealed class TrayService : IDisposable
 
     /// <summary>
     /// Hard tray-ready gate for --startup-smoke: awaits a fresh creation
-    /// episode with a bounded timeout (timer ticks; no UI-thread blocking wait).
+    /// episode's single terminal result (timer ticks; no UI-thread blocking wait).
     /// </summary>
     internal Task AssertTrayReadyAsync(
-        TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
         if (IsTrayIconCreated)
@@ -157,10 +156,8 @@ public sealed class TrayService : IDisposable
                 "tray icon creation already exhausted without success."));
         }
 
-        var budget = timeout
-            ?? TimeSpan.FromMilliseconds(TrayForceCreatePolicy.StartupSmokeTimeoutMilliseconds);
         BeginCreationEpisode();
-        return WaitForTrayReadyAsync(budget, cancellationToken);
+        return WaitForTrayReadyAsync(cancellationToken);
     }
 
     private readonly FlyoutWindow _flyout;
@@ -833,9 +830,7 @@ public sealed class TrayService : IDisposable
         }
     }
 
-    private async Task WaitForTrayReadyAsync(
-        TimeSpan timeout,
-        CancellationToken cancellationToken)
+    private async Task WaitForTrayReadyAsync(CancellationToken cancellationToken)
     {
         if (IsTrayIconCreated)
         {
@@ -844,12 +839,8 @@ public sealed class TrayService : IDisposable
 
         var tcs = _readyTcs
             ?? throw new InvalidOperationException("tray creation episode was not started");
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        linked.CancelAfter(timeout);
-        await using var reg = linked.Token.Register(
-            () => tcs.TrySetException(new TimeoutException(
-                $"tray icon not ready within {timeout.TotalMilliseconds:0} ms")));
-        _ = await tcs.Task.ConfigureAwait(true);
+        // The episode's terminal result is the only outcome (see TrayReadyWait).
+        await TrayReadyWait.AwaitAsync(tcs.Task, cancellationToken).ConfigureAwait(true);
         if (!IsTrayIconCreated)
         {
             throw new InvalidOperationException("tray icon creation finished without ready state");

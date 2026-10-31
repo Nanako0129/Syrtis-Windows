@@ -20,14 +20,6 @@ internal static class TrayForceCreatePolicy
     /// </summary>
     public const int MinProductionRetryWindowMilliseconds = EpisodeDeadlineMilliseconds;
 
-    /// <summary>
-    /// Startup-smoke outer wait for tray readiness. Longer than the episode
-    /// deadline so the DispatcherQueue terminal tick is not raced by the
-    /// thread-pool CancelAfter timer at the same instant.
-    /// </summary>
-    public const int StartupSmokeTimeoutMilliseconds =
-        EpisodeDeadlineMilliseconds + 2_000;
-
     /// <summary>Cap on a single inter-attempt delay (ms).</summary>
     public const int MaxDelayMilliseconds = 500;
 
@@ -51,6 +43,20 @@ internal static class TrayForceCreatePolicy
     /// </summary>
     public static bool IsSoftRetryable(Exception exception) =>
         exception is InvalidOperationException;
+}
+
+/// <summary>
+/// Startup-smoke readiness wait. The episode owns the only deadline and
+/// publishes exactly one terminal result (ready, or exhausted as a fault), so
+/// this wait has no timer of its own: a second scheduler racing the episode
+/// could fault a run whose terminal tick was merely queued behind a busy
+/// dispatcher. Only the caller's token can end the wait early; a hard hang
+/// limit belongs to the external smoke runner.
+/// </summary>
+internal static class TrayReadyWait
+{
+    public static Task AwaitAsync(Task<bool> terminal, CancellationToken cancellationToken) =>
+        terminal.WaitAsync(cancellationToken);
 }
 
 /// <summary>Result of one ForceCreate tick inside an episode.</summary>
