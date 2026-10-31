@@ -60,9 +60,14 @@ internal static class AntigravityAccountsCopy
         "If Antigravity's own sign-in (not agy) supplies the main card, the same account can appear twice.";
 
     /// <summary>The explanations behind the info button, in reading order.
-    /// <see cref="MergeOnlyUntilRefresh"/> is not here: it is a notice that
-    /// shows only while automatic capture is off, so it stays inline.</summary>
+    /// <see cref="MergeOnlyUntilRefresh"/> is not here: it applies only while
+    /// automatic capture is off, so <see cref="InfoFor"/> adds it then.</summary>
     internal static readonly string[] Info = [WhenOn, HowTo, Reads, RemoveMeans, TwiceFromIde];
+
+    /// <summary>What the info button shows: <see cref="Info"/>, led by the
+    /// off-only note while automatic capture is off (as on macOS).</summary>
+    internal static IEnumerable<string> InfoFor(bool automaticCaptureOn) =>
+        automaticCaptureOn ? Info : [MergeOnlyUntilRefresh, .. Info];
 
     internal const string ConfirmTitle = "Turn on automatic capture?";
 

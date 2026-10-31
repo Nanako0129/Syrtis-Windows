@@ -1102,11 +1102,12 @@ public sealed partial class SettingsWindow : Window
     {
         var panel = new StackPanel { Spacing = 16, MaxWidth = 380 };
         panel.Children.Add(InfoSection(
-            ClaudeAccountsCopy.Header, ClaudeAccountsCopy.Summary, ClaudeAccountsCopy.Info,
+            ClaudeAccountsCopy.Header, ClaudeAccountsCopy.Summary, () => ClaudeAccountsCopy.Info,
             BuildClaudeAccounts(store)));
         panel.Children.Add(InfoSection(
             AntigravityAccountsCopy.Header, AntigravityAccountsCopy.Summary,
-            AntigravityAccountsCopy.Info, BuildAntigravityAccounts(store)));
+            () => AntigravityAccountsCopy.InfoFor(AntigravityAutoCapture.Shared is not { IsEnabled: false }),
+            BuildAntigravityAccounts(store)));
         return panel;
     }
 
@@ -2019,16 +2020,23 @@ public sealed partial class SettingsWindow : Window
     /// Flyout rather than HoverTip: it opens on click, keyboard and touch too,
     /// and the privacy facts inside must be reachable by all of them.</summary>
     private static StackPanel InfoSection(
-        string title, string summary, IEnumerable<string> info, UIElement content)
+        string title, string summary, Func<IEnumerable<string>> info, UIElement content)
     {
+        // Built on each open: the list can depend on live state (the Antigravity
+        // note that applies only while automatic capture is off).
         var details = new StackPanel { Spacing = 8, MaxWidth = 320 };
-        foreach (var text in info)
+        var flyout = new Flyout { Content = details, Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Bottom };
+        flyout.Opening += (_, _) =>
         {
-            var line = Ui.Text(text.Localized(), 12);
-            line.TextWrapping = TextWrapping.Wrap;
-            line.TextTrimming = TextTrimming.None;
-            details.Children.Add(line);
-        }
+            details.Children.Clear();
+            foreach (var text in info())
+            {
+                var line = Ui.Text(text.Localized(), 12);
+                line.TextWrapping = TextWrapping.Wrap;
+                line.TextTrimming = TextTrimming.None;
+                details.Children.Add(line);
+            }
+        };
 
         var button = new Button
         {
@@ -2039,7 +2047,7 @@ public sealed partial class SettingsWindow : Window
             MinWidth = 0,
             MinHeight = 0,
             VerticalAlignment = VerticalAlignment.Center,
-            Flyout = new Flyout { Content = details, Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Bottom },
+            Flyout = flyout,
         };
         var name = SettingsCopy.MoreInfo.Localized();
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, name);

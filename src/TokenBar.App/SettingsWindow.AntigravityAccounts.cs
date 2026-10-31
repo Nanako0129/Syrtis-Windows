@@ -116,10 +116,6 @@ public sealed partial class SettingsWindow
             body.Children.Add(WarningLine(AntigravityAccountsCopy.Paused.Localized()));
         }
 
-        if (!enabled)
-        {
-            body.Children.Add(Hint(AntigravityAccountsCopy.MergeOnlyUntilRefresh.Localized()));
-        }
     }
 
     private static TextBlock WarningLine(string text)

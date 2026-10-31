@@ -45,7 +45,7 @@ internal static class SettingsCopy
     // The Accounts page (macOS SettingsPanel, built in parallel): nav label and
     // the info button's accessible name.
     internal const string AccountsPage = "Accounts";
-    internal const string MoreInfo = "More information";
+    internal const string MoreInfo = "More details";
 
     internal static IReadOnlyList<(string Raw, string Label)> LayoutOptions =>
         [("full", "Layout: Full"), ("classic", "Layout: Classic"), ("chart", "Layout: Chart")];

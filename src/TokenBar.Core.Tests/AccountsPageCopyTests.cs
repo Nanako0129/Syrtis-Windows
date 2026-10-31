@@ -32,8 +32,6 @@ public class AccountsPageCopyTests
                 ClaudeAccountsCopy.Locations, ClaudeAccountsCopy.RemoveMeans],
             ClaudeAccountsCopy.Info);
 
-    // MergeOnlyUntilRefresh is a conditional notice (automatic capture off), so
-    // it stays inline and is not part of the info text.
     [Fact]
     public void AntigravityInfoHoldsEveryFormerUnconditionalHint()
     {
@@ -42,6 +40,20 @@ public class AccountsPageCopyTests
                 AntigravityAccountsCopy.RemoveMeans, AntigravityAccountsCopy.TwiceFromIde],
             AntigravityAccountsCopy.Info);
         Assert.DoesNotContain(AntigravityAccountsCopy.MergeOnlyUntilRefresh, AntigravityAccountsCopy.Info);
+    }
+
+    // The note applies only while automatic capture is off: it joins the info
+    // then, and is absent while capture is on; the rest is the same either way.
+    [Fact]
+    public void MergeOnlyNoteIsInTheInfoOnlyWhileAutomaticCaptureIsOff()
+    {
+        var off = AntigravityAccountsCopy.InfoFor(false).ToList();
+        var on = AntigravityAccountsCopy.InfoFor(true).ToList();
+
+        Assert.Contains(AntigravityAccountsCopy.MergeOnlyUntilRefresh, off);
+        Assert.DoesNotContain(AntigravityAccountsCopy.MergeOnlyUntilRefresh, on);
+        Assert.Equal(AntigravityAccountsCopy.Info, on);
+        Assert.Equal(AntigravityAccountsCopy.Info, off.Where(s => s != AntigravityAccountsCopy.MergeOnlyUntilRefresh));
     }
 
     // Where a credential goes, where it is kept, and what Remove does must stay
