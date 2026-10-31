@@ -11,7 +11,13 @@ namespace TokenBar.App;
 /// </summary>
 internal static class AntigravityAccountsCopy
 {
-    internal const string Section = "Antigravity accounts";
+    /// <summary>The section header on the Accounts page: a product name, so it
+    /// is not translated.</summary>
+    internal const string Header = "Antigravity";
+
+    /// <summary>The one line kept under the header; everything else is behind
+    /// the info button (<see cref="Info"/>).</summary>
+    internal const string Summary = "Capture a Google account agy signs into.";
 
     internal const string Capture = "Capture current agy login";
 
@@ -52,6 +58,11 @@ internal static class AntigravityAccountsCopy
 
     internal const string TwiceFromIde =
         "If Antigravity's own sign-in (not agy) supplies the main card, the same account can appear twice.";
+
+    /// <summary>The explanations behind the info button, in reading order.
+    /// <see cref="MergeOnlyUntilRefresh"/> is not here: it is a notice that
+    /// shows only while automatic capture is off, so it stays inline.</summary>
+    internal static readonly string[] Info = [WhenOn, HowTo, Reads, RemoveMeans, TwiceFromIde];
 
     internal const string ConfirmTitle = "Turn on automatic capture?";
 
@@ -96,7 +107,7 @@ internal static class AntigravityAccountsCopy
     ];
 
     internal static IEnumerable<string> All() =>
-        [Section, "Antigravity account", "Antigravity account {0}", Capture, Capturing, Remove, RemoveNamed, Toggle, Paused, MergeOnlyUntilRefresh,
-            WhenOn, HowTo, Reads, RemoveMeans, TwiceFromIde, ConfirmTitle, ConfirmBody, ConfirmOk,
+        [Summary, "Antigravity account", "Antigravity account {0}", Capture, Capturing, Remove, RemoveNamed, Toggle, Paused, MergeOnlyUntilRefresh,
+            .. Info, ConfirmTitle, ConfirmBody, ConfirmOk,
             ConfirmCancel, Generic, .. Codes.Select(Message)];
 }

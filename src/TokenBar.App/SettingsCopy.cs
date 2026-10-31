@@ -42,10 +42,15 @@ internal static class SettingsCopy
         + "as a second line. Chart needs recorded quota history and falls back to a bar for "
         + "windows that have none.";
 
+    // The Accounts page (macOS SettingsPanel, built in parallel): nav label and
+    // the info button's accessible name.
+    internal const string AccountsPage = "Accounts";
+    internal const string MoreInfo = "More information";
+
     internal static IReadOnlyList<(string Raw, string Label)> LayoutOptions =>
         [("full", "Layout: Full"), ("classic", "Layout: Classic"), ("chart", "Layout: Chart")];
 
     internal static IReadOnlyList<string> All =>
         [About, TextColorHint, GaugeColoringHint, LiveTraceToggle, LiveTraceHint, RefreshHint,
-            LayoutHint];
+            LayoutHint, AccountsPage, MoreInfo];
 }

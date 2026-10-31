@@ -11,7 +11,13 @@ namespace TokenBar.App;
 /// </summary>
 internal static class ClaudeAccountsCopy
 {
-    internal const string Section = "Claude accounts";
+    /// <summary>The section header on the Accounts page: a product name, so it
+    /// is not translated.</summary>
+    internal const string Header = "Claude";
+
+    /// <summary>The one line kept under the header; everything else is behind
+    /// the info button (<see cref="Info"/>).</summary>
+    internal const string Summary = "Extra accounts join your totals.";
 
     internal const string Add = "Add config dir…";
 
@@ -34,6 +40,11 @@ internal static class ClaudeAccountsCopy
 
     internal const string RemoveMeans =
         "Remove only stops Syrtis reading the folder. The folder and its sign-in stay as they are, nothing is revoked at Anthropic, and the card's history is kept: adding the same folder again continues it.";
+
+    /// <summary>The explanations behind the info button, in reading order.
+    /// Nothing the section used to say inline is dropped: how to add an account,
+    /// what is read, where the token is sent, and what Remove does.</summary>
+    internal static readonly string[] Info = [HowTo, Reads, Transport, Locations, RemoveMeans];
 
     /// <summary>One sentence per fixed reason code the native registries and
     /// <c>tb_validate_claude_config_dir</c> return (<c>ctb.h</c>); an unknown
@@ -60,6 +71,6 @@ internal static class ClaudeAccountsCopy
     ];
 
     internal static IEnumerable<string> All() =>
-        [Section, Add, Remove, Missing, HowTo, Reads, Transport, Locations, RemoveMeans,
+        [Summary, Add, Remove, Missing, .. Info,
             .. ReasonCodes.Select(Reason)];
 }

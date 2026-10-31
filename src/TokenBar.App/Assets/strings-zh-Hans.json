@@ -499,7 +499,6 @@
   "Longest streak": "最长连续天数",
   "Favorite model": "最常用模型",
   "Best day": "单日最高",
-  "Claude accounts": "Claude 账户",
   "Add config dir…": "添加配置目录…",
   "Remove": "移除",
   "Remove {0}": "移除 {0}",
@@ -545,7 +544,6 @@
   "{0} less left": "预计少剩 {0}",
   "{0} more left": "预计多剩 {0}",
   "Drag to reorder": "拖动以调整顺序",
-  "Antigravity accounts": "Antigravity 账户",
   "Antigravity account": "Antigravity 账户",
   "Antigravity account {0}": "Antigravity 账户 {0}",
   "Capture current agy login": "捕获当前 agy 登录",
@@ -600,5 +598,9 @@
   "You also have Cursor usage from tokscale CLI on this PC. Use Syrtis's own sync instead? Choose this only if it's the same Cursor account, or that account's usage will no longer be shown.": "这台电脑上也有 tokscale CLI 的 Cursor 用量。要改用 Syrtis 自己的同步吗？只有在是同一个 Cursor 账号时才选，否则那个账号的用量就不会再显示。",
   "Use Syrtis Sync": "改用 Syrtis 同步",
   "Keep tokscale CLI Data": "保留 tokscale CLI 的数据",
-  "Cursor sync is off, but some downloaded usage couldn't be deleted. Restart Syrtis to retry.": "Cursor 同步已关闭，但有部分已下载的用量无法删除。重新启动 Syrtis 即可再试。"
+  "Cursor sync is off, but some downloaded usage couldn't be deleted. Restart Syrtis to retry.": "Cursor 同步已关闭，但有部分已下载的用量无法删除。重新启动 Syrtis 即可再试。",
+  "Accounts": "账户",
+  "More information": "更多信息",
+  "Extra accounts join your totals.": "额外的账户会并入你的总计。",
+  "Capture a Google account agy signs into.": "捕获 agy 登录的 Google 账户。"
 }

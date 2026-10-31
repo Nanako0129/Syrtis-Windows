@@ -7,7 +7,7 @@ using Grid = Microsoft.UI.Xaml.Controls.Grid;
 
 namespace TokenBar.App;
 
-// General page → "Antigravity accounts" (macOS SettingsPanel
+// Accounts page → "Antigravity" (macOS SettingsPanel
 // antigravityAccountsSection). Every action goes through
 // AntigravityAutoCapture.Shared; this only draws its state and the stored list.
 public sealed partial class SettingsWindow
@@ -119,15 +119,6 @@ public sealed partial class SettingsWindow
         if (!enabled)
         {
             body.Children.Add(Hint(AntigravityAccountsCopy.MergeOnlyUntilRefresh.Localized()));
-        }
-
-        foreach (var hint in new[]
-                 {
-                     AntigravityAccountsCopy.WhenOn, AntigravityAccountsCopy.HowTo, AntigravityAccountsCopy.Reads,
-                     AntigravityAccountsCopy.RemoveMeans, AntigravityAccountsCopy.TwiceFromIde,
-                 })
-        {
-            body.Children.Add(Hint(hint.Localized()));
         }
     }
 

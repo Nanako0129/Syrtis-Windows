@@ -75,6 +75,11 @@ public sealed partial class SettingsWindow : Window
         Content = UsageAttributionPage.Copy.Section.Localized(),
         Tag = "attribution",
     };
+    private readonly NavigationViewItem _accountsItem = new()
+    {
+        Content = SettingsCopy.AccountsPage.Localized(),
+        Tag = "accounts",
+    };
     private readonly NavigationViewItem _generalItem = new() { Content = "General".Localized(), Tag = "general" };
     private readonly NavigationViewItem _aboutItem = new() { Content = "About".Localized(), Tag = "about" };
     private readonly Dictionary<string, StackPanel> _pages = new(StringComparer.Ordinal);
@@ -162,6 +167,7 @@ public sealed partial class SettingsWindow : Window
         _nav.MenuItems.Add(_menuBarItem);
         _nav.MenuItems.Add(_dashboardItem);
         _nav.MenuItems.Add(_attributionItem);
+        _nav.MenuItems.Add(_accountsItem);
         _nav.MenuItems.Add(_generalItem);
         _nav.MenuItems.Add(_aboutItem);
         _nav.SelectedItem = _menuBarItem;
@@ -437,6 +443,7 @@ public sealed partial class SettingsWindow : Window
         _pages["menubar"] = BuildMenuBarPage(store);
         _pages["dashboard"] = BuildDashboardPage(store);
         _pages["attribution"] = BuildAttributionPage(store);
+        _pages["accounts"] = BuildAccountsPage(store);
         _pages["general"] = BuildGeneralPage(store);
         _pages["about"] = BuildAboutPage();
         ShowPage(_selectedTag);
@@ -1090,6 +1097,19 @@ public sealed partial class SettingsWindow : Window
         ShowPage(_selectedTag);
     }
 
+    // ── Accounts page: Claude extra accounts, Antigravity captured accounts ──
+    private StackPanel BuildAccountsPage(SettingsStore store)
+    {
+        var panel = new StackPanel { Spacing = 16, MaxWidth = 380 };
+        panel.Children.Add(InfoSection(
+            ClaudeAccountsCopy.Header, ClaudeAccountsCopy.Summary, ClaudeAccountsCopy.Info,
+            BuildClaudeAccounts(store)));
+        panel.Children.Add(InfoSection(
+            AntigravityAccountsCopy.Header, AntigravityAccountsCopy.Summary,
+            AntigravityAccountsCopy.Info, BuildAntigravityAccounts(store)));
+        return panel;
+    }
+
     // ── General page: Startup, Data refresh ──────────────────────────────
     private StackPanel BuildGeneralPage(SettingsStore store)
     {
@@ -1125,12 +1145,9 @@ public sealed partial class SettingsWindow : Window
         refresh.Children.Add(Hint(SettingsCopy.RefreshHint.Localized()));
         panel.Children.Add(Section("Data refresh".Localized(), refresh));
 
-        panel.Children.Add(Section(ClaudeAccountsCopy.Section.Localized(), BuildClaudeAccounts(store)));
-
-        panel.Children.Add(Section(AntigravityAccountsCopy.Section.Localized(), BuildAntigravityAccounts(store)));
-
-        // macOS puts this between Antigravity accounts and Language; Windows
-        // has Discord between those two, so it goes directly after Antigravity.
+        // Multi-account management lives on the Accounts page. macOS puts the
+        // sync below between Antigravity accounts and Language; Windows has
+        // Discord between those two, so it goes directly after Data refresh.
         panel.Children.Add(Section(CursorSync.Copy.Title.Localized(), BuildCursorSync(store)));
 
         // ── Discord (macOS SettingsPanel :944-1007) ─────────────────────
@@ -1997,6 +2014,51 @@ public sealed partial class SettingsWindow : Window
         return section;
     }
 
+    /// <summary>A Section whose header carries an info button and whose only
+    /// inline explanation is one line; the rest opens from the button. A
+    /// Flyout rather than HoverTip: it opens on click, keyboard and touch too,
+    /// and the privacy facts inside must be reachable by all of them.</summary>
+    private static StackPanel InfoSection(
+        string title, string summary, IEnumerable<string> info, UIElement content)
+    {
+        var details = new StackPanel { Spacing = 8, MaxWidth = 320 };
+        foreach (var text in info)
+        {
+            var line = Ui.Text(text.Localized(), 12);
+            line.TextWrapping = TextWrapping.Wrap;
+            line.TextTrimming = TextTrimming.None;
+            details.Children.Add(line);
+        }
+
+        var button = new Button
+        {
+            Content = new FontIcon { Glyph = "\uE946", FontSize = 12 }, // Info
+            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(4),
+            MinWidth = 0,
+            MinHeight = 0,
+            VerticalAlignment = VerticalAlignment.Center,
+            Flyout = new Flyout { Content = details, Placement = FlyoutPlacementMode.Bottom },
+        };
+        var name = SettingsCopy.MoreInfo.Localized();
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, name);
+        ToolTipService.SetToolTip(button, name);
+
+        var header = new Grid { ColumnSpacing = 4 };
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.Children.Add(Ui.Text(title.ToUpperInvariant(), 10, 0.55, bold: true));
+        Grid.SetColumn(button, 1);
+        header.Children.Add(button);
+
+        var section = new StackPanel { Spacing = 6 };
+        section.Children.Add(header);
+        section.Children.Add(Hint(summary.Localized()));
+        section.Children.Add(content);
+        return section;
+    }
+
     private static StackPanel RadioGroup(
         string group, IEnumerable<(string Raw, string Label)> options,
         string current, Action<string> pick, string? disabledRaw = null)
@@ -2147,7 +2209,7 @@ public sealed partial class SettingsWindow : Window
                 MinWidth = 0,
                 MinHeight = 0,
                 BorderThickness = new Thickness(0),
-                Background = new SolidColorBrush(Colors.Transparent),
+                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
                 CornerRadius = new CornerRadius(PresetCellSize / 2),
             };
             ToolTipService.SetToolTip(preset, $"{name.Localized()} {presetHex}");
