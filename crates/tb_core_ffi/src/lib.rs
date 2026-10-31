@@ -39,9 +39,12 @@ mod model_report;
 mod opencode_integrations;
 mod usage_graph;
 mod usage_tail;
+mod user_scanner_settings;
 #[cfg(target_os = "windows")]
 mod win_safe_storage;
 mod window_usage;
+#[cfg(test)]
+mod opencode_db_acceptance;
 #[cfg(test)]
 mod roots_acceptance;
 
@@ -227,9 +230,11 @@ fn capture_process_context(
     extra_scan_paths: std::collections::BTreeMap<String, Vec<PathBuf>>,
     takeover: &cursor_sync::Takeover,
 ) -> Result<tokscale_core::ResolvedLocalSourceContext, tokscale_core::SourceContextUnavailable> {
+    // The user's OpenCode DB locations (settings.json / `OPENCODE_DB`) enter
+    // the scan here and nowhere else; see `user_scanner_settings`.
     let mut settings = tokscale_core::ScannerSettings {
         extra_scan_paths,
-        ..Default::default()
+        ..user_scanner_settings::load()
     };
     cursor_sync::apply_takeover(&mut settings, takeover);
     tokscale_core::ResolvedLocalSourceContext::capture(user_home_dir(), true, settings)
