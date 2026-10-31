@@ -2039,7 +2039,7 @@ public sealed partial class SettingsWindow : Window
             MinWidth = 0,
             MinHeight = 0,
             VerticalAlignment = VerticalAlignment.Center,
-            Flyout = new Flyout { Content = details, Placement = FlyoutPlacementMode.Bottom },
+            Flyout = new Flyout { Content = details, Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Bottom },
         };
         var name = SettingsCopy.MoreInfo.Localized();
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, name);
