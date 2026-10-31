@@ -1,5 +1,3 @@
-using System.Diagnostics;
-
 namespace TokenBar.App;
 
 /// <summary>
@@ -81,7 +79,8 @@ internal sealed class TrayForceCreateEpisode
 
     public TrayForceCreateEpisode(
         TimeSpan? deadline = null,
-        Func<TimeSpan>? getElapsed = null)
+        Func<TimeSpan>? getElapsed = null,
+        TimeProvider? timeProvider = null)
     {
         _deadline = deadline
             ?? TimeSpan.FromMilliseconds(TrayForceCreatePolicy.EpisodeDeadlineMilliseconds);
@@ -92,10 +91,12 @@ internal sealed class TrayForceCreateEpisode
 
         if (getElapsed is null)
         {
-            // Stopwatch timestamps are monotonic; wall-clock NTP corrections at
-            // logon must not shrink or stretch the tray-creation window.
-            var startTimestamp = Stopwatch.GetTimestamp();
-            _getElapsed = () => Stopwatch.GetElapsedTime(startTimestamp);
+            // Monotonic timestamps (TimeProvider.System is Stopwatch-backed);
+            // wall-clock NTP corrections at logon must not shrink or stretch
+            // the tray-creation window. timeProvider is a test seam only.
+            var clock = timeProvider ?? TimeProvider.System;
+            var startTimestamp = clock.GetTimestamp();
+            _getElapsed = () => clock.GetElapsedTime(startTimestamp);
         }
         else
         {

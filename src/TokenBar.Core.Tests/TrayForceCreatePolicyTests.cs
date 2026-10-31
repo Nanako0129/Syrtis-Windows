@@ -324,4 +324,40 @@ public sealed class TrayForceCreatePolicyTests
         var text = File.ReadAllText(path!);
         Assert.DoesNotContain("Thread.Sleep", text, StringComparison.Ordinal);
     }
+
+    // Wall clock for the whole class of NTP/RTC corrections at logon: a
+    // provider whose UTC time jumps while its monotonic timestamps advance.
+    private sealed class SteppedClock : TimeProvider
+    {
+        public long Ticks;
+        public DateTimeOffset Utc = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        public override long TimestampFrequency => 1_000;
+
+        public override long GetTimestamp() => Ticks;
+
+        public override DateTimeOffset GetUtcNow() => Utc;
+    }
+
+    [Fact]
+    public void Default_episode_clock_is_monotonic_not_wall_time()
+    {
+        var clock = new SteppedClock();
+        var episode = new TrayForceCreateEpisode(
+            deadline: TimeSpan.FromSeconds(10),
+            timeProvider: clock);
+
+        // Wall clock steps back an hour, then forward a day, while 4 s of
+        // monotonic time pass: only the monotonic source may be consulted.
+        clock.Utc = clock.Utc.AddHours(-1);
+        clock.Ticks = 4_000;
+        Assert.Equal(TimeSpan.FromSeconds(4), episode.Elapsed);
+        Assert.False(episode.IsExhausted);
+
+        clock.Utc = clock.Utc.AddDays(1);
+        Assert.Equal(TimeSpan.FromSeconds(4), episode.Elapsed);
+
+        clock.Ticks = 10_000;
+        Assert.True(episode.IsExhausted);
+    }
 }
