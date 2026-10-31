@@ -87,6 +87,10 @@ public static class ClientRegistry
         // 6.3 ΔE76 from antigravity-cli; navy keeps every client >= 22 apart,
         // shared with macOS (ClientRegistry.swift).
         ["dsh"] = ("DeepSeek Harness", "#001259"),
+        // Engine #71: same databases and parser as antigravity-cli, separate id
+        // for attribution. Color shared with macOS (23.7 ΔE76 from the nearest
+        // registered color, floor 22).
+        ["antigravity-extension"] = ("Antigravity Extension", "#0369a1"),
     };
 
     /// <summary>Every registered client id, sorted. Demo fixtures use this
@@ -170,7 +174,8 @@ public static class ClientRegistry
     /// quota views have always folded it that way. Anything reasoning about which
     /// subscription a client's tokens consume has to fold it too, or it will
     /// conclude the CLI owns no subscription at all.</summary>
-    public static string QuotaOwner(string id) => id == "antigravity-cli" ? "antigravity" : id;
+    public static string QuotaOwner(string id) =>
+        id is "antigravity-cli" or "antigravity-extension" ? "antigravity" : id;
 
     /// <summary>The registered client behind an opencode subscription label.
     /// opencode reports which providers it is authed against as display labels
@@ -204,7 +209,7 @@ public static class ClientRegistry
     private static readonly Dictionary<string, (string[] Members, string Label)> TabGroups = new()
     {
         ["grok"] = (["grok", "grok-bot"], "Grok Build & Bot"),
-        ["antigravity"] = (["antigravity", "antigravity-cli"], "Antigravity"),
+        ["antigravity"] = (["antigravity", "antigravity-cli", "antigravity-extension"], "Antigravity"),
     };
 
     /// <summary>Reverse lookup built once: a group member's id -> the tab id

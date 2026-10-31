@@ -10,18 +10,43 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `2d64ec420e696486278e2190d1a1cef663008589` |
-| TokenBar alignment | macOS advances to the same `2d64ec42` in its own DSH registration PR; until that merges, macOS `main` pins `fcb85923` |
-| Engine alignment | `fcb85923e5544488f98001cfa390740d0009b9da` → `2d64ec420e696486278e2190d1a1cef663008589` (engine `main`) |
+| Reviewed pin | `15204f4e870716da9f0b42216ad63d98f1c5a320` |
+| TokenBar alignment | macOS registers the same client (`cc13f64e`) and advances its pin to the same `15204f4e` in its own PR |
+| Engine alignment | `2d64ec420e696486278e2190d1a1cef663008589` → `15204f4e870716da9f0b42216ad63d98f1c5a320` (engine `main`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/2d64ec420e696486278e2190d1a1cef663008589/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/15204f4e870716da9f0b42216ad63d98f1c5a320/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `2d64ec42`, DeepSeek Harness client (engine PR #66)
+## Current pin: `15204f4e`, Antigravity extension client (engine PRs #70, #71, #73)
+
+The reviewed pin is the merge commit of tokscale-core PR #73 on the engine's
+`main`, covering `2d64ec42` → `af1cb144` (#71) → `52815d03` (#70) →
+`15204f4e` (#73). The diff touches `src/clients.rs`, `src/lib.rs`,
+`src/scanner.rs`, `src/source_context.rs`, `src/sessions/antigravity_cli.rs`,
+`src/sessions/codex.rs`, `src/pricing/openrouter.rs` and `UPSTREAM.md`.
+
+- #71 (`af1cb144`): new `ClientId::AntigravityExtension`
+  (`antigravity-extension`, COUNT 42 → 43) reading
+  `~/.gemini/antigravity/conversations/*.db` with the Antigravity CLI parser.
+  Responses are deduplicated by response id across the IDE cache, the CLI and
+  the extension inside the engine (`AntigravityFamilyGate`).
+- #70 (`52815d03`): OpenRouter listing cache rates (pricing only).
+- #73 (`15204f4e`): Codex scan pattern `*.jsonl` becomes `*.jsonl*`, so
+  `.jsonl.zst` archives are scanned.
+- The Windows registry gains `antigravity-extension` in the same PR as this
+  pin: name "Antigravity Extension", color `#0369a1`, the antigravity icon,
+  a member of the Antigravity tab group beside `antigravity` and
+  `antigravity-cli`, and `ClientRegistry.QuotaOwner` folds it to
+  `antigravity` like the CLI (all shared with macOS `cc13f64e`).
+  `Fixtures/engine-client-ids.json` gains the id.
+- Verification is recorded in the PR description; `crates/tb_core_ffi` needed
+  no production change if its lanes pass there.
+
+## Historical: `2d64ec42`, DeepSeek Harness client (engine PR #66)
 
 The reviewed pin is the merge commit of tokscale-core PR #66 (an outside
 contribution) on the engine's `main`, covering `fcb85923` → `2d64ec42`. The

@@ -105,6 +105,7 @@ public class ClientRegistryTests : IDisposable
     [InlineData("senpi", "Senpi", "#2f6f63")]
     [InlineData("omp", "Oh My Pi", "#d946ef")]
     [InlineData("dsh", "DeepSeek Harness", "#001259")]
+    [InlineData("antigravity-extension", "Antigravity Extension", "#0369a1")]
     public void EngineSyncClientsAreRegisteredWithUpstreamStyle(string id, string name, string color)
     {
         Assert.Contains(id, ClientRegistry.AllIds);
@@ -116,6 +117,7 @@ public class ClientRegistryTests : IDisposable
     [InlineData("codex-cli", "codex")]
     [InlineData("gemini-cli", "gemini")]
     [InlineData("antigravity-cli", "antigravity-cli")] // NOT folded — distinct client
+    [InlineData("antigravity-extension", "antigravity-extension")] // NOT folded — distinct client
     [InlineData("amp", "amp")]
     public void CanonicalClientAliasesExplicitOnly(string id, string expected) =>
         Assert.Equal(expected, ClientRegistry.CanonicalClient(id));
@@ -320,10 +322,18 @@ public class ClientRegistryTests : IDisposable
         Assert.Equal(["claude", "antigravity", "copilot"], tabs);
     }
 
+    [Theory]
+    [InlineData("antigravity-cli", "antigravity")]
+    [InlineData("antigravity-extension", "antigravity")]
+    [InlineData("antigravity", "antigravity")]
+    [InlineData("claude", "claude")]
+    public void QuotaOwnerFoldsTheAntigravityFamilyToTheIdeSubscription(string id, string expected) =>
+        Assert.Equal(expected, ClientRegistry.QuotaOwner(id));
+
     [Fact]
     public void TabSliceAndLabelIdentifyTheAntigravityGroup()
     {
-        Assert.Equal(["antigravity", "antigravity-cli"], ClientRegistry.TabSlice("antigravity"));
+        Assert.Equal(["antigravity", "antigravity-cli", "antigravity-extension"], ClientRegistry.TabSlice("antigravity"));
         Assert.Equal(["claude"], ClientRegistry.TabSlice("claude"));
         Assert.Equal("Antigravity", ClientRegistry.TabLabel("antigravity"));
         Assert.Equal("Claude", ClientRegistry.TabLabel("claude")); // ShortName fallback
