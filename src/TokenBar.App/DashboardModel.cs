@@ -946,12 +946,13 @@ public sealed class DashboardModel
 
         if (Current is { } current)
         {
-            // Keep same-query topology as a visual baseline, but revoke
-            // the old model identity and every cost-bearing surface.
+            // Keep same-query topology and the previous Models as a visual
+            // baseline, but revoke cost authority (SameQueryRevoke).
+            var (models, authoritative) = SameQueryRevoke.Apply(current.Models);
             Current = current with
             {
-                Models = null,
-                CostAuthoritative = false,
+                Models = models,
+                CostAuthoritative = authoritative,
                 FetchedAt = DateTimeOffset.Now,
             };
             _lastSnapshot = Current;

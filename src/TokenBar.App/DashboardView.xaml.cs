@@ -3019,10 +3019,11 @@ public sealed partial class DashboardView : UserControl
     {
         var report = snapshot.Models;
         var confirmed = UsageAttribution.Confirmed(AppSettings.Store).Records;
-        // Models is cleared to null on every query (year) change until the new
-        // report lands (DashboardModel.ApplyGraphRequestStart), so whenever it
-        // is non-null it belongs to the currently selected _model.Year — unlike
-        // macOS there is no separate "reportYear" to carry alongside it.
+        // The whole snapshot is dropped on a query (year) change
+        // (DashboardModel.ApplyGraphRequestStart) and a same-query generation
+        // keeps its previous Models, so whenever Models is non-null it belongs
+        // to the currently selected _model.Year — unlike macOS there is no
+        // separate "reportYear" to carry alongside it.
         var rows = report is null
             ? null
             : UsageAttributionBreakdown.Rows(report.Entries, _selectedClients, confirmed);
