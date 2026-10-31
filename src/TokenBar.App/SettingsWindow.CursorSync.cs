@@ -34,6 +34,12 @@ public sealed partial class SettingsWindow
             return;
         }
 
+        // Rebuilding removes the focused control and focus falls to the next
+        // focusable one (the Discord toggle). Remember which control had it
+        // and hand it to its replacement (issue #243).
+        var focusedKey = body.XamlRoot is { } root
+            && Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(root) is FrameworkElement { Tag: string key }
+            ? key : null;
         body.Children.Clear();
         var on = CursorSync.ToggleShowsOn(CursorSync.Enabled(store), CursorSync.NoticeAcknowledged(store));
         var toggle = new ToggleSwitch { IsOn = on, OnContent = null, OffContent = null };
@@ -65,30 +71,56 @@ public sealed partial class SettingsWindow
         if (state == "cliPresent" && !CursorSync.TakeoverConfirmed(store))
         {
             body.Children.Add(Hint(CursorSync.Copy.CliQuestion.Localized()));
-            body.Children.Add(CursorSyncButton(CursorSync.Copy.UseSyrtis, enabled: true,
+            body.Children.Add(CursorSyncButton("useSyrtis", CursorSync.Copy.UseSyrtis,
                 () => cursor.SetTakeoverConfirmed(true)));
         }
         else if (CursorSync.TakeoverConfirmed(store))
         {
             // Undo for the D6 answer; the question returns on the next sync.
-            body.Children.Add(CursorSyncButton(CursorSync.Copy.KeepCli, enabled: true,
+            body.Children.Add(CursorSyncButton("keepCli", CursorSync.Copy.KeepCli,
                 () => cursor.SetTakeoverConfirmed(false)));
         }
 
-        var syncing = cursor.Syncing;
-        body.Children.Add(CursorSyncButton(
-            syncing ? CursorSync.Copy.Syncing : CursorSync.Copy.SyncNow, enabled: !syncing,
+        // Stays enabled while syncing: a disabled button cannot hold keyboard
+        // focus, and RunSync already ignores a call during a running sync.
+        body.Children.Add(CursorSyncButton("syncNow",
+            cursor.Syncing ? CursorSync.Copy.Syncing : CursorSync.Copy.SyncNow,
             () => _ = cursor.RunSync(userInitiated: true)));
+        RestoreFocus(body, focusedKey);
     }
 
-    private static Button CursorSyncButton(string text, bool enabled, Action click)
+    private static void RestoreFocus(StackPanel body, string? key)
+    {
+        if (key is null)
+        {
+            return;
+        }
+
+        foreach (var child in body.Children)
+        {
+            if (child is Button { Tag: string k } b && k == key)
+            {
+                // The replacement is not in a layout pass yet; focus it once loaded.
+                RoutedEventHandler? focus = null;
+                focus = (_, _) =>
+                {
+                    b.Loaded -= focus;
+                    b.Focus(FocusState.Programmatic);
+                };
+                b.Loaded += focus;
+                return;
+            }
+        }
+    }
+
+    private static Button CursorSyncButton(string key, string text, Action click)
     {
         var button = new Button
         {
             Content = text.Localized(),
             FontSize = 12,
             Padding = new Thickness(8, 3, 8, 4),
-            IsEnabled = enabled,
+            Tag = key,
         };
         button.Click += (_, _) => click();
         return button;
