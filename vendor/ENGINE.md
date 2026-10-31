@@ -11,7 +11,7 @@ app consumer advances its reviewed pin.
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
 | Reviewed pin | `15204f4e870716da9f0b42216ad63d98f1c5a320` |
-| TokenBar alignment | macOS registers the same client (`cc13f64e`) and advances its pin to the same `15204f4e` in its own PR |
+| TokenBar alignment | macOS registered the same client in `cc13f64e` and advanced its pin to the same `15204f4e` in Nanako0129/syrtis PR #529 (merge `7f26e712`) |
 | Engine alignment | `2d64ec420e696486278e2190d1a1cef663008589` → `15204f4e870716da9f0b42216ad63d98f1c5a320` (engine `main`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
@@ -43,8 +43,12 @@ The reviewed pin is the merge commit of tokscale-core PR #73 on the engine's
   `antigravity-cli`, and `ClientRegistry.QuotaOwner` folds it to
   `antigravity` like the CLI (all shared with macOS `cc13f64e`).
   `Fixtures/engine-client-ids.json` gains the id.
-- Verification is recorded in the PR description; `crates/tb_core_ffi` needed
-  no production change if its lanes pass there.
+- Measured on this advance: `crates/tb_core_ffi` needed no production change.
+  On 188, `cargo test -p tb_core_ffi --locked` passes (772 passed, 7 ignored,
+  including `engine_client_ids_match_the_fixture`) and `dotnet test` passes
+  (2238). `cargo clippy -D warnings` fails with the same 27 lib / 30 test
+  errors on `d189b82` (before this pin), in files this advance does not touch.
+  Not compared against a real Windows corpus.
 
 ## Historical: `2d64ec42`, DeepSeek Harness client (engine PR #66)
 
