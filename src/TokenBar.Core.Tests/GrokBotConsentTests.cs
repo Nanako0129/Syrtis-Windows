@@ -325,7 +325,7 @@ public class GrokBotConsentTests : IDisposable
             [GrokBotConsent.Card.None, GrokBotConsent.Card.Ask],
             shown.Select(agent => GrokBotConsent.CardFor(agent, null)));
         Assert.Null(OverviewScope.LimitsClients(null));
-        Assert.Equal(["antigravity", "antigravity-cli"], OverviewScope.LimitsClients("antigravity-cli")!);
+        Assert.Equal(["antigravity", "antigravity-cli", "antigravity-extension"], OverviewScope.LimitsClients("antigravity-cli")!);
     }
 
     public static TheoryData<string> CopyStrings() =>

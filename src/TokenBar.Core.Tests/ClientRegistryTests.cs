@@ -389,12 +389,12 @@ public class ClientRegistryTests : IDisposable
         var fromMember = ClientRegistry.HiddenTabClients(
             new HashSet<string> { "antigravity-cli" });
         Assert.Equal(
-            new HashSet<string> { "antigravity", "antigravity-cli" }, fromMember);
+            new HashSet<string> { "antigravity", "antigravity-cli", "antigravity-extension" }, fromMember);
 
         // Fresh: the tab id was stored directly. It must still expand to
         // cover the CLI's usage rows.
         var fromTab = ClientRegistry.HiddenTabClients(new HashSet<string> { "antigravity" });
-        Assert.Equal(new HashSet<string> { "antigravity", "antigravity-cli" }, fromTab);
+        Assert.Equal(new HashSet<string> { "antigravity", "antigravity-cli", "antigravity-extension" }, fromTab);
 
         // An ungrouped id passes through unchanged in both directions.
         Assert.Equal(new HashSet<string> { "claude" }, ClientRegistry.HiddenTabClients(
@@ -487,7 +487,7 @@ public class ClientRegistryTests : IDisposable
             activeTab: "antigravity-cli"); // legacy stored id still resolves
 
         Assert.Equal("antigravity", selection.ActiveTab);
-        Assert.Equal(["antigravity", "antigravity-cli"], selection.SelectedClients);
+        Assert.Equal(["antigravity", "antigravity-cli", "antigravity-extension"], selection.SelectedClients);
     }
 
     [Fact]
