@@ -31,6 +31,7 @@ Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot "lib\MuiGuard.ps1")
 . (Join-Path $PSScriptRoot "lib\RuntimeConfig.ps1")
+. (Join-Path $PSScriptRoot "lib\NativePdbGate.ps1")
 
 $ExpectedSemanticVersion = "1.3.0"
 $ExpectedAssemblyVersion = "1.3.0.0"
@@ -266,6 +267,8 @@ try {
         throw "Unable to resolve a sanitized 40-character git SHA."
     }
 
+    # Native PDBs older than this are not from this build (see NativePdbGate.ps1).
+    $buildStartedUtc = [datetime]::UtcNow
     Invoke-Captured -Command "cargo" -Arguments @(
         "build", "--release", "--locked", "--target", $rustTarget
     ) -FailureMessage "Cargo locked build failed"
@@ -653,19 +656,11 @@ foreach ($name in $capturedNames) {
 # hash-matched a newer tb_core_ffi.dll — an archive that cannot symbolicate the
 # binary it claims to describe.
 #
-# This is a timestamp heuristic, NOT an identity check. Proving a PDB belongs to
-# a DLL means comparing the CodeView RSDS GUID and age in the DLL's debug
-# directory against the PDB's own signature, and nothing here reads either. It
-# therefore fails closed against the named case above and stays open wherever
-# timestamps pass while the PDB is stale: an incremental cargo run that rewrites
-# neither file, a CI cache or artifact restore that resets write times, and
-# filesystem granularity coarse enough to collapse distinct writes. The
-# candidate loop also stops at the first acceptance, so a plausible-looking
-# top-level PDB wins before deps/ is examined.
-#
-# Issue #34 records a fix cheaper than PE parsing: gate on "written after this
-# build started", which the script already knows and which closes every case
-# above.
+# Gate: the PDB must have been written after this script's build started
+# (Select-NativePdbWrittenAfter, issue #34). That is not an identity check
+# (CodeView RSDS GUID/age); it rejects stale target/ PDBs, incremental
+# no-rewrite runs and cache restores. After such a rejection, rebuild with
+# `cargo clean -p tb_core_ffi` and rerun.
 $nativeReleaseDir = Join-Path $repoRoot ("target\{0}\release" -f $rustTarget)
 if (-not (Test-Path -LiteralPath $nativeReleaseDir -PathType Container)) {
     throw "Native release directory missing for symbols capture: target/$rustTarget/release"
@@ -676,43 +671,22 @@ $nativePdbCandidates = @(
     (Join-Path $nativeReleaseDir "tb_core_ffi.pdb"),
     (Join-Path $nativeReleaseDir "deps\tb_core_ffi.pdb")
 )
-# Tolerance for filesystem write-time jitter between the linker emitting the PDB
-# and the DLL. Not a matching contract — see the heuristic note above.
-$nativePdbMaxOlderThanDllSeconds = 2
-$freshNativePdbPath = $null
-$freshNativePdbMeta = $null
-foreach ($candidate in $nativePdbCandidates) {
-    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
-        continue
-    }
-    $pdbItem = Get-Item -LiteralPath $candidate
-    if ($pdbItem.Length -le 0) {
-        continue
-    }
-    $olderBySeconds = ($nativeDllItem.LastWriteTimeUtc - $pdbItem.LastWriteTimeUtc).TotalSeconds
-    if ($olderBySeconds -gt $nativePdbMaxOlderThanDllSeconds) {
-        Write-Output ("Skipping stale native PDB older than verified DLL by {0:N1}s: {1}" -f $olderBySeconds, $candidate)
-        continue
-    }
-    $freshNativePdbPath = $pdbItem.FullName
-    $pdbLocation = if ($candidate -like "*\deps\tb_core_ffi.pdb" -or $candidate -like "*/deps/tb_core_ffi.pdb") {
-        "target/$rustTarget/release/deps/tb_core_ffi.pdb"
-    } else {
-        "target/$rustTarget/release/tb_core_ffi.pdb"
-    }
-    $freshNativePdbMeta = [ordered]@{
-        relative = $pdbLocation
-        bytes = [int64]$pdbItem.Length
-        dllLastWriteTimeUtc = $nativeDllItem.LastWriteTimeUtc.ToString("o")
-        pdbLastWriteTimeUtc = $pdbItem.LastWriteTimeUtc.ToString("o")
-        pdbOlderThanDllSeconds = [math]::Round($olderBySeconds, 3)
-        maxOlderThanDllSeconds = $nativePdbMaxOlderThanDllSeconds
-    }
-    break
+$freshNativePdbItem = Select-NativePdbWrittenAfter -Candidates $nativePdbCandidates -BuildStartedUtc $buildStartedUtc
+if ($null -eq $freshNativePdbItem) {
+    throw ("No tb_core_ffi.pdb written after this build started ({0:o}) under target/{1}/release. A stale or unchanged target PDB is refused; run 'cargo clean -p tb_core_ffi' and rebuild." -f $buildStartedUtc, $rustTarget)
 }
-if ($null -eq $freshNativePdbPath) {
-    $msg = "No fresh tb_core_ffi.pdb for the verified native DLL under target/{0}/release. PDB must exist next to the cargo-built DLL (or deps/) and must not be older than the DLL by more than {1}s (refuse stale ignored target PDBs)." -f $rustTarget, $nativePdbMaxOlderThanDllSeconds
-    throw $msg
+$freshNativePdbPath = $freshNativePdbItem.FullName
+$pdbLocation = if ($freshNativePdbPath -like "*\deps\tb_core_ffi.pdb" -or $freshNativePdbPath -like "*/deps/tb_core_ffi.pdb") {
+    "target/$rustTarget/release/deps/tb_core_ffi.pdb"
+} else {
+    "target/$rustTarget/release/tb_core_ffi.pdb"
+}
+$freshNativePdbMeta = [ordered]@{
+    relative = $pdbLocation
+    bytes = [int64]$freshNativePdbItem.Length
+    dllLastWriteTimeUtc = $nativeDllItem.LastWriteTimeUtc.ToString("o")
+    pdbLastWriteTimeUtc = $freshNativePdbItem.LastWriteTimeUtc.ToString("o")
+    buildStartedUtc = $buildStartedUtc.ToString("o")
 }
 Copy-SymbolFile -SourcePath $freshNativePdbPath -CopiedNames $copiedSymbolNames
 
