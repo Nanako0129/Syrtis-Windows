@@ -64,6 +64,11 @@ internal static class AntigravityAccountsCopy
     /// automatic capture is off, so <see cref="InfoFor"/> adds it then.</summary>
     internal static readonly string[] Info = [WhenOn, HowTo, Reads, RemoveMeans, TwiceFromIde];
 
+    /// <summary>The paragraphs that explain the automatic-capture toggle. The
+    /// info flyout puts the toggle's own label (<see cref="Toggle"/>) above
+    /// them, since they no longer sit next to it.</summary>
+    internal static readonly string[] ToggleParagraphs = [MergeOnlyUntilRefresh, WhenOn];
+
     /// <summary>What the info button shows: <see cref="Info"/>, led by the
     /// off-only note while automatic capture is off (as on macOS).</summary>
     internal static IEnumerable<string> InfoFor(bool automaticCaptureOn) =>

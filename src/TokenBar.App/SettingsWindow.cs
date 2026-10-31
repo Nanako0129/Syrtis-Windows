@@ -1102,11 +1102,12 @@ public sealed partial class SettingsWindow : Window
     {
         var panel = new StackPanel { Spacing = 16, MaxWidth = 380 };
         panel.Children.Add(InfoSection(
-            ClaudeAccountsCopy.Header, ClaudeAccountsCopy.Summary, () => ClaudeAccountsCopy.Info,
+            ClaudeAccountsCopy.Header, ClaudeAccountsCopy.Summary, () => ClaudeAccountsCopy.Info, null,
             BuildClaudeAccounts(store)));
         panel.Children.Add(InfoSection(
             AntigravityAccountsCopy.Header, AntigravityAccountsCopy.Summary,
             () => AntigravityAccountsCopy.InfoFor(AntigravityAutoCapture.Shared is not { IsEnabled: false }),
+            (AntigravityAccountsCopy.Toggle, AntigravityAccountsCopy.ToggleParagraphs),
             BuildAntigravityAccounts(store)));
         return panel;
     }
@@ -2020,7 +2021,8 @@ public sealed partial class SettingsWindow : Window
     /// Flyout rather than HoverTip: it opens on click, keyboard and touch too,
     /// and the privacy facts inside must be reachable by all of them.</summary>
     private static StackPanel InfoSection(
-        string title, string summary, Func<IEnumerable<string>> info, UIElement content)
+        string title, string summary, Func<IEnumerable<string>> info,
+        (string Heading, string[] Paragraphs)? group, UIElement content)
     {
         // Built on each open: the list can depend on live state (the Antigravity
         // note that applies only while automatic capture is off).
@@ -2029,8 +2031,19 @@ public sealed partial class SettingsWindow : Window
         flyout.Opening += (_, _) =>
         {
             details.Children.Clear();
+            var headed = false;
             foreach (var text in info())
             {
+                // The heading names the control the grouped paragraphs explain.
+                if (!headed && group is { } g && g.Paragraphs.Contains(text))
+                {
+                    headed = true;
+                    var heading = Ui.Text(g.Heading.Localized(), 12, bold: true);
+                    heading.TextWrapping = TextWrapping.Wrap;
+                    heading.TextTrimming = TextTrimming.None;
+                    details.Children.Add(heading);
+                }
+
                 var line = Ui.Text(text.Localized(), 12);
                 line.TextWrapping = TextWrapping.Wrap;
                 line.TextTrimming = TextTrimming.None;
@@ -2049,7 +2062,7 @@ public sealed partial class SettingsWindow : Window
             VerticalAlignment = VerticalAlignment.Center,
             Flyout = flyout,
         };
-        var name = SettingsCopy.MoreInfo.Localized();
+        var name = SettingsCopy.MoreInfo.Localized(title);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, name);
         ToolTipService.SetToolTip(button, name);
 

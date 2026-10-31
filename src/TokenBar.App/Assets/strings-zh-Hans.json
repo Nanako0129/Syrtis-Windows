@@ -600,7 +600,7 @@
   "Keep tokscale CLI Data": "保留 tokscale CLI 的数据",
   "Cursor sync is off, but some downloaded usage couldn't be deleted. Restart Syrtis to retry.": "Cursor 同步已关闭，但有部分已下载的用量无法删除。重新启动 Syrtis 即可再试。",
   "Accounts": "账户",
-  "More details": "详细说明",
+  "More details: {0}": "详细说明：{0}",
   "Extra accounts join your totals.": "额外的账户会并入你的总计。",
   "Capture a Google account agy signs into.": "捕获 agy 登录的 Google 账户。"
 }

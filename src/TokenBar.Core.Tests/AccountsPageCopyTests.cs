@@ -72,6 +72,22 @@ public class AccountsPageCopyTests
         Assert.Contains("revoke access", antigravity);
     }
 
+    // The flyout heads the toggle's paragraphs with the toggle's own label, so
+    // both paragraphs must be ones the flyout can show, and the label must be
+    // the toggle's (translated through the existing table).
+    [Fact]
+    public void ToggleParagraphsAreInTheInfoAndHeadedByTheToggleLabel()
+    {
+        Assert.All(AntigravityAccountsCopy.ToggleParagraphs,
+            p => Assert.Contains(p, AntigravityAccountsCopy.InfoFor(false)));
+        Assert.Contains(AntigravityAccountsCopy.WhenOn, AntigravityAccountsCopy.InfoFor(true));
+        Assert.Contains(AntigravityAccountsCopy.Toggle, AntigravityAccountsCopy.All());
+        // Adjacent, so one heading covers them.
+        var info = AntigravityAccountsCopy.InfoFor(false).ToList();
+        var at = info.IndexOf(AntigravityAccountsCopy.ToggleParagraphs[0]);
+        Assert.Equal(AntigravityAccountsCopy.ToggleParagraphs, info.Skip(at).Take(2));
+    }
+
     // The translation tests walk All(); the summaries and info must be in it.
     [Fact]
     public void TranslationCheckCoversTheNewStrings()
