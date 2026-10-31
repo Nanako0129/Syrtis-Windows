@@ -168,14 +168,21 @@ public static class ClientRegistry
     };
 
     /// <summary>The client whose quota snapshot a client's usage is served by,
-    /// where the two identities differ. <c>antigravity-cli</c> is a registered
-    /// client in its own right — process identity, tab, icon and preferences all
-    /// stay distinct — but it draws on the <c>antigravity</c> subscription and the
-    /// quota views have always folded it that way. Anything reasoning about which
+    /// where the two identities differ. <c>antigravity-cli</c> and
+    /// <c>antigravity-extension</c> are registered clients in their own right —
+    /// process identity, tab, icon and preferences all stay distinct — but both
+    /// draw on the <c>antigravity</c> subscription and the quota views fold them
+    /// that way. Anything reasoning about which
     /// subscription a client's tokens consume has to fold it too, or it will
     /// conclude the CLI owns no subscription at all.</summary>
     public static string QuotaOwner(string id) =>
-        id is "antigravity-cli" or "antigravity-extension" ? "antigravity" : id;
+        AntigravityQuotaMembers.Contains(id) ? "antigravity" : id;
+
+    /// <summary>The usage-carrying clients that spend the <c>antigravity</c>
+    /// subscription (macOS <c>antigravityQuotaMembers</c>). Not derived from
+    /// <see cref="TabGroups"/>: grok-bot is grouped but has its own quota.</summary>
+    private static readonly HashSet<string> AntigravityQuotaMembers =
+        new(["antigravity-cli", "antigravity-extension"], StringComparer.Ordinal);
 
     /// <summary>The registered client behind an opencode subscription label.
     /// opencode reports which providers it is authed against as display labels
@@ -202,9 +209,9 @@ public static class ClientRegistry
     // MARK: - Grouped tabs
 
     /// <summary>Tabs that group more than one client id under a single top
-    /// tab: one member carries local session usage (antigravity-cli), the
-    /// other only a cloud quota with no usage of its own (antigravity, the
-    /// IDE client; grok-bot, the Grok Bot weekly quota). Ported from macOS
+    /// tab: the Antigravity tab has two members carrying local session usage
+    /// (antigravity-cli, antigravity-extension) beside the quota-only IDE
+    /// client (antigravity); grok-bot is the Grok Bot weekly quota. Ported from macOS
     /// ClientRegistry.swift's <c>tabGroups</c> (:214-226 at 451b4329).</summary>
     private static readonly Dictionary<string, (string[] Members, string Label)> TabGroups = new()
     {
@@ -223,9 +230,9 @@ public static class ClientRegistry
     private static string FoldToTabId(string id) =>
         MemberToTabId.TryGetValue(id, out var tab) ? tab : id;
 
-    /// <summary>Client ids behind a top tab. "antigravity": the CLI carries
-    /// the usage, the IDE client carries the quota — shown as two sections
-    /// under one tab rather than two tabs.</summary>
+    /// <summary>Client ids behind a top tab. "antigravity": the CLI and the
+    /// extension carry the usage, the IDE client carries the quota — shown as
+    /// sections under one tab rather than three tabs.</summary>
     public static IReadOnlyList<string> TabSlice(string id) =>
         TabGroups.TryGetValue(id, out var group) ? group.Members : [id];
 
@@ -261,8 +268,8 @@ public static class ClientRegistry
         TabSlice(id).Count > 1 ? TabLabel(id) : Style(id).DisplayName;
 
     /// <summary>Expand a set so group members follow their tab: naming the
-    /// "antigravity" tab also carries the quota-only "antigravity-cli" row
-    /// along (which has no tab of its own). Explicit member entries pass
+    /// "antigravity" tab also carries the "antigravity-cli" and
+    /// "antigravity-extension" rows along (which have no tab of their own). Explicit member entries pass
     /// through unchanged, so an independent limits-toggle on a member row
     /// keeps working.</summary>
     public static IReadOnlySet<string> WithGroupMembers(IReadOnlySet<string> ids)
