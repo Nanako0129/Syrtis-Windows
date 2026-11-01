@@ -246,3 +246,39 @@ fn a_relative_opencode_db_resolves_against_home_without_xdg_data_home() {
     std::env::set_var("OPENCODE_DB", Path::new("sub").join("opencode.db"));
     assert_eq!(entries_seeing_the_db(), EVERY_ENTRY);
 }
+
+/// The copied XDG rule, end to end against the engine: an empty value falls
+/// back to the home default, and a blank one is a relative directory name
+/// (joined onto the working directory), exactly as the engine resolves them.
+#[test]
+fn an_empty_xdg_data_home_falls_back_to_home() {
+    let Some(root) = child_root() else {
+        return run_in_child_at(
+            "opencode_db_acceptance::an_empty_xdg_data_home_falls_back_to_home",
+            "oc-xdg-empty",
+        );
+    };
+    std::env::set_var("XDG_DATA_HOME", "");
+    write_db_in(&root.join(".local").join("share").join("opencode").join("sub"));
+    std::env::set_var("OPENCODE_DB", Path::new("sub").join("opencode.db"));
+    assert_eq!(entries_seeing_the_db(), EVERY_ENTRY);
+}
+
+// Not on Windows: a directory named " " cannot be created there, so the
+// fixture cannot exist; the unit test `the_data_dir_follows_the_engines_xdg_rule`
+// covers the blank case there.
+#[cfg(not(windows))]
+#[test]
+fn a_blank_xdg_data_home_is_a_relative_directory() {
+    let Some(root) = child_root() else {
+        return run_in_child_at(
+            "opencode_db_acceptance::a_blank_xdg_data_home_is_a_relative_directory",
+            "oc-xdg-blank",
+        );
+    };
+    std::env::set_current_dir(&root).unwrap();
+    std::env::set_var("XDG_DATA_HOME", " ");
+    write_db_in(&root.join(" ").join("opencode").join("sub"));
+    std::env::set_var("OPENCODE_DB", Path::new("sub").join("opencode.db"));
+    assert_eq!(entries_seeing_the_db(), EVERY_ENTRY);
+}

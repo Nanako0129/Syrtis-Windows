@@ -32,7 +32,9 @@
 //! own choice to ignore: opencode would resolve it to its data directory,
 //! which holds no database, so it is reported as `emptyEnv` and not handed
 //! over. The `settings.json` entries are tokscale's, not opencode's: they are
-//! trimmed, unquoted and `%VAR%`-expanded, and must be absolute.
+//! trimmed, unquoted and `%VAR%`-expanded, and must be absolute. Windows
+//! drive-relative forms (`D:opencode.db`) are not resolved and end up
+//! `notAbsolute`; see [`data_dir_from`] for the other limits.
 //!
 //! The engine drops a configured path silently when its file name is not
 //! `opencode.db` / `opencode-<channel>.db` or the file is absent. Every
@@ -128,11 +130,19 @@ fn opencode_data_dir() -> Option<PathBuf> {
 
 /// The engine's rule for `PathRoot::XdgData` under a captured context
 /// (`resolve_client_root`, which is crate-private there and so cannot be
-/// asked): an unset or exactly empty `XDG_DATA_HOME` falls back to
-/// `<home>/.local/share`, any other value is taken as is and made absolute
-/// against the capture-time working directory.
+/// asked): an unset, exactly empty or non-Unicode `XDG_DATA_HOME` falls back
+/// to `<home>/.local/share`; any other value is taken as is and, when
+/// relative, joined onto the working directory read when the paths are read
+/// (not at the engine's capture, which follows immediately).
+///
+/// Limits, not handled: a Windows drive-relative form (`C:data` in
+/// `XDG_DATA_HOME`, `D:opencode.db` in `OPENCODE_DB`) is not resolved like
+/// Node's `path.resolve` or the engine's `fully_qualified`, and ends up
+/// `notAbsolute`; a relative HOME is not qualified against the working
+/// directory; `..` is not normalized (the engine's canonical dedup still
+/// collapses duplicates, but `handedToEngine` may over-count).
 fn data_dir_from(home: &Path, xdg: Option<std::ffi::OsString>, cwd: &Path) -> Option<PathBuf> {
-    let root = match xdg.filter(|v| !v.is_empty()) {
+    let root = match xdg.filter(|v| !v.is_empty() && v.to_str().is_some()) {
         Some(v) if Path::new(&v).is_absolute() => PathBuf::from(v),
         Some(v) => cwd.join(v),
         None => home.join(".local").join("share"),
@@ -525,5 +535,7 @@ mod tests {
         // only an exactly empty value counts as unset.
         assert_eq!(from(Some("rel".into())), cwd.join("rel").join("opencode"));
         assert_eq!(from(Some(" ".into())), cwd.join(" ").join("opencode"));
+        // The engine falls back to the default for a non-Unicode value.
+        assert_eq!(from(Some(non_unicode_path(&xdg))), default);
     }
 }
