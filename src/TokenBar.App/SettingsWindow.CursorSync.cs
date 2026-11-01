@@ -25,13 +25,10 @@ public sealed partial class SettingsWindow
     private Button? _csSyncNow;
     private bool _csAnswerConfirms;
     private bool _csUpdating;
-    private bool _csWindowActive;
 
     private StackPanel BuildCursorSync(SettingsStore store)
     {
         var body = new StackPanel { Spacing = 6 };
-        Activated += (_, a) =>
-            _csWindowActive = a.WindowActivationState != WindowActivationState.Deactivated;
         if (CursorSyncController.Shared is not { } cursor)
         {
             return body; // nothing to draw or act on without the controller
@@ -169,12 +166,14 @@ public sealed partial class SettingsWindow
 
     // Focus must never be on a control that is about to collapse: WinUI would
     // move it out of the section. Hand it over first, keeping its FocusState.
-    // Only while Settings is shown and active: the window is hidden, never
-    // closed, so background syncs update it unseen and must not touch layout
-    // or focus there.
+    // Only while the Settings window is visible, active or not: moving focus
+    // inside an inactive visible window is harmless and keeps it in the section
+    // for when the user returns. The window is hidden, never closed, so when it
+    // is hidden a background sync just collapses the control and must not touch
+    // layout or focus.
     private void MoveFocusBeforeHiding(Control leaving, bool staysVisible, Control target)
     {
-        if (!staysVisible && _csWindowActive && AppWindow.IsVisible
+        if (!staysVisible && AppWindow.IsVisible
             && leaving.FocusState != FocusState.Unfocused)
         {
             target.Visibility = Visibility.Visible;
