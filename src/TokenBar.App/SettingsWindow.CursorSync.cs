@@ -1,7 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
 using TokenBar.Core;
 
 namespace TokenBar.App;
@@ -15,7 +15,6 @@ namespace TokenBar.App;
 // moved focus to the next focusable one (the Discord toggle below the section).
 public sealed partial class SettingsWindow
 {
-    private StackPanel? _cursorSyncBody;
     private bool _cursorSyncSubscribed;
 
     private ToggleSwitch? _csToggle;
@@ -23,16 +22,18 @@ public sealed partial class SettingsWindow
     private TextBlock? _csStatusHint;
     private TextBlock? _csStatusWarning;
     private TextBlock? _csCliQuestion;
-    private Button? _csUseSyrtis;
-    private Button? _csKeepCli;
+    private Button? _csAnswer;
     private Button? _csSyncNow;
+    private bool _csAnswerConfirms;
     private bool _csUpdating;
-    private bool _csSyncPressIsRepeat;
 
     private StackPanel BuildCursorSync(SettingsStore store)
     {
-        _cursorSyncBody = new StackPanel { Spacing = 6 };
-        var cursor = CursorSyncController.Shared;
+        var body = new StackPanel { Spacing = 6 };
+        if (CursorSyncController.Shared is not { } cursor)
+        {
+            return body; // nothing to draw or act on without the controller
+        }
 
         var toggle = new ToggleSwitch { OnContent = null, OffContent = null };
         toggle.Toggled += (_, _) =>
@@ -42,49 +43,60 @@ public sealed partial class SettingsWindow
                 return; // programmatic IsOn from UpdateCursorSync, not the user
             }
 
-            cursor?.SetEnabled(toggle.IsOn);
+            cursor.SetEnabled(toggle.IsOn);
             UpdateCursorSync(store);
         };
         AutomationProperties.SetName(toggle, CursorSync.Copy.Toggle.Localized());
         _csToggle = toggle;
-        _cursorSyncBody.Children.Add(ToggleRow(CursorSync.Copy.Toggle.Localized(), toggle));
-        _cursorSyncBody.Children.Add(Hint(CursorSync.Copy.Privacy.Localized()));
+        body.Children.Add(ToggleRow(CursorSync.Copy.Toggle.Localized(), toggle));
+        body.Children.Add(Hint(CursorSync.Copy.Privacy.Localized()));
 
         _csCleanupWarning = WarningLine(CursorSync.Copy.CleanupFailed.Localized());
         _csStatusHint = Hint("");
         _csStatusWarning = WarningLine("");
+        // The result of a sync (Last synced, warnings) is announced when it changes.
+        AutomationProperties.SetLiveSetting(_csStatusHint, AutomationLiveSetting.Polite);
+        AutomationProperties.SetLiveSetting(_csStatusWarning, AutomationLiveSetting.Polite);
         _csCliQuestion = Hint(CursorSync.Copy.CliQuestion.Localized());
-        _csUseSyrtis = CursorSyncButton(CursorSync.Copy.UseSyrtis, () => cursor?.SetTakeoverConfirmed(true));
-        _csKeepCli = CursorSyncButton(CursorSync.Copy.KeepCli, () => cursor?.SetTakeoverConfirmed(false));
-        _csSyncNow = CursorSyncButton(CursorSync.Copy.SyncNow, () =>
+
+        // One button for the takeover answer: its Content and action switch
+        // between "Use Syrtis" and "Keep CLI", so the control that has focus
+        // when the answer lands is never replaced or hidden.
+        _csAnswer = new Button
         {
-            // A held Enter repeats Click. A press that began before this one
-            // (a key-repeat, possibly arriving after the sync it started has
-            // ended) must not start another sync; only a fresh press does.
-            var repeat = _csSyncPressIsRepeat;
-            _csSyncPressIsRepeat = false;
-            if (!repeat)
-            {
-                _ = cursor?.RunSync(userInitiated: true);
-            }
-        });
+            FontSize = 12,
+            Padding = new Thickness(8, 3, 8, 4),
+        };
+        _csAnswer.Click += (_, _) => cursor.SetTakeoverConfirmed(_csAnswerConfirms);
+
+        _csSyncNow = new Button
+        {
+            FontSize = 12,
+            Padding = new Thickness(8, 3, 8, 4),
+        };
+        _csSyncNow.Click += (_, _) => _ = cursor.RunSync(userInitiated: true);
+        // A held Enter repeats Click. Swallow the key-repeat KeyDowns; the first
+        // press and a Space release (Click fires on KeyUp) still go through.
         _csSyncNow.PreviewKeyDown += (_, e) =>
         {
-            if (e.Key is Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space)
+            if (e.Key is Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space
+                && e.KeyStatus.WasKeyDown)
             {
-                _csSyncPressIsRepeat = e.KeyStatus.WasKeyDown;
+                e.Handled = true;
             }
         };
+
         foreach (var element in new UIElement[]
         {
             _csCleanupWarning, _csStatusHint, _csStatusWarning, _csCliQuestion,
-            _csUseSyrtis, _csKeepCli, _csSyncNow,
+            _csAnswer, _csSyncNow,
         })
         {
-            _cursorSyncBody.Children.Add(element);
+            element.Visibility = Visibility.Collapsed;
+            body.Children.Add(element);
         }
 
-        if (!_cursorSyncSubscribed && cursor is not null)
+        if (!_cursorSyncSubscribed)
         {
             // The window is hidden, never closed, so one subscription lives as
             // long as the app.
@@ -93,14 +105,13 @@ public sealed partial class SettingsWindow
         }
 
         UpdateCursorSync(store);
-        return _cursorSyncBody;
+        return body;
     }
 
     private void UpdateCursorSync(SettingsStore store)
     {
         if (_csToggle is not { } toggle || _csSyncNow is not { } syncNow
-            || _csUseSyrtis is not { } useSyrtis || _csKeepCli is not { } keepCli
-            || CursorSyncController.Shared is not { } cursor)
+            || _csAnswer is not { } answer || CursorSyncController.Shared is not { } cursor)
         {
             return;
         }
@@ -128,62 +139,22 @@ public sealed partial class SettingsWindow
 
         var confirmed = CursorSync.TakeoverConfirmed(store);
         var askTakeover = on && state == "cliPresent" && !confirmed;
-        var offerUndo = on && confirmed;
         Show(_csCliQuestion!, askTakeover);
-        // The pressed button of the pair disappears when its answer lands: show
-        // its replacement first and hand focus over (with the same keyboard or
-        // pointer focus state) before collapsing it, so focus never leaves the
-        // section. If nothing replaces it, Sync Now takes the focus.
-        Button? gone = null;
-        if (useSyrtis.FocusState != FocusState.Unfocused && !askTakeover)
-        {
-            gone = useSyrtis;
-        }
-        else if (keepCli.FocusState != FocusState.Unfocused && !offerUndo)
-        {
-            gone = keepCli;
-        }
-
-        if (gone is not null)
-        {
-            var target = gone == useSyrtis && offerUndo ? keepCli
-                : gone == keepCli && askTakeover ? useSyrtis
-                : on ? syncNow : null;
-            if (target is not null)
-            {
-                var focusState = gone.FocusState;
-                Show(target, true);
-                target.UpdateLayout();
-                target.Focus(focusState);
-            }
-        }
-
-        Show(useSyrtis, askTakeover);
-        Show(keepCli, offerUndo);
+        // Question shown: answer "Use Syrtis". Answered: the undo, "Keep CLI".
+        _csAnswerConfirms = askTakeover;
+        answer.Content = (askTakeover ? CursorSync.Copy.UseSyrtis : CursorSync.Copy.KeepCli).Localized();
+        Show(answer, askTakeover || (on && confirmed));
 
         Show(syncNow, on);
         var syncing = cursor.Syncing;
         var label = (syncing ? CursorSync.Copy.Syncing : CursorSync.Copy.SyncNow).Localized();
         syncNow.Content = label;
         // Stays enabled while syncing: a disabled button cannot keep keyboard
-        // focus. The busy state is carried by the name screen readers announce
-        // and by RunSync ignoring a second call.
+        // focus, and moving focus away would strand the user when the sync ends.
+        // RunSync ignores a call made during a running sync.
         AutomationProperties.SetName(syncNow, label);
     }
 
     private static void Show(UIElement element, bool visible) =>
         element.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
-
-    private static Button CursorSyncButton(string text, Action click)
-    {
-        var button = new Button
-        {
-            Content = text.Localized(),
-            FontSize = 12,
-            Padding = new Thickness(8, 3, 8, 4),
-            Visibility = Visibility.Collapsed,
-        };
-        button.Click += (_, _) => click();
-        return button;
-    }
 }
