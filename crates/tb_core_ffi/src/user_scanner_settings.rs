@@ -535,7 +535,9 @@ mod tests {
         // only an exactly empty value counts as unset.
         assert_eq!(from(Some("rel".into())), cwd.join("rel").join("opencode"));
         assert_eq!(from(Some(" ".into())), cwd.join(" ").join("opencode"));
-        // The engine falls back to the default for a non-Unicode value.
+        // Matches the engine's `resolve_source_environment_paths` at pin
+        // 15204f4 (falls back for a non-Unicode value) by reading that code;
+        // only the local copy is exercised here, not the engine end to end.
         assert_eq!(from(Some(non_unicode_path(&xdg))), default);
     }
 }
