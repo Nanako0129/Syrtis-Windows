@@ -1519,7 +1519,7 @@ public sealed partial class DashboardView : UserControl
             return holder;
         }
 
-        var colors = new ModelColorMap(snapshot.Models, snapshot.CostAuthoritative);
+        var colors = new ModelColorMap(snapshot.Models, snapshot.ModelsRankByCost);
         var metric = _chartMetric;
         var stats = _selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet);
         var bars = DayBars.Build(
@@ -2328,8 +2328,8 @@ public sealed partial class DashboardView : UserControl
         if (report is not null)
         {
             subtitleParts.Add(CostSurfaceProjection.ModelsSubtitle(
-                entries, snapshot.CostAuthoritative));
-            if (snapshot.CostAuthoritative && report.PricingUpdatedAt is { } ts)
+                entries, snapshot.ModelsCostAuthoritative));
+            if (snapshot.ModelsCostAuthoritative && report.PricingUpdatedAt is { } ts)
             {
                 subtitleParts.Add("Prices updated {0}".Localized(Format.RelativeTime(ts)));
             }
@@ -2387,7 +2387,7 @@ public sealed partial class DashboardView : UserControl
     {
         var panel = new StackPanel { Spacing = 8 };
         var entries = CostSurfaceProjection.OrderModels(
-            SelectedModelEntries(snapshot), snapshot.CostAuthoritative).ToList();
+            SelectedModelEntries(snapshot), snapshot.ModelsRankByCost).ToList();
         var listed = entries;
         var toggle = (string?)null;
         if (collapsible)
@@ -2403,7 +2403,7 @@ public sealed partial class DashboardView : UserControl
         }
 
         var colors = new ModelColorMap(
-            snapshot.Models, snapshot.CostAuthoritative);
+            snapshot.Models, snapshot.ModelsRankByCost);
         foreach (var entry in entries)
         {
             var block = new StackPanel { Spacing = 3 };
@@ -2421,7 +2421,7 @@ public sealed partial class DashboardView : UserControl
             Grid.SetColumn(modelText, 1);
             name.Children.Add(modelText);
             if (!collapsible
-                && CostSurfaceProjection.ModelShare(entry, listed, snapshot.CostAuthoritative) is { } share)
+                && CostSurfaceProjection.ModelShare(entry, listed, snapshot.ModelsCostAuthoritative) is { } share)
             {
                 var shareText = Ui.Text(share, 10, 0.5);
                 shareText.VerticalAlignment = VerticalAlignment.Center;
@@ -2437,12 +2437,12 @@ public sealed partial class DashboardView : UserControl
             // "$0.00" beside its own token count.
             var costText = Ui.Text(
                 CostSurfaceProjection.CostText(
-                    entry.Total, entry.Cost, snapshot.CostAuthoritative), 10, 0.65);
+                    entry.Total, entry.Cost, snapshot.ModelsCostAuthoritative), 10, 0.65);
             costText.HorizontalAlignment = HorizontalAlignment.Right;
             trailing.Children.Add(tokensText);
             trailing.Children.Add(ModelCostCell(
                 costText,
-                CostSurfaceProjection.CostWarning(entry, snapshot.CostAuthoritative)));
+                CostSurfaceProjection.CostWarning(entry, snapshot.ModelsCostAuthoritative)));
             if (collapsible)
             {
                 block.Children.Add(Ui.Row(name, trailing));
@@ -2507,7 +2507,7 @@ public sealed partial class DashboardView : UserControl
             });
             HoverTip.AttachRich(
                 block,
-                () => ModelTip(captured, colors, snapshot.CostAuthoritative));
+                () => ModelTip(captured, colors, snapshot.ModelsCostAuthoritative));
             panel.Children.Add(block);
         }
 
@@ -2651,7 +2651,7 @@ public sealed partial class DashboardView : UserControl
     {
         var panel = new StackPanel { Spacing = 6 };
         var colors = new ModelColorMap(
-            snapshot.Models, snapshot.CostAuthoritative);
+            snapshot.Models, snapshot.ModelsRankByCost);
         var days = DailyRows.Build(snapshot.Graph, _selectedClients);
         if (days.Count == 0)
         {
@@ -2714,7 +2714,7 @@ public sealed partial class DashboardView : UserControl
     private UIElement BuildMonthly(DashboardModel.Snapshot snapshot)
     {
         var panel = new StackPanel { Spacing = 6 };
-        var colors = new ModelColorMap(snapshot.Models, snapshot.CostAuthoritative);
+        var colors = new ModelColorMap(snapshot.Models, snapshot.ModelsRankByCost);
         var months = MonthlyRows.Build(snapshot.Graph, _selectedClients);
         if (months.Count == 0)
         {
@@ -2950,7 +2950,7 @@ public sealed partial class DashboardView : UserControl
         summary.Children.Add(grid);
 
         var lines = new StackPanel { Spacing = 5 };
-        if (CostSurfaceProjection.FavoriteModel(SelectedModelEntries(snapshot), authoritative)
+        if (CostSurfaceProjection.FavoriteModel(SelectedModelEntries(snapshot), snapshot.ModelsRankByCost)
             is { } favorite)
         {
             // Label, then the dot and a name that trims rather than pushing
@@ -2965,7 +2965,7 @@ public sealed partial class DashboardView : UserControl
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var disc = Ui.Disc(
-                new ModelColorMap(snapshot.Models, authoritative).Color(favorite.Provider, favorite.Model), 7);
+                new ModelColorMap(snapshot.Models, snapshot.ModelsRankByCost).Color(favorite.Provider, favorite.Model), 7);
             disc.VerticalAlignment = VerticalAlignment.Center;
             name.Children.Add(disc);
             var text = Ui.MiddleText(favorite.Model, 11);
@@ -3019,11 +3019,10 @@ public sealed partial class DashboardView : UserControl
     {
         var report = snapshot.Models;
         var confirmed = UsageAttribution.Confirmed(AppSettings.Store).Records;
-        // The whole snapshot is dropped on a query (year) change
-        // (DashboardModel.ApplyGraphRequestStart) and a same-query generation
-        // keeps its previous Models, so whenever Models is non-null it belongs
-        // to the currently selected _model.Year — unlike macOS there is no
-        // separate "reportYear" to carry alongside it.
+        // ApplyGraphRequestStart drops the whole snapshot when the query (year)
+        // changes, so Models is either null or from the same query as the
+        // selected _model.Year. During a same-query refresh it may still be the
+        // previous generation's report; its rows are kept, not re-fetched yet.
         var rows = report is null
             ? null
             : UsageAttributionBreakdown.Rows(report.Entries, _selectedClients, confirmed);

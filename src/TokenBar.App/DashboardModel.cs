@@ -257,6 +257,9 @@ public sealed class DashboardModel
         if (_lastSnapshot is not null)
         {
             Current = _lastSnapshot;
+            // The restored snapshot carries its own request, so the first
+            // Begin compares queries instead of treating it as same-query.
+            _snapshotRequestId = _lastSnapshot.RequestId;
         }
 
         if (ClaudeExtraRoots.Shared is { } roots)
@@ -326,6 +329,32 @@ public sealed class DashboardModel
         DateTimeOffset FetchedAt,
         bool CostAuthoritative = false)
     {
+        /// <summary>The graph request this snapshot was last advanced to, and
+        /// the one <see cref="Models"/> were fetched for (#247). Kept on the
+        /// snapshot so a restored <c>_lastSnapshot</c> knows its own query.</summary>
+        public GraphRequestId? RequestId { get; init; }
+
+        public GraphRequestId? ModelsRequestId { get; init; }
+
+        public bool ModelsRankByCost { get; init; }
+
+        private ModelsLineage Lineage =>
+            new(Models, RequestId, ModelsRequestId, CostAuthoritative, ModelsRankByCost);
+
+        /// <summary>Costs, shares and warnings of the Models surfaces.</summary>
+        public bool ModelsCostAuthoritative => Lineage.ModelsCostAuthoritative;
+
+        internal Snapshot WithLineage(ModelsLineage l) => this with
+        {
+            Models = l.Models,
+            RequestId = l.RequestId,
+            ModelsRequestId = l.ModelsRequestId,
+            CostAuthoritative = l.GraphAuthoritative,
+            ModelsRankByCost = l.RankByCost,
+        };
+
+        internal ModelsLineage ToLineage() => Lineage;
+
         /// <summary>Capture time of the persisted snapshot <see cref="Graph"/>
         /// came from; null once a live pass has published (macOS
         /// <c>restoredSnapshot</c>).</summary>
@@ -934,7 +963,7 @@ public sealed class DashboardModel
             _pendingModel = null;
         }
 
-        if (previous is { } old && old.Query != requestId.Query)
+        if (ModelsLineage.DropsSnapshot(previous, requestId))
         {
             // Year payloads cannot reconstruct hidden-only year visibility.
             // Keep the retained all-time graph while clearing the rendered query.
@@ -944,21 +973,18 @@ public sealed class DashboardModel
             return;
         }
 
-        if (Current is { } current)
+        if (Current is not { } current)
         {
-            // Keep same-query topology and the previous Models as a visual
-            // baseline, but revoke cost authority (SameQueryRevoke).
-            var (models, authoritative) = SameQueryRevoke.Apply(current.Models);
-            Current = current with
-            {
-                Models = models,
-                CostAuthoritative = authoritative,
-                FetchedAt = DateTimeOffset.Now,
-            };
-            _lastSnapshot = Current;
-            Updated?.Invoke();
+            return;
         }
 
+        // Same query: keep the previous Models and rank basis, revoke cost
+        // authority (ModelsLineage.Begin). Models costs stay "Checking" until
+        // the report for this request lands.
+        var lineage = current.ToLineage().Begin(requestId);
+        Current = current.WithLineage(lineage) with { FetchedAt = DateTimeOffset.Now };
+        _lastSnapshot = Current;
+        Updated?.Invoke();
     }
 
     private void OnGraphPublished(GraphPublication publication)
@@ -1030,11 +1056,10 @@ public sealed class DashboardModel
                 _pendingModel = null;
             }
 
-            Current = baseline with
+            Current = baseline.WithLineage(baseline.ToLineage().Publish(
+                publication.RequestId, pendingModel, _graphState.CostAuthoritative)) with
             {
                 Graph = publication.Payload,
-                Models = pendingModel ?? baseline.Models,
-                CostAuthoritative = _graphState.CostAuthoritative,
                 FetchedAt = DateTimeOffset.Now,
                 RestoredAt = publication.RestoredFrom,
                 RestoreFailed = publication.RestoredFrom is not null
@@ -1082,9 +1107,8 @@ public sealed class DashboardModel
                     return;
                 }
 
-                Current = Current with
+                Current = Current.WithLineage(Current.ToLineage().Apply(requestId, report)) with
                 {
-                    Models = report,
                     FetchedAt = DateTimeOffset.Now,
                 };
                 _lastSnapshot = Current;
