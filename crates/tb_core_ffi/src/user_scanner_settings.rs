@@ -22,15 +22,22 @@
 //! Only `opencodeDbPaths` is taken from the file: `extra_scan_paths` and
 //! `excluded_scan_paths` stay owned by the root registry and Cursor takeover.
 //!
+//! A relative `OPENCODE_DB` is joined onto opencode's data dir (the dir the
+//! engine scans for the default OpenCode DB: `XDG_DATA_HOME`, else
+//! `<home>/.local/share`, plus `opencode`), as opencode itself does; an empty
+//! value is unset and `:memory:` names nothing to scan. settings.json entries
+//! stay absolute-only: tokscale documents `opencodeDbPaths` as absolute paths.
+//!
 //! The engine drops a configured path silently when its file name is not
 //! `opencode.db` / `opencode-<channel>.db` or the file is absent. Every
 //! absolute path is handed to the engine regardless (the engine owns its
 //! rules, so a rule change on a pin bump cannot be masked here); a local copy
-//! of the name rule only produces the `badFileName` diagnostic. So that a
-//! configured path never silently does nothing, each problem is recorded with
-//! a fixed reason code (never the path: it names a user directory) and
-//! surfaced in `tb_probe` under `opencodeDb`, and logged to stderr when the
-//! set of problems changes. The probe shows what the last read found, which
+//! of the name rule only produces the `badFileName` diagnostic. Each problem
+//! is recorded with a fixed reason code (never the path: it names a user
+//! directory) and is visible through `tb_probe` under `opencodeDb` (used by
+//! Smoke and the tests; the WinUI app does not call it) and on stderr when the
+//! set of problems changes (a GUI process discards stderr). Surfacing it in
+//! the app UI is a deferred product decision. The probe shows what the last read found, which
 //! is not necessarily the live context when a capture failed after the read.
 
 use std::collections::HashSet;
@@ -95,10 +102,21 @@ pub(crate) fn opencode_db_paths() -> Vec<PathBuf> {
     let (paths, report) = resolve(
         &tokscale_core::paths::get_config_dir().join("settings.json"),
         std::env::var_os("OPENCODE_DB"),
+        opencode_data_dir().as_deref(),
         &|name| std::env::var(name).ok(),
     );
     publish(&report);
     paths
+}
+
+/// opencode's data dir as the engine resolves it for the default OpenCode DB
+/// (`<XDG_DATA_HOME or <home>/.local/share>/opencode`, scanner.rs), the base a
+/// relative `OPENCODE_DB` is joined onto.
+fn opencode_data_dir() -> Option<PathBuf> {
+    let home = crate::user_home_dir()?;
+    let xdg = tokscale_core::PathRoot::XdgData
+        .resolve_with_env_strategy(&home.to_string_lossy(), true);
+    Some(PathBuf::from(format!("{xdg}/opencode")))
 }
 
 fn publish(report: &Report) {
@@ -168,14 +186,23 @@ fn expand(raw: &str, vars: &dyn Fn(&str) -> Option<String>) -> String {
 /// the engine will probably skip it. Only `notAbsolute` withholds a path.
 fn normalize_os(
     raw: &std::ffi::OsStr,
+    relative_base: Option<&Path>,
     vars: &dyn Fn(&str) -> Option<String>,
 ) -> Result<(PathBuf, Option<&'static str>), &'static str> {
     // Only valid Unicode is trimmed/unquoted/expanded; anything else (an
     // unpaired surrogate in a Windows path) is passed through untouched.
-    let path = match raw.to_str() {
+    let mut path = match raw.to_str() {
         Some(text) => normalize(text, vars),
         None => PathBuf::from(raw),
     };
+    if !path.is_absolute() {
+        // Only `OPENCODE_DB` passes a base (opencode joins a relative value
+        // onto its data dir); settings.json entries must be absolute.
+        match relative_base {
+            Some(base) => path = base.join(path),
+            None => return Err("notAbsolute"),
+        }
+    }
     if !path.is_absolute() {
         return Err("notAbsolute");
     }
@@ -222,19 +249,25 @@ fn read_file_paths(file: &Path) -> (&'static str, Vec<String>) {
 fn resolve(
     settings_file: &Path,
     opencode_db_env: Option<std::ffi::OsString>,
+    opencode_data_dir: Option<&Path>,
     vars: &dyn Fn(&str) -> Option<String>,
 ) -> (Vec<PathBuf>, Report) {
     let (state, from_file) = read_file_paths(settings_file);
     let mut paths = Vec::new();
     let mut issues = Vec::new();
     let mut seen = HashSet::new();
-    let sources: [(&'static str, Vec<std::ffi::OsString>); 2] = [
-        ("file", from_file.into_iter().map(Into::into).collect()),
-        ("env", opencode_db_env.into_iter().collect()),
+    // opencode (packages/core/src/database/database.ts): an empty OPENCODE_DB
+    // is unset and `:memory:` is an in-memory DB, so neither names a file.
+    let opencode_db_env = opencode_db_env.filter(|v| {
+        v.to_str().is_none_or(|t| !t.trim().is_empty() && t.trim() != ":memory:")
+    });
+    let sources: [(&'static str, Vec<std::ffi::OsString>, Option<&Path>); 2] = [
+        ("file", from_file.into_iter().map(Into::into).collect(), None),
+        ("env", opencode_db_env.into_iter().collect(), opencode_data_dir),
     ];
-    for (source, raws) in sources {
+    for (source, raws, base) in sources {
         for (index, raw) in raws.iter().enumerate() {
-            match normalize_os(raw, vars) {
+            match normalize_os(raw, base, vars) {
                 Ok((path, name_issue)) => {
                     if let Some(reason) = name_issue {
                         issues.push(Issue { source, index, reason });
@@ -276,6 +309,18 @@ mod tests {
         file
     }
 
+    fn data_dir() -> PathBuf {
+        std::env::temp_dir().join("tb-uss-opencode-data")
+    }
+
+    fn resolve_t(
+        file: &Path,
+        env: Option<std::ffi::OsString>,
+        vars: &dyn Fn(&str) -> Option<String>,
+    ) -> (Vec<PathBuf>, Report) {
+        resolve(file, env, Some(&data_dir()), vars)
+    }
+
     fn none(_: &str) -> Option<String> {
         None
     }
@@ -283,7 +328,7 @@ mod tests {
     #[test]
     fn no_file_and_no_env_is_the_default() {
         let dir = temp("none");
-        let (paths, report) = resolve(&dir.join("absent.json"), None, &none);
+        let (paths, report) = resolve_t(&dir.join("absent.json"), None, &none);
         assert!(paths.is_empty() && report.issues.is_empty());
         assert_eq!(report.settings_file, "absent");
     }
@@ -294,7 +339,7 @@ mod tests {
         let a = db(&dir, "opencode.db");
         let json = serde_json::json!({"scanner": {"opencodeDbPaths": [a, a]}});
         let file = settings(&dir, json.to_string().as_bytes());
-        let (paths, report) = resolve(&file, Some(a.clone().into_os_string()), &none);
+        let (paths, report) = resolve_t(&file, Some(a.clone().into_os_string()), &none);
         assert_eq!(paths, vec![a]);
         assert!(report.issues.is_empty());
     }
@@ -312,7 +357,7 @@ mod tests {
         let vars = |n: &str| (n == "TBDIR").then(|| dir_str.clone());
         let b = db(&dir, "opencode.db");
         let quoted = format!("  \"{}\" ", b.display());
-        let (paths, report) = resolve(&file, Some(quoted.into()), &vars);
+        let (paths, report) = resolve_t(&file, Some(quoted.into()), &vars);
         assert_eq!(report.settings_file, "ok");
         assert_eq!(paths, vec![PathBuf::from(format!("{dir_str}/opencode-beta.db")), b]);
         assert!(report.issues.is_empty());
@@ -326,7 +371,7 @@ mod tests {
         let json = serde_json::json!({"scanner": {"opencodeDbPaths": [
             "rel/opencode.db", "%NOPE%/opencode.db", dir.join("mydb.db"), missing, ok]}});
         let file = settings(&dir, json.to_string().as_bytes());
-        let (paths, report) = resolve(&file, None, &none);
+        let (paths, report) = resolve_t(&file, None, &none);
         // Only the non-absolute ones are withheld; the engine decides on the rest.
         assert_eq!(paths, vec![dir.join("mydb.db"), missing, ok]);
         assert_eq!(report.handed_to_engine, 3);
@@ -357,7 +402,7 @@ mod tests {
     fn a_non_unicode_env_path_is_passed_through_untouched() {
         let dir = temp("nonuni");
         let raw = non_unicode_path(&dir);
-        let (paths, report) = resolve(&dir.join("absent.json"), Some(raw.clone()), &none);
+        let (paths, report) = resolve_t(&dir.join("absent.json"), Some(raw.clone()), &none);
         assert_eq!(paths, vec![PathBuf::from(&raw)]);
         assert_eq!(report.handed_to_engine, 1);
         assert!(report.issues.iter().any(|i| i.reason == "missing"));
@@ -385,13 +430,35 @@ mod tests {
     fn unusable_files_are_reported_and_ignored() {
         let dir = temp("junk");
         let file = settings(&dir, b"{not json");
-        assert_eq!(resolve(&file, None, &none).1.settings_file, "invalidJson");
+        assert_eq!(resolve_t(&file, None, &none).1.settings_file, "invalidJson");
         let file = settings(&dir, &vec![b' '; MAX_SETTINGS_BYTES as usize + 1]);
-        let (paths, report) = resolve(&file, None, &none);
+        let (paths, report) = resolve_t(&file, None, &none);
         assert!(paths.is_empty());
         assert_eq!(report.settings_file, "tooLarge");
         let file = settings(&dir, br#"{"scanner":{"extraScanPaths":{"claude":["/x"]}}}"#);
-        let (paths, report) = resolve(&file, None, &none);
+        let (paths, report) = resolve_t(&file, None, &none);
         assert!(paths.is_empty() && report.settings_file == "ok");
+    }
+
+    #[test]
+    fn opencode_db_env_follows_opencode_semantics() {
+        let dir = temp("envsem");
+        let absent = dir.join("absent.json");
+        for unset in ["", "  ", ":memory:"] {
+            let (paths, report) = resolve_t(&absent, Some(unset.into()), &none);
+            assert!(paths.is_empty() && report.issues.is_empty(), "{unset:?}");
+        }
+        let (paths, report) = resolve_t(&absent, Some("sub/opencode.db".into()), &none);
+        assert_eq!(paths, vec![data_dir().join("sub/opencode.db")]);
+        assert_eq!(report.handed_to_engine, 1);
+        // The data dir does not exist here, so only `missing` is reported.
+        assert!(report.issues.iter().all(|i| i.reason == "missing"));
+        // Without a resolvable data dir a relative value is still notAbsolute.
+        let (paths, report) = resolve(&absent, Some("opencode.db".into()), None, &none);
+        assert!(paths.is_empty() && report.issues[0].reason == "notAbsolute");
+        // settings.json entries are never joined.
+        let file = settings(&dir, br#"{"scanner":{"opencodeDbPaths":["opencode.db"]}}"#);
+        let (paths, report) = resolve_t(&file, None, &none);
+        assert!(paths.is_empty() && report.issues[0].reason == "notAbsolute");
     }
 }

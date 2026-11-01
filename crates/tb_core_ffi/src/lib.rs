@@ -548,7 +548,8 @@ fn tail_tick_if_stale(context: &LocalSourceContext) {
 /// read of the user's OpenCode DB settings found (see `user_scanner_settings`);
 /// `index` is the zero-based position in that source's list, `notAbsolute`
 /// paths are withheld from the engine, the other reasons are paths it will
-/// probably skip. No path crosses the ABI.
+/// probably skip. No path crosses the ABI. Only Smoke and tests call this; the
+/// WinUI app does not, so the diagnostics are not shown in the UI (deferred).
 #[no_mangle]
 pub extern "C" fn tb_probe() -> *mut c_char {
     guarded("tb_probe", || {
