@@ -1,6 +1,5 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
-using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using TokenBar.Core;
 
@@ -26,10 +25,13 @@ public sealed partial class SettingsWindow
     private Button? _csSyncNow;
     private bool _csAnswerConfirms;
     private bool _csUpdating;
+    private bool _csWindowActive;
 
     private StackPanel BuildCursorSync(SettingsStore store)
     {
         var body = new StackPanel { Spacing = 6 };
+        Activated += (_, a) =>
+            _csWindowActive = a.WindowActivationState != WindowActivationState.Deactivated;
         if (CursorSyncController.Shared is not { } cursor)
         {
             return body; // nothing to draw or act on without the controller
@@ -54,9 +56,6 @@ public sealed partial class SettingsWindow
         _csCleanupWarning = WarningLine(CursorSync.Copy.CleanupFailed.Localized());
         _csStatusHint = Hint("");
         _csStatusWarning = WarningLine("");
-        // The result of a sync (Last synced, warnings) is announced when it changes.
-        AutomationProperties.SetLiveSetting(_csStatusHint, AutomationLiveSetting.Polite);
-        AutomationProperties.SetLiveSetting(_csStatusWarning, AutomationLiveSetting.Polite);
         _csCliQuestion = Hint(CursorSync.Copy.CliQuestion.Localized());
 
         // One button for the takeover answer: its Content and action switch
@@ -124,16 +123,10 @@ public sealed partial class SettingsWindow
         var state = cursor.State;
         var line = on ? CursorSync.StatusLine(state, cursor.LastSuccessMs) : null;
         var warning = line is not null && CursorSync.StatusIsWarning(state);
-        var statusChanged = line is not null && _csStatusHint!.Text != line;
         _csStatusHint!.Text = line ?? "";
         _csStatusWarning!.Text = line ?? "";
         Show(_csStatusHint, line is not null && !warning);
         Show(_csStatusWarning, line is not null && warning);
-        if (statusChanged)
-        {
-            // LiveSetting alone announces nothing; the change has to be raised.
-            RaiseLiveRegionChanged(warning ? _csStatusWarning : _csStatusHint);
-        }
 
         var confirmed = CursorSync.TakeoverConfirmed(store);
         var askTakeover = on && state == "cliPresent" && !confirmed;
@@ -176,19 +169,19 @@ public sealed partial class SettingsWindow
 
     // Focus must never be on a control that is about to collapse: WinUI would
     // move it out of the section. Hand it over first, keeping its FocusState.
-    private static void MoveFocusBeforeHiding(Control leaving, bool staysVisible, Control target)
+    // Only while Settings is shown and active: the window is hidden, never
+    // closed, so background syncs update it unseen and must not touch layout
+    // or focus there.
+    private void MoveFocusBeforeHiding(Control leaving, bool staysVisible, Control target)
     {
-        if (!staysVisible && leaving.FocusState != FocusState.Unfocused)
+        if (!staysVisible && _csWindowActive && AppWindow.IsVisible
+            && leaving.FocusState != FocusState.Unfocused)
         {
             target.Visibility = Visibility.Visible;
             target.UpdateLayout();
             target.Focus(leaving.FocusState);
         }
     }
-
-    private static void RaiseLiveRegionChanged(UIElement element) =>
-        FrameworkElementAutomationPeer.FromElement(element)
-            ?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
 
     private static void Show(UIElement element, bool visible) =>
         element.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
