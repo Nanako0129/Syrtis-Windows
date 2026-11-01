@@ -50,13 +50,15 @@
 // {"ok":true,"messages":N,"opencodeDb":{...}} / {"ok":false,"err":...}.
 // opencodeDb = {"settingsFile":"absent"|"ok"|"tooLarge"|"unreadable"|
 // "invalidJson","handedToEngine":N,"issues":[{"source":"env"|"file","index":i,
-// "reason":"notAbsolute"|"badFileName"|"missing"}]} reports what the last read
+// "reason":"notAbsolute"|"emptyEnv"|"badFileName"|"missing"}]} reports what the last read
 // of the user's OpenCode DB settings (OPENCODE_DB, tokscale settings.json
 // scanner.opencodeDbPaths) found. index is the zero-based position within that
-// source's list; "notAbsolute" paths are withheld from the engine, the other
-// reasons are paths it will probably skip. No path crosses the ABI. A relative
-// OPENCODE_DB is joined onto opencode's data dir as opencode does (empty =
-// unset, ":memory:" = nothing to scan); settings.json entries must be absolute.
+// source's list; "notAbsolute" and "emptyEnv" are withheld from the engine, the other
+// reasons are paths it will probably skip. No path crosses the ABI. OPENCODE_DB is
+// read as opencode does (packages/cli/src/database-path.ts): a relative value
+// is resolved against opencode's data dir, the exact string ":memory:" names
+// no file; an exactly empty value is ignored by our own choice and reported as
+// "emptyEnv". settings.json entries must be absolute.
 // Visibility: only tb_probe callers (Smoke, tests) and stderr see these; the
 // WinUI app does not call tb_probe and a GUI process discards stderr, so UI
 // surfacing is a deferred product decision.

@@ -544,12 +544,13 @@ fn tail_tick_if_stale(context: &LocalSourceContext) {
 /// `{"ok":true,"messages":N,"opencodeDb":{...}}` or `{"ok":false,"err":...}`.
 /// `opencodeDb` = `{"settingsFile":"absent"|"ok"|"tooLarge"|"unreadable"|
 /// "invalidJson","handedToEngine":N,"issues":[{"source":"env"|"file",
-/// "index":i,"reason":"notAbsolute"|"badFileName"|"missing"}]}`: what the last
-/// read of the user's OpenCode DB settings found (see `user_scanner_settings`);
-/// `index` is the zero-based position in that source's list, `notAbsolute`
-/// paths are withheld from the engine, the other reasons are paths it will
-/// probably skip. No path crosses the ABI. Only Smoke and tests call this; the
-/// WinUI app does not, so the diagnostics are not shown in the UI (deferred).
+/// "index":i,"reason":"notAbsolute"|"emptyEnv"|"badFileName"|"missing"}]}`:
+/// what the last read of the user's OpenCode DB settings found (see
+/// `user_scanner_settings`); `index` is the zero-based position in that
+/// source's list, `notAbsolute` and `emptyEnv` paths are withheld from the
+/// engine, the other reasons are paths it will probably skip. No path crosses
+/// the ABI. Only Smoke and tests call this; the WinUI app does not, so the
+/// diagnostics are not shown in the UI (deferred).
 #[no_mangle]
 pub extern "C" fn tb_probe() -> *mut c_char {
     guarded("tb_probe", || {
