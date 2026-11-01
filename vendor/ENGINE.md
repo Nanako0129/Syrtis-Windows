@@ -37,9 +37,13 @@ The reviewed pin is the merge commit of tokscale-core PR #73 on the engine's
   dependences recorded in the engine's `UPSTREAM.md`: the whole family must be
   requested together (a source outside the requested set cannot gate the
   others), and `modified_after` pruning can count the extension's copy of a
-  response in place of an older CLI or IDE copy that was pruned. Windows
-  `usage_tail.rs` scans with `modified_after`, so a tail window can attribute
-  such a response to the extension rather than the CLI or IDE.
+  response in place of an older copy that was pruned. On Windows the engine
+  never prunes the CLI or extension dbs (`prune_scan_result_by_mtime` skips
+  both lanes under `cfg!(windows)`; UPSTREAM.md: every db stays unpruned on
+  Windows), so the caveat applies only to the IDE cache copy under
+  `antigravity`. Windows `usage_tail.rs` scans with `modified_after`, so a
+  tail window can attribute a response to the extension rather than an
+  older, pruned IDE copy.
 - #70 (`52815d03`): OpenRouter listing cache rates (pricing only).
 - #73 (`15204f4e`): Codex scan pattern `*.jsonl` becomes `*.jsonl*`, so
   `.jsonl.zst` archives are scanned.

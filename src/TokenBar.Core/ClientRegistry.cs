@@ -174,7 +174,7 @@ public static class ClientRegistry
     /// draw on the <c>antigravity</c> subscription and the quota views fold them
     /// that way. Anything reasoning about which
     /// subscription a client's tokens consume has to fold it too, or it will
-    /// conclude the CLI owns no subscription at all.</summary>
+    /// conclude the CLI and the extension own no subscription at all.</summary>
     public static string QuotaOwner(string id) =>
         AntigravityQuotaMembers.Contains(id) ? "antigravity" : id;
 
@@ -210,8 +210,10 @@ public static class ClientRegistry
 
     /// <summary>Tabs that group more than one client id under a single top
     /// tab: the Antigravity tab has two members carrying local session usage
-    /// (antigravity-cli, antigravity-extension) beside the quota-only IDE
-    /// client (antigravity); grok-bot is the Grok Bot weekly quota. Ported from macOS
+    /// (antigravity-cli, antigravity-extension) beside the IDE client
+    /// (antigravity), which carries the cloud quota and the IDE cache's usage
+    /// (the engine dedups that against the CLI and extension by response id);
+    /// grok-bot is the Grok Bot weekly quota. Ported from macOS
     /// ClientRegistry.swift's <c>tabGroups</c> (:214-226 at 451b4329).</summary>
     private static readonly Dictionary<string, (string[] Members, string Label)> TabGroups = new()
     {
@@ -404,7 +406,8 @@ public static class ClientRegistry
     /// deviation from macOS <c>quotaClients</c>, which passes the raw
     /// presentClients straight to <c>tabSlice</c>; do not remove the fold to
     /// "restore parity". Antigravity's local usage is recorded under
-    /// <c>antigravity-cli</c>, whose own slice would leave out the
+    /// <c>antigravity-cli</c> and <c>antigravity-extension</c> (the IDE cache's
+    /// under <c>antigravity</c> itself), whose own slices would leave out the
     /// <c>antigravity</c> owner and move the tab's window card off its stored
     /// history until a payload names antigravity configured (before the first
     /// fetch, or offline). Folding to the TAB would be wrong for grok-bot: its
@@ -537,7 +540,7 @@ public static class ClientRegistry
     /// member's tokens and never selects a quota-only id (e.g. Copilot) that
     /// has no usage lens of its own. A grouped tab's own selection is its
     /// <see cref="TabSlice"/>, so a usage lens on the Antigravity tab
-    /// includes antigravity-cli's usage and the quota lens still resolves
+    /// includes antigravity-cli's and antigravity-extension's usage and the quota lens still resolves
     /// antigravity via <see cref="QuotaOwner"/>. Ported from macOS
     /// `PopoverView`'s `displayUsageClients` / `presentTabClients` /
     /// `lensClientIds` split (:126-129, :137-140, :173).</summary>
