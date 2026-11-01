@@ -249,7 +249,10 @@ fn a_relative_opencode_db_resolves_against_home_without_xdg_data_home() {
 
 /// The copied XDG rule, end to end against the engine, for an exactly empty
 /// `XDG_DATA_HOME` only: it falls back to the home default. The blank (`" "`)
-/// case is checked against the engine only by the non-Windows test below.
+/// case is not checked against the engine: cargo test runs only on Windows,
+/// where the fixture's `create_dir_all` for a directory named " " failed on
+/// 188 (a verbatim `\\?\` path was not tried).
+/// `the_data_dir_follows_the_engines_xdg_rule` checks only the local copy.
 #[test]
 fn an_empty_xdg_data_home_falls_back_to_home() {
     let Some(root) = child_root() else {
@@ -260,28 +263,6 @@ fn an_empty_xdg_data_home_falls_back_to_home() {
     };
     std::env::set_var("XDG_DATA_HOME", "");
     write_db_in(&root.join(".local").join("share").join("opencode").join("sub"));
-    std::env::set_var("OPENCODE_DB", Path::new("sub").join("opencode.db"));
-    assert_eq!(entries_seeing_the_db(), EVERY_ENTRY);
-}
-
-// Not on Windows: on 188 the fixture's `std::fs::create_dir_all` for a
-// directory named " " failed (the unwrap panicked; the error text was not
-// captured), so the test was gated out there. A verbatim `\\?\` path was not
-// tried. On Windows the blank-XDG case is therefore not checked against the
-// engine at all; `the_data_dir_follows_the_engines_xdg_rule` only checks the
-// local copy of the rule. This test has not been run on any platform.
-#[cfg(not(windows))]
-#[test]
-fn a_blank_xdg_data_home_is_a_relative_directory() {
-    let Some(root) = child_root() else {
-        return run_in_child_at(
-            "opencode_db_acceptance::a_blank_xdg_data_home_is_a_relative_directory",
-            "oc-xdg-blank",
-        );
-    };
-    std::env::set_current_dir(&root).unwrap();
-    std::env::set_var("XDG_DATA_HOME", " ");
-    write_db_in(&root.join(" ").join("opencode").join("sub"));
     std::env::set_var("OPENCODE_DB", Path::new("sub").join("opencode.db"));
     assert_eq!(entries_seeing_the_db(), EVERY_ENTRY);
 }
