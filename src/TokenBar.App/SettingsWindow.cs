@@ -44,7 +44,8 @@ public sealed partial class SettingsWindow : Window
     };
 
     // Sidebar (macOS SettingsPanel.Page): one NavigationView built once, its
-    // four items never rebuilt. Rebuild() only regenerates each page's
+    // six items (Menu bar, Dashboard, Attribution, Accounts, General, About)
+    // never rebuilt. Rebuild() only regenerates each page's
     // StackPanel and re-attaches whichever one matches _selectedTag — the
     // NavigationView's own SelectedItem is untouched by a rebuild, which is
     // what keeps the user on the same page across a settings write and
@@ -59,6 +60,9 @@ public sealed partial class SettingsWindow : Window
         // pane buys nothing — and the items carry no icons, so the compact
         // state has nothing to fall back to and just clips the labels to
         // "Menu"/"Dash"/"Gene"/"Abou". macOS has no such control either.
+        // "Accounts" / 帳號 are shorter than the existing "Attribution" and
+        // "Dashboard" labels, so they are expected to fit the 180 px pane; not
+        // rendered or measured.
         IsPaneToggleButtonVisible = false,
         // NavigationView's default is 320, which would eat the width the 732
         // -> 900 widening was meant to give the content column: 900 - 304
@@ -1102,12 +1106,11 @@ public sealed partial class SettingsWindow : Window
     {
         var panel = new StackPanel { Spacing = 16, MaxWidth = 380 };
         panel.Children.Add(InfoSection(
-            ClaudeAccountsCopy.Header, ClaudeAccountsCopy.Summary, () => ClaudeAccountsCopy.Info, null,
+            ClaudeAccountsCopy.Header, ClaudeAccountsCopy.Summary, ClaudeAccountsCopy.InfoRows,
             BuildClaudeAccounts(store)));
         panel.Children.Add(InfoSection(
             AntigravityAccountsCopy.Header, AntigravityAccountsCopy.Summary,
-            () => AntigravityAccountsCopy.InfoFor(AntigravityAutoCapture.Shared is not { IsEnabled: false }),
-            (AntigravityAccountsCopy.Toggle, AntigravityAccountsCopy.ToggleParagraphs),
+            () => AntigravityAccountsCopy.InfoRows(AntigravityAutoCapture.Shared?.IsEnabled),
             BuildAntigravityAccounts(store)));
         return panel;
     }
@@ -2021,35 +2024,43 @@ public sealed partial class SettingsWindow : Window
     /// Flyout rather than HoverTip: it opens on click, keyboard and touch too,
     /// and the privacy facts inside must be reachable by all of them.</summary>
     private static StackPanel InfoSection(
-        string title, string summary, Func<IEnumerable<string>> info,
-        (string Heading, string[] Paragraphs)? group, UIElement content)
+        string title, string summary, Func<IEnumerable<(string Text, bool Heading)>> rows,
+        UIElement content)
     {
-        // Built on each open: the list can depend on live state (the Antigravity
+        // Filled on each open: the rows can depend on live state (the Antigravity
         // note that applies only while automatic capture is off).
         var details = new StackPanel { Spacing = 8, MaxWidth = 320 };
-        var flyout = new Flyout { Content = details, Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Bottom };
+        // A ScrollViewer that takes focus when the flyout opens, so arrow keys
+        // and PageDown scroll text that is otherwise unfocusable, and a screen
+        // reader lands inside the flyout; the Antigravity rows are taller than
+        // the 640 px settings window.
+        var scroller = new ScrollViewer
+        {
+            Content = details,
+            MaxHeight = 420,
+            IsTabStop = true,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+        };
+        var flyout = new Flyout { Content = scroller, Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Bottom };
         flyout.Opening += (_, _) =>
         {
             details.Children.Clear();
-            var headed = false;
-            foreach (var text in info())
+            foreach (var (text, heading) in rows())
             {
-                // The heading names the control the grouped paragraphs explain.
-                if (!headed && group is { } g && g.Paragraphs.Contains(text))
-                {
-                    headed = true;
-                    var heading = Ui.Text(g.Heading.Localized(), 12, bold: true);
-                    heading.TextWrapping = TextWrapping.Wrap;
-                    heading.TextTrimming = TextTrimming.None;
-                    details.Children.Add(heading);
-                }
-
-                var line = Ui.Text(text.Localized(), 12);
+                var line = Ui.Text(text.Localized(), 12, bold: heading);
                 line.TextWrapping = TextWrapping.Wrap;
                 line.TextTrimming = TextTrimming.None;
+                line.IsTextSelectionEnabled = true;
+                if (heading)
+                {
+                    Microsoft.UI.Xaml.Automation.AutomationProperties.SetHeadingLevel(
+                        line, Microsoft.UI.Xaml.Automation.Peers.AutomationHeadingLevel.Level2);
+                }
+
                 details.Children.Add(line);
             }
         };
+        flyout.Opened += (_, _) => scroller.Focus(FocusState.Keyboard);
 
         var button = new Button
         {
@@ -2063,8 +2074,9 @@ public sealed partial class SettingsWindow : Window
             Flyout = flyout,
         };
         var name = SettingsCopy.MoreInfo.Localized(title);
+        // No ToolTip: it would repeat this name to a screen reader, and the
+        // glyph is the usual info mark.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, name);
-        ToolTipService.SetToolTip(button, name);
 
         var header = new Grid { ColumnSpacing = 4 };
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });

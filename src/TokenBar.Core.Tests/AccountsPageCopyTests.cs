@@ -5,12 +5,15 @@ namespace TokenBar.Core.Tests;
 /// <summary>
 /// The Accounts settings page keeps one short line per section and moves every
 /// other explanation behind the info button. SettingsWindow compiles under no
-/// test project, so these pin the copy the page is built from: nothing the
-/// sections used to say inline was dropped, and the privacy and storage facts
-/// are still in the info text.
+/// test project, so these pin the rows the flyouts render: nothing the sections
+/// used to say inline was dropped, the privacy and storage facts are still
+/// there, and the automatic-capture group is last under its own heading.
 /// </summary>
 public class AccountsPageCopyTests
 {
+    private static List<(string Text, bool Heading)> AgyRows(bool? captureEnabled) =>
+        AntigravityAccountsCopy.InfoRows(captureEnabled).ToList();
+
     [Fact]
     public void EachSectionKeepsOneShortLine()
     {
@@ -20,80 +23,90 @@ public class AccountsPageCopyTests
             Assert.True(summary.Length <= 60, summary);
         }
 
-        Assert.DoesNotContain(ClaudeAccountsCopy.Summary, ClaudeAccountsCopy.Info);
-        Assert.DoesNotContain(AntigravityAccountsCopy.Summary, AntigravityAccountsCopy.Info);
+        Assert.DoesNotContain(ClaudeAccountsCopy.Summary, ClaudeAccountsCopy.InfoRows().Select(r => r.Text));
+        Assert.DoesNotContain(AntigravityAccountsCopy.Summary, AgyRows(true).Select(r => r.Text));
     }
 
-    // The five hints each section showed inline before the move.
+    // The five hints the Claude section showed inline before the move.
     [Fact]
     public void ClaudeInfoHoldsEveryFormerInlineHint() =>
         Assert.Equal(
-            [ClaudeAccountsCopy.HowTo, ClaudeAccountsCopy.Reads, ClaudeAccountsCopy.Transport,
-                ClaudeAccountsCopy.Locations, ClaudeAccountsCopy.RemoveMeans],
-            ClaudeAccountsCopy.Info);
+            [(ClaudeAccountsCopy.HowTo, false), (ClaudeAccountsCopy.Reads, false),
+                (ClaudeAccountsCopy.Transport, false), (ClaudeAccountsCopy.Locations, false),
+                (ClaudeAccountsCopy.RemoveMeans, false)],
+            ClaudeAccountsCopy.InfoRows());
 
-    [Fact]
-    public void AntigravityInfoHoldsEveryFormerUnconditionalHint()
-    {
+    // Automatic capture on: the four general paragraphs, then the toggle's
+    // heading and its WhenOn paragraph, last.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(null)] // no controller counts as on
+    public void AntigravityRowsWhileCaptureIsOn(bool? enabled) =>
         Assert.Equal(
-            [AntigravityAccountsCopy.WhenOn, AntigravityAccountsCopy.HowTo, AntigravityAccountsCopy.Reads,
-                AntigravityAccountsCopy.RemoveMeans, AntigravityAccountsCopy.TwiceFromIde],
-            AntigravityAccountsCopy.Info);
-        Assert.DoesNotContain(AntigravityAccountsCopy.MergeOnlyUntilRefresh, AntigravityAccountsCopy.Info);
-    }
+            [(AntigravityAccountsCopy.HowTo, false), (AntigravityAccountsCopy.Reads, false),
+                (AntigravityAccountsCopy.RemoveMeans, false), (AntigravityAccountsCopy.TwiceFromIde, false),
+                (AntigravityAccountsCopy.Toggle, true), (AntigravityAccountsCopy.WhenOn, false)],
+            AgyRows(enabled));
 
-    // The note applies only while automatic capture is off: it joins the info
-    // then, and is absent while capture is on; the rest is the same either way.
+    // Off: the same rows, plus the off-only note as the last paragraph of the
+    // toggle's group. No paragraph of the former inline set is lost either way.
     [Fact]
-    public void MergeOnlyNoteIsInTheInfoOnlyWhileAutomaticCaptureIsOff()
+    public void AntigravityRowsWhileCaptureIsOffAddTheNoteInsideTheToggleGroup()
     {
-        var off = AntigravityAccountsCopy.InfoFor(false).ToList();
-        var on = AntigravityAccountsCopy.InfoFor(true).ToList();
+        var on = AgyRows(true);
+        var off = AgyRows(false);
 
-        Assert.Contains(AntigravityAccountsCopy.MergeOnlyUntilRefresh, off);
-        Assert.DoesNotContain(AntigravityAccountsCopy.MergeOnlyUntilRefresh, on);
-        Assert.Equal(AntigravityAccountsCopy.Info, on);
-        Assert.Equal(AntigravityAccountsCopy.Info, off.Where(s => s != AntigravityAccountsCopy.MergeOnlyUntilRefresh));
+        Assert.Equal(on.Append((AntigravityAccountsCopy.MergeOnlyUntilRefresh, false)), off);
+        Assert.DoesNotContain(on, r => r.Text == AntigravityAccountsCopy.MergeOnlyUntilRefresh);
+
+        foreach (var rows in new[] { on, off })
+        {
+            Assert.Single(rows, r => r.Heading);
+            var heading = rows.FindIndex(r => r.Heading);
+            Assert.Equal(AntigravityAccountsCopy.Toggle, rows[heading].Text);
+            // The heading starts the last group: only toggle paragraphs follow it.
+            Assert.Equal(AntigravityAccountsCopy.WhenOn, rows[heading + 1].Text);
+            Assert.All(rows.Skip(heading + 1), r => Assert.Contains(
+                r.Text, new[] { AntigravityAccountsCopy.WhenOn, AntigravityAccountsCopy.MergeOnlyUntilRefresh }));
+        }
+
+        var former = new[]
+        {
+            AntigravityAccountsCopy.WhenOn, AntigravityAccountsCopy.HowTo, AntigravityAccountsCopy.Reads,
+            AntigravityAccountsCopy.RemoveMeans, AntigravityAccountsCopy.TwiceFromIde,
+            AntigravityAccountsCopy.MergeOnlyUntilRefresh,
+        };
+        Assert.Empty(former.Except(off.Select(r => r.Text)));
     }
 
     // Where a credential goes, where it is kept, and what Remove does must stay
     // reachable from the page.
-    [Fact]
-    public void PrivacyAndStorageFactsStayInTheInfo()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void PrivacyAndStorageFactsStayInTheInfo(bool captureEnabled)
     {
-        var claude = string.Join('\n', ClaudeAccountsCopy.Info);
+        var claude = string.Join('\n', ClaudeAccountsCopy.InfoRows().Select(r => r.Text));
         Assert.Contains("api.anthropic.com", claude);
         Assert.Contains("nothing is revoked at Anthropic", claude);
 
-        var antigravity = string.Join('\n', AntigravityAccountsCopy.Info);
+        var antigravity = string.Join('\n', AgyRows(captureEnabled).Select(r => r.Text));
         Assert.Contains("Windows Credential Manager", antigravity);
         Assert.Contains("Google's token service", antigravity);
         Assert.Contains("deletes only the copy on this PC", antigravity);
         Assert.Contains("revoke access", antigravity);
     }
 
-    // The flyout heads the toggle's paragraphs with the toggle's own label, so
-    // both paragraphs must be ones the flyout can show, and the label must be
-    // the toggle's (translated through the existing table).
-    [Fact]
-    public void ToggleParagraphsAreInTheInfoAndHeadedByTheToggleLabel()
-    {
-        Assert.All(AntigravityAccountsCopy.ToggleParagraphs,
-            p => Assert.Contains(p, AntigravityAccountsCopy.InfoFor(false)));
-        Assert.Contains(AntigravityAccountsCopy.WhenOn, AntigravityAccountsCopy.InfoFor(true));
-        Assert.Contains(AntigravityAccountsCopy.Toggle, AntigravityAccountsCopy.All());
-        // Adjacent, so one heading covers them.
-        var info = AntigravityAccountsCopy.InfoFor(false).ToList();
-        var at = info.IndexOf(AntigravityAccountsCopy.ToggleParagraphs[0]);
-        Assert.Equal(AntigravityAccountsCopy.ToggleParagraphs, info.Skip(at).Take(2));
-    }
-
-    // The translation tests walk All(); the summaries and info must be in it.
+    // The translation tests walk All(); everything the flyouts render must be in it.
     [Fact]
     public void TranslationCheckCoversTheNewStrings()
     {
-        Assert.Subset(ClaudeAccountsCopy.All().ToHashSet(), ClaudeAccountsCopy.Info.Append(ClaudeAccountsCopy.Summary).ToHashSet());
-        Assert.Subset(AntigravityAccountsCopy.All().ToHashSet(), AntigravityAccountsCopy.Info.Append(AntigravityAccountsCopy.Summary).ToHashSet());
+        Assert.Subset(
+            ClaudeAccountsCopy.All().ToHashSet(),
+            ClaudeAccountsCopy.InfoRows().Select(r => r.Text).Append(ClaudeAccountsCopy.Summary).ToHashSet());
+        Assert.Subset(
+            AntigravityAccountsCopy.All().ToHashSet(),
+            AgyRows(false).Select(r => r.Text).Append(AntigravityAccountsCopy.Summary).ToHashSet());
         Assert.Contains(SettingsCopy.AccountsPage, SettingsCopy.All);
         Assert.Contains(SettingsCopy.MoreInfo, SettingsCopy.All);
     }

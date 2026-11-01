@@ -46,6 +46,9 @@ internal static class ClaudeAccountsCopy
     /// what is read, where the token is sent, and what Remove does.</summary>
     internal static readonly string[] Info = [HowTo, Reads, Transport, Locations, RemoveMeans];
 
+    internal static IEnumerable<(string Text, bool Heading)> InfoRows() =>
+        Info.Select(text => (text, false));
+
     /// <summary>One sentence per fixed reason code the native registries and
     /// <c>tb_validate_claude_config_dir</c> return (<c>ctb.h</c>); an unknown
     /// code gets the generic sentence.</summary>
