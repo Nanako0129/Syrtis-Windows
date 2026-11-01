@@ -326,9 +326,10 @@ public sealed record ProbeResult(
 /// <summary>
 /// What the last read of the user's OpenCode DB settings found. SettingsFile is
 /// absent | ok | tooLarge | unreadable | invalidJson. Issue reasons are
-/// notAbsolute (withheld from the engine) | badFileName | missing (handed over,
-/// the engine probably skips them); Index is the zero-based position within the
-/// source's list ("env" or "file"). No path crosses the ABI.
+/// notAbsolute | emptyEnv (both withheld from the engine) | badFileName |
+/// missing (handed over, the engine probably skips them); Index is the zero-based position within the
+/// source's list ("env" or "file"). No path crosses the ABI. Only Smoke and
+/// tests call Probe(); the app UI does not surface this (deferred decision).
 /// </summary>
 public sealed record OpenCodeDbReport(
     [property: JsonPropertyName("settingsFile")] string SettingsFile,

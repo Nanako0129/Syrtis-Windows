@@ -19,8 +19,11 @@ const WINDOW_FROM: i64 = 1_767_225_600_000; // 2026-01-01T00:00:00Z
 const WINDOW_UNTIL: i64 = 1_767_312_000_000; // 2026-01-02T00:00:00Z
 
 fn write_external_db(root: &Path) -> PathBuf {
-    let dir = root.join("external");
-    std::fs::create_dir_all(&dir).unwrap();
+    write_db_in(&root.join("external"))
+}
+
+fn write_db_in(dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
     let db = dir.join("opencode.db");
     let conn = rusqlite::Connection::open(&db).unwrap();
     conn.execute_batch(
@@ -211,4 +214,55 @@ fn write_settings(root: &Path, paths: serde_json::Value) {
     std::fs::create_dir_all(&config).unwrap();
     let settings = serde_json::json!({"scanner": {"opencodeDbPaths": paths}});
     std::fs::write(config.join("settings.json"), settings.to_string()).unwrap();
+}
+
+/// A relative OPENCODE_DB is resolved against the data dir the engine scans
+/// for its default OpenCode DB. The DB sits in a subdirectory, which the
+/// engine's own discovery (flat) does not list, so only the join reaches it.
+#[test]
+fn a_relative_opencode_db_resolves_against_xdg_data_home() {
+    let Some(root) = child_root() else {
+        return run_in_child_at(
+            "opencode_db_acceptance::a_relative_opencode_db_resolves_against_xdg_data_home",
+            "oc-rel-xdg",
+        );
+    };
+    // The child harness sets XDG_DATA_HOME=<root>/data.
+    write_db_in(&root.join("data").join("opencode").join("sub"));
+    std::env::set_var("OPENCODE_DB", Path::new("sub").join("opencode.db"));
+    assert_eq!(entries_seeing_the_db(), EVERY_ENTRY);
+}
+
+#[test]
+fn a_relative_opencode_db_resolves_against_home_without_xdg_data_home() {
+    let Some(root) = child_root() else {
+        return run_in_child_at(
+            "opencode_db_acceptance::a_relative_opencode_db_resolves_against_home_without_xdg_data_home",
+            "oc-rel-home",
+        );
+    };
+    std::env::remove_var("XDG_DATA_HOME");
+    write_db_in(&root.join(".local").join("share").join("opencode").join("sub"));
+    std::env::set_var("OPENCODE_DB", Path::new("sub").join("opencode.db"));
+    assert_eq!(entries_seeing_the_db(), EVERY_ENTRY);
+}
+
+/// The copied XDG rule, end to end against the engine, for an exactly empty
+/// `XDG_DATA_HOME` only: it falls back to the home default. The blank (`" "`)
+/// case is not checked against the engine: cargo test runs only on Windows,
+/// where the fixture's `create_dir_all` for a directory named " " failed on
+/// 188 (a verbatim `\\?\` path was not tried).
+/// `the_data_dir_follows_the_engines_xdg_rule` checks only the local copy.
+#[test]
+fn an_empty_xdg_data_home_falls_back_to_home() {
+    let Some(root) = child_root() else {
+        return run_in_child_at(
+            "opencode_db_acceptance::an_empty_xdg_data_home_falls_back_to_home",
+            "oc-xdg-empty",
+        );
+    };
+    std::env::set_var("XDG_DATA_HOME", "");
+    write_db_in(&root.join(".local").join("share").join("opencode").join("sub"));
+    std::env::set_var("OPENCODE_DB", Path::new("sub").join("opencode.db"));
+    assert_eq!(entries_seeing_the_db(), EVERY_ENTRY);
 }
