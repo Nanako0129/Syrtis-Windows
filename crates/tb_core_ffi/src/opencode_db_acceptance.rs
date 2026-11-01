@@ -61,7 +61,19 @@ fn all_entries() -> Vec<(&'static str, serde_json::Value)> {
     }
 }
 
-/// Entry payloads that mention the fixture model, i.e. that scanned the DB.
+/// Whether any JSON number node equals `n`.
+fn has_int(value: &serde_json::Value, n: i64) -> bool {
+    match value {
+        serde_json::Value::Number(x) => x.as_i64() == Some(n),
+        serde_json::Value::Array(items) => items.iter().any(|v| has_int(v, n)),
+        serde_json::Value::Object(map) => map.values().any(|v| has_int(v, n)),
+        _ => false,
+    }
+}
+
+/// Entry payloads that scanned the DB: they name the fixture model (agent for
+/// the Agents report) and carry its output tokens exactly once -- the fixture
+/// output appears, and twice that (a double count) does not.
 fn entries_seeing_the_db() -> Vec<&'static str> {
     all_entries()
         .into_iter()
@@ -69,7 +81,8 @@ fn entries_seeing_the_db() -> Vec<&'static str> {
         .filter(|(name, payload)| {
             // The Agents report buckets by agent (OpenCode's `mode`), not model.
             let marker = if *name == "tb_agents_report" { "Build" } else { MODEL };
-            payload.to_string().contains(marker)
+            assert!(!has_int(payload, 2 * OUTPUT), "{name} double counted: {payload}");
+            payload.to_string().contains(marker) && has_int(payload, OUTPUT)
         })
         .map(|(name, _)| name)
         .collect()
@@ -121,10 +134,7 @@ fn settings_file_opencode_db_paths_reach_every_entry() {
         );
     };
     let db = write_external_db(&root);
-    let config = root.join("tokscale-config");
-    std::fs::create_dir_all(&config).unwrap();
-    let settings = serde_json::json!({"scanner": {"opencodeDbPaths": [db]}});
-    std::fs::write(config.join("settings.json"), settings.to_string()).unwrap();
+    write_settings(&root, serde_json::json!([db]));
     assert_ne!(context_id(), default_identity());
     assert_eq!(entries_seeing_the_db(), EVERY_ENTRY);
 }
@@ -142,4 +152,63 @@ fn without_configuration_the_external_db_stays_unscanned() {
     write_external_db(&root);
     assert_eq!(context_id(), default_identity());
     assert_eq!(entries_seeing_the_db(), Vec::<&str>::new());
+}
+
+/// The same DB named by `OPENCODE_DB` and by settings.json is scanned once.
+#[test]
+fn the_same_db_from_env_and_file_counts_once() {
+    let Some(root) = child_root() else {
+        return run_in_child_at(
+            "opencode_db_acceptance::the_same_db_from_env_and_file_counts_once",
+            "oc-same",
+        );
+    };
+    let db = write_external_db(&root);
+    write_settings(&root, serde_json::json!([db]));
+    std::env::set_var("OPENCODE_DB", &db);
+    assert_eq!(entries_seeing_the_db(), EVERY_ENTRY);
+}
+
+/// settings.json edited after the first capture is picked up by the next
+/// re-capture, which a root setter performs (here its test seam).
+#[test]
+fn a_root_setter_recapture_picks_up_a_changed_settings_file() {
+    let Some(root) = child_root() else {
+        return run_in_child_at(
+            "opencode_db_acceptance::a_root_setter_recapture_picks_up_a_changed_settings_file",
+            "oc-recapture",
+        );
+    };
+    let db = write_external_db(&root);
+    assert_eq!(entries_seeing_the_db(), Vec::<&str>::new());
+    write_settings(&root, serde_json::json!([db]));
+    assert_eq!(entries_seeing_the_db(), Vec::<&str>::new(), "no re-capture yet");
+    crate::apply_scan_roots_for_test(Default::default()).unwrap();
+    assert_eq!(entries_seeing_the_db(), EVERY_ENTRY);
+}
+
+/// A configured path the engine would silently drop is reported by tb_probe.
+#[test]
+fn tb_probe_reports_rejected_paths() {
+    let Some(root) = child_root() else {
+        return run_in_child_at("opencode_db_acceptance::tb_probe_reports_rejected_paths", "oc-probe");
+    };
+    let good = write_external_db(&root);
+    let bad = root.join("external").join("mydb.db");
+    write_settings(&root, serde_json::json!([bad, good]));
+    let probe = unsafe { take(crate::tb_probe()) };
+    assert_eq!(probe["ok"], true, "{probe}");
+    let report = &probe["opencodeDb"];
+    assert_eq!(report["settingsFile"], "ok");
+    assert_eq!(report["accepted"], 1);
+    assert_eq!(report["rejected"][0]["reason"], "badFileName");
+    assert_eq!(report["rejected"][0]["index"], 0);
+    assert!(!report.to_string().contains("mydb"), "a path must not cross the ABI");
+}
+
+fn write_settings(root: &Path, paths: serde_json::Value) {
+    let config = root.join("tokscale-config");
+    std::fs::create_dir_all(&config).unwrap();
+    let settings = serde_json::json!({"scanner": {"opencodeDbPaths": paths}});
+    std::fs::write(config.join("settings.json"), settings.to_string()).unwrap();
 }
