@@ -350,7 +350,9 @@ public static class AgentLimitsText
             .ToHashSet(StringComparer.Ordinal);
 
     /// <summary>macOS <c>normalizeTraceClient</c>: an explicit alias wins;
-    /// otherwise a trailing <c>-cli</c> is dropped.</summary>
+    /// otherwise a trailing <c>-cli</c> is dropped, then the result is folded to
+    /// its quota owner (macOS <c>normalizeTraceClient</c> via
+    /// <c>quotaOwner</c>), so antigravity-extension reaches <c>antigravity</c>.</summary>
     public static string NormalizeTraceClient(string id)
     {
         var canonical = ClientRegistry.CanonicalClient(id);
@@ -359,7 +361,7 @@ public static class AgentLimitsText
             return canonical;
         }
 
-        return id.EndsWith("-cli", StringComparison.Ordinal) ? id[..^4] : id;
+        return ClientRegistry.QuotaOwner(id.EndsWith("-cli", StringComparison.Ordinal) ? id[..^4] : id);
     }
 
     /// <summary>The recent-trend fold resolved against the window's own

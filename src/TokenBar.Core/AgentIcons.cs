@@ -47,6 +47,7 @@ public static class AgentIcons
     private static readonly Dictionary<string, string> IconAliases = new()
     {
         ["antigravity-cli"] = "antigravity",
+        ["antigravity-extension"] = "antigravity",
         ["kilo"] = "kilocode",
         ["grok-bot"] = "grok",
     };
