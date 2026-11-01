@@ -90,12 +90,27 @@ internal sealed class TrayReadyGate
     public bool IsCompleted => _tcs.Task.IsCompleted;
 
     /// <summary>
-    /// The gate the next waiter should use: <paramref name="current"/> while it
-    /// is still pending, otherwise a fresh one. A gate faulted by the ceiling
-    /// must not be reused, or every later wait would fail at once.
+    /// The gate a waiter should use. With no creation episode running there is
+    /// nothing that could ever complete a gate, so it fails at once instead of
+    /// waiting out the ceiling. Otherwise <paramref name="current"/> is kept
+    /// while pending and replaced once completed: a gate faulted by the ceiling
+    /// must not fail every later wait.
     /// </summary>
-    public static TrayReadyGate ForNextWait(TrayReadyGate? current, TimeProvider? timeProvider = null) =>
-        current is { IsCompleted: false } ? current : new TrayReadyGate(timeProvider);
+    public static TrayReadyGate ForNextWait(
+        TrayReadyGate? current, bool episodeRunning, TimeProvider? timeProvider = null)
+    {
+        if (current is { IsCompleted: false })
+        {
+            return current;
+        }
+
+        if (!episodeRunning)
+        {
+            throw new InvalidOperationException("tray creation episode was not started");
+        }
+
+        return new TrayReadyGate(timeProvider);
+    }
 
     public async Task WaitAsync(CancellationToken cancellationToken)
     {

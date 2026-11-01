@@ -472,11 +472,18 @@ public sealed class TrayForceCreatePolicyTests
 
         // A new episode starts one second before each deadline, so no episode
         // ever reaches Exhausted and nothing else completes the gate. Time moves
-        // exactly to each boundary: 9 s, 18 s, 27 s, then the 30 s ceiling.
+        // exactly to each restart boundary (deadline minus a second, repeated), then the ceiling.
         var deadline = TimeSpan.FromMilliseconds(TrayForceCreatePolicy.EpisodeDeadlineMilliseconds);
         var step = deadline - TimeSpan.FromSeconds(1);
+        var restarts = 0;
+        while (step * (restarts + 1) < Ceiling)
+        {
+            restarts++;
+        }
+
+        Assert.True(restarts >= 2, "the ceiling must outlast several restarted episodes");
         var episode = new TrayForceCreateEpisode(deadline, clock);
-        for (var i = 1; i <= 3; i++)
+        for (var i = 1; i <= restarts; i++)
         {
             clock.Now = step * i;
             Assert.NotEqual(
@@ -485,7 +492,7 @@ public sealed class TrayForceCreatePolicyTests
             episode = new TrayForceCreateEpisode(deadline, clock);
         }
 
-        Assert.Equal(TimeSpan.FromSeconds(27), clock.Now);
+        Assert.True(clock.Now < Ceiling);
         Assert.False(wait.IsCompleted);
         clock.Now = Ceiling;
         await Assert.ThrowsAsync<TrayReadyCeilingException>(() => wait.WaitAsync(Settle));
@@ -535,18 +542,58 @@ public sealed class TrayForceCreatePolicyTests
     {
         var clock = new FakeClock();
         var pending = new TrayReadyGate(clock);
-        Assert.Same(pending, TrayReadyGate.ForNextWait(pending, clock));
+        Assert.Same(pending, TrayReadyGate.ForNextWait(pending, true, clock));
 
         var wait = pending.WaitAsync(CancellationToken.None);
         clock.Now = Ceiling;
         await Assert.ThrowsAsync<TrayReadyCeilingException>(() => wait.WaitAsync(Settle));
         Assert.True(pending.IsCompleted);
 
-        var next = TrayReadyGate.ForNextWait(pending, clock);
+        var next = TrayReadyGate.ForNextWait(pending, true, clock);
         Assert.NotSame(pending, next);
         var nextWait = next.WaitAsync(CancellationToken.None);
         Assert.True(next.TrySetReady());
         await nextWait.WaitAsync(Settle);
+        Assert.Equal(0, clock.LiveTimers);
+    }
+
+    [Fact]
+    public async Task An_episode_that_becomes_ready_just_before_its_deadline_is_not_cut_by_the_ceiling()
+    {
+        var clock = new FakeClock();
+        var gate = new TrayReadyGate(clock);
+        var wait = gate.WaitAsync(CancellationToken.None);
+        var deadline = TimeSpan.FromMilliseconds(TrayForceCreatePolicy.EpisodeDeadlineMilliseconds);
+        var episode = new TrayForceCreateEpisode(deadline, clock);
+
+        Assert.Equal(
+            TrayForceCreateTickResult.Continue,
+            episode.Tick(() => throw new InvalidOperationException("soft")));
+        clock.Now = deadline - TimeSpan.FromMilliseconds(1);
+        Assert.Equal(TrayForceCreateTickResult.Success, episode.Tick(() => true));
+        Assert.True(gate.TrySetReady());
+        await wait.WaitAsync(Settle);
+
+        clock.Now = Ceiling; // the ceiling is far past; nothing may fault now
+        Assert.Equal(0, clock.LiveTimers);
+    }
+
+    [Fact]
+    public void Waiting_with_no_episode_running_fails_at_once_instead_of_at_the_ceiling()
+    {
+        var clock = new FakeClock();
+
+        // No gate, and a gate already completed (ceiling or otherwise): both
+        // fail immediately when no episode could complete a new one.
+        Assert.Throws<InvalidOperationException>(() => TrayReadyGate.ForNextWait(null, false, clock));
+        var done = new TrayReadyGate(clock);
+        done.TrySetReady();
+        Assert.Throws<InvalidOperationException>(() => TrayReadyGate.ForNextWait(done, false, clock));
+
+        // With an episode running a gate is created, and a pending one is kept.
+        var made = TrayReadyGate.ForNextWait(null, true, clock);
+        Assert.Same(made, TrayReadyGate.ForNextWait(made, false, clock));
+        Assert.NotSame(done, TrayReadyGate.ForNextWait(done, true, clock));
         Assert.Equal(0, clock.LiveTimers);
     }
 }

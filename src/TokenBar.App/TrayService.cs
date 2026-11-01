@@ -706,7 +706,7 @@ public sealed class TrayService : IDisposable
         }
 
         _creationEpisode = new TrayForceCreateEpisode();
-        _readyGate = TrayReadyGate.ForNextWait(_readyGate);
+        _readyGate = TrayReadyGate.ForNextWait(_readyGate, episodeRunning: true);
         ProcessCreationTick();
     }
 
@@ -838,9 +838,10 @@ public sealed class TrayService : IDisposable
             return;
         }
 
-        // A gate the ceiling already faulted is replaced, so a later wait (or
-        // the next episode) is not poisoned by it.
-        var gate = _readyGate = TrayReadyGate.ForNextWait(_readyGate);
+        // A gate the ceiling already faulted is replaced, so a later wait is not
+        // poisoned by it; with no episode running this fails at once.
+        var gate = _readyGate = TrayReadyGate.ForNextWait(
+            _readyGate, episodeRunning: _creationEpisode is not null);
         // One terminal result: ready, exhausted episode, or the named ceiling.
         await gate.WaitAsync(cancellationToken).ConfigureAwait(true);
         if (!IsTrayIconCreated)
