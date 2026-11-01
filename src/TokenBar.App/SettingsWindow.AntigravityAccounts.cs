@@ -127,14 +127,19 @@ public sealed partial class SettingsWindow
     /// <summary>The confirmation before automatic capture turns on, as a
     /// flyout on the toggle (no ContentDialog: see UpdateDialog's note on a
     /// second open throwing). Light dismiss counts as Cancel.</summary>
-    private static Task<bool> ConfirmAutoCapture(FrameworkElement anchor)
+    private static Task<bool> ConfirmAutoCapture(FrameworkElement anchor) =>
+        ConfirmFlyout(anchor, AntigravityAccountsCopy.ConfirmTitle, AntigravityAccountsCopy.ConfirmBody);
+
+    /// <summary>The same flyout for any switch whose enabling needs a
+    /// disclosure shown first (Cursor usage sync uses it too).</summary>
+    private static Task<bool> ConfirmFlyout(FrameworkElement anchor, string title, string body)
     {
         var answer = new TaskCompletionSource<bool>();
         var panel = new StackPanel { Spacing = 10, MaxWidth = 320 };
         foreach (var line in new[]
                  {
-                     Ui.Text(AntigravityAccountsCopy.ConfirmTitle.Localized(), 13, bold: true),
-                     Ui.Text(AntigravityAccountsCopy.ConfirmBody.Localized(), 12),
+                     Ui.Text(title.Localized(), 13, bold: true),
+                     Ui.Text(body.Localized(), 12),
                  })
         {
             line.TextWrapping = TextWrapping.Wrap;

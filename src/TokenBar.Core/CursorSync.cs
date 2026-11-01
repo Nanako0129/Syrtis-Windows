@@ -87,6 +87,12 @@ public static class CursorSync
     {
         public const string Title = "Cursor usage sync";
         public const string Toggle = "Sync Cursor usage from the Cursor app";
+        /// <summary>The Accounts page section header: a product name, not translated.</summary>
+        public const string Header = "Cursor";
+        /// <summary>The one line kept under the header; <see cref="Privacy"/> is behind the info button.
+        /// Not in <see cref="All"/>: that list is pinned to the shared approved
+        /// text; this one is translated and checked via SettingsCopy.All.</summary>
+        public const string Summary = "Sync usage from the Cursor app.";
         public const string Privacy =
             "To show your Cursor usage, Syrtis reads the login of the Cursor app on this PC and sends it only to Cursor's usage service (cursor.com) to download your usage. Syrtis stores the date, model, token counts, cost and conversation ID of each request on this PC; the login itself is never saved or logged. Turning this off deletes the downloaded usage.";
         public const string Continue = "Continue";
@@ -111,6 +117,10 @@ public static class CursorSync
         /// retry. The launch off push is the retry (App.StartCursorSync).</summary>
         public const string CleanupFailed =
             "Cursor sync is off, but some downloaded usage couldn't be deleted. Restart Syrtis to retry.";
+
+        /// <summary>The info flyout's rows. The privacy paragraph is also what
+        /// the enable confirmation and the first-run notice card show.</summary>
+        public static IEnumerable<(string Text, bool Heading)> InfoRows() => [(Privacy, false)];
 
         public static readonly string[] All =
         [

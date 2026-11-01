@@ -52,5 +52,5 @@ internal static class SettingsCopy
 
     internal static IReadOnlyList<string> All =>
         [About, TextColorHint, GaugeColoringHint, LiveTraceToggle, LiveTraceHint, RefreshHint,
-            LayoutHint, AccountsPage, MoreInfo];
+            LayoutHint, AccountsPage, MoreInfo, TokenBar.Core.CursorSync.Copy.Summary];
 }

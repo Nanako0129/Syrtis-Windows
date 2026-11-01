@@ -4,7 +4,7 @@ using TokenBar.Core;
 
 namespace TokenBar.App;
 
-// General page → "Cursor usage sync" (macOS SettingsPanel cursorSyncSection,
+// Accounts page → "Cursor" (macOS SettingsPanel cursorSyncSection,
 // shared spec §2). Every action goes through CursorSyncController.Shared; this
 // only draws its state and the stored preferences.
 public sealed partial class SettingsWindow
@@ -37,14 +37,32 @@ public sealed partial class SettingsWindow
         body.Children.Clear();
         var on = CursorSync.ToggleShowsOn(CursorSync.Enabled(store), CursorSync.NoticeAcknowledged(store));
         var toggle = new ToggleSwitch { IsOn = on, OnContent = null, OffContent = null };
-        toggle.Toggled += (_, _) =>
+        var reverting = false;
+        toggle.Toggled += async (_, _) =>
         {
+            if (reverting)
+            {
+                return;
+            }
+
+            // Turning the switch on before the notice is answered answers it
+            // (CursorSyncController.SetEnabled), so the disclosure must be seen
+            // first. It used to sit beside the switch; it is behind the info
+            // button now, so it is shown in a confirmation instead.
+            if (toggle.IsOn && !CursorSync.NoticeAcknowledged(store)
+                && !await ConfirmFlyout(toggle, CursorSync.Copy.Title, CursorSync.Copy.Privacy))
+            {
+                reverting = true;
+                toggle.IsOn = false;
+                reverting = false;
+                return;
+            }
+
             cursor.SetEnabled(toggle.IsOn);
             FillCursorSync(store);
         };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(toggle, CursorSync.Copy.Toggle.Localized());
         body.Children.Add(ToggleRow(CursorSync.Copy.Toggle.Localized(), toggle));
-        body.Children.Add(Hint(CursorSync.Copy.Privacy.Localized()));
 
         if (CursorSync.CleanupFailedVisible(on, cursor.CleanupFailed))
         {

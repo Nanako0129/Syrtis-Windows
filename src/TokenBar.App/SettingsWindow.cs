@@ -1112,6 +1112,9 @@ public sealed partial class SettingsWindow : Window
             AntigravityAccountsCopy.Header, AntigravityAccountsCopy.Summary,
             () => AntigravityAccountsCopy.InfoRows(AntigravityAutoCapture.Shared?.IsEnabled),
             BuildAntigravityAccounts(store)));
+        panel.Children.Add(InfoSection(
+            CursorSync.Copy.Header, CursorSync.Copy.Summary, CursorSync.Copy.InfoRows,
+            BuildCursorSync(store)));
         return panel;
     }
 
@@ -1150,10 +1153,7 @@ public sealed partial class SettingsWindow : Window
         refresh.Children.Add(Hint(SettingsCopy.RefreshHint.Localized()));
         panel.Children.Add(Section("Data refresh".Localized(), refresh));
 
-        // Multi-account management lives on the Accounts page. macOS puts the
-        // sync below between Antigravity accounts and Language; Windows has
-        // Discord between those two, so it goes directly after Data refresh.
-        panel.Children.Add(Section(CursorSync.Copy.Title.Localized(), BuildCursorSync(store)));
+        // Claude, Antigravity and Cursor sync live on the Accounts page.
 
         // ── Discord (macOS SettingsPanel :944-1007) ─────────────────────
         _discordSection = Section(DiscordCopy.Section.Localized(), BuildDiscord(store));

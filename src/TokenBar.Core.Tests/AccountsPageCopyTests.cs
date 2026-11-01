@@ -97,6 +97,24 @@ public class AccountsPageCopyTests
         Assert.Contains("revoke access", antigravity);
     }
 
+    [Fact]
+    public void CursorKeepsOneLineAndItsPrivacyParagraphInTheInfo()
+    {
+        Assert.DoesNotContain('\n', CursorSync.Copy.Summary);
+        Assert.True(CursorSync.Copy.Summary.Length <= 60);
+        Assert.Equal([(CursorSync.Copy.Privacy, false)], CursorSync.Copy.InfoRows());
+        Assert.Contains(CursorSync.Copy.Summary, SettingsCopy.All); // checked in both tables
+
+        // Reads the Cursor login; sends only to Cursor's usage service; what is
+        // stored; the login is not stored; turning off deletes the usage.
+        var privacy = CursorSync.Copy.Privacy;
+        Assert.Contains("reads the login of the Cursor app", privacy);
+        Assert.Contains("only to Cursor's usage service (cursor.com)", privacy);
+        Assert.Contains("date, model, token counts, cost and conversation ID", privacy);
+        Assert.Contains("the login itself is never saved or logged", privacy);
+        Assert.Contains("Turning this off deletes the downloaded usage", privacy);
+    }
+
     // The translation tests walk All(); everything the flyouts render must be in it.
     [Fact]
     public void TranslationCheckCoversTheNewStrings()
