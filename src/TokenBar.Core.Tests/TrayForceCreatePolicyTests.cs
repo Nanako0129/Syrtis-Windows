@@ -321,62 +321,91 @@ public sealed class TrayForceCreatePolicyTests
     }
 
     // Deterministic TimeProvider: Now is the monotonic timestamp axis; moving it
-    // forward fires due timers. UTC is separate so wall-clock steps can be shown
-    // not to matter.
+    // forward fires due timers. Thread-safe, because gate waits dispose their
+    // timers from continuation threads while the test thread moves time.
     private sealed class FakeClock : TimeProvider
     {
+        private readonly object _lock = new();
         private readonly List<FakeTimer> _timers = [];
         private TimeSpan _now;
 
         public TimeSpan Now
         {
-            get => _now;
+            get { lock (_lock) { return _now; } }
             set
             {
-                _now = value;
-                foreach (var t in _timers.ToArray())
+                FakeTimer[] due;
+                lock (_lock)
                 {
-                    t.FireIfDue(_now);
+                    _now = value;
+                    due = _timers.Where(t => t.IsDue(value)).ToArray();
+                }
+
+                foreach (var t in due)
+                {
+                    t.Fire();
                 }
             }
+        }
+
+        public int LiveTimers
+        {
+            get { lock (_lock) { return _timers.Count; } }
         }
 
         public DateTimeOffset Utc { get; set; } = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
         public override long TimestampFrequency => TimeSpan.TicksPerSecond;
 
-        public override long GetTimestamp() => _now.Ticks;
+        public override long GetTimestamp() => Now.Ticks;
 
         public override DateTimeOffset GetUtcNow() => Utc;
 
         public override ITimer CreateTimer(
             TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
         {
-            var timer = new FakeTimer(callback, state, _now + dueTime, _timers);
-            _timers.Add(timer);
-            return timer;
+            lock (_lock)
+            {
+                var timer = new FakeTimer(this, callback, state, _now + dueTime);
+                _timers.Add(timer);
+                return timer;
+            }
         }
 
         private sealed class FakeTimer(
-            TimerCallback callback, object? state, TimeSpan due, List<FakeTimer> owner) : ITimer
+            FakeClock owner, TimerCallback callback, object? state, TimeSpan due) : ITimer
         {
             private bool _done;
 
-            public void FireIfDue(TimeSpan now)
+            public bool IsDue(TimeSpan now)
             {
-                if (!_done && due != Timeout.InfiniteTimeSpan && now >= due)
+                lock (owner._lock) { return !_done && now >= due; }
+            }
+
+            public void Fire()
+            {
+                lock (owner._lock)
                 {
+                    if (_done)
+                    {
+                        return;
+                    }
+
                     _done = true;
-                    callback(state);
                 }
+
+                callback(state);
             }
 
             public bool Change(TimeSpan dueTime, TimeSpan period) => false;
 
             public void Dispose()
             {
-                _done = true;
-                owner.Remove(this);
+                lock (owner._lock)
+                {
+                    _done = true;
+                    owner._timers.Remove(this);
+                }
             }
 
             public ValueTask DisposeAsync()
@@ -417,25 +446,19 @@ public sealed class TrayForceCreatePolicyTests
         TimeSpan.FromMilliseconds(TrayForceCreatePolicy.ReadyCeilingMilliseconds);
 
     [Fact]
-    public void Ready_ceiling_is_comfortably_above_the_episode_deadline()
-    {
-        Assert.True(
-            TrayForceCreatePolicy.ReadyCeilingMilliseconds
-            >= 2 * TrayForceCreatePolicy.EpisodeDeadlineMilliseconds);
-    }
-
-    [Fact]
-    public async Task Ready_before_the_ceiling_succeeds_and_the_ceiling_is_then_inert()
+    public async Task Ready_before_the_ceiling_succeeds_and_releases_the_ceiling_timer()
     {
         var clock = new FakeClock();
         var gate = new TrayReadyGate(clock);
         var wait = gate.WaitAsync(CancellationToken.None);
+        Assert.Equal(1, clock.LiveTimers);
 
         clock.Now = Ceiling - TimeSpan.FromMilliseconds(1);
         Assert.False(wait.IsCompleted);
         Assert.True(gate.TrySetReady());
         await wait.WaitAsync(Settle);
 
+        Assert.Equal(0, clock.LiveTimers);
         clock.Now = Ceiling + TimeSpan.FromMinutes(1);
         Assert.False(gate.TrySetFailed(new InvalidOperationException("late")));
     }
@@ -447,25 +470,26 @@ public sealed class TrayForceCreatePolicyTests
         var gate = new TrayReadyGate(clock);
         var wait = gate.WaitAsync(CancellationToken.None);
 
-        // A new episode starts just before each deadline, so no episode ever
-        // reaches Exhausted and nothing else completes the gate.
+        // A new episode starts one second before each deadline, so no episode
+        // ever reaches Exhausted and nothing else completes the gate. Time moves
+        // exactly to each boundary: 9 s, 18 s, 27 s, then the 30 s ceiling.
         var deadline = TimeSpan.FromMilliseconds(TrayForceCreatePolicy.EpisodeDeadlineMilliseconds);
-        var episodeStart = TimeSpan.Zero;
+        var step = deadline - TimeSpan.FromSeconds(1);
         var episode = new TrayForceCreateEpisode(deadline, clock);
-        while (clock.Now + TimeSpan.FromSeconds(1) < Ceiling)
+        for (var i = 1; i <= 3; i++)
         {
-            clock.Now += deadline - TimeSpan.FromSeconds(1);
+            clock.Now = step * i;
             Assert.NotEqual(
                 TrayForceCreateTickResult.Exhausted,
                 episode.Tick(() => throw new InvalidOperationException("soft")));
-            episodeStart = clock.Now;
             episode = new TrayForceCreateEpisode(deadline, clock);
         }
 
-        Assert.True(episodeStart > TimeSpan.Zero);
+        Assert.Equal(TimeSpan.FromSeconds(27), clock.Now);
         Assert.False(wait.IsCompleted);
         clock.Now = Ceiling;
         await Assert.ThrowsAsync<TrayReadyCeilingException>(() => wait.WaitAsync(Settle));
+        Assert.Equal(0, clock.LiveTimers);
     }
 
     [Fact]
@@ -476,21 +500,53 @@ public sealed class TrayForceCreatePolicyTests
         var wait = gate.WaitAsync(CancellationToken.None);
 
         Assert.True(gate.TrySetFailed(new InvalidOperationException("episode exhausted")));
-        clock.Now = Ceiling;
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => wait.WaitAsync(Settle));
         Assert.Equal("episode exhausted", ex.Message);
+
+        clock.Now = Ceiling;
+        Assert.Equal(0, clock.LiveTimers);
     }
 
     [Fact]
-    public async Task Caller_cancellation_ends_the_wait_without_a_terminal_result()
+    public async Task Caller_cancellation_ends_the_wait_and_a_later_wait_still_has_a_ceiling()
     {
         var clock = new FakeClock();
         var gate = new TrayReadyGate(clock);
         using var cts = new CancellationTokenSource();
-        var wait = gate.WaitAsync(cts.Token);
+        var first = gate.WaitAsync(cts.Token);
 
         cts.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => wait.WaitAsync(Settle));
-        Assert.True(gate.TrySetReady());
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first.WaitAsync(Settle));
+        Assert.False(gate.IsCompleted);
+        Assert.Equal(0, clock.LiveTimers);
+
+        // The second wait arms its own ceiling; a concurrent third is bounded too.
+        var second = gate.WaitAsync(CancellationToken.None);
+        var third = gate.WaitAsync(CancellationToken.None);
+        Assert.Equal(2, clock.LiveTimers);
+        clock.Now = Ceiling;
+        await Assert.ThrowsAsync<TrayReadyCeilingException>(() => second.WaitAsync(Settle));
+        await Assert.ThrowsAsync<TrayReadyCeilingException>(() => third.WaitAsync(Settle));
+        Assert.Equal(0, clock.LiveTimers);
+    }
+
+    [Fact]
+    public async Task A_gate_faulted_by_the_ceiling_is_replaced_for_the_next_wait()
+    {
+        var clock = new FakeClock();
+        var pending = new TrayReadyGate(clock);
+        Assert.Same(pending, TrayReadyGate.ForNextWait(pending, clock));
+
+        var wait = pending.WaitAsync(CancellationToken.None);
+        clock.Now = Ceiling;
+        await Assert.ThrowsAsync<TrayReadyCeilingException>(() => wait.WaitAsync(Settle));
+        Assert.True(pending.IsCompleted);
+
+        var next = TrayReadyGate.ForNextWait(pending, clock);
+        Assert.NotSame(pending, next);
+        var nextWait = next.WaitAsync(CancellationToken.None);
+        Assert.True(next.TrySetReady());
+        await nextWait.WaitAsync(Settle);
+        Assert.Equal(0, clock.LiveTimers);
     }
 }

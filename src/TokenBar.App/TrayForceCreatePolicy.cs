@@ -64,7 +64,7 @@ internal sealed class TrayReadyCeilingException(TimeSpan ceiling) : TimeoutExcep
 /// episode, restarting that deadline, while the last tick is still queued. The
 /// ceiling is therefore an upper bound well above the episode deadline; its
 /// expiry is a distinct <see cref="TrayReadyCeilingException"/>. It starts when
-/// a caller first waits, so normal launches have no extra timer.
+/// a caller waits (one timer per wait), so normal launches have no extra timer.
 /// </summary>
 internal sealed class TrayReadyGate
 {
@@ -72,7 +72,6 @@ internal sealed class TrayReadyGate
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TimeProvider _time;
     private readonly TimeSpan _ceiling;
-    private ITimer? _timer;
 
     public TrayReadyGate(TimeProvider? timeProvider = null, TimeSpan? ceiling = null)
     {
@@ -87,19 +86,25 @@ internal sealed class TrayReadyGate
 
     public bool TrySetCanceled() => _tcs.TrySetCanceled();
 
+    /// <summary>True once any terminal result (including the ceiling) landed.</summary>
+    public bool IsCompleted => _tcs.Task.IsCompleted;
+
+    /// <summary>
+    /// The gate the next waiter should use: <paramref name="current"/> while it
+    /// is still pending, otherwise a fresh one. A gate faulted by the ceiling
+    /// must not be reused, or every later wait would fail at once.
+    /// </summary>
+    public static TrayReadyGate ForNextWait(TrayReadyGate? current, TimeProvider? timeProvider = null) =>
+        current is { IsCompleted: false } ? current : new TrayReadyGate(timeProvider);
+
     public async Task WaitAsync(CancellationToken cancellationToken)
     {
-        _timer ??= _time.CreateTimer(
+        // One ceiling timer per wait, so a second or concurrent waiter is
+        // bounded too and each timer is released when its own wait ends.
+        using var timer = _time.CreateTimer(
             _ => _tcs.TrySetException(new TrayReadyCeilingException(_ceiling)),
             null, _ceiling, Timeout.InfiniteTimeSpan);
-        try
-        {
-            await _tcs.Task.WaitAsync(cancellationToken).ConfigureAwait(true);
-        }
-        finally
-        {
-            _timer.Dispose();
-        }
+        await _tcs.Task.WaitAsync(cancellationToken).ConfigureAwait(true);
     }
 }
 
