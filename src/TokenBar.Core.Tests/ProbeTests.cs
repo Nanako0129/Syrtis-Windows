@@ -14,5 +14,8 @@ public class ProbeTests
         var probe = TbCore.Probe();
         Assert.True(probe.Ok);
         Assert.True(probe.Messages >= 0);
+        // The opencodeDb object decodes under the strict (required-member) options.
+        Assert.NotNull(probe.OpencodeDb);
+        Assert.NotEmpty(probe.OpencodeDb!.SettingsFile);
     }
 }

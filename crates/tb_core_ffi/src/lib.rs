@@ -39,9 +39,12 @@ mod model_report;
 mod opencode_integrations;
 mod usage_graph;
 mod usage_tail;
+mod user_scanner_settings;
 #[cfg(target_os = "windows")]
 mod win_safe_storage;
 mod window_usage;
+#[cfg(test)]
+mod opencode_db_acceptance;
 #[cfg(test)]
 mod roots_acceptance;
 
@@ -104,6 +107,18 @@ impl LocalSourceContext {
     /// pair; the generation stored beside the context is the one it was
     /// captured at (W4b lock-order and lazy-fill rules).
     pub(crate) fn process() -> Result<Self, tokscale_core::SourceContextUnavailable> {
+        {
+            let cell = lock_context_cell();
+            if let Some((generation, resolved)) = cell.as_ref() {
+                return Ok(Self {
+                    resolved: Arc::clone(resolved),
+                    generation: *generation,
+                });
+            }
+        }
+        // The user's settings file is read with no lock held (V-2b); a racing
+        // first caller that fills the cell meanwhile wins below.
+        let opencode_db_paths = user_scanner_settings::opencode_db_paths();
         let mut cell = lock_context_cell();
         if let Some((generation, resolved)) = cell.as_ref() {
             return Ok(Self {
@@ -119,6 +134,7 @@ impl LocalSourceContext {
         let resolved = Arc::new(capture_process_context(
             extra_scan_paths::snapshot(),
             &cursor_takeover(),
+            opencode_db_paths,
         )?);
         *cell = Some((generation, Arc::clone(&resolved)));
         Ok(Self {
@@ -226,9 +242,14 @@ fn lock_context_cell(
 fn capture_process_context(
     extra_scan_paths: std::collections::BTreeMap<String, Vec<PathBuf>>,
     takeover: &cursor_sync::Takeover,
+    opencode_db_paths: Vec<PathBuf>,
 ) -> Result<tokscale_core::ResolvedLocalSourceContext, tokscale_core::SourceContextUnavailable> {
+    // The user's OpenCode DB locations (settings.json / `OPENCODE_DB`) enter
+    // the scan here and nowhere else; the caller reads them via
+    // `user_scanner_settings::opencode_db_paths()` outside the cell lock.
     let mut settings = tokscale_core::ScannerSettings {
         extra_scan_paths,
+        opencode_db_paths,
         ..Default::default()
     };
     cursor_sync::apply_takeover(&mut settings, takeover);
@@ -519,7 +540,15 @@ fn tail_tick_if_stale(context: &LocalSourceContext) {
 
 /// Smoke probe: parse all local clients and report the message count.
 /// Proves the staticlib links and tokscale-core can read this machine.
-/// (Legacy Phase 0 shape: `{"ok":true,"messages":N}`, no `data` wrapper.)
+/// Legacy Phase 0 shape, no `data` wrapper:
+/// `{"ok":true,"messages":N,"opencodeDb":{...}}` or `{"ok":false,"err":...}`.
+/// `opencodeDb` = `{"settingsFile":"absent"|"ok"|"tooLarge"|"unreadable"|
+/// "invalidJson","handedToEngine":N,"issues":[{"source":"env"|"file",
+/// "index":i,"reason":"notAbsolute"|"badFileName"|"missing"}]}`: what the last
+/// read of the user's OpenCode DB settings found (see `user_scanner_settings`);
+/// `index` is the zero-based position in that source's list, `notAbsolute`
+/// paths are withheld from the engine, the other reasons are paths it will
+/// probably skip. No path crosses the ABI.
 #[no_mangle]
 pub extern "C" fn tb_probe() -> *mut c_char {
     guarded("tb_probe", || {
@@ -532,7 +561,12 @@ pub extern "C" fn tb_probe() -> *mut c_char {
                 )
             });
         let json = match result {
-            Ok(pm) => format!(r#"{{"ok":true,"messages":{}}}"#, pm.messages.len()),
+            Ok(pm) => serde_json::json!({
+                "ok": true,
+                "messages": pm.messages.len(),
+                "opencodeDb": user_scanner_settings::diagnostics(),
+            })
+            .to_string(),
             Err(e) => serde_json::json!({"ok": false, "err": e}).to_string(),
         };
         into_raw_json(json)
@@ -919,7 +953,11 @@ fn set_extra_scan_paths(raw: &str) -> Result<serde_json::Value, String> {
 fn apply_scan_roots(
     registry: std::collections::BTreeMap<String, Vec<PathBuf>>,
 ) -> Result<(), String> {
-    let resolved = capture_process_context(registry.clone(), &cursor_takeover())
+    let resolved = capture_process_context(
+        registry.clone(),
+        &cursor_takeover(),
+        user_scanner_settings::opencode_db_paths(),
+    )
         .map_err(|_| "sourceContextUnavailable".to_string())?;
     commit_process_context(resolved, || extra_scan_paths::commit(registry));
     Ok(())
@@ -962,7 +1000,11 @@ fn recheck_cursor_takeover() -> (cursor_sync::Takeover, bool) {
     if computed == held {
         return (computed, false);
     }
-    let Ok(resolved) = capture_process_context(extra_scan_paths::snapshot(), &computed) else {
+    let Ok(resolved) = capture_process_context(
+        extra_scan_paths::snapshot(),
+        &computed,
+        user_scanner_settings::opencode_db_paths(),
+    ) else {
         return (held, false);
     };
     commit_process_context(resolved, || {
