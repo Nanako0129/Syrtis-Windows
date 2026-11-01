@@ -96,6 +96,9 @@ jobs:
       - name: required-desktop-MUI guard unit test
         shell: pwsh
         run: pwsh -File ./scripts/tests/test-required-mui-guard.ps1
+      - name: native PDB freshness gate unit test
+        shell: pwsh
+        run: pwsh -File ./scripts/tests/test-native-pdb-gate.ps1
       # Full x64 artifact (also covered by deployment-matrix). Kept here so the
       # primary build job still fails closed on the release contract early.
       # Run the clean-checkout artifact contract before any legacy tracked
