@@ -75,16 +75,8 @@ public sealed partial class SettingsWindow
             Padding = new Thickness(8, 3, 8, 4),
         };
         _csSyncNow.Click += (_, _) => _ = cursor.RunSync(userInitiated: true);
-        // A held Enter repeats Click. Swallow the key-repeat KeyDowns; the first
-        // press and a Space release (Click fires on KeyUp) still go through.
-        _csSyncNow.PreviewKeyDown += (_, e) =>
-        {
-            if (e.Key is Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space
-                && e.KeyStatus.WasKeyDown)
-            {
-                e.Handled = true;
-            }
-        };
+        SwallowKeyRepeat(_csSyncNow);
+        SwallowKeyRepeat(_csAnswer);
 
         foreach (var element in new UIElement[]
         {
@@ -132,10 +124,16 @@ public sealed partial class SettingsWindow
         var state = cursor.State;
         var line = on ? CursorSync.StatusLine(state, cursor.LastSuccessMs) : null;
         var warning = line is not null && CursorSync.StatusIsWarning(state);
+        var statusChanged = line is not null && _csStatusHint!.Text != line;
         _csStatusHint!.Text = line ?? "";
         _csStatusWarning!.Text = line ?? "";
         Show(_csStatusHint, line is not null && !warning);
         Show(_csStatusWarning, line is not null && warning);
+        if (statusChanged)
+        {
+            // LiveSetting alone announces nothing; the change has to be raised.
+            RaiseLiveRegionChanged(warning ? _csStatusWarning : _csStatusHint);
+        }
 
         var confirmed = CursorSync.TakeoverConfirmed(store);
         var askTakeover = on && state == "cliPresent" && !confirmed;
@@ -143,8 +141,16 @@ public sealed partial class SettingsWindow
         // Question shown: answer "Use Syrtis". Answered: the undo, "Keep CLI".
         _csAnswerConfirms = askTakeover;
         answer.Content = (askTakeover ? CursorSync.Copy.UseSyrtis : CursorSync.Copy.KeepCli).Localized();
-        Show(answer, askTakeover || (on && confirmed));
+        var showAnswer = askTakeover || (on && confirmed);
 
+        if (on)
+        {
+            Show(syncNow, true); // before focus can be handed to it
+        }
+
+        MoveFocusBeforeHiding(answer, showAnswer, on ? syncNow : toggle);
+        MoveFocusBeforeHiding(syncNow, on, toggle);
+        Show(answer, showAnswer);
         Show(syncNow, on);
         var syncing = cursor.Syncing;
         var label = (syncing ? CursorSync.Copy.Syncing : CursorSync.Copy.SyncNow).Localized();
@@ -154,6 +160,35 @@ public sealed partial class SettingsWindow
         // RunSync ignores a call made during a running sync.
         AutomationProperties.SetName(syncNow, label);
     }
+
+    // A held Enter repeats Click (the answer button would flip back and forth,
+    // Sync Now would restart). Swallow the key-repeat KeyDowns; the first press
+    // and a Space release (Click fires on KeyUp) still go through.
+    private static void SwallowKeyRepeat(Button button) =>
+        button.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key is Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space
+                && e.KeyStatus.WasKeyDown)
+            {
+                e.Handled = true;
+            }
+        };
+
+    // Focus must never be on a control that is about to collapse: WinUI would
+    // move it out of the section. Hand it over first, keeping its FocusState.
+    private static void MoveFocusBeforeHiding(Control leaving, bool staysVisible, Control target)
+    {
+        if (!staysVisible && leaving.FocusState != FocusState.Unfocused)
+        {
+            target.Visibility = Visibility.Visible;
+            target.UpdateLayout();
+            target.Focus(leaving.FocusState);
+        }
+    }
+
+    private static void RaiseLiveRegionChanged(UIElement element) =>
+        FrameworkElementAutomationPeer.FromElement(element)
+            ?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
 
     private static void Show(UIElement element, bool visible) =>
         element.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
