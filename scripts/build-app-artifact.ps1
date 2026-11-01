@@ -267,7 +267,13 @@ try {
         throw "Unable to resolve a sanitized 40-character git SHA."
     }
 
-    # Native PDBs older than this are not from this build (see NativePdbGate.ps1).
+    # Clean the crate's release artifacts for this target first, so cargo cannot
+    # skip the link and leave an older PDB in place; every run then writes a
+    # fresh one. Native PDBs older than the recorded start are not from this
+    # build (NativePdbGate.ps1 keeps that as a backstop).
+    Invoke-Captured -Command "cargo" -Arguments @(
+        "clean", "-p", "tb_core_ffi", "--release", "--target", $rustTarget
+    ) -FailureMessage "Cargo clean of tb_core_ffi failed"
     $buildStartedUtc = [datetime]::UtcNow
     Invoke-Captured -Command "cargo" -Arguments @(
         "build", "--release", "--locked", "--target", $rustTarget
@@ -659,8 +665,9 @@ foreach ($name in $capturedNames) {
 # Gate: the PDB must have been written after this script's build started
 # (Select-NativePdbWrittenAfter, issue #34). That is not an identity check
 # (CodeView RSDS GUID/age); it rejects stale target/ PDBs, incremental
-# no-rewrite runs and cache restores. After such a rejection, rebuild with
-# `cargo clean -p tb_core_ffi` and rerun.
+# no-rewrite runs and cache restores. The script cleans the crate's release
+# output for this target before building (`cargo clean -p tb_core_ffi --release
+# --target <triple>`), so a rejection here means cargo did not write a PDB.
 $nativeReleaseDir = Join-Path $repoRoot ("target\{0}\release" -f $rustTarget)
 if (-not (Test-Path -LiteralPath $nativeReleaseDir -PathType Container)) {
     throw "Native release directory missing for symbols capture: target/$rustTarget/release"
@@ -673,7 +680,7 @@ $nativePdbCandidates = @(
 )
 $freshNativePdbItem = Select-NativePdbWrittenAfter -Candidates $nativePdbCandidates -BuildStartedUtc $buildStartedUtc
 if ($null -eq $freshNativePdbItem) {
-    throw ("No tb_core_ffi.pdb written after this build started ({0:o}) under target/{1}/release. A stale or unchanged target PDB is refused; run 'cargo clean -p tb_core_ffi' and rebuild." -f $buildStartedUtc, $rustTarget)
+    throw ("No tb_core_ffi.pdb written after this build started ({0:o}) under target/{1}/release. A stale or unchanged target PDB is refused (the script runs 'cargo clean -p tb_core_ffi --release --target {1}' before building, so cargo did not write a PDB)." -f $buildStartedUtc, $rustTarget)
 }
 $freshNativePdbPath = $freshNativePdbItem.FullName
 $pdbLocation = if ($freshNativePdbPath -like "*\deps\tb_core_ffi.pdb" -or $freshNativePdbPath -like "*/deps/tb_core_ffi.pdb") {
