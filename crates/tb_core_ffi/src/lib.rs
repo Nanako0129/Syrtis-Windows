@@ -540,7 +540,15 @@ fn tail_tick_if_stale(context: &LocalSourceContext) {
 
 /// Smoke probe: parse all local clients and report the message count.
 /// Proves the staticlib links and tokscale-core can read this machine.
-/// (Legacy Phase 0 shape: `{"ok":true,"messages":N}`, no `data` wrapper.)
+/// Legacy Phase 0 shape, no `data` wrapper:
+/// `{"ok":true,"messages":N,"opencodeDb":{...}}` or `{"ok":false,"err":...}`.
+/// `opencodeDb` = `{"settingsFile":"absent"|"ok"|"tooLarge"|"unreadable"|
+/// "invalidJson","handedToEngine":N,"issues":[{"source":"env"|"file",
+/// "index":i,"reason":"notAbsolute"|"badFileName"|"missing"}]}`: what the last
+/// read of the user's OpenCode DB settings found (see `user_scanner_settings`);
+/// `index` is the zero-based position in that source's list, `notAbsolute`
+/// paths are withheld from the engine, the other reasons are paths it will
+/// probably skip. No path crosses the ABI.
 #[no_mangle]
 pub extern "C" fn tb_probe() -> *mut c_char {
     guarded("tb_probe", || {

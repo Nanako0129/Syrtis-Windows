@@ -200,9 +200,9 @@ fn tb_probe_reports_rejected_paths() {
     assert_eq!(probe["ok"], true, "{probe}");
     let report = &probe["opencodeDb"];
     assert_eq!(report["settingsFile"], "ok");
-    assert_eq!(report["accepted"], 1);
-    assert_eq!(report["rejected"][0]["reason"], "badFileName");
-    assert_eq!(report["rejected"][0]["index"], 0);
+    assert_eq!(report["handedToEngine"], 2);
+    assert_eq!(report["issues"][0]["reason"], "badFileName");
+    assert_eq!(report["issues"][0]["index"], 0);
     assert!(!report.to_string().contains("mydb"), "a path must not cross the ABI");
 }
 
