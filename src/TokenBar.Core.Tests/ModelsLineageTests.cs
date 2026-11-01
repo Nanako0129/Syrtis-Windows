@@ -79,7 +79,6 @@ public class ModelsLineageTests
         var s = Settled(out _);
         Assert.True(ModelsLineage.DropsSnapshot(s.RequestId, Req(Y2025, 2)));
         Assert.False(ModelsLineage.DropsSnapshot(s.RequestId, Req(AllTime, 2)));
-        Assert.Null(s.Begin(Req(Y2025, 2)).Models);
     }
 
     [Fact]
@@ -108,6 +107,34 @@ public class ModelsLineageTests
     {
         var s = Settled(out _).Begin(Req(AllTime, 2))
             .Publish(Req(AllTime, 2), early: null, graphAuthoritative: false);
+        Assert.True(s.RankByCost);
+    }
+
+    [Fact]
+    public void RankBasisDoesNotChangeMidGenerationInProductionOrder()
+    {
+        // Begin -> LocalFirst graph (not authoritative) -> report -> Richer graph.
+        var s = Settled(out _);
+        var basis = s.RankByCost;
+        s = s.Begin(Req(AllTime, 2));
+        Assert.Equal(basis, s.RankByCost);
+        s = s.Publish(Req(AllTime, 2), early: null, graphAuthoritative: false);
+        Assert.Equal(basis, s.RankByCost);
+        s = s.Apply(Req(AllTime, 2), Report(2));
+        Assert.Equal(basis, s.RankByCost);
+        s = s.Publish(Req(AllTime, 2), early: null, graphAuthoritative: true);
+        Assert.Equal(basis, s.RankByCost);
+        Assert.True(s.ModelsCostAuthoritative);
+    }
+
+    [Fact]
+    public void FirstReportDuringLocalFirstRanksByTokensThenMovesOnceToCost()
+    {
+        var s = new ModelsLineage(null, null, null, false, false)
+            .Publish(Req(AllTime, 1), early: null, graphAuthoritative: false)
+            .Apply(Req(AllTime, 1), Report(1));
+        Assert.False(s.RankByCost);
+        s = s.Publish(Req(AllTime, 1), early: null, graphAuthoritative: true);
         Assert.True(s.RankByCost);
     }
 

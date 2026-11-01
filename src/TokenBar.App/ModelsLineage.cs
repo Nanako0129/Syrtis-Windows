@@ -14,8 +14,8 @@ namespace TokenBar.App;
 /// (<c>invalidateModel</c>). It has no cost-authority flag on the models, so
 /// this port adds one: a kept report still shows (that is the fix), but its
 /// costs, shares and warnings read "Checking" until a report fetched for the
-/// current request lands. The rank basis (cost vs tokens) is held while a
-/// report is stale, so rows and colors do not reorder twice per generation.
+/// current request lands. The rank basis (cost vs tokens) changes only when
+/// Models first appear or a current report and an authoritative graph coexist.
 /// </para>
 /// </summary>
 public readonly record struct ModelsLineage(
@@ -37,13 +37,12 @@ public readonly record struct ModelsLineage(
     public static bool DropsSnapshot(GraphRequestId? previous, GraphRequestId next) =>
         previous is { } old && old.Query != next.Query;
 
-    /// <summary>A new graph request begins. A different query (including a
-    /// restored snapshot whose persisted year changed) drops the Models; the
-    /// same query keeps them, revokes cost authority and holds the rank basis.</summary>
+    /// <summary>A new graph request begins on the same query (a query change
+    /// never reaches here: <c>ApplyGraphRequestStart</c> drops the snapshot via
+    /// <see cref="DropsSnapshot"/> first). Keeps the Models and the rank basis,
+    /// revokes cost authority.</summary>
     public ModelsLineage Begin(GraphRequestId next) =>
-        DropsSnapshot(RequestId, next)
-            ? new(null, next, null, false, false)
-            : this with { RequestId = next, GraphAuthoritative = false };
+        this with { RequestId = next, GraphAuthoritative = false };
 
     /// <summary>The graph for <paramref name="id"/> is accepted. A report that
     /// arrived early for this request is applied; a failed fetch leaves the old
@@ -54,13 +53,22 @@ public readonly record struct ModelsLineage(
             ? this
             : this with { Models = early, ModelsRequestId = id };
         next = next with { RequestId = id, GraphAuthoritative = graphAuthoritative };
-        return next with { RankByCost = next.ModelsCurrent ? graphAuthoritative : RankByCost };
+        return next with { RankByCost = next.Rank(firstAppearance: early is not null && Models is null) };
     }
 
     /// <summary>The report for <paramref name="id"/> lands on the snapshot.</summary>
     public ModelsLineage Apply(GraphRequestId id, ModelReport report)
     {
         var next = this with { Models = report, ModelsRequestId = id };
-        return next with { RankByCost = next.ModelsCurrent ? GraphAuthoritative : RankByCost };
+        return next with { RankByCost = next.Rank(firstAppearance: Models is null) };
     }
+
+    // The basis changes only when Models first appear (nothing to reorder), or
+    // when a current report and an authoritative graph coexist. A report that
+    // lands during a non-authoritative LocalFirst graph keeps the old basis, so
+    // rows and colors move at most once, when the authoritative graph arrives.
+    private bool Rank(bool firstAppearance) =>
+        firstAppearance ? GraphAuthoritative
+        : ModelsCurrent && GraphAuthoritative ? true
+        : RankByCost;
 }

@@ -3059,7 +3059,7 @@ public sealed partial class DashboardView : UserControl
 
             foreach (var row in rows)
             {
-                panel.Children.Add(BuildAttributionRow(row, snapshot.CostAuthoritative));
+                panel.Children.Add(BuildAttributionRow(row, snapshot.ModelsCostAuthoritative));
             }
 
             content = panel;
