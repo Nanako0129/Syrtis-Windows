@@ -587,7 +587,7 @@ public partial class App : Application
                     "--startup-smoke sentinel path is missing");
             }
 
-            // Hard gate: await the episode's single terminal result (it owns the deadline).
+            // Hard gate: await the single terminal result (bounded by the readiness ceiling).
             await _tray!.AssertTrayReadyAsync().ConfigureAwait(true);
 
             WriteStartupSmokeSentinel(path);

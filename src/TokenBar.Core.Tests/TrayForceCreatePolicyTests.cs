@@ -67,11 +67,11 @@ public sealed class TrayForceCreatePolicyTests
     [Fact]
     public void Episode_soft_fail_then_success_same_episode()
     {
-        var elapsed = TimeSpan.Zero;
+        var clock = new FakeClock { Now = TimeSpan.Zero };
         var calls = 0;
         var episode = new TrayForceCreateEpisode(
             deadline: TimeSpan.FromSeconds(10),
-            getElapsed: () => elapsed);
+            timeProvider: clock);
 
         var soft = episode.Tick(
             () =>
@@ -84,7 +84,7 @@ public sealed class TrayForceCreatePolicyTests
         Assert.Equal(10, episode.NextDelayMilliseconds);
         Assert.Equal(1, episode.Attempts);
 
-        elapsed += TimeSpan.FromMilliseconds(episode.NextDelayMilliseconds);
+        clock.Now += TimeSpan.FromMilliseconds(episode.NextDelayMilliseconds);
 
         var ok = episode.Tick(
             () =>
@@ -104,10 +104,10 @@ public sealed class TrayForceCreatePolicyTests
     public void Host_simulation_cancellation_stops_before_deadline()
     {
         using var cts = new CancellationTokenSource();
-        var elapsed = TimeSpan.Zero;
+        var clock = new FakeClock { Now = TimeSpan.Zero };
         var episode = new TrayForceCreateEpisode(
             deadline: TimeSpan.FromSeconds(10),
-            getElapsed: () => elapsed);
+            timeProvider: clock);
         var calls = 0;
 
         while (!episode.IsExhausted && !cts.IsCancellationRequested)
@@ -130,7 +130,7 @@ public sealed class TrayForceCreatePolicyTests
                 break;
             }
 
-            elapsed += TimeSpan.FromMilliseconds(episode.NextDelayMilliseconds);
+            clock.Now += TimeSpan.FromMilliseconds(episode.NextDelayMilliseconds);
         }
 
         Assert.True(cts.IsCancellationRequested);
@@ -143,11 +143,11 @@ public sealed class TrayForceCreatePolicyTests
     public void Production_soft_fail_schedule_covers_minimum_retry_window()
     {
         // Advance a fake monotonic clock by each production delay until Exhausted.
-        var elapsed = TimeSpan.Zero;
+        var clock = new FakeClock { Now = TimeSpan.Zero };
         var episode = new TrayForceCreateEpisode(
             deadline: TimeSpan.FromMilliseconds(
                 TrayForceCreatePolicy.EpisodeDeadlineMilliseconds),
-            getElapsed: () => elapsed);
+            timeProvider: clock);
 
         var safety = 0;
         TrayForceCreateTickResult result;
@@ -161,7 +161,7 @@ public sealed class TrayForceCreatePolicyTests
                 Assert.True(
                     episode.NextDelayMilliseconds
                     <= TrayForceCreatePolicy.MaxDelayMilliseconds);
-                elapsed += TimeSpan.FromMilliseconds(episode.NextDelayMilliseconds);
+                clock.Now += TimeSpan.FromMilliseconds(episode.NextDelayMilliseconds);
             }
 
             safety++;
@@ -171,9 +171,9 @@ public sealed class TrayForceCreatePolicyTests
 
         Assert.Equal(TrayForceCreateTickResult.Exhausted, result);
         Assert.True(
-            elapsed.TotalMilliseconds
+            clock.Now.TotalMilliseconds
             >= TrayForceCreatePolicy.MinProductionRetryWindowMilliseconds,
-            $"production soft-fail window {elapsed.TotalMilliseconds}ms is below minimum "
+            $"production soft-fail window {clock.Now.TotalMilliseconds}ms is below minimum "
             + $"{TrayForceCreatePolicy.MinProductionRetryWindowMilliseconds}ms");
         Assert.True(episode.IsExhausted);
         Assert.True(episode.Attempts > 5, "time-based budget must allow more than five attempts");
@@ -183,13 +183,12 @@ public sealed class TrayForceCreatePolicyTests
     public void Episode_elapsed_ignores_backward_clock_steps()
     {
         // Wall-clock going backwards (NTP at logon) must not invert exhaustion
-        // or extend the episode past the monotonic deadline. Injected elapsed
-        // that steps backwards is clamped to zero for IsExhausted math after
-        // production uses Stopwatch; here we prove the clamp on the seam.
-        var elapsed = TimeSpan.FromMilliseconds(200);
+        // or extend the episode past the monotonic deadline. Elapsed
+        // that steps backwards is clamped to zero for IsExhausted math.
+        var clock = new FakeClock { Now = TimeSpan.FromMilliseconds(200) };
         var episode = new TrayForceCreateEpisode(
             deadline: TimeSpan.FromMilliseconds(500),
-            getElapsed: () => elapsed);
+            timeProvider: clock);
 
         Assert.Equal(
             TrayForceCreateTickResult.Continue,
@@ -198,12 +197,12 @@ public sealed class TrayForceCreatePolicyTests
 
         // Step "backwards" — must not throw and must not look like more time remaining
         // than before (clamped elapsed does not go negative).
-        elapsed = TimeSpan.FromMilliseconds(-5_000);
+        clock.Now = TimeSpan.FromMilliseconds(-5_000);
         Assert.Equal(TimeSpan.Zero, episode.Elapsed);
         Assert.False(episode.IsExhausted);
 
         // Advance past deadline on the monotonic axis.
-        elapsed = TimeSpan.FromMilliseconds(500);
+        clock.Now = TimeSpan.FromMilliseconds(700);
         Assert.Equal(
             TrayForceCreateTickResult.Exhausted,
             episode.Tick(() => throw new InvalidOperationException("soft")));
@@ -215,10 +214,10 @@ public sealed class TrayForceCreatePolicyTests
     [Fact]
     public void Episode_soft_failures_continue_until_deadline_then_exhaust()
     {
-        var elapsed = TimeSpan.Zero;
+        var clock = new FakeClock { Now = TimeSpan.Zero };
         var episode = new TrayForceCreateEpisode(
             deadline: TimeSpan.FromMilliseconds(250),
-            getElapsed: () => elapsed);
+            timeProvider: clock);
 
         TrayForceCreateTickResult Tick() => episode.Tick(
             () => throw new InvalidOperationException("shell not ready"),
@@ -226,16 +225,16 @@ public sealed class TrayForceCreatePolicyTests
 
         Assert.Equal(TrayForceCreateTickResult.Continue, Tick());
         Assert.Equal(100, episode.NextDelayMilliseconds);
-        elapsed += TimeSpan.FromMilliseconds(100);
+        clock.Now += TimeSpan.FromMilliseconds(100);
 
         Assert.Equal(TrayForceCreateTickResult.Continue, Tick());
         Assert.Equal(100, episode.NextDelayMilliseconds);
-        elapsed += TimeSpan.FromMilliseconds(100);
+        clock.Now += TimeSpan.FromMilliseconds(100);
 
         // Elapsed 200ms, remaining 50ms → delay clamped to remaining.
         Assert.Equal(TrayForceCreateTickResult.Continue, Tick());
         Assert.Equal(50, episode.NextDelayMilliseconds);
-        elapsed += TimeSpan.FromMilliseconds(50);
+        clock.Now += TimeSpan.FromMilliseconds(50);
 
         // Elapsed == deadline → Exhausted on entry without another attempt.
         Assert.Equal(TrayForceCreateTickResult.Exhausted, Tick());
@@ -279,12 +278,12 @@ public sealed class TrayForceCreatePolicyTests
     [Fact]
     public void Separate_episodes_have_independent_deadlines()
     {
-        var elapsed = TimeSpan.Zero;
+        var clock = new FakeClock { Now = TimeSpan.Zero };
         var first = new TrayForceCreateEpisode(
             deadline: TimeSpan.FromMilliseconds(50),
-            getElapsed: () => elapsed);
+            timeProvider: clock);
         _ = first.Tick(() => throw new InvalidOperationException("a"));
-        elapsed += TimeSpan.FromMilliseconds(first.NextDelayMilliseconds);
+        clock.Now += TimeSpan.FromMilliseconds(first.NextDelayMilliseconds);
         Assert.Equal(
             TrayForceCreateTickResult.Exhausted,
             first.Tick(() => throw new InvalidOperationException("b")));
@@ -292,7 +291,7 @@ public sealed class TrayForceCreatePolicyTests
 
         var second = new TrayForceCreateEpisode(
             deadline: TimeSpan.FromSeconds(10),
-            getElapsed: () => elapsed);
+            timeProvider: clock);
         var ok = second.Tick(() => true);
         Assert.Equal(TrayForceCreateTickResult.Success, ok);
         Assert.Equal(1, second.Attempts);
@@ -321,24 +320,77 @@ public sealed class TrayForceCreatePolicyTests
         Assert.DoesNotContain("Thread.Sleep", text, StringComparison.Ordinal);
     }
 
-    // Wall clock for the whole class of NTP/RTC corrections at logon: a
-    // provider whose UTC time jumps while its monotonic timestamps advance.
-    private sealed class SteppedClock : TimeProvider
+    // Deterministic TimeProvider: Now is the monotonic timestamp axis; moving it
+    // forward fires due timers. UTC is separate so wall-clock steps can be shown
+    // not to matter.
+    private sealed class FakeClock : TimeProvider
     {
-        public long Ticks;
-        public DateTimeOffset Utc = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        private readonly List<FakeTimer> _timers = [];
+        private TimeSpan _now;
 
-        public override long TimestampFrequency => 1_000;
+        public TimeSpan Now
+        {
+            get => _now;
+            set
+            {
+                _now = value;
+                foreach (var t in _timers.ToArray())
+                {
+                    t.FireIfDue(_now);
+                }
+            }
+        }
 
-        public override long GetTimestamp() => Ticks;
+        public DateTimeOffset Utc { get; set; } = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+        public override long GetTimestamp() => _now.Ticks;
 
         public override DateTimeOffset GetUtcNow() => Utc;
+
+        public override ITimer CreateTimer(
+            TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = new FakeTimer(callback, state, _now + dueTime, _timers);
+            _timers.Add(timer);
+            return timer;
+        }
+
+        private sealed class FakeTimer(
+            TimerCallback callback, object? state, TimeSpan due, List<FakeTimer> owner) : ITimer
+        {
+            private bool _done;
+
+            public void FireIfDue(TimeSpan now)
+            {
+                if (!_done && due != Timeout.InfiniteTimeSpan && now >= due)
+                {
+                    _done = true;
+                    callback(state);
+                }
+            }
+
+            public bool Change(TimeSpan dueTime, TimeSpan period) => false;
+
+            public void Dispose()
+            {
+                _done = true;
+                owner.Remove(this);
+            }
+
+            public ValueTask DisposeAsync()
+            {
+                Dispose();
+                return ValueTask.CompletedTask;
+            }
+        }
     }
 
     [Fact]
     public void Default_episode_clock_is_monotonic_not_wall_time()
     {
-        var clock = new SteppedClock();
+        var clock = new FakeClock();
         var episode = new TrayForceCreateEpisode(
             deadline: TimeSpan.FromSeconds(10),
             timeProvider: clock);
@@ -346,67 +398,99 @@ public sealed class TrayForceCreatePolicyTests
         // Wall clock steps back an hour, then forward a day, while 4 s of
         // monotonic time pass: only the monotonic source may be consulted.
         clock.Utc = clock.Utc.AddHours(-1);
-        clock.Ticks = 4_000;
+        clock.Now = TimeSpan.FromSeconds(4);
         Assert.Equal(TimeSpan.FromSeconds(4), episode.Elapsed);
         Assert.False(episode.IsExhausted);
 
         clock.Utc = clock.Utc.AddDays(1);
         Assert.Equal(TimeSpan.FromSeconds(4), episode.Elapsed);
 
-        clock.Ticks = 10_000;
+        clock.Now = TimeSpan.FromSeconds(10);
         Assert.True(episode.IsExhausted);
     }
 
+    // Real-time bound used only so a broken gate fails the test instead of
+    // hanging the run; passing runs never wait on it.
+    private static readonly TimeSpan Settle = TimeSpan.FromSeconds(10);
+
+    private static readonly TimeSpan Ceiling =
+        TimeSpan.FromMilliseconds(TrayForceCreatePolicy.ReadyCeilingMilliseconds);
+
     [Fact]
-    public async Task Ready_wait_has_no_timer_and_reports_the_episodes_own_terminal_result()
+    public void Ready_ceiling_is_comfortably_above_the_episode_deadline()
     {
-        // Fake clock + manual TCS stand in for the DispatcherQueueTimer: the
-        // terminal tick is "queued" for as long as the test withholds it, with
-        // no real time passing. The wait must neither fault nor complete early.
-        var elapsed = TimeSpan.Zero;
-        var episode = new TrayForceCreateEpisode(
-            deadline: TimeSpan.FromMilliseconds(TrayForceCreatePolicy.EpisodeDeadlineMilliseconds),
-            getElapsed: () => elapsed);
-        var terminal = new TaskCompletionSource<bool>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var wait = TrayReadyWait.AwaitAsync(terminal.Task, CancellationToken.None);
+        Assert.True(
+            TrayForceCreatePolicy.ReadyCeilingMilliseconds
+            >= 2 * TrayForceCreatePolicy.EpisodeDeadlineMilliseconds);
+    }
 
-        // Dispatcher congested far past the episode deadline plus any margin.
-        elapsed = TimeSpan.FromMilliseconds(TrayForceCreatePolicy.EpisodeDeadlineMilliseconds)
-            + TimeSpan.FromMinutes(5);
+    [Fact]
+    public async Task Ready_before_the_ceiling_succeeds_and_the_ceiling_is_then_inert()
+    {
+        var clock = new FakeClock();
+        var gate = new TrayReadyGate(clock);
+        var wait = gate.WaitAsync(CancellationToken.None);
+
+        clock.Now = Ceiling - TimeSpan.FromMilliseconds(1);
         Assert.False(wait.IsCompleted);
+        Assert.True(gate.TrySetReady());
+        await wait.WaitAsync(Settle);
 
-        // The delayed terminal tick finally runs and publishes Exhausted.
-        var result = episode.Tick(() => throw new InvalidOperationException("soft"));
-        Assert.Equal(TrayForceCreateTickResult.Exhausted, result);
-        terminal.SetException(new InvalidOperationException("episode exhausted"));
+        clock.Now = Ceiling + TimeSpan.FromMinutes(1);
+        Assert.False(gate.TrySetFailed(new InvalidOperationException("late")));
+    }
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => wait);
+    [Fact]
+    public async Task Restarting_episodes_still_end_at_the_ceiling_with_the_named_failure()
+    {
+        var clock = new FakeClock();
+        var gate = new TrayReadyGate(clock);
+        var wait = gate.WaitAsync(CancellationToken.None);
+
+        // A new episode starts just before each deadline, so no episode ever
+        // reaches Exhausted and nothing else completes the gate.
+        var deadline = TimeSpan.FromMilliseconds(TrayForceCreatePolicy.EpisodeDeadlineMilliseconds);
+        var episodeStart = TimeSpan.Zero;
+        var episode = new TrayForceCreateEpisode(deadline, clock);
+        while (clock.Now + TimeSpan.FromSeconds(1) < Ceiling)
+        {
+            clock.Now += deadline - TimeSpan.FromSeconds(1);
+            Assert.NotEqual(
+                TrayForceCreateTickResult.Exhausted,
+                episode.Tick(() => throw new InvalidOperationException("soft")));
+            episodeStart = clock.Now;
+            episode = new TrayForceCreateEpisode(deadline, clock);
+        }
+
+        Assert.True(episodeStart > TimeSpan.Zero);
+        Assert.False(wait.IsCompleted);
+        clock.Now = Ceiling;
+        await Assert.ThrowsAsync<TrayReadyCeilingException>(() => wait.WaitAsync(Settle));
+    }
+
+    [Fact]
+    public async Task The_first_terminal_result_wins_over_the_ceiling()
+    {
+        var clock = new FakeClock();
+        var gate = new TrayReadyGate(clock);
+        var wait = gate.WaitAsync(CancellationToken.None);
+
+        Assert.True(gate.TrySetFailed(new InvalidOperationException("episode exhausted")));
+        clock.Now = Ceiling;
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => wait.WaitAsync(Settle));
         Assert.Equal("episode exhausted", ex.Message);
     }
 
     [Fact]
-    public async Task Ready_wait_returns_when_readiness_lands_after_the_deadline_instant()
+    public async Task Caller_cancellation_ends_the_wait_without_a_terminal_result()
     {
-        var terminal = new TaskCompletionSource<bool>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var wait = TrayReadyWait.AwaitAsync(terminal.Task, CancellationToken.None);
-        Assert.False(wait.IsCompleted);
-
-        terminal.SetResult(true);
-        await wait;
-    }
-
-    [Fact]
-    public async Task Ready_wait_ends_early_only_through_the_callers_token()
-    {
-        var terminal = new TaskCompletionSource<bool>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
+        var clock = new FakeClock();
+        var gate = new TrayReadyGate(clock);
         using var cts = new CancellationTokenSource();
-        var wait = TrayReadyWait.AwaitAsync(terminal.Task, cts.Token);
-        Assert.False(wait.IsCompleted);
+        var wait = gate.WaitAsync(cts.Token);
 
         cts.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => wait);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => wait.WaitAsync(Settle));
+        Assert.True(gate.TrySetReady());
     }
 }

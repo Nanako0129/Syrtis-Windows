@@ -46,7 +46,7 @@ public sealed class TrayService : IDisposable
     private readonly DispatcherQueue _dispatcher;
     private TrayForceCreateEpisode? _creationEpisode;
     private DispatcherQueueTimer? _retryTimer;
-    private TaskCompletionSource<bool>? _readyTcs;
+    private TrayReadyGate? _readyGate;
     private bool _trayCreationFailed;
 
     public TrayService(FlyoutWindow flyout, GraphRequestCoordinator graphCoordinator)
@@ -140,7 +140,9 @@ public sealed class TrayService : IDisposable
 
     /// <summary>
     /// Hard tray-ready gate for --startup-smoke: awaits a fresh creation
-    /// episode's single terminal result (timer ticks; no UI-thread blocking wait).
+    /// episode's single terminal result, bounded by
+    /// <see cref="TrayForceCreatePolicy.ReadyCeilingMilliseconds"/> (no UI-thread
+    /// blocking wait).
     /// </summary>
     internal Task AssertTrayReadyAsync(
         CancellationToken cancellationToken = default)
@@ -704,8 +706,7 @@ public sealed class TrayService : IDisposable
         }
 
         _creationEpisode = new TrayForceCreateEpisode();
-        _readyTcs ??= new TaskCompletionSource<bool>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
+        _readyGate ??= new TrayReadyGate();
         ProcessCreationTick();
     }
 
@@ -802,8 +803,8 @@ public sealed class TrayService : IDisposable
         {
             _trayCreationFailed = false;
             _creationEpisode = null;
-            _readyTcs?.TrySetResult(true);
-            _readyTcs = null;
+            _readyGate?.TrySetReady();
+            _readyGate = null;
         }
     }
 
@@ -813,8 +814,8 @@ public sealed class TrayService : IDisposable
         _creationEpisode = null;
         StopRetryTimer();
         DevLog.Write($"tray creation FAILED: {message}");
-        _readyTcs?.TrySetException(new InvalidOperationException(message));
-        _readyTcs = null;
+        _readyGate?.TrySetFailed(new InvalidOperationException(message));
+        _readyGate = null;
 
         // Normal launch must not leave an invisible tray-less process.
         // Startup-smoke path also exits via QuitApp after assert failure.
@@ -837,10 +838,10 @@ public sealed class TrayService : IDisposable
             return;
         }
 
-        var tcs = _readyTcs
+        var gate = _readyGate
             ?? throw new InvalidOperationException("tray creation episode was not started");
-        // The episode's terminal result is the only outcome (see TrayReadyWait).
-        await TrayReadyWait.AwaitAsync(tcs.Task, cancellationToken).ConfigureAwait(true);
+        // One terminal result: ready, exhausted episode, or the named ceiling.
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(true);
         if (!IsTrayIconCreated)
         {
             throw new InvalidOperationException("tray icon creation finished without ready state");
@@ -881,8 +882,8 @@ public sealed class TrayService : IDisposable
         _disposed = true;
         StopRetryTimer();
         _creationEpisode = null;
-        _readyTcs?.TrySetCanceled();
-        _readyTcs = null;
+        _readyGate?.TrySetCanceled();
+        _readyGate = null;
         _pendingUpdate.Dispose();
         _activeUpdate = null;
         _pendingOffer = null;

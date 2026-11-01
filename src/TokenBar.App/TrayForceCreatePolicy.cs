@@ -2,8 +2,8 @@ namespace TokenBar.App;
 
 /// <summary>
 /// Pure policy + injectable per-episode ForceCreate state machine.
-/// Free of WinUI types so unit tests can inject attempt, delay, and elapsed
-/// functions without constructing a tray.
+/// Free of WinUI types so unit tests can inject attempt, delay, and a time
+/// provider without constructing a tray.
 /// </summary>
 internal static class TrayForceCreatePolicy
 {
@@ -19,6 +19,12 @@ internal static class TrayForceCreatePolicy
     /// Tests fail if a schedule change shrinks the recovery window.
     /// </summary>
     public const int MinProductionRetryWindowMilliseconds = EpisodeDeadlineMilliseconds;
+
+    /// <summary>
+    /// Upper bound for one --startup-smoke readiness wait (see TrayReadyGate).
+    /// Three episode deadlines: a single episode always ends well inside it.
+    /// </summary>
+    public const int ReadyCeilingMilliseconds = EpisodeDeadlineMilliseconds * 3;
 
     /// <summary>Cap on a single inter-attempt delay (ms).</summary>
     public const int MaxDelayMilliseconds = 500;
@@ -45,18 +51,56 @@ internal static class TrayForceCreatePolicy
         exception is InvalidOperationException;
 }
 
+/// <summary>Named failure when the smoke readiness ceiling expires.</summary>
+internal sealed class TrayReadyCeilingException(TimeSpan ceiling) : TimeoutException(
+    $"tray readiness not reached within the {ceiling.TotalMilliseconds:0} ms ceiling "
+    + "(creation episodes kept restarting or the dispatcher is wedged)");
+
 /// <summary>
-/// Startup-smoke readiness wait. The episode owns the only deadline and
-/// publishes exactly one terminal result (ready, or exhausted as a fault), so
-/// this wait has no timer of its own: a second scheduler racing the episode
-/// could fault a run whose terminal tick was merely queued behind a busy
-/// dispatcher. Only the caller's token can end the wait early; a hard hang
-/// limit belongs to the external smoke runner.
+/// The single terminal result of tray creation. Ready, an exhausted episode,
+/// disposal and the ceiling all complete one TaskCompletionSource, so the first
+/// writer wins and a waiter sees exactly one outcome. The episode deadline
+/// alone cannot bound --startup-smoke: EnsureIconCreated can start a new
+/// episode, restarting that deadline, while the last tick is still queued. The
+/// ceiling is therefore an upper bound well above the episode deadline; its
+/// expiry is a distinct <see cref="TrayReadyCeilingException"/>. It starts when
+/// a caller first waits, so normal launches have no extra timer.
 /// </summary>
-internal static class TrayReadyWait
+internal sealed class TrayReadyGate
 {
-    public static Task AwaitAsync(Task<bool> terminal, CancellationToken cancellationToken) =>
-        terminal.WaitAsync(cancellationToken);
+    private readonly TaskCompletionSource<bool> _tcs =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TimeProvider _time;
+    private readonly TimeSpan _ceiling;
+    private ITimer? _timer;
+
+    public TrayReadyGate(TimeProvider? timeProvider = null, TimeSpan? ceiling = null)
+    {
+        _time = timeProvider ?? TimeProvider.System;
+        _ceiling = ceiling
+            ?? TimeSpan.FromMilliseconds(TrayForceCreatePolicy.ReadyCeilingMilliseconds);
+    }
+
+    public bool TrySetReady() => _tcs.TrySetResult(true);
+
+    public bool TrySetFailed(Exception exception) => _tcs.TrySetException(exception);
+
+    public bool TrySetCanceled() => _tcs.TrySetCanceled();
+
+    public async Task WaitAsync(CancellationToken cancellationToken)
+    {
+        _timer ??= _time.CreateTimer(
+            _ => _tcs.TrySetException(new TrayReadyCeilingException(_ceiling)),
+            null, _ceiling, Timeout.InfiniteTimeSpan);
+        try
+        {
+            await _tcs.Task.WaitAsync(cancellationToken).ConfigureAwait(true);
+        }
+        finally
+        {
+            _timer.Dispose();
+        }
+    }
 }
 
 /// <summary>Result of one ForceCreate tick inside an episode.</summary>
@@ -85,7 +129,6 @@ internal sealed class TrayForceCreateEpisode
 
     public TrayForceCreateEpisode(
         TimeSpan? deadline = null,
-        Func<TimeSpan>? getElapsed = null,
         TimeProvider? timeProvider = null)
     {
         _deadline = deadline
@@ -95,19 +138,12 @@ internal sealed class TrayForceCreateEpisode
             throw new ArgumentOutOfRangeException(nameof(deadline));
         }
 
-        if (getElapsed is null)
-        {
-            // Monotonic timestamps (TimeProvider.System is Stopwatch-backed);
-            // wall-clock NTP corrections at logon must not shrink or stretch
-            // the tray-creation window. timeProvider is a test seam only.
-            var clock = timeProvider ?? TimeProvider.System;
-            var startTimestamp = clock.GetTimestamp();
-            _getElapsed = () => clock.GetElapsedTime(startTimestamp);
-        }
-        else
-        {
-            _getElapsed = getElapsed;
-        }
+        // Monotonic timestamps (TimeProvider.System is Stopwatch-backed);
+        // wall-clock NTP corrections at logon must not shrink or stretch the
+        // tray-creation window. timeProvider is the single test seam.
+        var clock = timeProvider ?? TimeProvider.System;
+        var startTimestamp = clock.GetTimestamp();
+        _getElapsed = () => clock.GetElapsedTime(startTimestamp);
     }
 
     public int Attempts { get; private set; }
