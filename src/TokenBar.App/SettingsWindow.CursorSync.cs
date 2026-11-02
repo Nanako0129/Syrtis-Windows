@@ -5,13 +5,14 @@ using TokenBar.Core;
 
 namespace TokenBar.App;
 
-// General page → "Cursor usage sync" (macOS SettingsPanel cursorSyncSection,
+// Accounts page → "Cursor" (macOS SettingsPanel cursorSyncSection,
 // shared spec §2). Every action goes through CursorSyncController.Shared; this
 // only draws its state and the stored preferences.
 //
 // The controls are built once and updated in place on every state change
 // (issue #243): recreating them removed the focused control, and WinUI then
-// moved focus to the next focusable one (the Discord toggle below the section).
+// moved focus to the next focusable one (on the General page, where the
+// section was then, the Discord toggle below it).
 public sealed partial class SettingsWindow
 {
     private bool _cursorSyncSubscribed;
@@ -25,30 +26,73 @@ public sealed partial class SettingsWindow
     private Button? _csSyncNow;
     private bool _csAnswerConfirms;
     private bool _csUpdating;
+    // The switch whose enable confirmation is open. UpdateCursorSync leaves
+    // only that switch's IsOn alone; a switch built later (Rebuild) always
+    // shows the stored state, even if that confirmation never resolves.
+    private ToggleSwitch? _csConfirmingToggle;
 
-    private StackPanel BuildCursorSync(SettingsStore store)
+    // Called only with the controller (BuildAccountsPage states the contract).
+    private StackPanel BuildCursorSync(SettingsStore store, CursorSyncController cursor)
     {
         var body = new StackPanel { Spacing = 6 };
-        if (CursorSyncController.Shared is not { } cursor)
-        {
-            return body; // nothing to draw or act on without the controller
-        }
-
         var toggle = new ToggleSwitch { OnContent = null, OffContent = null };
-        toggle.Toggled += (_, _) =>
+        toggle.Toggled += async (_, _) =>
         {
             if (_csUpdating)
             {
                 return; // programmatic IsOn from UpdateCursorSync, not the user
             }
 
-            cursor.SetEnabled(toggle.IsOn);
-            UpdateCursorSync(store);
+            try
+            {
+                try
+                {
+                    if (!toggle.IsOn)
+                    {
+                        cursor.TurnOff();
+                    }
+                    else
+                    {
+                        // Consent is the controller's (CursorSyncController.TurnOn,
+                        // which also records how this differs from macOS): while the
+                        // notice is unanswered it opens this confirmation, and only
+                        // Continue writes. While it is open, UpdateCursorSync leaves
+                        // this switch's IsOn alone, so a state change (a sync ending,
+                        // the Overview card) does not flip it under the flyout.
+                        _csConfirmingToggle = toggle;
+                        try
+                        {
+                            await cursor.TurnOn(() => ConfirmFlyout(toggle, CursorSync.Copy.Title,
+                                CursorSync.Copy.Privacy, CursorSync.Copy.Continue, CursorSync.Copy.Cancel));
+                        }
+                        finally
+                        {
+                            if (ReferenceEquals(_csConfirmingToggle, toggle))
+                            {
+                                _csConfirmingToggle = null;
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    // Cancel or a failure: the switch shows the stored state again.
+                    UpdateCursorSync(store);
+                }
+            }
+            catch (Exception ex)
+            {
+                // async void: nothing in this handler, UpdateCursorSync
+                // included, may escape to the dispatcher. The type only, as
+                // elsewhere in Settings.
+                DevLog.Write($"cursor-sync: settings toggle failed: {ex.GetType().Name}");
+            }
         };
         AutomationProperties.SetName(toggle, CursorSync.Copy.Toggle.Localized());
         _csToggle = toggle;
         body.Children.Add(ToggleRow(CursorSync.Copy.Toggle.Localized(), toggle));
-        body.Children.Add(Hint(CursorSync.Copy.Privacy.Localized()));
+        // The privacy paragraph is in the section's info flyout, the enable
+        // confirmation and the Overview notice card, not inline.
 
         _csCleanupWarning = WarningLine(CursorSync.Copy.CleanupFailed.Localized());
         _csStatusHint = Hint("");
@@ -105,14 +149,17 @@ public sealed partial class SettingsWindow
         }
 
         var on = CursorSync.ToggleShowsOn(CursorSync.Enabled(store), CursorSync.NoticeAcknowledged(store));
-        _csUpdating = true;
-        try
+        if (!ReferenceEquals(toggle, _csConfirmingToggle))
         {
-            toggle.IsOn = on;
-        }
-        finally
-        {
-            _csUpdating = false;
+            _csUpdating = true;
+            try
+            {
+                toggle.IsOn = on;
+            }
+            finally
+            {
+                _csUpdating = false;
+            }
         }
 
         Show(_csCleanupWarning!, CursorSync.CleanupFailedVisible(on, cursor.CleanupFailed));

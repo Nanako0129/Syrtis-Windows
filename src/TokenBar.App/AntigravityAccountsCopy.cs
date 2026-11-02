@@ -11,7 +11,13 @@ namespace TokenBar.App;
 /// </summary>
 internal static class AntigravityAccountsCopy
 {
-    internal const string Section = "Antigravity accounts";
+    /// <summary>The section header on the Accounts page: a product name, so it
+    /// is not translated.</summary>
+    internal const string Header = "Antigravity";
+
+    /// <summary>The one line kept under the header; everything else is behind
+    /// the info button (<see cref="Info"/>).</summary>
+    internal const string Summary = "Capture a Google account agy signs into.";
 
     internal const string Capture = "Capture current agy login";
 
@@ -52,6 +58,32 @@ internal static class AntigravityAccountsCopy
 
     internal const string TwiceFromIde =
         "If Antigravity's own sign-in (not agy) supplies the main card, the same account can appear twice.";
+
+    /// <summary>The explanations behind the info button that do not depend on
+    /// the automatic-capture toggle, in reading order.</summary>
+    internal static readonly string[] Info = [HowTo, Reads, RemoveMeans, TwiceFromIde];
+
+    /// <summary>The info flyout's rows. The toggle's group comes last, under the
+    /// toggle's own label (<see cref="Toggle"/>) as a heading, so nothing after
+    /// the heading reads as being about anything else: <see cref="WhenOn"/>,
+    /// then <see cref="MergeOnlyUntilRefresh"/> only while automatic capture is
+    /// off (as on macOS). <paramref name="captureEnabled"/> is the controller's
+    /// <c>IsEnabled</c>; null (no controller) counts as on, and the section body
+    /// is empty then anyway.</summary>
+    internal static IEnumerable<(string Text, bool Heading)> InfoRows(bool? captureEnabled)
+    {
+        foreach (var text in Info)
+        {
+            yield return (text, false);
+        }
+
+        yield return (Toggle, true);
+        yield return (WhenOn, false);
+        if (captureEnabled == false)
+        {
+            yield return (MergeOnlyUntilRefresh, false);
+        }
+    }
 
     internal const string ConfirmTitle = "Turn on automatic capture?";
 
@@ -96,7 +128,7 @@ internal static class AntigravityAccountsCopy
     ];
 
     internal static IEnumerable<string> All() =>
-        [Section, "Antigravity account", "Antigravity account {0}", Capture, Capturing, Remove, RemoveNamed, Toggle, Paused, MergeOnlyUntilRefresh,
-            WhenOn, HowTo, Reads, RemoveMeans, TwiceFromIde, ConfirmTitle, ConfirmBody, ConfirmOk,
+        [Summary, "Antigravity account", "Antigravity account {0}", Capture, Capturing, Remove, RemoveNamed, Toggle, Paused, MergeOnlyUntilRefresh,
+            WhenOn, .. Info, ConfirmTitle, ConfirmBody, ConfirmOk,
             ConfirmCancel, Generic, .. Codes.Select(Message)];
 }

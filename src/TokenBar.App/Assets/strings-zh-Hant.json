@@ -499,7 +499,6 @@
   "Longest streak": "最長連續",
   "Favorite model": "最常用模型",
   "Best day": "最高單日",
-  "Claude accounts": "Claude 帳號",
   "Add config dir…": "加入設定資料夾…",
   "Remove": "移除",
   "Remove {0}": "移除 {0}",
@@ -545,7 +544,6 @@
   "{0} less left": "剩餘少 {0}",
   "{0} more left": "剩餘多 {0}",
   "Drag to reorder": "拖曳可調整順序",
-  "Antigravity accounts": "Antigravity 帳號",
   "Antigravity account": "Antigravity 帳號",
   "Antigravity account {0}": "Antigravity 帳號 {0}",
   "Capture current agy login": "擷取 agy 目前的登入",
@@ -600,5 +598,10 @@
   "You also have Cursor usage from tokscale CLI on this PC. Use Syrtis's own sync instead? Choose this only if it's the same Cursor account, or that account's usage will no longer be shown.": "這台電腦上也有 tokscale CLI 的 Cursor 用量。要改用 Syrtis 自己的同步嗎？只有在是同一個 Cursor 帳號時才選，否則那個帳號的用量就不會再顯示。",
   "Use Syrtis Sync": "改用 Syrtis 同步",
   "Keep tokscale CLI Data": "保留 tokscale CLI 的資料",
-  "Cursor sync is off, but some downloaded usage couldn't be deleted. Restart Syrtis to retry.": "Cursor 同步已關閉，但有部分已下載的用量無法刪除。重新啟動 Syrtis 即可再試。"
+  "Cursor sync is off, but some downloaded usage couldn't be deleted. Restart Syrtis to retry.": "Cursor 同步已關閉，但有部分已下載的用量無法刪除。重新啟動 Syrtis 即可再試。",
+  "Accounts": "帳號",
+  "More details: {0}": "詳細說明：{0}",
+  "Extra accounts join your totals.": "額外的帳號會併入你的總計。",
+  "Capture a Google account agy signs into.": "擷取 agy 登入的 Google 帳號。",
+  "Sync usage from the Cursor app.": "同步 Cursor App 的用量。"
 }

@@ -6,7 +6,7 @@ using Grid = Microsoft.UI.Xaml.Controls.Grid;
 
 namespace TokenBar.App;
 
-// General page → "Claude accounts" (macOS SettingsPanel claudeExtraRootsSection).
+// Accounts page → "Claude" (macOS SettingsPanel claudeExtraRootsSection).
 // Saving the list is the whole action: App's store observer queues the push
 // (ClaudeRootsPusher), which also refreshes the dashboard when it lands.
 public sealed partial class SettingsWindow
@@ -129,15 +129,6 @@ public sealed partial class SettingsWindow
             var text = Ui.Dim(notice, 11);
             text.Foreground = Ui.BrushFromHex(DashboardView.PaceOrange);
             body.Children.Add(text);
-        }
-
-        foreach (var hint in new[]
-                 {
-                     ClaudeAccountsCopy.HowTo, ClaudeAccountsCopy.Reads, ClaudeAccountsCopy.Transport,
-                     ClaudeAccountsCopy.Locations, ClaudeAccountsCopy.RemoveMeans,
-                 })
-        {
-            body.Children.Add(Hint(hint.Localized()));
         }
     }
 

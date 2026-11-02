@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Reflection;
 using System.Text.Json;
 using TokenBar.Core;
 using TokenBar.Interop;
@@ -83,6 +84,9 @@ public class CursorSyncTests
         public int UserSyncs => Log.Count(e => e == "sync:user");
     }
 
+    // The confirmation for a notice that is already answered: TurnOn must not open it.
+    private static Task<bool> NeverAsked() => throw new InvalidOperationException("asked again");
+
     private static async Task Until(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow + Wait;
@@ -117,7 +121,7 @@ public class CursorSyncTests
         await Until(() => core.Pushes.Count == 3);
         Assert.Equal("""{"enabled":true,"cliTakeoverConfirmed":true}""", Last());
 
-        controller.SetEnabled(false);
+        controller.TurnOff();
         await Until(() => core.Pushes.Count == 4);
         Assert.Equal("""{"enabled":false,"cliTakeoverConfirmed":true}""", Last());
     }
@@ -133,14 +137,138 @@ public class CursorSyncTests
         Assert.False(CursorSync.ShouldSync(store));
     }
 
+    // The Settings switch's real sequence (TurnOn with the confirmation's
+    // answer): Continue enables with one config push and one sync.
     [Fact]
-    public void TheSettingsSwitchAnswersTheNoticeWhenTurnedOn()
+    public async Task TurningTheSwitchOnAndContinuingPushesOnceAndSyncsOnce()
     {
         var store = TempStore();
-        var controller = new CursorSyncController(new FakeCore().Io, store, User, interval: Never);
-        controller.SetEnabled(true);
+        var core = new FakeCore();
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var asked = 0;
+        var turnedOn = await controller.TurnOn(() =>
+        {
+            // While the confirmation is open nothing is written or sent, so a
+            // state change then still reads off (the switch must not follow it).
+            asked++;
+            Assert.False(CursorSync.ToggleShowsOn(CursorSync.Enabled(store), CursorSync.NoticeAcknowledged(store)));
+            Assert.Null(store.GetNullableBool(CursorSync.NoticeKey));
+            Assert.Equal(0, core.Calls);
+            return Task.FromResult(true);
+        });
+        Assert.True(turnedOn);
+        Assert.Equal(1, asked);
+        await Until(() => core.Log.Any(e => e.StartsWith("sync", StringComparison.Ordinal)));
+        await Task.Delay(200);
         Assert.True(CursorSync.NoticeAcknowledged(store));
+        Assert.True(CursorSync.Enabled(store));
+        Assert.Equal(new[] { (true, false) }, core.Pushes.ToArray());
+        Assert.Equal(1, core.Log.Count(e => e.StartsWith("sync", StringComparison.Ordinal)));
+
+        // Once answered, Windows turns on without asking (macOS asks every
+        // time; a decided difference, see TurnOn).
+        controller.TurnOff();
+        Assert.True(await controller.TurnOn(NeverAsked));
         Assert.True(CursorSync.ShouldSync(store));
+    }
+
+    [Fact]
+    public async Task CancellingTheConfirmationWritesNothingAndCallsNoCore()
+    {
+        var store = TempStore();
+        var core = new FakeCore();
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var changes = 0;
+        controller.StateChanged += () => changes++;
+        Assert.False(await controller.TurnOn(() => Task.FromResult(false)));
+        await Task.Delay(200);
+        Assert.Null(store.GetNullableBool(CursorSync.EnabledKey));
+        Assert.Null(store.GetNullableBool(CursorSync.NoticeKey));
+        Assert.Equal(0, core.Calls);
+        Assert.Equal(0, changes);
+    }
+
+    // Consent lives in the controller: only TurnOn (its confirmation) and the
+    // Overview card's AnswerNotice may turn sync on. Every other public
+    // controller call (instance or static), with every bool argument, leaves
+    // it off, both before the notice is answered (default-on preference) and
+    // after it was answered and turned off: in the store, and in what reaches
+    // the core (no enabled config push, no sync).
+    [Fact]
+    public async Task NoPublicCallButTheConsentPathsTurnsSyncOn()
+    {
+        string[] consent = [nameof(CursorSyncController.TurnOn), nameof(CursorSyncController.AnswerNotice)];
+        var calls = typeof(CursorSyncController)
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName && !consent.Contains(m.Name))
+            .ToArray();
+        // Control: the scan sees the controller's actions.
+        Assert.Contains(calls, m => m.Name == nameof(CursorSyncController.TurnOff));
+        Assert.Contains(calls, m => m.Name == nameof(CursorSyncController.SetTakeoverConfirmed));
+        foreach (var answered in new[] { false, true })
+        {
+            foreach (var call in calls)
+            {
+                var parameters = call.GetParameters();
+                // A new public call with other parameters must be classified here.
+                Assert.True(parameters.All(p => p.ParameterType == typeof(bool)), call.Name);
+                foreach (var flag in new[] { false, true })
+                {
+                    var store = TempStore();
+                    if (answered)
+                    {
+                        store.SetBool(CursorSync.NoticeKey, true);
+                        store.SetBool(CursorSync.EnabledKey, false);
+                    }
+
+                    var core = new FakeCore();
+                    var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+                    var args = parameters.Select(_ => (object)flag).ToArray();
+                    if (call.Invoke(call.IsStatic ? null : controller, args) is Task task)
+                    {
+                        await task;
+                    }
+
+                    // Pushes and syncs run on the thread pool; let them land.
+                    await Task.Delay(50);
+                    var what = $"{call.Name}({flag}) answered={answered}";
+                    Assert.False(CursorSync.ShouldSync(store), what);
+                    Assert.Equal(answered, CursorSync.NoticeAcknowledged(store));
+                    Assert.False(core.Pushes.LastOrDefault().Enabled, what);
+                    Assert.DoesNotContain(core.Log, e => e.StartsWith("sync", StringComparison.Ordinal));
+                }
+            }
+        }
+
+        // Controls: the consent paths do turn it on, and the core sees it.
+        var answeredStore = TempStore();
+        new CursorSyncController(new FakeCore().Io, answeredStore, User, interval: Never)
+            .AnswerNotice(continuing: true);
+        Assert.True(CursorSync.ShouldSync(answeredStore));
+
+        var confirmedStore = TempStore();
+        var confirmedCore = new FakeCore();
+        Assert.True(await new CursorSyncController(confirmedCore.Io, confirmedStore, User, interval: Never)
+            .TurnOn(() => Task.FromResult(true)));
+        Assert.True(CursorSync.ShouldSync(confirmedStore));
+        await Until(() => confirmedCore.Log.Any(e => e.StartsWith("sync", StringComparison.Ordinal)));
+        Assert.True(confirmedCore.Pushes.Last().Enabled);
+    }
+
+    // Turn Off on the notice card: no reader may see "answered" while the
+    // preference is still the default on.
+    [Fact]
+    public void TurnOffOnTheNoticeNeverPassesThroughSyncAllowed()
+    {
+        var store = TempStore();
+        var seen = new List<(string Key, bool ShouldSync)>();
+        store.Changed += key => seen.Add((key, CursorSync.ShouldSync(store)));
+        Assert.True(CursorSync.Enabled(store)); // default on
+        new CursorSyncController(new FakeCore().Io, store, User, interval: Never)
+            .AnswerNotice(continuing: false);
+        // Control: both writes were observed.
+        Assert.Equal(new[] { CursorSync.EnabledKey, CursorSync.NoticeKey }.Order(), seen.Select(s => s.Key).Order());
+        Assert.DoesNotContain(seen, s => s.ShouldSync);
     }
 
     // ---- notice and switch rules ------------------------------------------------
@@ -218,12 +346,12 @@ public class CursorSyncTests
             var core = new FakeCore();
             var controller = new CursorSyncController(core.Io, store, ["Syrtis.exe", flag], interval: Never);
             controller.Reconfigure(refresh: true);
-            controller.SetEnabled(true);
+            await controller.TurnOn(NeverAsked);
             controller.SetTakeoverConfirmed(true);
             controller.AnswerNotice(continuing: true);
             await controller.RunSync(userInitiated: true);
             await controller.ProbeCursorPresent();
-            controller.SetEnabled(false); // off would delete files
+            controller.TurnOff(); // off would delete files
             await Task.Delay(100);
             Assert.True(core.Calls == 0, $"{flag}: {string.Join(",", core.Log)}");
         }
@@ -261,7 +389,7 @@ public class CursorSyncTests
         core.PushGate = enabled => enabled ? slowOn : null;
         var controller = new CursorSyncController(core.Io, store, User, interval: Never);
         controller.Reconfigure(refresh: false);
-        controller.SetEnabled(false);
+        controller.TurnOff();
         await Task.Delay(100);
         slowOn.Set();
         await Until(() => core.Pushes.Count == 2);
@@ -408,7 +536,7 @@ public class CursorSyncTests
         var running = controller.RunSync(userInitiated: false);
         Assert.True(await core.SyncStarted.WaitAsync(Wait));
         await controller.RunSync(userInitiated: true);
-        controller.SetEnabled(false);
+        controller.TurnOff();
         gate.Set();
         await running;
         Assert.Equal(new[] { "sync:auto" }, core.Log.Where(e => e.StartsWith("sync")).ToArray());
@@ -429,8 +557,8 @@ public class CursorSyncTests
         var running = controller.RunSync(userInitiated: false);
         Assert.True(await core.SyncStarted.WaitAsync(Wait));
         await controller.RunSync(userInitiated: true);
-        controller.SetEnabled(false);
-        controller.SetEnabled(true);
+        controller.TurnOff();
+        await controller.TurnOn(NeverAsked);
         gate.Set();
         await running;
         Assert.Equal(0, core.UserSyncs);
@@ -481,7 +609,7 @@ public class CursorSyncTests
         var controller = new CursorSyncController(core.Io, store, User, interval: Never);
         controller.Reconfigure(refresh: false);                // on push, held
         var syncNow = controller.RunSync(userInitiated: true); // waits on that push
-        controller.SetEnabled(false);                          // the user turns it off
+        controller.TurnOff();                          // the user turns it off
         slowOn.Set();
         await syncNow;
         await Until(() => core.Pushes.Count == 2);
@@ -555,7 +683,7 @@ public class CursorSyncTests
             CursorSync.ToggleShowsOn(CursorSync.Enabled(store), CursorSync.NoticeAcknowledged(store)),
             controller.CleanupFailed);
 
-        controller.SetEnabled(false);
+        controller.TurnOff();
         await Until(() => core.Pushes.Count == 1);
         await Until(() => controller.CleanupFailed);
         Assert.True(Shown()); // sync off, line shown
@@ -563,13 +691,13 @@ public class CursorSyncTests
         // Turning sync on hides the line ("sync is off" would be false) but
         // does not clear it: only a successful cleanup does.
         failCleanup = false;
-        controller.SetEnabled(true);
+        await controller.TurnOn(NeverAsked);
         await Until(() => core.Pushes.Count == 2);
         await Task.Delay(50);
         Assert.True(controller.CleanupFailed);
         Assert.False(Shown());
 
-        controller.SetEnabled(false);
+        controller.TurnOff();
         await Until(() => core.Pushes.Count == 3);
         await Until(() => !controller.CleanupFailed);
         Assert.False(Shown()); // gone after a successful cleanup
@@ -633,13 +761,13 @@ public class CursorSyncTests
             CursorSync.ToggleShowsOn(CursorSync.Enabled(store), CursorSync.NoticeAcknowledged(store)),
             controller.CleanupFailed);
 
-        controller.SetEnabled(false);
+        controller.TurnOff();
         await Until(() => Shown()); // the previous failure
 
         using (var failAgain = new ManualResetEventSlim(false))
         {
             hold = failAgain;
-            controller.SetEnabled(false); // retry, held
+            controller.TurnOff(); // retry, held
             await Task.Delay(100);
             Assert.False(Shown());
             failAgain.Set();
@@ -651,7 +779,7 @@ public class CursorSyncTests
         {
             hold = succeed;
             fail = false;
-            controller.SetEnabled(false);
+            controller.TurnOff();
             await Task.Delay(100);
             Assert.False(Shown());
             succeed.Set();
@@ -722,6 +850,7 @@ public class CursorSyncTests
         ["To show your Cursor usage, Syrtis reads the login of the Cursor app on this PC and sends it only to Cursor's usage service (cursor.com) to download your usage. Syrtis stores the date, model, token counts, cost and conversation ID of each request on this PC; the login itself is never saved or logged. Turning this off deletes the downloaded usage."] =
             "要顯示 Cursor 用量，Syrtis 會讀取這台電腦上 Cursor App 的登入資訊，只送到 Cursor 的用量服務（cursor.com）下載你的用量。Syrtis 會在這台電腦上存下每次請求的日期、模型、token 數、費用和對話 ID；登入資訊本身不會儲存或記錄。關閉這個選項會刪除已下載的用量。",
         ["Continue"] = "繼續",
+        ["Cancel"] = "取消",
         ["Turn Off"] = "關閉",
         ["Last synced {0}"] = "上次同步：{0}",
         ["Only part of your usage was downloaded. Syrtis will try again."] = "只下載到部分用量，Syrtis 會再試一次。",

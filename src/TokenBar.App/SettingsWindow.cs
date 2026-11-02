@@ -44,7 +44,8 @@ public sealed partial class SettingsWindow : Window
     };
 
     // Sidebar (macOS SettingsPanel.Page): one NavigationView built once, its
-    // four items never rebuilt. Rebuild() only regenerates each page's
+    // six items (Menu bar, Dashboard, Attribution, Accounts, General, About)
+    // never rebuilt. Rebuild() only regenerates each page's
     // StackPanel and re-attaches whichever one matches _selectedTag — the
     // NavigationView's own SelectedItem is untouched by a rebuild, which is
     // what keeps the user on the same page across a settings write and
@@ -59,6 +60,10 @@ public sealed partial class SettingsWindow : Window
         // pane buys nothing — and the items carry no icons, so the compact
         // state has nothing to fall back to and just clips the labels to
         // "Menu"/"Dash"/"Gene"/"Abou". macOS has no such control either.
+        // "Accounts" / 帳號 are shorter than the existing "Attribution" and
+        // "Dashboard" labels. The page was rendered on 188 in zh-Hant
+        // (2026-11-02, screenshot) and the maintainer approved it; the other
+        // languages' labels were not measured.
         IsPaneToggleButtonVisible = false,
         // NavigationView's default is 320, which would eat the width the 732
         // -> 900 widening was meant to give the content column: 900 - 304
@@ -74,6 +79,11 @@ public sealed partial class SettingsWindow : Window
     {
         Content = UsageAttributionPage.Copy.Section.Localized(),
         Tag = "attribution",
+    };
+    private readonly NavigationViewItem _accountsItem = new()
+    {
+        Content = SettingsCopy.AccountsPage.Localized(),
+        Tag = "accounts",
     };
     private readonly NavigationViewItem _generalItem = new() { Content = "General".Localized(), Tag = "general" };
     private readonly NavigationViewItem _aboutItem = new() { Content = "About".Localized(), Tag = "about" };
@@ -162,6 +172,7 @@ public sealed partial class SettingsWindow : Window
         _nav.MenuItems.Add(_menuBarItem);
         _nav.MenuItems.Add(_dashboardItem);
         _nav.MenuItems.Add(_attributionItem);
+        _nav.MenuItems.Add(_accountsItem);
         _nav.MenuItems.Add(_generalItem);
         _nav.MenuItems.Add(_aboutItem);
         _nav.SelectedItem = _menuBarItem;
@@ -437,6 +448,7 @@ public sealed partial class SettingsWindow : Window
         _pages["menubar"] = BuildMenuBarPage(store);
         _pages["dashboard"] = BuildDashboardPage(store);
         _pages["attribution"] = BuildAttributionPage(store);
+        _pages["accounts"] = BuildAccountsPage(store);
         _pages["general"] = BuildGeneralPage(store);
         _pages["about"] = BuildAboutPage();
         ShowPage(_selectedTag);
@@ -1090,6 +1102,34 @@ public sealed partial class SettingsWindow : Window
         ShowPage(_selectedTag);
     }
 
+    // ── Accounts page: Claude extra accounts, Antigravity captured accounts ──
+    private StackPanel BuildAccountsPage(SettingsStore store)
+    {
+        var panel = new StackPanel { Spacing = 16, MaxWidth = 380 };
+        panel.Children.Add(InfoSection(
+            ClaudeAccountsCopy.Header, ClaudeAccountsCopy.Summary, ClaudeAccountsCopy.InfoRows,
+            BuildClaudeAccounts(store)));
+        // App.OnLaunched sets both controllers (StartAntigravityAccounts,
+        // StartCursorSync) before any SettingsWindow exists. This is the one
+        // check: without its controller a section is not shown at all, no
+        // summary or info for a switch that is not there.
+        if (AntigravityAutoCapture.Shared is not null)
+        {
+            panel.Children.Add(InfoSection(
+                AntigravityAccountsCopy.Header, AntigravityAccountsCopy.Summary,
+                () => AntigravityAccountsCopy.InfoRows(AntigravityAutoCapture.Shared?.IsEnabled),
+                BuildAntigravityAccounts(store)));
+        }
+
+        if (CursorSyncController.Shared is { } cursor)
+        {
+            panel.Children.Add(InfoSection(
+                CursorSync.Copy.Header, SettingsCopy.CursorSummary, CursorSync.Copy.InfoRows,
+                BuildCursorSync(store, cursor)));
+        }
+        return panel;
+    }
+
     // ── General page: Startup, Data refresh ──────────────────────────────
     private StackPanel BuildGeneralPage(SettingsStore store)
     {
@@ -1125,13 +1165,7 @@ public sealed partial class SettingsWindow : Window
         refresh.Children.Add(Hint(SettingsCopy.RefreshHint.Localized()));
         panel.Children.Add(Section("Data refresh".Localized(), refresh));
 
-        panel.Children.Add(Section(ClaudeAccountsCopy.Section.Localized(), BuildClaudeAccounts(store)));
-
-        panel.Children.Add(Section(AntigravityAccountsCopy.Section.Localized(), BuildAntigravityAccounts(store)));
-
-        // macOS puts this between Antigravity accounts and Language; Windows
-        // has Discord between those two, so it goes directly after Antigravity.
-        panel.Children.Add(Section(CursorSync.Copy.Title.Localized(), BuildCursorSync(store)));
+        // Claude, Antigravity and Cursor sync live on the Accounts page.
 
         // ── Discord (macOS SettingsPanel :944-1007) ─────────────────────
         _discordSection = Section(DiscordCopy.Section.Localized(), BuildDiscord(store));
@@ -1991,10 +2025,167 @@ public sealed partial class SettingsWindow : Window
     private static StackPanel Section(string title, UIElement content)
     {
         var section = new StackPanel { Spacing = 6 };
-        var header = Ui.Text(title.ToUpperInvariant(), 10, 0.55, bold: true);
-        section.Children.Add(header);
+        section.Children.Add(SectionHeader(title));
         section.Children.Add(content);
         return section;
+    }
+
+    /// <summary>A section's caps header, marked as a Level2 heading for
+    /// screen-reader heading navigation (Narrator's use of it is not measured).
+    /// Its automation name is the title as written, not the upper-cased
+    /// display text.</summary>
+    private static TextBlock SectionHeader(string title)
+    {
+        var header = Ui.Text(title.ToUpperInvariant(), 10, 0.55, bold: true);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(header, title);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHeadingLevel(
+            header, Microsoft.UI.Xaml.Automation.Peers.AutomationHeadingLevel.Level2);
+        return header;
+    }
+
+    /// <summary>A Section whose header carries an info button and whose only
+    /// inline explanation is one line; the rest opens from the button. A
+    /// Flyout rather than HoverTip: it opens on click, keyboard and touch too,
+    /// and the privacy facts inside must be reachable by all of them.</summary>
+    private static StackPanel InfoSection(
+        string title, string summary, Func<IEnumerable<(string Text, bool Heading)>> rows,
+        UIElement content)
+    {
+        // Filled on each open: the rows can depend on live state (the Antigravity
+        // note that applies only while automatic capture is off).
+        var details = new StackPanel { Spacing = 8, MaxWidth = 320 };
+        var name = SettingsCopy.MoreInfo.Localized(title);
+        // A ScrollViewer that takes focus when the flyout opens, so arrow keys
+        // and PageDown scroll text that is otherwise unfocusable; the
+        // Antigravity rows are taller than the 640 px settings window.
+        var scroller = new ScrollViewer
+        {
+            Content = details,
+            MaxHeight = 420,
+            IsTabStop = true,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+        };
+        // Named like the button. What Narrator announces on open is not measured.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(scroller, name);
+        var flyout = new Flyout { Content = scroller, Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Bottom };
+        var button = new Button
+        {
+            Content = new FontIcon { Glyph = "\uE946", FontSize = 12 }, // Info
+            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(4),
+            // A 24x24 minimum hit target; the rendered size was not measured.
+            // The glyph size is unchanged.
+            MinWidth = 24,
+            MinHeight = 24,
+            VerticalAlignment = VerticalAlignment.Center,
+            Flyout = flyout,
+        };
+        // No ToolTip: it would repeat this name to a screen reader, and the
+        // glyph is the usual info mark.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, name);
+
+        // The scroller takes the focus state the button has when the flyout
+        // starts opening (Keyboard after Enter/Space, Pointer after a click;
+        // Programmatic if the button has none), so the focus rectangle, which
+        // WinUI draws only for Keyboard focus, follows the input that opened
+        // it. Not observed on screen yet.
+        var openedWith = FocusState.Programmatic;
+        flyout.Opening += (_, _) =>
+        {
+            openedWith = button.FocusState == FocusState.Unfocused
+                ? FocusState.Programmatic : button.FocusState;
+            details.Children.Clear();
+            foreach (var (text, heading) in rows())
+            {
+                var line = Ui.Text(text.Localized(), 12, bold: heading);
+                line.TextWrapping = TextWrapping.Wrap;
+                line.TextTrimming = TextTrimming.None;
+                line.IsTextSelectionEnabled = true;
+                if (heading)
+                {
+                    // Level3: inside a section, whose header is Level2.
+                    Microsoft.UI.Xaml.Automation.AutomationProperties.SetHeadingLevel(
+                        line, Microsoft.UI.Xaml.Automation.Peers.AutomationHeadingLevel.Level3);
+                }
+
+                details.Children.Add(line);
+            }
+        };
+        flyout.Opened += (_, _) => scroller.Focus(openedWith);
+
+        var header = new Grid { ColumnSpacing = 4 };
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.Children.Add(SectionHeader(title));
+        Grid.SetColumn(button, 1);
+        header.Children.Add(button);
+
+        var section = new StackPanel { Spacing = 6 };
+        section.Children.Add(header);
+        section.Children.Add(Hint(summary.Localized()));
+        section.Children.Add(content);
+        return section;
+    }
+
+    /// <summary>A confirmation flyout on a switch whose enabling needs a
+    /// disclosure seen first (Antigravity automatic capture, Cursor usage sync),
+    /// with that switch's own button labels. No ContentDialog: see
+    /// UpdateDialog's note on a second open throwing. Light dismiss counts as
+    /// Cancel.</summary>
+    private static Task<bool> ConfirmFlyout(
+        FrameworkElement anchor, string title, string body, string ok, string cancel)
+    {
+        var answer = new TaskCompletionSource<bool>();
+        var heading = Ui.Text(title.Localized(), 13, bold: true);
+        var text = Ui.Text(body.Localized(), 12);
+        var panel = new StackPanel { Spacing = 10, MaxWidth = 320 };
+        foreach (var line in new[] { heading, text })
+        {
+            line.TextWrapping = TextWrapping.Wrap;
+            line.TextTrimming = TextTrimming.None;
+            panel.Children.Add(line);
+        }
+
+        // No automation name or description on the panel: a StackPanel has no
+        // automation peer to carry them. The title and body are TextBlocks
+        // (which have peers), and the consenting button is DescribedBy the
+        // body below. How Narrator reads this flyout is not measured.
+
+        var flyout = new Flyout
+        {
+            Content = panel,
+            Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Bottom,
+        };
+        var cancelButton = new Button { Content = cancel.Localized() };
+        var okButton = new Button
+        {
+            Content = ok.Localized(),
+            Style = (Style)Application.Current.Resources["AccentButtonStyle"],
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.GetDescribedBy(okButton).Add(text);
+        // #264's key-repeat guard, as on Sync Now: the repeats of a held
+        // Enter or Space are swallowed at these buttons.
+        SwallowKeyRepeat(cancelButton);
+        SwallowKeyRepeat(okButton);
+        cancelButton.Click += (_, _) => flyout.Hide();
+        okButton.Click += (_, _) =>
+        {
+            answer.TrySetResult(true);
+            flyout.Hide();
+        };
+        flyout.Closed += (_, _) => answer.TrySetResult(false);
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            HorizontalAlignment = HorizontalAlignment.Right,
+        };
+        buttons.Children.Add(cancelButton);
+        buttons.Children.Add(okButton);
+        panel.Children.Add(buttons);
+        flyout.ShowAt(anchor);
+        return answer.Task;
     }
 
     private static StackPanel RadioGroup(
@@ -2147,7 +2338,7 @@ public sealed partial class SettingsWindow : Window
                 MinWidth = 0,
                 MinHeight = 0,
                 BorderThickness = new Thickness(0),
-                Background = new SolidColorBrush(Colors.Transparent),
+                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
                 CornerRadius = new CornerRadius(PresetCellSize / 2),
             };
             ToolTipService.SetToolTip(preset, $"{name.Localized()} {presetHex}");
