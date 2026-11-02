@@ -46,13 +46,16 @@ public sealed record CursorProfileStatus(
 /// <summary>Result of <c>tb_cursor_sync</c>. <see cref="State"/> is the
 /// round's headline, one of <c>ok</c>, <c>partial</c>, <c>expired</c>,
 /// <c>notSignedIn</c>, <c>offline</c>, <c>error</c>, <c>disabled</c>,
-/// <c>cliPresent</c>. <see cref="Changed"/>: some profile's file content
-/// changed this round (new bytes written, or a superseded file removed; a
-/// rewrite with the same bytes is not a change), whatever the headline says
-/// (the dashboard refreshes on it).</summary>
+/// <c>cliPresent</c>. <see cref="Changed"/>: some profile's usage file
+/// content changed this round (new bytes written, or a superseded usage file
+/// removed; a rewrite with the same bytes, or an orphan temp's removal, is
+/// not a change), whatever the headline says (the dashboard refreshes on it).
+/// <see cref="CleanupFailedProfiles"/>: ids of duplicate profiles whose other
+/// account's file could not be deleted this round (null from an older core).</summary>
 public sealed record CursorSyncStatus(
     string State, long Events, long? LastSuccessMs, bool Changed,
-    IReadOnlyList<CursorProfileStatus> Profiles, string? Reason = null);
+    IReadOnlyList<CursorProfileStatus> Profiles, string? Reason = null,
+    IReadOnlyList<string>? CleanupFailedProfiles = null);
 
 /// <summary>Result of <c>tb_validate_cursor_profile</c>: whether a folder can
 /// be added, else a fixed reason code. Never a path.</summary>

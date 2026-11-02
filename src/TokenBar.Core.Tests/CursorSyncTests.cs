@@ -49,6 +49,8 @@ public class CursorSyncTests
         public readonly SemaphoreSlim SyncStarted = new(0);
         public Func<CursorSyncStatus> Result = () => Status("ok", 1);
         public bool Present = true;
+        /// <summary>An accepted on push's <c>cleanupFailed</c>.</summary>
+        public volatile bool PushCleanupFailed;
         public int PresenceProbes;
         public volatile bool CoreTakeover;
 
@@ -70,7 +72,8 @@ public class CursorSyncTests
                     throw error;
                 }
 
-                return new CursorSyncConfig(enabled, null, takeover, 0, [], [], false, []);
+                return new CursorSyncConfig(
+                    enabled, null, takeover, 0, [], [], enabled && PushCleanupFailed, []);
             },
             Sync: userInitiated =>
             {
@@ -558,6 +561,40 @@ public class CursorSyncTests
         next = Status("partial", 0, changed: false);
         await controller.RunSync(userInitiated: true);
         Assert.Equal(3, data);
+    }
+
+    /// <summary>CMP-W W1 review round 3 (C): a round whose status lists
+    /// <c>cleanupFailedProfiles</c>, or an accepted on push whose cleanup
+    /// failed, raises <see cref="CursorSyncController.ProfileCleanupFailed"/>;
+    /// a clean round or push clears its own part, and an off push clears
+    /// both.</summary>
+    [Fact]
+    public async Task ProfileCleanupFailuresAreRaisedWhileOn()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var next = Status("ok", 1) with { CleanupFailedProfiles = ["0A1B2C3D-0000-4000-8000-00000000000A"] };
+        var core = new FakeCore { Result = () => next };
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+
+        await controller.RunSync(userInitiated: true);
+        Assert.True(controller.ProfileCleanupFailed, "the round's cleanupFailedProfiles was dropped");
+        next = Status("ok", 1) with { CleanupFailedProfiles = [] };
+        await controller.RunSync(userInitiated: true);
+        Assert.False(controller.ProfileCleanupFailed);
+
+        core.PushCleanupFailed = true;
+        controller.Reconfigure(refresh: false);
+        await Until(() => controller.ProfileCleanupFailed);
+        core.PushCleanupFailed = false;
+        controller.Reconfigure(refresh: false);
+        await Until(() => !controller.ProfileCleanupFailed);
+
+        core.PushCleanupFailed = true;
+        controller.Reconfigure(refresh: false);
+        await Until(() => controller.ProfileCleanupFailed);
+        controller.SetEnabled(false);
+        await Until(() => !controller.ProfileCleanupFailed);
     }
 
     // ---- configRejected (CMP-W WB3) -----------------------------------------------

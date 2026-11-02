@@ -247,7 +247,8 @@ char *tb_antigravity_remove(const char *key);
 // any other key (a "dir" included) is invalidJson. Every Syrtis dir is chosen
 // here: the default profile's
 // %APPDATA%\com.nyanako.tokenbar[.secure]\cursor-cache[.secure], added
-// profiles' %LOCALAPPDATA%\com.nyanako.tokenbar[.secure]\cursor-profiles[.secure]\<UUID>.
+// profiles' %LOCALAPPDATA%\com.nyanako.tokenbar[.secure]\cursor-profiles[.secure]\
+// <UUID>-<16 hex of SHA-256 of the folded root>[.secure].
 // Full replace, in-memory, default off: the caller re-applies it at launch.
 // Success data: {"enabled","dir","profilesDir","profiles":[{"id"}],
 // "rejected":[{"index","reason"}],"cliTakeoverConfirmed","removedFiles":N,
@@ -274,7 +275,8 @@ char *tb_set_cursor_sync(const char *json);
 // (a duplicate whose other-account file could not be deleted). state/reason
 // are the headline (ok when every profile is ok or duplicate, else the first
 // other state); changed = some profile's usage file content changed (new
-// bytes, or a superseded usage file removed); a profile's state may also be
+// bytes, or a usage file removed; not an orphan temp, not a rewrite of the
+// same bytes); a profile's state may also be
 // duplicate (duplicateOf names
 // the earlier profile, never the account).
 // cliPresent (no reason) = a profile synced but tokscale CLI Cursor files

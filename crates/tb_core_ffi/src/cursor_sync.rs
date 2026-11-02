@@ -33,7 +33,7 @@
 //! - W1: the caller passes no Syrtis path. The default profile's dir is
 //!   `<secure root>\cursor-cache` under `dirs::data_dir()\com.nyanako.tokenbar`
 //!   (roaming, as every release); added profiles live in
-//!   `<secure root>\cursor-profiles\<UUID>` under
+//!   `<secure root>\cursor-profiles\<UUID>-<root digest>` under
 //!   `dirs::data_local_dir()\com.nyanako.tokenbar` (local only, WB5), each
 //!   level following the `.secure` fallback like quota history.
 //! - W2: storage only through `agent_storage_windows` (protected DACL
@@ -57,11 +57,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const USAGE_EVENTS_URL: &str = "https://cursor.com/api/dashboard/get-filtered-usage-events";
 const FILE_NAME_DOMAIN: &str = "cursor-sync-file";
 const LOCK_FILE_NAME: &str = ".cursor-sync.lock";
-/// An added profile's dir records which root its files came from
-/// (`root_tag`), so a push that lists the same id with another root cleans
-/// it even after a refused push or a restart lost the old config. Not a
-/// usage name: commits never delete it.
-const ROOT_FILE_NAME: &str = ".cursor-sync.root";
 /// Starts with a dot so it can never match the engine's `usage*` patterns: a
 /// half-written temp file must not be scanned.
 const TEMP_FILE_PREFIX: &str = ".cursor-sync.tmp-";
@@ -275,17 +270,41 @@ fn resolve_under(base: Option<&Path>, child: &str) -> io::Result<PathBuf> {
     secure::resolve_dir(&root.join(child))
 }
 
-/// The content of an added profile's `ROOT_FILE_NAME`: SHA-256 of the root's
-/// folded key (`claude_config_dirs::duplicate_key`: case and `/` vs `\`
-/// folded, so a case-only change is the same root), hex. A digest, not the
-/// path (WB9: no root in any Syrtis file); comparison only, not secrecy.
-fn root_tag(root: &Path) -> String {
-    use sha2::Digest as _;
-    let key = crate::claude_config_dirs::duplicate_key(&root.to_string_lossy());
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(b"cursor-sync-root-v1\0");
-    hasher.update(key.as_bytes());
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+/// A root as roots compare everywhere (`claude_config_dirs::duplicate_key`:
+/// case and `/` vs `\` folded), so a respelling of the same folder is the
+/// same root.
+fn folded_root(root: &Path) -> String {
+    crate::claude_config_dirs::duplicate_key(&root.to_string_lossy())
+}
+
+/// Length of the root digest in an added profile's dir name.
+const ROOT_DIGEST_HEX: usize = 16;
+
+/// An added profile's dir name: `<UUID>-<first 16 hex of SHA-256 of the
+/// folded root>`. A new root for the same id is another dir, so the old one
+/// is unlisted and cleaned like a removed profile's; a respelling is the same
+/// dir. A digest, not the path (WB9: no root in any Syrtis name).
+fn profile_dir_name(profile: &Profile) -> String {
+    let digest = crate::agent_usage::sha256_hex_exact(folded_root(&profile.root).as_bytes());
+    format!("{}-{}", profile.id, &digest[..ROOT_DIGEST_HEX])
+}
+
+/// The profile id of a Syrtis profile dir name (`.secure` stripped first):
+/// `<UUID>-<16 hex>`, or a bare `<UUID>` (earlier W1 builds, cleaned as
+/// unlisted). `None` for anything else, which is never touched.
+fn profile_dir_id(name: &str) -> Option<&str> {
+    let id = name.get(..36).filter(|id| valid_profile_id(id))?;
+    match name.get(36..) {
+        Some("") => Some(id),
+        Some(rest) => rest
+            .strip_prefix('-')
+            .filter(|hex| {
+                hex.len() == ROOT_DIGEST_HEX
+                    && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+            .map(|_| id),
+        None => None,
+    }
 }
 
 /// `name` and `name.secure`: the two spellings one sticky-fallback level can
@@ -345,18 +364,18 @@ impl Cleanup {
             return;
         };
         for dir in candidates(base, SYNC_DIR_NAME) {
-            let cleaned = clean_candidate(&dir, false, None, None).map(|r| r.usage + r.temps);
+            let cleaned = clean_candidate(&dir, false, None).and_then(Removal::complete);
             self.record(DEFAULT_PROFILE_ID, cleaned);
         }
     }
 
-    /// Every `<UUID>` / `<UUID>.secure` profile dir under every local
-    /// `cursor-profiles` candidate whose id is not in `keep`, or is listed
-    /// there with another root than the dir records (`ROOT_FILE_NAME`,
-    /// compared under the dir's lock; a dir with no record counts as
-    /// another root) (WB7): only real directories with a UUID name; a
-    /// junction or symlink at any level is skipped, never followed; anything
-    /// else is left alone.
+    /// Every profile dir (`profile_dir_id`, plain or `.secure`) under every
+    /// local `cursor-profiles` candidate whose name is not a `keep`
+    /// profile's (WB7): a profile removed, or listed with another root (its
+    /// dir name differs), or a bare `<UUID>` dir of an earlier W1 build. Only
+    /// real directories; a junction or symlink at any level is skipped, never
+    /// followed; a listed profile's dir is not opened; anything else is left
+    /// alone.
     fn profile_dirs(&mut self, local: Option<&Path>, keep: &[Profile]) {
         let Some(local) = local else {
             return;
@@ -383,17 +402,18 @@ impl Cleanup {
                 let Some(name) = name.to_str() else {
                     continue;
                 };
-                let id = name.strip_suffix(secure::FALLBACK_SUFFIX).unwrap_or(name);
-                if !valid_profile_id(id) {
+                let dir_name = name.strip_suffix(secure::FALLBACK_SUFFIX).unwrap_or(name);
+                let Some(id) = profile_dir_id(dir_name) else {
+                    continue;
+                };
+                if keep.iter().any(|p| profile_dir_name(p) == dir_name) {
                     continue;
                 }
-                let listed = keep.iter().find(|p| p.id == id).map(|p| root_tag(&p.root));
                 let id = id.to_string();
                 match real_dir(&entry.path()) {
                     Ok(true) => self.record(
                         &id,
-                        clean_candidate(&entry.path(), true, None, listed.as_deref())
-                            .map(|r| r.usage + r.temps),
+                        clean_candidate(&entry.path(), true, None).and_then(Removal::complete),
                     ),
                     Ok(false) => {}
                     Err(error) => self.record(&id, Err(error)),
@@ -414,17 +434,11 @@ impl Cleanup {
 /// followed, as the storage contract allows (same-user planting, out of
 /// scope). `remove_dir`: an added profile's dir; once our files are gone,
 /// the lock file goes too (secure delete) and the dir is `rmdir`ed, which
-/// succeeds only if nothing else is left (the root record goes with it).
-/// `keep`: one file name to leave (a duplicate profile keeps its current
-/// account's copy, as a commit does). `unless_root`: leave the dir alone when
-/// its root record equals this tag (checked under the lock, so a commit
-/// cannot slip in between).
-fn clean_candidate(
-    dir: &Path,
-    remove_dir: bool,
-    keep: Option<&str>,
-    unless_root: Option<&str>,
-) -> io::Result<Removal> {
+/// succeeds only if nothing else is left. `keep`: one file name to leave (a
+/// duplicate profile keeps its current account's copy, as a commit does).
+/// Files that could not be deleted are counted in `left`, next to what was
+/// removed (`Removal::complete` makes them an error).
+fn clean_candidate(dir: &Path, remove_dir: bool, keep: Option<&str>) -> io::Result<Removal> {
     if !real_dir(dir)? {
         return Ok(Removal::default());
     }
@@ -441,20 +455,10 @@ fn clean_candidate(
         };
     }
     let lock = secure::open_lock(&dir.join(LOCK_FILE_NAME))?;
-    if unless_root.is_some_and(|tag| {
-        secure::read(&dir.join(ROOT_FILE_NAME)).is_ok_and(|recorded| recorded == tag.as_bytes())
-    }) {
-        return Ok(Removal::default());
-    }
     let removal = remove_usage_files(dir, keep)?;
-    if removal.left > 0 {
-        return Err(io::Error::other("a Syrtis usage file could not be deleted"));
-    }
-    // A kept file stays with its root record and lock.
-    if remove_dir && !keep.is_some_and(|name| dir.join(name).exists()) {
+    if remove_dir && removal.left == 0 {
         // The lock handle does not share delete: release it first.
         drop(lock);
-        let _ = secure::remove_file(&dir.join(ROOT_FILE_NAME));
         let _ = secure::remove_file(&dir.join(LOCK_FILE_NAME));
         let _ = std::fs::remove_dir(dir);
     }
@@ -681,7 +685,7 @@ struct Slot {
     /// `None` for the default profile.
     root: Option<PathBuf>,
     /// The default's resolved dir; an added profile's preferred dir
-    /// (`<profiles dir>\<UUID>`, resolved at commit), or `None` when the
+    /// (`<profiles dir>\<UUID>-<root digest>`, resolved at commit), or `None` when the
     /// local storage could not be resolved.
     dir: Option<PathBuf>,
 }
@@ -700,7 +704,7 @@ fn slots(config: &Config) -> Vec<Slot> {
     slots.extend(config.profiles.iter().map(|p| Slot {
         id: p.id.clone(),
         root: Some(p.root.clone()),
-        dir: config.profiles_dir.as_ref().map(|parent| parent.join(&p.id)),
+        dir: config.profiles_dir.as_ref().map(|parent| parent.join(profile_dir_name(p))),
     }));
     slots
 }
@@ -720,8 +724,14 @@ impl Slot {
                     && now
                         .profiles
                         .iter()
-                        .any(|p| p.id == self.id && &p.root == root)
+                        .any(|p| p.id == self.id && folded_root(&p.root) == folded_root(root))
             })
+    }
+
+    /// What the budget remembers a slot by: its id and folded root, so a
+    /// respelling of the same folder is the same slot.
+    fn key(&self) -> (String, Option<String>) {
+        (self.id.clone(), self.root.as_deref().map(folded_root))
     }
 
     /// Where this profile's files can be: the default's one resolved dir
@@ -949,16 +959,6 @@ mod secure {
         .unwrap_or(false)
     }
 
-    /// The bytes of a Syrtis file that meets the storage contract.
-    pub(super) fn read(path: &Path) -> io::Result<Vec<u8>> {
-        use std::io::Read as _;
-        let mut file = storage::open_existing_secure_file(path, false)?;
-        storage::verify_secure_file_path(&file, path)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        Ok(bytes)
-    }
-
     /// Delete one Syrtis file by pathname, only if it is a regular file that
     /// meets the storage contract and is still the object just opened.
     /// `DeleteFileW` on a reparse point would remove the link itself, but the
@@ -1000,9 +1000,6 @@ mod secure {
     pub(super) fn refresh_if_same(_: &Path, _: &[u8]) -> bool {
         false
     }
-    pub(super) fn read(_: &Path) -> io::Result<Vec<u8>> {
-        Err(unsupported())
-    }
     pub(super) fn remove_file(_: &Path) -> io::Result<()> {
         Err(unsupported())
     }
@@ -1021,6 +1018,17 @@ struct Removal {
     usage: usize,
     temps: usize,
     left: usize,
+}
+
+impl Removal {
+    /// Files removed, or an error when one of ours was left.
+    fn complete(self) -> io::Result<usize> {
+        if self.left > 0 {
+            Err(io::Error::other("a Syrtis usage file could not be deleted"))
+        } else {
+            Ok(self.usage + self.temps)
+        }
+    }
 }
 
 /// Delete Syrtis usage files and temp leftovers in `dir` except `keep`.
@@ -1047,10 +1055,7 @@ fn remove_usage_files(dir: &Path, keep: Option<&str>) -> io::Result<Removal> {
 #[cfg(test)]
 fn remove_usage_files_locked(dir: &Path) -> io::Result<usize> {
     let _lock = secure::open_lock(&dir.join(LOCK_FILE_NAME))?;
-    match remove_usage_files(dir, None)? {
-        Removal { usage, temps, left: 0 } => Ok(usage + temps),
-        _ => Err(io::Error::other("a Syrtis usage file could not be deleted")),
-    }
+    remove_usage_files(dir, None)?.complete()
 }
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1079,16 +1084,15 @@ struct UsageFile<'a> {
 /// anything is created, which keeps a profile removed earlier (during its
 /// last page, say) from creating its dir; that check is not atomic with the
 /// creation, so a removal racing it can leave an empty dir and lock file,
-/// cleaned at the next accepted push. `root`: an added profile's root; its
-/// dir is resolved (and created) only now and records the root
-/// (`ROOT_FILE_NAME`) before the usage file is written. Returns whether a
+/// cleaned at the next accepted push. `resolve`: an added profile's dir,
+/// resolved (and created) only now. Returns whether a
 /// usage file's content changed: a file whose bytes already equal the new
 /// ones is not rewritten (only its modified time moves to now), so an
 /// identical walk changes nothing (finding 8) unless a superseded usage file
 /// was removed (an orphan temp does not count).
 fn commit_file(
     dir: &Path,
-    root: Option<&Path>,
+    resolve: bool,
     stem: &str,
     events: &[Event],
     still_wanted: &dyn Fn() -> bool,
@@ -1098,7 +1102,7 @@ fn commit_file(
         return Err(Stop::new(State::Disabled, None));
     }
     let resolved;
-    let dir = if root.is_some() {
+    let dir = if resolve {
         resolved = secure::resolve_dir(dir).map_err(|_| failed())?;
         resolved.as_path()
     } else {
@@ -1114,20 +1118,6 @@ fn commit_file(
         usage_events_display: events,
     })
     .map_err(|_| failed())?;
-    if let Some(root) = root {
-        // Another root's files go before the record names this root, so a
-        // record never vouches for a file from elsewhere, even if the write
-        // below then fails.
-        let tag = root_tag(root);
-        let recorded = secure::read(&dir.join(ROOT_FILE_NAME));
-        if !recorded.is_ok_and(|recorded| recorded == tag.as_bytes()) {
-            let removal = remove_usage_files(dir, None).map_err(|_| failed())?;
-            if removal.left > 0 {
-                return Err(failed());
-            }
-            write_file(&directory, dir, ROOT_FILE_NAME, tag.as_bytes()).map_err(|_| failed())?;
-        }
-    }
     let final_name = format!("usage.{stem}.json");
     // Read only through the storage contract: a file that fails it is
     // replaced, never compared.
@@ -1289,6 +1279,11 @@ struct Outcome {
     /// A duplicate's cleanup could not delete one of our files (reported in
     /// `cleanupFailedProfiles`).
     cleanup_failed: bool,
+    /// Stopped by a refusal decided where it arose, so no list of codes can
+    /// miss one: every `Err` a login reader returns (all its refusals; no
+    /// login is `Ok(None)`), a token that cannot be read or does not match
+    /// its account, no installation key, no storage for the profile.
+    refused: bool,
 }
 
 impl Outcome {
@@ -1299,31 +1294,28 @@ impl Outcome {
             duplicate_of: None,
             changed: false,
             cleanup_failed: false,
+            refused: false,
+        }
+    }
+
+    fn refused(stop: Stop) -> Self {
+        Self {
+            refused: true,
+            ..Self::stopped(stop)
         }
     }
 }
 
 /// Outcomes that write no file however long the round runs: a duplicate, no
-/// login, the login refused locally or by Cursor (an expired session, a token
-/// that cannot be read or does not match its account, a database the reader
-/// refuses: every `ForeignRefusal` code plus `db_changed`), no installation
-/// key, or no storage for the profile. A slot whose last round ended so does
-/// not ask for the full budget while it has no file (finding 1); a timeout,
-/// an outage or a spent budget does.
-fn writes_no_file(stop: Stop) -> bool {
-    let Some(reason) = stop.reason else {
-        return matches!(stop.state, State::Duplicate | State::NotSignedIn | State::Expired);
-    };
-    match stop.state {
-        State::Expired => true,
-        State::Error => {
-            matches!(
-                reason,
-                "token_unreadable" | "account_mismatch" | "key_unavailable" | "storage_unavailable"
-            ) || cursor_desktop::is_reader_refusal(reason)
-        }
-        _ => false,
-    }
+/// login, an expired session, or a refusal (`Outcome::refused`). A slot
+/// whose last round ended so does not ask for the full budget while it has
+/// no file (finding 1); a timeout, an outage or a spent budget does.
+fn writes_no_file(outcome: &Outcome) -> bool {
+    outcome.refused
+        || matches!(
+            outcome.stop.state,
+            State::Duplicate | State::NotSignedIn | State::Expired
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -1582,7 +1574,7 @@ async fn run(
     let login = match read {
         Ok(Some(login)) => login,
         Ok(None) => return stopped(Stop::new(State::NotSignedIn, None)),
-        Err(reason) => return stopped(Stop::error(reason)),
+        Err(reason) => return Outcome::refused(Stop::error(reason)),
     };
     #[cfg(test)]
     if PANIC_AFTER_LOGIN.with(std::cell::Cell::get) {
@@ -1590,7 +1582,7 @@ async fn run(
     }
     let (user, exp) = match token_user(&login) {
         Ok(found) => found,
-        Err(stop) => return stopped(stop),
+        Err(stop) => return Outcome::refused(stop),
     };
     // Cursor refreshes the token only while it runs, and an expired one is
     // answered with a redirect to WorkOS. Decide locally; send nothing.
@@ -1598,7 +1590,7 @@ async fn run(
         return stopped(Stop::new(State::Expired, None));
     }
     let Some(stem) = (target.file_stem)(&user) else {
-        return stopped(Stop::error("key_unavailable"));
+        return Outcome::refused(Stop::error("key_unavailable"));
     };
     // An account already covered this round by an earlier profile is not
     // walked again (saves requests, avoids 429); its file name is the same,
@@ -1607,10 +1599,15 @@ async fn run(
     // lock, the way a commit drops superseded files (finding 3).
     if let Some(first) = claim(&stem, false) {
         let keep = format!("usage.{stem}.json");
+        // Usage files removed count as a change even when another one could
+        // not be removed.
         let (mut removed, mut cleanup_failed) = (0, false);
         for dir in slot.candidates() {
-            match clean_candidate(&dir, slot.root.is_some(), Some(&keep), None) {
-                Ok(removal) => removed += removal.usage,
+            match clean_candidate(&dir, slot.root.is_some(), Some(&keep)) {
+                Ok(removal) => {
+                    removed += removal.usage;
+                    cleanup_failed |= removal.left > 0;
+                }
                 Err(_) => cleanup_failed = true,
             }
         }
@@ -1620,6 +1617,7 @@ async fn run(
             duplicate_of: Some(first),
             changed: removed > 0,
             cleanup_failed,
+            refused: false,
         };
     }
     let Ok(mut cookie) = reqwest::header::HeaderValue::from_str(&format!(
@@ -1640,7 +1638,7 @@ async fn run(
         }
     };
     drop(cookie);
-    match commit_file(dir, slot.root.as_deref(), &stem, &events, enabled) {
+    match commit_file(dir, slot.root.is_some(), &stem, &events, enabled) {
         Ok(changed) => {
             claim(&stem, true);
             Outcome {
@@ -1649,6 +1647,7 @@ async fn run(
                 duplicate_of: None,
                 changed,
                 cleanup_failed: false,
+                refused: false,
             }
         }
         Err(stop) => stopped(stop),
@@ -1663,10 +1662,10 @@ async fn run(
 /// starting another.
 struct LastRound {
     status: Option<serde_json::Value>,
-    /// The slots, exactly as configured then, whose outcome writes no file
-    /// (`writes_no_file`). A slot changed since (another root or dir) is not
-    /// in it, so its first round may take the full budget.
-    no_file: Vec<Slot>,
+    /// The slots (`Slot::key`: id and folded root) whose outcome writes no
+    /// file (`writes_no_file`). A slot changed since (another root) is not in
+    /// it, so its first round may take the full budget; a respelling is.
+    no_file: Vec<(String, Option<String>)>,
 }
 
 static IN_FLIGHT: Mutex<LastRound> = Mutex::new(LastRound {
@@ -1688,12 +1687,12 @@ fn round_budget(
     explicit: bool,
     slots: &[Slot],
     files: &[Option<SystemTime>],
-    no_file: &[Slot],
+    no_file: &[(String, Option<String>)],
 ) -> Duration {
     let wants_full = slots
         .iter()
         .zip(files)
-        .any(|(slot, file)| file.is_none() && !no_file.contains(slot));
+        .any(|(slot, file)| file.is_none() && !no_file.contains(&slot.key()));
     if explicit || wants_full {
         FULL_BUDGET
     } else {
@@ -1779,7 +1778,7 @@ fn sync_with(
         let remaining = deadline.saturating_duration_since(Instant::now());
         let blocked = Outcome::stopped;
         let outcome = match &profile.dir {
-            None => blocked(Stop::error("storage_unavailable")),
+            None => Outcome::refused(Stop::error("storage_unavailable")),
             Some(_) if remaining.is_zero() => {
                 blocked(Stop::new(State::Partial, Some("budget_exhausted")))
             }
@@ -1868,8 +1867,8 @@ fn sync_with(
     last.no_file = profiles
         .iter()
         .zip(&outcomes)
-        .filter(|(_, outcome)| writes_no_file(outcome.stop))
-        .map(|(profile, _)| profile.clone())
+        .filter(|(_, outcome)| writes_no_file(outcome))
+        .map(|(profile, _)| profile.key())
         .collect();
     last.status = Some(status.clone());
     (status, changed)

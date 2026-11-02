@@ -47,24 +47,6 @@ pub(crate) fn drive_type(_: &Path) -> u32 {
     0
 }
 
-/// Whether `code` is one of the refusals the readers return as `Err`: every
-/// `ForeignRefusal` code (from the type's own list) and `db_changed`
-/// (`read_login_added`), `login_unreadable` (both readers). Used to tell a
-/// refusal that repeats every round from a transient failure.
-#[cfg(windows)]
-pub(crate) fn is_reader_refusal(code: &str) -> bool {
-    code == "db_changed"
-        || code == "login_unreadable"
-        || crate::agent_storage_windows::ForeignRefusal::REFUSALS
-            .iter()
-            .any(|refusal| refusal.code() == code)
-}
-
-#[cfg(not(windows))]
-pub(crate) fn is_reader_refusal(code: &str) -> bool {
-    code == "login_unreadable"
-}
-
 /// `GetDriveTypeW` values: only a fixed drive is read.
 pub(crate) const DRIVE_NO_ROOT_DIR: u32 = 1;
 pub(crate) const DRIVE_FIXED: u32 = 3;
@@ -471,6 +453,37 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// WB2 on the handle without a drive-letter final path (round-3 F): with
+    /// the DOS query failing (test fault; no real volume on 188 lacks one),
+    /// the production open still decides by the volume GUID root: a file on
+    /// the fixed system volume is read, and the same file is refused when
+    /// that root answers removable. Pins `open_foreign_file`'s wiring, which
+    /// `the_handle_location_rule` (the pure rule) cannot.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_without_a_dos_path_is_decided_by_its_volume() {
+        use crate::agent_storage_windows::{set_owner_for_test, TestOwner, NO_DOS_PATH_FOR_TEST};
+        let root = temp_root("nodos");
+        let dir = root.join("User").join("globalStorage");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = empty_db(&dir);
+        set_owner_for_test(&db, TestOwner::CurrentUser).unwrap();
+        let removable_volume = |path: &Path| {
+            if path.to_string_lossy().starts_with(r"\\?\Volume{") {
+                2
+            } else {
+                DRIVE_FIXED
+            }
+        };
+        NO_DOS_PATH_FOR_TEST.with(|fault| fault.set(true));
+        let fixed = read_login_added(&root, &drive_type);
+        let removable = read_login_added(&root, &removable_volume);
+        NO_DOS_PATH_FOR_TEST.with(|fault| fault.set(false));
+        assert!(matches!(fixed, Ok(None)), "{:?}", fixed.err());
+        assert_eq!(removable.err(), Some("db_not_fixed_drive"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /// WB1 on a volume without persistent ACLs: an exFAT VHD, mounted for
     /// this test only (needs elevation, so it is a manual run:
     /// `cargo test -p tb_core_ffi -- --ignored an_exfat_volume_is_refused`).
@@ -542,7 +555,8 @@ mod tests {
     /// GUID root answers fixed. Measured on 188: the file still has a
     /// drive-letter final path through the mount folder, so this is a
     /// regression check that such a volume is read, not a test of the
-    /// no-DOS-path branch (that is `the_handle_location_rule`). A VHD made and
+    /// no-DOS-path branch (that is `a_file_without_a_dos_path_is_decided_by_
+    /// its_volume`, with a test fault). A VHD made and
     /// mounted with diskpart (needs elevation), so a manual run:
     /// `cargo test -p tb_core_ffi -- --ignored --exact cursor_desktop::tests::a_fixed_volume_mounted_at_a_folder_is_read`.
     /// The VHD is always detached and deleted, also when an assertion fails.

@@ -209,6 +209,11 @@ public sealed class CursorSyncController
     private string? _state;
     private long? _lastSuccessMs;
     private bool _cleanupFailed;
+    // While on: the last accepted on push could not clean a profile it no
+    // longer lists, or the last round could not clean a duplicate's other
+    // account's file (cleanupFailedProfiles). Cleared by an off push.
+    private bool _pushProfileCleanupFailed;
+    private bool _roundProfileCleanupFailed;
     private int _offPushesPending;
     private bool _cursorPresent;
 
@@ -250,6 +255,17 @@ public sealed class CursorSyncController
     /// clears it). In memory only: the next launch pushes off again while sync
     /// is off, which is the retry the copy ("Restart Syrtis to retry") names.</summary>
     public bool CleanupFailed { get { lock (_gate) { return _cleanupFailed && _offPushesPending == 0; } } }
+
+    /// <summary>While sync is on, some Syrtis usage file of an added profile
+    /// could not be deleted: by the last accepted on push (a profile it no
+    /// longer lists, <c>cleanupFailed</c> in its result) or by the last round
+    /// (<c>cleanupFailedProfiles</c> in its status). Not shown by W1: the
+    /// <see cref="CleanupFailed"/> line's copy is about sync being off, and an
+    /// on-state line needs its own approved copy (W2).</summary>
+    public bool ProfileCleanupFailed
+    {
+        get { lock (_gate) { return _pushProfileCleanupFailed || _roundProfileCleanupFailed; } }
+    }
 
     /// <summary>Cursor desktop's state.vscdb exists; false until
     /// <see cref="ProbeCursorPresent"/> has answered.</summary>
@@ -350,9 +366,10 @@ public sealed class CursorSyncController
         // An on push's outcome: refused (any error) stops every sync until an
         // accepted push; the core then keeps only profiles this push listed.
         var rejected = false;
+        var profileCleanupFailed = false;
         try
         {
-            io.SetConfig(json);
+            profileCleanupFailed = io.SetConfig(json).CleanupFailed;
             failed = false;
         }
         catch (TbCoreException ex) when (!enabled && ex.Message == CursorSync.CleanupFailedCode)
@@ -376,9 +393,13 @@ public sealed class CursorSyncController
                     {
                         _state = CursorSync.ConfigRejectedState;
                     }
-                    else if (_state == CursorSync.ConfigRejectedState)
+                    else
                     {
-                        _state = null;
+                        _pushProfileCleanupFailed = profileCleanupFailed;
+                        if (_state == CursorSync.ConfigRejectedState)
+                        {
+                            _state = null;
+                        }
                     }
                 }
             }
@@ -392,6 +413,9 @@ public sealed class CursorSyncController
                     {
                         _cleanupFailed = outcome;
                     }
+
+                    _pushProfileCleanupFailed = false;
+                    _roundProfileCleanupFailed = false;
 
                     _offPushesPending--;
                 }
@@ -546,6 +570,7 @@ public sealed class CursorSyncController
                     {
                         _state = result.State;
                         _lastSuccessMs = result.LastSuccessMs;
+                        _roundProfileCleanupFailed = result.CleanupFailedProfiles is { Count: > 0 };
                         // A round that changed a file already invalidated
                         // the core's caches; refresh on `changed`, not on the
                         // headline (one profile can write while another

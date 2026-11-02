@@ -13,7 +13,7 @@ Cursor state.vscdb (read-only)
   └─ access token + its own JWT `sub`
        └─ POST https://cursor.com/api/dashboard/get-filtered-usage-events   (paginated, full history)
             └─ usage.<hmac>.json  in  %APPDATA%\com.nyanako.tokenbar\cursor-cache                      (default profile)
-                                  or  %LOCALAPPDATA%\com.nyanako.tokenbar\cursor-profiles\<UUID>        (added profile)
+                                  or  %LOCALAPPDATA%\com.nyanako.tokenbar\cursor-profiles\<UUID>-<root digest>  (added profile)
                  └─ engine scans the newest copy of each account's file as an extra Cursor root
                     (files only, never a directory; only while the takeover is on)
 ```
@@ -95,7 +95,8 @@ one Cursor total.
   only the default profile's database.
 - **Rounds.** Profiles are walked one at a time under one time budget: 10 min
   for "Sync now" and while some profile that could write a file has none;
-  60 s otherwise. A profile whose last round, with the same root and dirs, was
+  60 s otherwise. A profile whose last round, with the same id and root
+  (folded like `duplicate_key`, so a respelling is the same root), was
   `duplicate`, `notSignedIn`, `expired` or a refusal of its login or database
   does not hold the background budget at 10 min (it may get 10 min again once
   its config changes, or after a round it ran out of time); the same holds
@@ -135,23 +136,23 @@ one Cursor total.
   profiles (an added profile's dir and its `.secure` sibling), never a
   directory, so a stale copy left by a failed delete is never counted and a
   removed profile's leftovers are never scanned.
-- **Cleanup.** Only `usage.<64 hex>.json`, the temp prefix, the lock and the
-  root record (below) are Syrtis's.
+- **Cleanup.** Only `usage.<64 hex>.json`, the temp prefix and the lock are
+  Syrtis's. An added profile's dir is named `<UUID>-<root digest>`: the
+  first 16 hex of SHA-256 of its root folded like `duplicate_key` (case and
+  `/` vs `\` ignored, so a respelling of the same folder is the same dir; a
+  digest, not the path). A new root for the same id is therefore another dir,
+  and the old one is no longer listed.
   Disabling cleans every default and added-profile candidate (each `.secure`
-  level); an accepted on push cleans profile dirs no longer listed, or listed
-  under the same id with another root than the dir records (non-fatal,
-  `cleanupFailed` / `cleanupFailedProfiles` in the result), under the same
-  secure lock a walk commits under. Only real `<UUID>` / `<UUID>.secure` dirs
-  are entered (junctions and symlinks at any level are skipped), files are
-  deleted through the secure delete, and an emptied dir is `rmdir`ed. Each
-  added profile's dir records its root as `.cursor-sync.root`: SHA-256 of the
-  root folded like `duplicate_key` (case and `/` vs `\` ignored, so a
-  case-only change is the same root), written under the lock by every commit
-  (after removing another root's usage files, before writing the new one)
-  and compared under the lock at the push's cleanup. A digest, not the path;
-  a dir with no record counts as another root. So a new root cleans the old
-  account's file even after a refused push or a restart lost the old
-  config.
+  level); an accepted on push cleans every profile dir it does not list
+  (non-fatal, `cleanupFailed` / `cleanupFailedProfiles` in the result), under
+  the same secure lock a walk commits under, whatever the config before it
+  was (so after a refused push or a restart too). A listed profile's dir is
+  not opened. Only real profile dirs (`<UUID>-<root digest>` or a bare
+  `<UUID>`, each also with `.secure`) are entered (junctions and symlinks at
+  any level are skipped), files are deleted through the secure delete, and an
+  emptied dir is `rmdir`ed. A bare `<UUID>` dir comes from an earlier W1 build
+  (test machines only; added profiles never shipped): it is never listed, so
+  the first accepted push cleans it like a removed profile's.
 - **Add-time check.** `tb_validate_cursor_profile` (validate-only, metadata
   only, no database opened) refuses a full list, a path the rule refuses, a
   drive that is not fixed (checked first), Cursor's own folder and a listed
@@ -204,8 +205,8 @@ walk (at most one sync interval), and the status then says `cliPresent`.
 - The sync dir is chosen by Rust, never passed in: `<root>\cursor-cache`,
   where `<root>` is `%APPDATA%\com.nyanako.tokenbar` resolved exactly as quota
   history resolves it (following its `.secure` fallback). Added profiles live
-  in `<local root>\cursor-profiles\<UUID>` under `%LOCALAPPDATA%`, resolved
-  the same way. `tb_set_cursor_sync` refuses any key besides `enabled`,
+  in `<local root>\cursor-profiles\<UUID>-<root digest>` under
+  `%LOCALAPPDATA%`, resolved the same way (the digest: below, Cleanup). `tb_set_cursor_sync` refuses any key besides `enabled`,
   `cliTakeoverConfirmed` and `profiles`.
 - Every file operation goes through `agent_storage_windows`: owner = current
   user, protected DACL with exactly {current user, SYSTEM}, final-component

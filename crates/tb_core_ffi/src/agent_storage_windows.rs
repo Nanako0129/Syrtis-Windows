@@ -1427,20 +1427,6 @@ pub(crate) enum ForeignRefusal {
 }
 
 impl ForeignRefusal {
-    /// Every variant that refuses the database (all but `Absent`, which reads
-    /// as "not signed in"). A new variant must get an arm in `code` (an
-    /// exhaustive match) and in the exhaustive match of the test
-    /// `every_foreign_refusal_but_absent_is_listed`, which checks it is here.
-    pub(crate) const REFUSALS: [Self; 7] = [
-        Self::NotFile,
-        Self::Reparse,
-        Self::NoAclVolume,
-        Self::Remote,
-        Self::NotFixedDrive,
-        Self::ForeignOwner,
-        Self::Unreadable,
-    ];
-
     pub(crate) fn code(self) -> &'static str {
         match self {
             Self::Absent => "not_signed_in",
@@ -1518,11 +1504,10 @@ pub(crate) fn open_foreign_file(
     .map_err(|error| classify_failed_open(path, &error))?;
     let handle = file.as_raw_handle() as HANDLE;
     // WB2 on the handle, before anything else is asked of the file.
-    handle_location(
-        final_path(handle, VOLUME_NAME_DOS).as_deref(),
-        handle_volume_root(handle).as_deref(),
-        drive_type,
-    )?;
+    let dos = final_path(handle, VOLUME_NAME_DOS);
+    #[cfg(test)]
+    let dos = dos.filter(|_| !NO_DOS_PATH_FOR_TEST.with(std::cell::Cell::get));
+    handle_location(dos.as_deref(), handle_volume_root(handle).as_deref(), drive_type)?;
     // Then: on exFAT (measured on 188) the attribute-tag query below fails
     // with ERROR_INVALID_PARAMETER, and "no ACLs" is the reason worth
     // reporting. Every check must pass whatever the order.
@@ -1620,6 +1605,14 @@ fn foreign_kind(handle: HANDLE) -> Result<(), ForeignRefusal> {
         return Err(ForeignRefusal::NotFile);
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test fault: `open_foreign_file`'s drive-letter final-path query
+    /// answers nothing on this thread (no real volume was found that does).
+    pub(crate) static NO_DOS_PATH_FOR_TEST: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// WB2 on an opened handle, from its two final paths: a drive-letter (DOS)
@@ -4328,8 +4321,8 @@ mod tests {
     /// WB2 on the handle, decided from the two final paths (round-2 finding
     /// 2). No drive-letter path is not an error: the volume GUID root
     /// decides; no GUID root is not fixed; a UNC drive-letter path is remote
-    /// whatever the volume answers. The only test of the no-DOS-path branch:
-    /// a real folder-mounted volume has a DOS path on 188.
+    /// whatever the volume answers. `open_foreign_file`'s use of it without
+    /// a DOS path: `cursor_desktop::tests::a_file_without_a_dos_path_is_decided_by_its_volume`.
     #[test]
     fn the_handle_location_rule() {
         let guid = Path::new(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\");
@@ -4351,34 +4344,5 @@ mod tests {
             handle_location(Some(r"\\?\C:\x\f"), Some(guid), &removable),
             Err(ForeignRefusal::NotFixedDrive)
         );
-    }
-
-    /// `ForeignRefusal::REFUSALS` lists every variant but `Absent`. The match
-    /// is exhaustive: a new variant does not compile until it is placed here,
-    /// and its arm checks it is in the list.
-    #[test]
-    fn every_foreign_refusal_but_absent_is_listed() {
-        use ForeignRefusal::*;
-        for refusal in REFUSALS_AND_ABSENT {
-            match refusal {
-                Absent => assert!(!ForeignRefusal::REFUSALS.contains(&refusal)),
-                NotFile | Reparse | NoAclVolume | Remote | NotFixedDrive | ForeignOwner
-                | Unreadable => assert!(ForeignRefusal::REFUSALS.contains(&refusal)),
-            }
-        }
-        const REFUSALS_AND_ABSENT: [ForeignRefusal; 8] = [
-            Absent,
-            NotFile,
-            Reparse,
-            NoAclVolume,
-            Remote,
-            NotFixedDrive,
-            ForeignOwner,
-            Unreadable,
-        ];
-        for refusal in ForeignRefusal::REFUSALS {
-            assert!(crate::cursor_desktop::is_reader_refusal(refusal.code()));
-        }
-        assert!(!crate::cursor_desktop::is_reader_refusal(Absent.code()));
     }
 }

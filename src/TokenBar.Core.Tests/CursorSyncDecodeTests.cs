@@ -73,8 +73,9 @@ public class CursorSyncDecodeTests
     public void StatusCarriesEventsLastSuccessAndReason()
     {
         var ok = TbCore.DecodeEnvelope<CursorSyncStatus>(
-            """{"ok":true,"data":{"state":"ok","events":3542,"lastSuccessMs":1788256800000,"changed":true,"profiles":[{"id":"default","state":"ok","events":3542,"lastSuccessMs":1788256800000},{"id":"0A1B2C3D-0000-4000-8000-00000000000A","state":"duplicate","events":0,"lastSuccessMs":null,"duplicateOf":"default"},{"id":"0A1B2C3D-0000-4000-8000-00000000000B","state":"error","events":0,"lastSuccessMs":null,"reason":"db_foreign_owner"}]}}""");
+            """{"ok":true,"data":{"state":"ok","events":3542,"lastSuccessMs":1788256800000,"changed":true,"profiles":[{"id":"default","state":"ok","events":3542,"lastSuccessMs":1788256800000},{"id":"0A1B2C3D-0000-4000-8000-00000000000A","state":"duplicate","events":0,"lastSuccessMs":null,"duplicateOf":"default"},{"id":"0A1B2C3D-0000-4000-8000-00000000000B","state":"error","events":0,"lastSuccessMs":null,"reason":"db_foreign_owner"}],"cleanupFailedProfiles":["0A1B2C3D-0000-4000-8000-00000000000A"]}}""");
         Assert.Equal(("ok", 3542L, (long?)1788256800000, true), (ok.State, ok.Events, ok.LastSuccessMs, ok.Changed));
+        Assert.Equal(["0A1B2C3D-0000-4000-8000-00000000000A"], ok.CleanupFailedProfiles);
         Assert.Equal(
             [
                 new CursorProfileStatus("default", "ok", 3542, 1788256800000),
@@ -86,6 +87,7 @@ public class CursorSyncDecodeTests
         var partial = TbCore.DecodeEnvelope<CursorSyncStatus>(
             """{"ok":true,"data":{"state":"partial","events":0,"lastSuccessMs":1788256800000,"changed":false,"profiles":[],"reason":"timeout"}}""");
         Assert.Equal("timeout", partial.Reason);
+        Assert.Null(partial.CleanupFailedProfiles); // an older core sends none
     }
 
     [Fact]

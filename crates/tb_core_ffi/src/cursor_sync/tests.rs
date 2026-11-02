@@ -314,6 +314,7 @@ fn ok(events: usize) -> Outcome {
         duplicate_of: None,
         changed: true,
         cleanup_failed: false,
+        refused: false,
     }
 }
 
@@ -683,10 +684,9 @@ fn stored_account_that_differs_from_the_token_is_refused() {
         let refs: Vec<(&str, &str)> = all.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let db = state_db(tmp.path(), &refs);
         let (url, seen) = serve(vec![json_ok(&page(1, &["a"]))]);
-        assert_eq!(
-            run_with(&db, &tmp.path().join("sync"), &url, limits(), &|| true),
-            stop(State::Error, Some("account_mismatch"))
-        );
+        let outcome = run_with(&db, &tmp.path().join("sync"), &url, limits(), &|| true);
+        assert_eq!(outcome.stop, Stop::error("account_mismatch"));
+        assert!(outcome.refused);
         assert!(seen.lock().unwrap().is_empty());
     }
     // Controls: matching stored ids, and no stored id at all, are both sent.
@@ -1571,8 +1571,9 @@ fn takeover_matrix() {
             files.push(write_named_file(&default_sync_dir(home.path()), 'a'));
         }
         if in_added {
-            drop(secure::ensure_dir(&profile_dir(home.path(), PROFILE_A)).unwrap());
-            files.push(write_named_file(&profile_dir(home.path(), PROFILE_A), 'b'));
+            let a = profile(PROFILE_A, Path::new(r"C:\x\a"));
+            drop(secure::ensure_dir(&profile_dir(home.path(), &a)).unwrap());
+            files.push(write_named_file(&profile_dir(home.path(), &a), 'b'));
         }
         if cli_files {
             std::fs::write(cli.join("usage.csv"), "x").unwrap();
@@ -2010,8 +2011,9 @@ fn default_sync_dir(base: &Path) -> PathBuf {
     base.join(SYNC_DIR_NAME)
 }
 
-fn profile_dir(base: &Path, id: &str) -> PathBuf {
-    base.join(PROFILES_DIR_NAME).join(id)
+/// Where an added profile's files go under `base` (`profile_dir_name`).
+fn profile_dir(base: &Path, profile: &Profile) -> PathBuf {
+    base.join(PROFILES_DIR_NAME).join(profile_dir_name(profile))
 }
 
 /// A registry whose default dir is `<base>\cursor-cache` and whose profiles
@@ -2153,7 +2155,7 @@ fn a_second_profile_on_the_same_account_is_not_walked_again() {
     assert_eq!(status["state"], "ok");
     assert_eq!(status["changed"], true);
     assert!(expected_file(&default_sync_dir(tmp.path())).exists());
-    assert!(!profile_dir(tmp.path(), PROFILE_A).exists());
+    assert!(!profile_dir(tmp.path(), &profile(PROFILE_A, &root)).exists());
     // Control: a different account in the second profile is walked.
     let other = profile_root(tmp.path(), "c", &other_token(), OTHER_USER);
     *registry.write().unwrap() = multi(tmp.path(), true, vec![profile(PROFILE_A, &other)]);
@@ -2162,7 +2164,7 @@ fn a_second_profile_on_the_same_account_is_not_walked_again() {
     assert_eq!(seen.lock().unwrap().len(), 2);
     assert_eq!(states(&status), ["ok", "ok"]);
     assert_eq!(status["events"], 2);
-    assert_eq!(usage_names(&profile_dir(tmp.path(), PROFILE_A)).len(), 1);
+    assert_eq!(usage_names(&profile_dir(tmp.path(), &profile(PROFILE_A, &other))).len(), 1);
 }
 
 /// A listed folder that does not exist is accepted and reports its own
@@ -2476,7 +2478,7 @@ fn each_profile_token_reaches_only_its_own_requests() {
         assert!(!request.head.contains(other.as_str()) && !request.body.contains(other.as_str()));
     }
     let mut outputs = vec![status.to_string()];
-    for dir in [default_sync_dir(tmp.path()), profile_dir(tmp.path(), PROFILE_A)] {
+    for dir in [default_sync_dir(tmp.path()), profile_dir(tmp.path(), &profile(PROFILE_A, &root))] {
         for entry in std::fs::read_dir(&dir).unwrap().flatten() {
             outputs.push(entry.file_name().to_string_lossy().into_owned());
             outputs.push(std::fs::read_to_string(entry.path()).unwrap_or_default());
@@ -2598,7 +2600,7 @@ fn root_changed_mid_walk_writes_nothing() {
     assert_eq!(states(&status), ["notSignedIn", "disabled"]);
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(seen.lock().unwrap().len(), 1, "a page was sent after the change");
-    assert!(usage_names(&profile_dir(tmp.path(), PROFILE_A)).is_empty());
+    assert!(usage_names(&profile_dir(tmp.path(), &profile(PROFILE_A, &root))).is_empty());
 }
 
 /// 10 ✱: sync off sends nothing for any profile; turned off during the
@@ -2737,7 +2739,7 @@ fn a_profile_removed_mid_walk_does_not_cover_its_account() {
     });
     assert_eq!(states(&status), ["notSignedIn", "disabled", "ok"]);
     assert_eq!(seen.lock().unwrap().len(), 2, "A kept walking, or B was skipped");
-    assert!(usage_names(&profile_dir(tmp.path(), PROFILE_A)).is_empty());
+    assert!(usage_names(&profile_dir(tmp.path(), &profile(PROFILE_A, &a))).is_empty());
     assert!(covers_account(Stop::error("rate_limited")));
     assert!(!covers_account(Stop::new(State::Disabled, None)));
 }
@@ -2924,7 +2926,7 @@ fn a_profile_dropped_by_a_push_stops_and_its_dir_is_cleaned() {
     set(serde_json::json!({"enabled": true,
         "profiles": [{"id": PROFILE_A, "root": a}, {"id": PROFILE_B, "root": b}]}))
     .unwrap();
-    let b_dir = config().profiles_dir.unwrap().join(PROFILE_B);
+    let b_dir = config().profiles_dir.unwrap().join(profile_dir_name(&profile(PROFILE_B, &b)));
     drop(secure::ensure_dir(&b_dir).unwrap());
     write_secure(&b_dir.join(hex_name('b')), b"{}");
 
@@ -2997,13 +2999,15 @@ fn removed_and_orphaned_profiles_are_cleaned_and_nothing_else() {
     let parent = local.join(APP_DIR_NAME).join(PROFILES_DIR_NAME);
     secure_tree(&local, &parent);
     let temp = format!("{TEMP_FILE_PREFIX}9-9");
-    // A (kept, with the root record its commit wrote) holds a temp file of
-    // ours and a foreign file.
-    let a = parent.join(PROFILE_A);
+    // A (kept) holds a temp file of ours and a foreign file; A's bare
+    // `<UUID>` dir from an earlier W1 build holds ours.
+    let a = parent.join(profile_dir_name(&profile(PROFILE_A, Path::new(r"C:\x\a"))));
     secure_tree(&parent, &a);
     write_secure(&a.join(&temp), b"x");
     write_secure(&a.join("foreign.txt"), b"x");
-    write_secure(&a.join(ROOT_FILE_NAME), root_tag(Path::new(r"C:\x\a")).as_bytes());
+    let a_bare = parent.join(PROFILE_A);
+    secure_tree(&parent, &a_bare);
+    write_secure(&a_bare.join(hex_name('a')), b"x");
     // B (orphan) holds ours plus a foreign file named like usage; its
     // `.secure` variant holds ours.
     let b = parent.join(PROFILE_B);
@@ -3038,15 +3042,12 @@ fn removed_and_orphaned_profiles_are_cleaned_and_nothing_else() {
     let result = set(serde_json::json!({"enabled": true,
         "profiles": [{"id": PROFILE_A, "root": r"C:\x\a"}]}))
     .unwrap();
-    assert_eq!(result["removedFiles"], 3, "{result}");
+    assert_eq!(result["removedFiles"], 4, "{result}");
     assert_eq!(result["cleanupFailed"], false);
     let mut left = names(&a);
     left.sort();
-    // The record is compared under A's lock, so A now has its lock file.
-    assert_eq!(
-        left,
-        [LOCK_FILE_NAME, ROOT_FILE_NAME, temp.as_str(), "foreign.txt"].map(String::from)
-    );
+    assert_eq!(left, [temp.clone(), "foreign.txt".to_string()], "a listed dir was opened");
+    assert!(!a_bare.exists(), "the earlier build's bare dir was left");
     assert_eq!(usage_names(&b), ["usage.foreign.json"], "B: only ours went");
     assert!(!b_secure.exists(), "B.secure was emptied and removed");
     assert_eq!(usage_names(&outside), [hex_name('c')], "the junction was followed");
@@ -3069,7 +3070,7 @@ fn removal_cleanup_waits_for_the_profile_lock() {
     set(serde_json::json!({"enabled": true,
         "profiles": [{"id": PROFILE_A, "root": r"C:\x\a"}]}))
     .unwrap();
-    let dir = config().profiles_dir.unwrap().join(PROFILE_A);
+    let dir = config().profiles_dir.unwrap().join(profile_dir_name(&profile(PROFILE_A, Path::new(r"C:\x\a"))));
     drop(secure::ensure_dir(&dir).unwrap());
     let file = dir.join(hex_name('a'));
     write_secure(&file, b"{}");
@@ -3128,7 +3129,10 @@ fn a_removed_profiles_leftovers_are_never_registered() {
         {"id": PROFILE_B, "root": r"C:\x\b"},
     ]}))
     .unwrap();
-    let b_dir = config().profiles_dir.unwrap().join(PROFILE_B);
+    let b_dir = config()
+        .profiles_dir
+        .unwrap()
+        .join(profile_dir_name(&profile(PROFILE_B, Path::new(r"C:\x\b"))));
     drop(secure::ensure_dir(&b_dir).unwrap());
     let stuck = b_dir.join(hex_name('b'));
     std::fs::write(&stuck, b"{}").unwrap(); // inherited ACL: the secure delete refuses it
@@ -3306,14 +3310,14 @@ fn same_account_in_two_profiles_counts_once() {
     let base = root.join("appdata");
     let config = multi_plain(&base, vec![profile(PROFILE_A, Path::new(r"C:\x\a"))]);
     usage_file(&default_sync_dir(&base), 'a', &[x_event()], 10);
-    let copy = usage_file(&profile_dir(&base, PROFILE_A), 'a', &[x_event()], 0);
+    let copy = usage_file(&profile_dir(&base, &profile(PROFILE_A, Path::new(r"C:\x\a"))), 'a', &[x_event()], 0);
     let (input, output, cost, sessions) = report(&root, &config);
     assert_eq!((input, output), (100, 20), "double counted");
     assert!((cost - 0.5).abs() < 1e-9, "cost {cost}");
     assert_eq!(sessions, ["conv-x"]);
 
     std::fs::remove_file(copy).unwrap();
-    usage_file(&profile_dir(&base, PROFILE_A), 'b', &[y_event()], 0);
+    usage_file(&profile_dir(&base, &profile(PROFILE_A, Path::new(r"C:\x\a"))), 'b', &[y_event()], 0);
     let (input, output, cost, sessions) = report(&root, &config);
     assert_eq!((input, output), (300, 60));
     assert!((cost - 0.75).abs() < 1e-9, "cost {cost}");
@@ -3355,9 +3359,9 @@ fn a_stale_copy_in_another_profile_is_never_scanned() {
     usage_file(&default_sync_dir(&base), 'b', &[y_event()], 100);
     let a_secure = base
         .join(PROFILES_DIR_NAME)
-        .join(format!("{PROFILE_A}.secure"));
+        .join(format!("{}.secure", profile_dir_name(&profile(PROFILE_A, Path::new(r"C:\x\a")))));
     let newest_y = usage_file(&a_secure, 'b', &[y_event()], 0);
-    usage_file(&profile_dir(&base, PROFILE_B), 'c', &[z_event()], 50);
+    usage_file(&profile_dir(&base, &profile(PROFILE_B, Path::new(r"C:\x\b"))), 'c', &[z_event()], 50);
 
     let (input, output, cost, sessions) = report(&root, &config);
     assert_eq!((input, output), (700, 140), "a stale copy was counted");
@@ -3387,7 +3391,7 @@ fn upgrade_keeps_the_existing_file_and_registers_no_directory() {
         multi_plain(&base, vec![profile(PROFILE_A, Path::new(r"C:\x\a"))]),
     ] {
         if !config.profiles.is_empty() {
-            usage_file(&profile_dir(&base, PROFILE_A), 'a', &[x_event(), y_event()], 5);
+            usage_file(&profile_dir(&base, &profile(PROFILE_A, Path::new(r"C:\x\a"))), 'a', &[x_event(), y_event()], 5);
         }
         let (input, _, _, sessions) = report(&root, &config);
         assert_eq!(input, 300, "{config:?}");
@@ -3413,8 +3417,8 @@ fn rollback_scan_of_cursor_cache_counts_the_account_once() {
     };
     let base = root.join("appdata");
     usage_file(&default_sync_dir(&base), 'a', &[x_event()], 0);
-    usage_file(&profile_dir(&base, PROFILE_A), 'a', &[x_event()], 0);
-    usage_file(&profile_dir(&base, PROFILE_B), 'b', &[y_event()], 0);
+    usage_file(&profile_dir(&base, &profile(PROFILE_A, Path::new(r"C:\x\a"))), 'a', &[x_event()], 0);
+    usage_file(&profile_dir(&base, &profile(PROFILE_B, Path::new(r"C:\x\b"))), 'b', &[y_event()], 0);
     let (input, _, _, sessions) =
         report_with(&root, &Config::default(), Some(&default_sync_dir(&base)));
     assert_eq!(input, 100);
@@ -3434,10 +3438,10 @@ fn account_switch_in_a_profile_leaves_only_the_new_file() {
     let base = root.join("appdata");
     std::fs::create_dir_all(&base).unwrap();
     let registry = RwLock::new(multi(&base, true, vec![]));
-    let old_dir = profile_dir(&base, PROFILE_A);
+    let cursor_root = profile_root(&root, "b", &other_token(), OTHER_USER);
+    let old_dir = profile_dir(&base, &profile(PROFILE_A, &cursor_root));
     drop(secure::ensure_dir(&old_dir).unwrap());
     write_secure(&old_dir.join(hex_name('a')), x_body().as_bytes());
-    let cursor_root = profile_root(&root, "b", &other_token(), OTHER_USER);
     registry.write().unwrap().profiles = vec![profile(PROFILE_A, &cursor_root)];
     let body = serde_json::json!({"totalUsageEventsCount": 1, "usageEventsDisplay": [y_event()]});
     let (url, _) = serve(vec![json_ok(&body.to_string())]);
@@ -3483,7 +3487,7 @@ fn a_failed_walk_does_not_cover_the_account_for_later_profiles() {
     let status = sync_round(&default_db, &url, &registry);
     assert_eq!(states(&status), ["expired", "ok"]);
     assert_eq!(seen.lock().unwrap().len(), 2, "A never tried its own session");
-    assert!(expected_file(&profile_dir(&base, PROFILE_A)).exists());
+    assert!(expected_file(&profile_dir(&base, &profile(PROFILE_A, &cursor_root))).exists());
     let (input, _, _, sessions) = report(&root, &registry.read().unwrap());
     assert_eq!(input, 100);
     assert_eq!(sessions, ["conv-x"]);
@@ -3501,7 +3505,7 @@ fn a_removed_profile_is_not_in_the_report() {
     };
     let base = root.join("appdata");
     usage_file(&default_sync_dir(&base), 'a', &[x_event()], 0);
-    usage_file(&profile_dir(&base, PROFILE_B), 'b', &[y_event()], 0);
+    usage_file(&profile_dir(&base, &profile(PROFILE_B, Path::new(r"C:\x\b"))), 'b', &[y_event()], 0);
     let listed = multi_plain(&base, vec![profile(PROFILE_B, Path::new(r"C:\x\b"))]);
     assert_eq!(report(&root, &listed).3, ["conv-x", "conv-y"], "control");
     let removed = multi_plain(&base, vec![]);
@@ -3653,7 +3657,7 @@ fn a_profile_removed_during_its_last_page_leaves_no_dir() {
     );
     assert_eq!(states(&status), ["notSignedIn", "disabled"]);
     assert_eq!(seen.lock().unwrap().len(), 1, "control: the last page was answered");
-    let dir = profile_dir(tmp.path(), PROFILE_A);
+    let dir = profile_dir(tmp.path(), &profile(PROFILE_A, &root));
     assert!(!dir.exists(), "the removed profile's dir was created");
     assert!(!Slot { id: PROFILE_A.into(), root: Some(root), dir: Some(dir) }.candidates()[1].exists());
 }
@@ -3670,13 +3674,11 @@ fn a_duplicate_profile_drops_its_old_accounts_file() {
     let default_db = login_db(&tmp.path().join("default"), &valid_token(), USER);
     let root = profile_root(tmp.path(), "b", &valid_token(), USER);
     let registry = RwLock::new(multi(tmp.path(), true, vec![profile(PROFILE_A, &root)]));
-    let a_dir = profile_dir(tmp.path(), PROFILE_A);
+    let a_dir = profile_dir(tmp.path(), &profile(PROFILE_A, &root));
     let old_name = format!("usage.{}.json", stem(OTHER_USER).unwrap());
     write_secure(&a_dir.join(&old_name), b"{}");
     let current = expected_file(&a_dir);
     write_secure(&current, b"{}");
-    let record = a_dir.join(ROOT_FILE_NAME);
-    write_secure(&record, root_tag(&root).as_bytes());
     assert!(
         newest_per_account(&registry.read().unwrap()).iter().any(|p| p.ends_with(&old_name)),
         "control: the old account's file is registered before the round"
@@ -3686,7 +3688,6 @@ fn a_duplicate_profile_drops_its_old_accounts_file() {
     assert_eq!(states(&status), ["ok", "duplicate"]);
     assert!(!a_dir.join(&old_name).exists(), "the old account's file stayed");
     assert!(current.exists(), "the current account's copy was removed");
-    assert!(record.exists(), "the kept copy lost its root record");
     assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([]));
     let registered = newest_per_account(&registry.read().unwrap());
     assert!(registered.iter().all(|p| !p.ends_with(&old_name)), "{registered:?}");
@@ -3694,8 +3695,8 @@ fn a_duplicate_profile_drops_its_old_accounts_file() {
 }
 
 /// Finding 3: a profile listed again under the same id with another root
-/// starts clean, as a removed one is cleaned; the same root keeps its file.
-/// The dir's root record is written the way a commit writes it.
+/// starts clean (its dir name follows the root, so the old dir is unlisted
+/// and cleaned like a removed one); the same root keeps its file.
 #[test]
 fn a_profile_moved_to_another_root_is_cleaned() {
     let root = DataRoot::new();
@@ -3704,10 +3705,9 @@ fn a_profile_moved_to_another_root_is_cleaned() {
             .unwrap()
     };
     push(r"C:\x\a");
-    let dir = config().profiles_dir.unwrap().join(PROFILE_A);
+    let dir = config().profiles_dir.unwrap().join(profile_dir_name(&profile(PROFILE_A, Path::new(r"C:\x\a"))));
     let file = dir.join(hex_name('a'));
     write_secure(&file, b"{}");
-    write_secure(&dir.join(ROOT_FILE_NAME), root_tag(Path::new(r"C:\x\a")).as_bytes());
     assert_eq!(push(r"C:\x\a")["removedFiles"], 0);
     assert!(file.exists(), "control: the same root kept its file");
     assert_eq!(push(r"C:\x\b")["removedFiles"], 1);
@@ -3753,7 +3753,7 @@ fn an_identical_walk_changes_nothing() {
 // Round 2 of the /code-review findings ------------------------------------------
 
 /// Pushes profile A at `at` and syncs once, so A's dir holds its account's
-/// file and the root record a commit writes. Returns A's dir and the file.
+/// file. Returns A's dir and the file.
 fn synced_at(root: &DataRoot, at: &Path) -> (PathBuf, PathBuf) {
     set(serde_json::json!({"enabled": true, "profiles": [{"id": PROFILE_A, "root": at}]}))
         .unwrap();
@@ -3761,16 +3761,16 @@ fn synced_at(root: &DataRoot, at: &Path) -> (PathBuf, PathBuf) {
     let (url, _) = serve(vec![json_ok(&page(1, &["a"]))]);
     let status = sync_round(&root.path().join("absent.vscdb"), &url, &registry);
     assert_eq!(states(&status), ["notSignedIn", "ok"]);
-    let dir = config().profiles_dir.unwrap().join(PROFILE_A);
+    let dir = config().profiles_dir.unwrap().join(profile_dir_name(&profile(PROFILE_A, at)));
     let file = dir.join(format!("usage.{}.json", stem(OTHER_USER).unwrap()));
-    assert!(file.exists() && dir.join(ROOT_FILE_NAME).exists(), "fixture: no commit");
+    assert!(file.exists(), "fixture: no commit");
     (dir, file)
 }
 
-/// Round-2 finding 1: the old root is recorded in the profile's dir, so a
-/// push with a new root cleans the old account's file even when the
-/// in-memory config no longer knows the old root: after a refused push
-/// (which kept no profile) and after a restart (empty config).
+/// Round-2 finding 1 / round-3 A: a push with a new root cleans the old
+/// account's file even when the in-memory config no longer knows the old
+/// root (after a refused push that kept no profile, after a restart): the
+/// old root's dir has another name, so it is unlisted.
 #[test]
 fn a_new_root_cleans_the_old_file_after_a_refused_push_or_a_restart() {
     let root = DataRoot::new();
@@ -3796,8 +3796,9 @@ fn a_new_root_cleans_the_old_file_after_a_refused_push_or_a_restart() {
     assert!(!file.exists(), "after a restart the old root's file stayed");
 }
 
-/// Round-2 finding 8: roots compare as `duplicate_key` folds them; a
-/// case-only (or `/` vs `\`) change is the same root and keeps the file.
+/// Round-2 finding 8 / round-3 A: roots compare as `duplicate_key` folds
+/// them; a case-only (or `/` vs `\`) respelling names the same dir and keeps
+/// the file.
 #[test]
 fn a_case_only_root_change_is_the_same_root() {
     let root = DataRoot::new();
@@ -3810,6 +3811,11 @@ fn a_case_only_root_change_is_the_same_root() {
     assert_eq!(result["rejected"], serde_json::json!([]));
     assert_eq!(result["removedFiles"], 0);
     assert!(file.exists(), "a case-only change cleaned the profile");
+    assert_eq!(
+        profile_dir_name(&profile(PROFILE_A, Path::new(&respelled))),
+        profile_dir_name(&profile(PROFILE_A, &old)),
+        "a respelling named another dir"
+    );
 }
 
 /// Round-2 finding 3: a profile without an installation key
@@ -3842,10 +3848,12 @@ fn no_key_or_no_storage_does_not_hold_the_full_budget() {
     assert_eq!(budget, FULL_BUDGET, "the default had no file yet");
     assert_eq!(round().1, BACKGROUND_BUDGET, "storage_unavailable held the full budget");
 
+    // Storage back, same id and root: the same slot for the budget (round 3
+    // keys it by id and folded root), so no full budget for this round.
     *registry.write().unwrap() = multi(tmp.path(), true, vec![profile(PROFILE_A, &other)]);
     let (states_seen, budget) = round();
     assert_eq!(states_seen, ["ok", "error:key_unavailable"]);
-    assert_eq!(budget, FULL_BUDGET, "a changed profile's first round");
+    assert_eq!(budget, BACKGROUND_BUDGET);
     assert_eq!(round().1, BACKGROUND_BUDGET, "key_unavailable held the full budget");
 }
 
@@ -3877,7 +3885,7 @@ fn a_duplicates_failed_cleanup_is_reported() {
     let default_db = login_db(&tmp.path().join("default"), &valid_token(), USER);
     let root = profile_root(tmp.path(), "b", &valid_token(), USER);
     let registry = RwLock::new(multi(tmp.path(), true, vec![profile(PROFILE_A, &root)]));
-    let a_dir = profile_dir(tmp.path(), PROFILE_A);
+    let a_dir = profile_dir(tmp.path(), &profile(PROFILE_A, &root));
     drop(secure::ensure_dir(&a_dir).unwrap());
     let loose = a_dir.join(format!("usage.{}.json", stem(OTHER_USER).unwrap()));
     std::fs::write(&loose, b"{}").unwrap();
@@ -3890,4 +3898,75 @@ fn a_duplicates_failed_cleanup_is_reported() {
     std::fs::remove_file(&loose).unwrap();
     let status = sync_round(&default_db, &url, &registry);
     assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([]));
+}
+
+// Round 3 of the /code-review findings ------------------------------------------
+
+/// Round-3 B: a respelling of the same folder (case, `/` vs `\`) while the
+/// profile walks is still the same root: the walk goes on and writes its
+/// file.
+#[test]
+fn a_respelled_root_mid_walk_keeps_walking() {
+    let _guard = lock();
+    let tmp = TempDir::new();
+    let root = profile_root(tmp.path(), "b", &valid_token(), USER);
+    let registry = RwLock::new(multi(tmp.path(), true, vec![profile(PROFILE_A, &root)]));
+    let (url, seen) = serve(vec![delayed(json_ok(&page(1, &["a"])))]);
+    let respelled = PathBuf::from(root.to_string_lossy().to_uppercase().replace('\\', "/"));
+    let status = change_mid_walk(
+        &seen,
+        || sync_round(&tmp.path().join("absent.vscdb"), &url, &registry),
+        || registry.write().unwrap().profiles[0].root = respelled.clone(),
+    );
+    assert_eq!(states(&status), ["notSignedIn", "ok"], "a respelling aborted the walk");
+    assert!(expected_file(&profile_dir(tmp.path(), &profile(PROFILE_A, &root))).exists());
+}
+
+/// Round-3 B: the budget remembers a slot by its folded root, so a
+/// respelled root that still writes no file keeps the background budget.
+#[test]
+fn a_respelled_root_keeps_the_background_budget() {
+    let _guard = lock();
+    let tmp = TempDir::new();
+    let default_db = login_db(&tmp.path().join("default"), &valid_token(), USER);
+    let empty = empty_root(tmp.path(), "empty");
+    let registry = RwLock::new(multi(tmp.path(), true, vec![profile(PROFILE_A, &empty)]));
+    let (url, _) = serve(vec![json_ok(&page(1, &["a"])); 4]);
+    let round = || {
+        let source = || registry.read().unwrap().clone();
+        let status = sync_with(false, &target(&default_db, &url), &source, Some(limits())).0;
+        (states(&status), ROUND_BUDGET.with(std::cell::Cell::get).unwrap())
+    };
+    assert_eq!(round().0, ["ok", "notSignedIn"]);
+    assert_eq!(round().1, BACKGROUND_BUDGET);
+    let respelled = PathBuf::from(empty.to_string_lossy().to_uppercase().replace('\\', "/"));
+    registry.write().unwrap().profiles[0].root = respelled;
+    let (states_seen, budget) = round();
+    assert_eq!(states_seen, ["ok", "notSignedIn"]);
+    assert_eq!(budget, BACKGROUND_BUDGET, "a respelling reset the budget");
+}
+
+/// Round-3 D: a duplicate's cleanup that removes one usage file and then
+/// cannot remove another reports both: `changed` (a file went) and
+/// `cleanupFailedProfiles`.
+#[test]
+fn a_partly_failed_duplicate_cleanup_still_counts_as_a_change() {
+    let _guard = lock();
+    let tmp = TempDir::new();
+    let default_db = login_db(&tmp.path().join("default"), &valid_token(), USER);
+    let root = profile_root(tmp.path(), "b", &valid_token(), USER);
+    let registry = RwLock::new(multi(tmp.path(), true, vec![profile(PROFILE_A, &root)]));
+    let (url, _) = serve(vec![json_ok(&page(1, &["a"])), json_ok(&page(1, &["a"]))]);
+    assert_eq!(states(&sync_round(&default_db, &url, &registry)), ["ok", "duplicate"]);
+    // Planted after the first round, so the default's walk is unchanged.
+    let a_dir = profile_dir(tmp.path(), &profile(PROFILE_A, &root));
+    let removable = a_dir.join(hex_name('e'));
+    write_secure(&removable, b"{}");
+    let loose = a_dir.join(hex_name('f'));
+    std::fs::write(&loose, b"{}").unwrap();
+    let status = sync_round(&default_db, &url, &registry);
+    assert_eq!(states(&status), ["ok", "duplicate"]);
+    assert!(!removable.exists() && loose.exists(), "fixture");
+    assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([PROFILE_A]));
+    assert_eq!(status["changed"], true, "a removed file was not a change");
 }

@@ -1468,8 +1468,9 @@ pub unsafe extern "C" fn tb_validate_cursor_profile(json: *const c_char) -> *mut
 /// could not be deleted):
 /// `state`/`reason` are the headline (`ok` when every profile is `ok` or
 /// `duplicate`, else the first other state, a `notSignedIn` profile ignored
-/// while another synced); `changed` = some profile's file content changed
-/// (new bytes written, or a superseded file removed); a
+/// while another synced); `changed` = some profile's usage file content
+/// changed (new bytes written, or a usage file removed; not an orphan temp,
+/// not a rewrite of the same bytes); a
 /// profile's `duplicate` names the earlier profile that covered the same
 /// account (`duplicateOf`), never the account. After the walk the takeover is
 /// rechecked (W5); `cliPresent` (no reason) = a profile synced but CLI
