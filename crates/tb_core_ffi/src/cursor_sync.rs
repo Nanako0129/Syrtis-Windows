@@ -276,27 +276,16 @@ fn with_fallback(name: &str) -> [String; 2] {
     [name.to_string(), format!("{name}{}", secure::FALLBACK_SUFFIX)]
 }
 
-/// Every default-profile sync dir Syrtis could have written to: root ∈
-/// {preferred, `.secure`} × child ∈ {`cursor-cache`, `cursor-cache.secure`}.
-/// The fallbacks are sticky, so the dir in use can move after files were
-/// written elsewhere; disabling cleans them all.
-fn sync_dir_candidates(base: &Path) -> Vec<PathBuf> {
+/// Every dir `<base>\<app root>\<child>` Syrtis could have written to: root ∈
+/// {preferred, `.secure`} × child ∈ {`child`, `child.secure`}. The fallbacks
+/// are sticky, so the dir in use can move after files were written
+/// elsewhere; cleanup covers them all (`cursor-cache` under the roaming base,
+/// the `cursor-profiles` parents under the local one, WB7).
+fn candidates(base: &Path, child: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     for root in with_fallback(APP_DIR_NAME) {
-        for child in with_fallback(SYNC_DIR_NAME) {
+        for child in with_fallback(child) {
             candidates.push(base.join(&root).join(child));
-        }
-    }
-    candidates
-}
-
-/// Every `cursor-profiles` parent under the local base (WB7: root ∈
-/// {preferred, `.secure`} × parent ∈ {`cursor-profiles`, `.secure`}).
-fn profiles_parent_candidates(local: &Path) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    for root in with_fallback(APP_DIR_NAME) {
-        for parent in with_fallback(PROFILES_DIR_NAME) {
-            candidates.push(local.join(&root).join(parent));
         }
     }
     candidates
@@ -337,8 +326,8 @@ impl Cleanup {
         let Some(base) = roaming else {
             return;
         };
-        for dir in sync_dir_candidates(base) {
-            self.record(DEFAULT_PROFILE_ID, clean_candidate(&dir, false));
+        for dir in candidates(base, SYNC_DIR_NAME) {
+            self.record(DEFAULT_PROFILE_ID, clean_candidate(&dir, false, None));
         }
     }
 
@@ -350,7 +339,7 @@ impl Cleanup {
         let Some(local) = local else {
             return;
         };
-        for parent in profiles_parent_candidates(local) {
+        for parent in candidates(local, PROFILES_DIR_NAME) {
             match real_dir(&parent) {
                 Ok(true) => {}
                 Ok(false) => continue,
@@ -378,7 +367,7 @@ impl Cleanup {
                 }
                 let id = id.to_string();
                 match real_dir(&entry.path()) {
-                    Ok(true) => self.record(&id, clean_candidate(&entry.path(), true)),
+                    Ok(true) => self.record(&id, clean_candidate(&entry.path(), true, None)),
                     Ok(false) => {}
                     Err(error) => self.record(&id, Err(error)),
                 }
@@ -398,16 +387,18 @@ impl Cleanup {
 /// followed, as the storage contract allows (same-user planting, out of
 /// scope). `remove_dir`: an added profile's dir; once our files are gone,
 /// the lock file goes too (secure delete) and the dir is `rmdir`ed, which
-/// succeeds only if nothing else is left.
-fn clean_candidate(dir: &Path, remove_dir: bool) -> io::Result<usize> {
+/// succeeds only if nothing else is left. `keep`: one file name to leave (a
+/// duplicate profile keeps its current account's copy, as a commit does).
+fn clean_candidate(dir: &Path, remove_dir: bool, keep: Option<&str>) -> io::Result<usize> {
     if !real_dir(dir)? {
         return Ok(0);
     }
     if secure::ensure_dir(dir).is_err() {
         let ours = std::fs::read_dir(dir).map(|entries| {
-            entries
-                .flatten()
-                .any(|entry| is_ours(&entry.file_name().to_string_lossy()))
+            entries.flatten().any(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                is_ours(&name) && Some(name.as_str()) != keep
+            })
         });
         return match ours {
             Ok(false) => Ok(0),
@@ -415,7 +406,7 @@ fn clean_candidate(dir: &Path, remove_dir: bool) -> io::Result<usize> {
         };
     }
     let lock = secure::open_lock(&dir.join(LOCK_FILE_NAME))?;
-    let (removed, left) = remove_usage_files(dir, None)?;
+    let (removed, left) = remove_usage_files(dir, keep)?;
     if left > 0 {
         return Err(io::Error::other("a Syrtis usage file could not be deleted"));
     }
@@ -470,7 +461,8 @@ pub(crate) fn set_from_json(raw: &str) -> Result<serde_json::Value, String> {
 /// only the profiles that are also in this input (none when the input cannot
 /// be read), so a profile the user removed is never walked by a stale config.
 /// An accepted on push removes our files from every profile dir no longer
-/// listed (non-fatal: `cleanupFailed` / `cleanupFailedProfiles`).
+/// listed, or listed under the same id with another root than the config it
+/// replaces (non-fatal: `cleanupFailed` / `cleanupFailedProfiles`).
 pub(crate) fn set_with_bases(raw: &str, bases: &Bases) -> Result<serde_json::Value, String> {
     let input: SetInput = match serde_json::from_str(raw) {
         Ok(input) => input,
@@ -515,9 +507,23 @@ pub(crate) fn set_with_bases(raw: &str, bases: &Bases) -> Result<serde_json::Val
         profiles,
         cli_takeover_confirmed: input.cli_takeover_confirmed,
     };
+    let previous = config();
     commit_config(new.clone());
+    // A profile whose id is now listed with another root is cleaned like a
+    // removed one: its files came from the old root's account.
+    let keep: Vec<Profile> = new
+        .profiles
+        .iter()
+        .filter(|p| {
+            !previous
+                .profiles
+                .iter()
+                .any(|old| old.id == p.id && old.root != p.root)
+        })
+        .cloned()
+        .collect();
     let mut cleanup = Cleanup::default();
-    cleanup.profile_dirs(bases.local.as_deref(), &new.profiles);
+    cleanup.profile_dirs(bases.local.as_deref(), &keep);
     Ok(set_result(&new, &rejected, cleanup.removed, &cleanup.failed))
 }
 
@@ -670,16 +676,20 @@ fn slots(config: &Config) -> Vec<Slot> {
 
 impl Slot {
     /// Still configured exactly as when the round started (WB4): sync on,
-    /// the same resolved roots, and (for an added profile) the same
-    /// `(id, root)` still listed.
+    /// the same default dir, and for an added profile the same resolved
+    /// profiles dir and the same `(id, root)` still listed. The default
+    /// profile does not depend on the added ones: adding the first or
+    /// removing the last (which sets or clears `profiles_dir`) leaves its
+    /// walk alone.
     fn still_in(&self, start: &Config, now: &Config) -> bool {
         now.enabled
             && now.dir == start.dir
-            && now.profiles_dir == start.profiles_dir
             && self.root.as_ref().is_none_or(|root| {
-                now.profiles
-                    .iter()
-                    .any(|p| p.id == self.id && &p.root == root)
+                now.profiles_dir == start.profiles_dir
+                    && now
+                        .profiles
+                        .iter()
+                        .any(|p| p.id == self.id && &p.root == root)
             })
     }
 
@@ -884,6 +894,27 @@ mod secure {
         storage::replace_secure_file(directory, dir, staged, dest)
     }
 
+    /// Whether the Syrtis file at `path` (meeting the storage contract)
+    /// already holds exactly `bytes`; if so its modified time is set to now,
+    /// on the same handle, so it still dates the last complete walk
+    /// (`lastSuccessMs`, the newest copy per account) without a rewrite.
+    /// Any failure answers `false`: the caller then writes as usual.
+    pub(super) fn refresh_if_same(path: &Path, bytes: &[u8]) -> bool {
+        use std::io::Read as _;
+        (|| -> io::Result<bool> {
+            let mut file = storage::open_existing_secure_file(path, true)?;
+            storage::verify_secure_file_path(&file, path)?;
+            let mut old = Vec::new();
+            file.read_to_end(&mut old)?;
+            if old != bytes {
+                return Ok(false);
+            }
+            file.set_modified(std::time::SystemTime::now())?;
+            Ok(true)
+        })()
+        .unwrap_or(false)
+    }
+
     /// Delete one Syrtis file by pathname, only if it is a regular file that
     /// meets the storage contract and is still the object just opened.
     /// `DeleteFileW` on a reparse point would remove the link itself, but the
@@ -921,6 +952,9 @@ mod secure {
     }
     pub(super) fn replace(_: &File, _: &Path, _: &Path, _: &Path) -> io::Result<()> {
         Err(unsupported())
+    }
+    pub(super) fn refresh_if_same(_: &Path, _: &[u8]) -> bool {
+        false
     }
     pub(super) fn remove_file(_: &Path) -> io::Result<()> {
         Err(unsupported())
@@ -983,18 +1017,26 @@ struct UsageFile<'a> {
 
 /// Write the complete walk: secure dir, secure lock, secure temp, flush,
 /// secure replace (the commit point; it flushes the directory), then drop
-/// every other usage file and orphan temp. `still_wanted` is re-checked
-/// under the lock so a concurrent disable or profile removal (which deletes
-/// under the same lock) can never be undone by a walk finishing after it.
-/// `resolve`: an added profile's dir, resolved (and created) only now.
+/// every other usage file and orphan temp. `still_wanted` is checked before
+/// anything is created (a profile removed during its last page leaves no
+/// dir) and again under the lock, so a concurrent disable or profile removal
+/// (which deletes under the same lock) can never be undone by a walk
+/// finishing after it. `resolve`: an added profile's dir, resolved (and
+/// created) only now. Returns whether a file's content changed: a file whose
+/// bytes already equal the new ones is not rewritten (only its modified time
+/// moves to now), so an identical walk changes nothing (finding 8) unless a
+/// superseded file was removed.
 fn commit_file(
     dir: &Path,
     resolve: bool,
     stem: &str,
     events: &[Event],
     still_wanted: &dyn Fn() -> bool,
-) -> Result<(), Stop> {
+) -> Result<bool, Stop> {
     let failed = || Stop::error("write_failed");
+    if !still_wanted() {
+        return Err(Stop::new(State::Disabled, None));
+    }
     let resolved;
     let dir = if resolve {
         resolved = secure::resolve_dir(dir).map_err(|_| failed())?;
@@ -1013,25 +1055,31 @@ fn commit_file(
     })
     .map_err(|_| failed())?;
     let final_name = format!("usage.{stem}.json");
-    let temp_path = dir.join(temp_file_name());
-    let written = (|| {
-        let mut file = secure::create_new(&temp_path)?;
-        file.write_all(&payload)?;
-        file.sync_all()?;
-        drop(file);
-        secure::replace(&directory, dir, &temp_path, &dir.join(&final_name))
-    })();
-    if written.is_err() {
-        let _ = secure::remove_file(&temp_path);
-        return Err(failed());
+    // Read only through the storage contract: a file that fails it is
+    // replaced, never compared.
+    let same = secure::refresh_if_same(&dir.join(&final_name), &payload);
+    if !same {
+        let temp_path = dir.join(temp_file_name());
+        let written = (|| {
+            let mut file = secure::create_new(&temp_path)?;
+            file.write_all(&payload)?;
+            file.sync_all()?;
+            drop(file);
+            secure::replace(&directory, dir, &temp_path, &dir.join(&final_name))
+        })();
+        if written.is_err() {
+            let _ = secure::remove_file(&temp_path);
+            return Err(failed());
+        }
     }
     // Superseded files and orphan temps go. A Syrtis-named file that fails
     // the storage contract (planted, or written by something else) is left
     // in place and not reported here: putting one in this protected dir
     // needs a process running as the same user, which is out of scope
     // (Plan threat model). Disable-time cleanup does report it (W7).
-    let _ = remove_usage_files(dir, Some(&final_name));
-    Ok(())
+    let removed =
+        remove_usage_files(dir, Some(&final_name)).map_or(0, |(removed, _)| removed);
+    Ok(!same || removed > 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1156,6 +1204,47 @@ struct Outcome {
     /// For `Duplicate`: the index (in this round's slots) of the profile that
     /// already covered the same account. Never the account itself.
     duplicate_of: Option<usize>,
+    /// A file in this profile's dirs was written with new bytes or removed.
+    changed: bool,
+}
+
+impl Outcome {
+    fn stopped(stop: Stop) -> Self {
+        Self {
+            stop,
+            events: 0,
+            duplicate_of: None,
+            changed: false,
+        }
+    }
+}
+
+/// Outcomes that write no file however long the round runs: a duplicate, no
+/// login, or the login refused locally or by Cursor (an expired session, a
+/// token that cannot be read or does not match its account, a database the
+/// WB1/WB2 checks refuse). A slot whose last round ended so does not ask for
+/// the full budget while it has no file (finding 1); a timeout, an outage or
+/// a spent budget does.
+fn writes_no_file(stop: Stop) -> bool {
+    match stop.state {
+        State::Duplicate | State::NotSignedIn | State::Expired => true,
+        State::Error => matches!(
+            stop.reason,
+            Some(
+                "login_unreadable"
+                    | "token_unreadable"
+                    | "account_mismatch"
+                    | "db_not_file"
+                    | "db_symlink"
+                    | "db_no_acl_volume"
+                    | "db_remote"
+                    | "db_foreign_owner"
+                    | "db_not_fixed_drive"
+                    | "db_changed"
+            )
+        ),
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1403,11 +1492,7 @@ async fn run(
     enabled: &dyn Fn() -> bool,
     claim: &mut dyn FnMut(&str, bool) -> Option<usize>,
 ) -> Outcome {
-    let stopped = |stop| Outcome {
-        stop,
-        events: 0,
-        duplicate_of: None,
-    };
+    let stopped = Outcome::stopped;
     if !enabled() {
         return stopped(Stop::new(State::Disabled, None));
     }
@@ -1438,12 +1523,21 @@ async fn run(
     };
     // An account already covered this round by an earlier profile is not
     // walked again (saves requests, avoids 429); its file name is the same,
-    // so the takeover keeps one copy.
+    // so the takeover keeps one copy. Any other account's file this profile
+    // still holds (it was signed in to that one before) goes, under its
+    // lock, the way a commit drops superseded files (finding 3).
     if let Some(first) = claim(&stem, false) {
+        let keep = format!("usage.{stem}.json");
+        let removed: usize = slot
+            .candidates()
+            .iter()
+            .filter_map(|dir| clean_candidate(dir, slot.root.is_some(), Some(&keep)).ok())
+            .sum();
         return Outcome {
             stop: Stop::new(State::Duplicate, None),
             events: 0,
             duplicate_of: Some(first),
+            changed: removed > 0,
         };
     }
     let Ok(mut cookie) = reqwest::header::HeaderValue::from_str(&format!(
@@ -1465,12 +1559,13 @@ async fn run(
     };
     drop(cookie);
     match commit_file(dir, slot.root.is_some(), &stem, &events, enabled) {
-        Ok(()) => {
+        Ok(changed) => {
             claim(&stem, true);
             Outcome {
                 stop: Stop::new(State::Ok, None),
                 events: events.len(),
                 duplicate_of: None,
+                changed,
             }
         }
         Err(stop) => stopped(stop),
@@ -1480,9 +1575,48 @@ async fn run(
 // ---------------------------------------------------------------------------
 // Entry point (single-flight).
 
-/// The last status, behind the single-flight lock. A caller arriving while a
-/// sync runs waits for it and returns its status instead of starting another.
-static IN_FLIGHT: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+/// What the last round left, behind the single-flight lock. A caller
+/// arriving while a sync runs waits for it and returns its status instead of
+/// starting another.
+struct LastRound {
+    status: Option<serde_json::Value>,
+    /// The slots, exactly as configured then, whose outcome writes no file
+    /// (`writes_no_file`). A slot changed since (another root or dir) is not
+    /// in it, so its first round may take the full budget.
+    no_file: Vec<Slot>,
+}
+
+static IN_FLIGHT: Mutex<LastRound> = Mutex::new(LastRound {
+    status: None,
+    no_file: Vec::new(),
+});
+
+#[cfg(test)]
+thread_local! {
+    /// The budget the last round on this thread chose (finding 1's test).
+    static ROUND_BUDGET: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+/// The round's budget: full for "Sync now", and while some profile has no
+/// complete file but could write one; background otherwise. A profile whose
+/// last round could not write a file however long it ran (duplicate, not
+/// signed in, refused) does not hold every later round at the full budget.
+fn round_budget(
+    explicit: bool,
+    slots: &[Slot],
+    files: &[Option<SystemTime>],
+    no_file: &[Slot],
+) -> Duration {
+    let wants_full = slots
+        .iter()
+        .zip(files)
+        .any(|(slot, file)| file.is_none() && !no_file.contains(slot));
+    if explicit || wants_full {
+        FULL_BUDGET
+    } else {
+        BACKGROUND_BUDGET
+    }
+}
 
 /// Run one sync round against Cursor, every profile. Returns the status JSON
 /// and whether a synced file changed. The takeover recheck and the
@@ -1530,22 +1664,27 @@ fn sync_with(
     config: &(dyn Fn() -> Config + Sync),
     test_limits: Option<Limits>,
 ) -> (serde_json::Value, bool) {
-    let mut slot = match IN_FLIGHT.try_lock() {
-        Ok(slot) => slot,
+    let mut last = match IN_FLIGHT.try_lock() {
+        Ok(last) => last,
         Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => {
-            let slot = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner());
-            return (slot.clone().unwrap_or(serde_json::Value::Null), false);
+            let last = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner());
+            return (last.status.clone().unwrap_or(serde_json::Value::Null), false);
         }
     };
     let start = config();
     // Off is decided per profile, before its login is read (`run`).
     let profiles = slots(&start);
-    let budget = if explicit || profiles.iter().any(|p| p.complete_file().is_none()) {
-        FULL_BUDGET
-    } else {
-        BACKGROUND_BUDGET
-    };
+    // Each slot's newest complete file, read once (budget, per-profile and
+    // top-level `lastSuccessMs`); read again below only for a slot whose
+    // files this round touched.
+    let mut files: Vec<Option<SystemTime>> = profiles
+        .iter()
+        .map(|p| p.complete_file().map(|(_, modified)| modified))
+        .collect();
+    let budget = round_budget(explicit, &profiles, &files, &last.no_file);
+    #[cfg(test)]
+    ROUND_BUDGET.with(|cell| cell.set(Some(budget)));
     let limits = test_limits.unwrap_or(Limits::production(budget));
     // One budget for the whole round, so several profiles cannot hold
     // IN_FLIGHT longer than one would. (A database read that blocks in the
@@ -1555,11 +1694,7 @@ fn sync_with(
     let mut outcomes: Vec<Outcome> = Vec::with_capacity(profiles.len());
     for (index, profile) in profiles.iter().enumerate() {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let blocked = |stop| Outcome {
-            stop,
-            events: 0,
-            duplicate_of: None,
-        };
+        let blocked = Outcome::stopped;
         let outcome = match &profile.dir {
             None => blocked(Stop::error("storage_unavailable")),
             Some(_) if remaining.is_zero() => {
@@ -1590,30 +1725,37 @@ fn sync_with(
                 ))
             }
         };
+        // A completed walk moved its file's time (rewritten or not); a
+        // duplicate may have removed one.
+        if outcome.changed || outcome.stop.state == State::Ok {
+            files[index] = profile.complete_file().map(|(_, modified)| modified);
+        }
         outcomes.push(outcome);
     }
-    let changed = outcomes.iter().any(|o| o.stop.state == State::Ok);
+    let changed = outcomes.iter().any(|o| o.changed);
     let head = if profiles.is_empty() {
         Stop::new(State::Disabled, None)
     } else {
         headline(&outcomes)
     };
-    let last_success_ms = |profile: &Slot| {
-        profile
-            .complete_file()
-            .and_then(|(_, modified)| modified.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-    };
+    let last_success: Vec<Option<u64>> = files
+        .iter()
+        .map(|file| {
+            file.and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+        })
+        .collect();
     // WB9: id, state, reason code and `duplicateOf` only, never a root.
     let per_profile: Vec<serde_json::Value> = profiles
         .iter()
         .zip(&outcomes)
-        .map(|(profile, outcome)| {
+        .zip(&last_success)
+        .map(|((profile, outcome), last_success)| {
             let mut entry = serde_json::json!({
                 "id": profile.id,
                 "state": outcome.stop.state,
                 "events": outcome.events,
-                "lastSuccessMs": last_success_ms(profile),
+                "lastSuccessMs": last_success,
             });
             if let Some(reason) = outcome.stop.reason {
                 entry["reason"] = reason.into();
@@ -1627,22 +1769,32 @@ fn sync_with(
     let mut status = serde_json::json!({
         "state": head.state,
         "events": outcomes.iter().map(|o| o.events).sum::<usize>(),
-        "lastSuccessMs": profiles.iter().filter_map(last_success_ms).max(),
+        "lastSuccessMs": last_success.iter().flatten().max(),
         "changed": changed,
         "profiles": per_profile,
     });
     if let Some(reason) = head.reason {
         status["reason"] = reason.into();
     }
-    *slot = Some(status.clone());
+    last.no_file = profiles
+        .iter()
+        .zip(&outcomes)
+        .filter(|(_, outcome)| writes_no_file(outcome.stop))
+        .map(|(profile, _)| profile.clone())
+        .collect();
+    last.status = Some(status.clone());
     (status, changed)
 }
 
-/// `cliPresent` when a profile wrote its file this round but the D6 guard
-/// blocks the takeover the recheck just computed (macOS mapping). It carries
-/// no reason: another profile's must not ride along.
+/// `cliPresent` when a profile's walk completed (`ok`) this round but the D6
+/// guard blocks the takeover the recheck just computed (macOS mapping; main's
+/// rule, whether or not the file's bytes changed). It carries no reason:
+/// another profile's must not ride along.
 pub(crate) fn status_for(mut status: serde_json::Value, takeover: &Takeover) -> serde_json::Value {
-    if status["changed"] == true && *takeover == Takeover::Blocked {
+    let synced = status["profiles"]
+        .as_array()
+        .is_some_and(|profiles| profiles.iter().any(|p| p["state"] == "ok"));
+    if synced && *takeover == Takeover::Blocked {
         status["state"] = serde_json::json!(State::CliPresent);
         if let Some(object) = status.as_object_mut() {
             object.remove("reason");

@@ -46,8 +46,10 @@ public sealed record CursorProfileStatus(
 /// <summary>Result of <c>tb_cursor_sync</c>. <see cref="State"/> is the
 /// round's headline, one of <c>ok</c>, <c>partial</c>, <c>expired</c>,
 /// <c>notSignedIn</c>, <c>offline</c>, <c>error</c>, <c>disabled</c>,
-/// <c>cliPresent</c>. <see cref="Changed"/>: some profile wrote its file this
-/// round, whatever the headline says (the dashboard refreshes on it).</summary>
+/// <c>cliPresent</c>. <see cref="Changed"/>: some profile's file content
+/// changed this round (new bytes written, or a superseded file removed; a
+/// rewrite with the same bytes is not a change), whatever the headline says
+/// (the dashboard refreshes on it).</summary>
 public sealed record CursorSyncStatus(
     string State, long Events, long? LastSuccessMs, bool Changed,
     IReadOnlyList<CursorProfileStatus> Profiles, string? Reason = null);

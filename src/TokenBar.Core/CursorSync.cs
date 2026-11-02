@@ -218,7 +218,7 @@ public sealed class CursorSyncController
     public event Action? StateChanged;
 
     /// <summary>Raised when what the dashboard shows may have changed (a sync
-    /// round in which some profile wrote its file, <c>changed</c>, or a
+    /// round in which some profile's file content changed, <c>changed</c>, or a
     /// toggle / D6 answer): the core already dropped its caches, so the app
     /// only re-asks.</summary>
     public event Action? DataChanged;
@@ -546,11 +546,12 @@ public sealed class CursorSyncController
                     {
                         _state = result.State;
                         _lastSuccessMs = result.LastSuccessMs;
-                        // A round that wrote a file already invalidated the
-                        // core's caches; refresh on `changed`, not on the
+                        // A round that changed a file already invalidated
+                        // the core's caches; refresh on `changed`, not on the
                         // headline (one profile can write while another
                         // fails) and not on the event count (another profile
-                        // can write the same count).
+                        // can write the same count). An identical rewrite is
+                        // not `changed` in the core.
                         refresh = result.Changed;
                     }
 

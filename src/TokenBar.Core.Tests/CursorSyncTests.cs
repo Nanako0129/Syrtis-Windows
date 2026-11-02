@@ -525,10 +525,11 @@ public class CursorSyncTests
         await Until(() => core.Log.Contains("sync:auto"));
     }
 
-    /// <summary>The dashboard refreshes on <c>changed</c> (some profile wrote
-    /// its file), not on the headline or the event count: a round whose
-    /// headline is an error can still have written a file, and another
-    /// profile can write the same count.</summary>
+    /// <summary>The dashboard refreshes on <c>changed</c> (some profile's
+    /// file content changed), not on the headline or the event count: a round
+    /// whose headline is an error can still have written a file, another
+    /// profile can write the same count, and an ok walk whose bytes equal the
+    /// file's changes nothing.</summary>
     [Fact]
     public async Task EveryRoundThatWroteAFileRefreshesAndNoOther()
     {
@@ -543,13 +544,15 @@ public class CursorSyncTests
         await controller.RunSync(userInitiated: true);
         Assert.Equal(1, data);
         await controller.RunSync(userInitiated: true);
-        Assert.Equal(2, data); // the same count, written again: refreshes
+        Assert.Equal(2, data); // the same count, new content: refreshes
 
         next = Status("error", 7, changed: true); // one profile failed, another wrote
         await controller.RunSync(userInitiated: true);
         Assert.Equal(3, data);
 
-        next = Status("ok", 7, changed: false); // e.g. every profile a duplicate
+        // e.g. every profile a duplicate, or a walk whose bytes equal the
+        // file's (core: cursor_sync an_identical_walk_changes_nothing)
+        next = Status("ok", 7, changed: false);
         await controller.RunSync(userInitiated: true);
         Assert.Equal(3, data);
         next = Status("partial", 0, changed: false);

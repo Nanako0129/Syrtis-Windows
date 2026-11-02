@@ -1457,18 +1457,20 @@ pub unsafe extern "C" fn tb_validate_cursor_profile(json: *const c_char) -> *mut
 /// Run one Cursor desktop sync round now, every profile in turn. Blocking
 /// (SQLite reads + network, up to 10 min for the whole round): never call on
 /// the UI thread. `user_initiated` non-zero = the user's "Sync now" (10 min
-/// budget); zero = background (10 min until every profile has a complete
-/// file, then 60 s). Single-flight: a call made while one runs waits for it
-/// and returns its status. Success data is
+/// budget); zero = background (10 min while a profile that could write a file
+/// has none, then 60 s; a profile whose last round was a duplicate, not
+/// signed in or refused does not count). Single-flight: a call made while one
+/// runs waits for it and returns its status. Success data is
 /// `{"state":"ok|partial|expired|notSignedIn|offline|error|disabled|cliPresent",
 /// "events":N,"lastSuccessMs":ms|null,"changed":bool,"reason"?:"<fixed code>",
 /// "profiles":[{"id","state","events","lastSuccessMs","reason"?,"duplicateOf"?}]}`:
 /// `state`/`reason` are the headline (`ok` when every profile is `ok` or
 /// `duplicate`, else the first other state, a `notSignedIn` profile ignored
-/// while another synced); `changed` = some profile wrote its file; a
+/// while another synced); `changed` = some profile's file content changed
+/// (new bytes written, or a superseded file removed); a
 /// profile's `duplicate` names the earlier profile that covered the same
 /// account (`duplicateOf`), never the account. After the walk the takeover is
-/// rechecked (W5); `cliPresent` (no reason) = a file was written but CLI
+/// rechecked (W5); `cliPresent` (no reason) = a profile synced but CLI
 /// Cursor files exist and the takeover is not confirmed, so reports read the
 /// CLI's files.
 #[no_mangle]

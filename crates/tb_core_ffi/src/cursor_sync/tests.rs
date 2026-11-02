@@ -303,18 +303,16 @@ fn fixture() -> Fixture {
 }
 
 fn stop(state: State, reason: Option<&'static str>) -> Outcome {
-    Outcome {
-        stop: Stop::new(state, reason),
-        events: 0,
-        duplicate_of: None,
-    }
+    Outcome::stopped(Stop::new(state, reason))
 }
 
+/// A walk that wrote new bytes.
 fn ok(events: usize) -> Outcome {
     Outcome {
         stop: Stop::new(State::Ok, None),
         events,
         duplicate_of: None,
+        changed: true,
     }
 }
 
@@ -1629,20 +1627,30 @@ fn cli_file_detection_errs_toward_asking() {
     assert!(cli_has_cursor_files(&cli));
 }
 
-/// `cliPresent` follows `changed` (a profile wrote its file), whatever the
-/// headline, and carries no reason (macOS FIX 5, `cli_present_carries_no_other_reason`).
+/// `cliPresent` follows a profile whose walk completed (`ok`), whatever the
+/// headline and whether or not its bytes changed, and carries no reason
+/// (macOS FIX 5, `cli_present_carries_no_other_reason`).
 #[test]
-fn cli_present_follows_changed_and_carries_no_reason() {
-    let ok = serde_json::json!({"state": "ok", "events": 2, "lastSuccessMs": 1, "changed": true});
+fn cli_present_follows_a_synced_profile_and_carries_no_reason() {
+    let ok = serde_json::json!({"state": "ok", "events": 2, "lastSuccessMs": 1, "changed": true,
+        "profiles": [{"id": "default", "state": "ok"}]});
     assert_eq!(status_for(ok.clone(), &Takeover::Blocked)["state"], "cliPresent");
     assert_eq!(status_for(ok.clone(), &Takeover::Off)["state"], "ok");
+    // A walk that completed with the file's own bytes is not `changed`, and
+    // still reads as cliPresent while the takeover is blocked (main's rule).
+    let same = serde_json::json!({"state": "ok", "events": 2, "changed": false,
+        "profiles": [{"id": "default", "state": "ok"}]});
+    assert_eq!(status_for(same, &Takeover::Blocked)["state"], "cliPresent");
     let mixed = serde_json::json!({"state": "error", "reason": "account_mismatch",
-        "events": 1, "changed": true});
+        "events": 1, "changed": true, "profiles": [
+            {"id": "default", "state": "error", "reason": "account_mismatch"},
+            {"id": PROFILE_A, "state": "ok"}]});
     let relabelled = status_for(mixed.clone(), &Takeover::Blocked);
     assert_eq!(relabelled["state"], "cliPresent");
     assert!(relabelled.get("reason").is_none(), "{relabelled}");
     assert_eq!(status_for(mixed, &Takeover::Off)["reason"], "account_mismatch");
-    let partial = serde_json::json!({"state": "partial", "events": 0, "changed": false});
+    let partial = serde_json::json!({"state": "partial", "events": 0, "changed": false,
+        "profiles": [{"id": "default", "state": "partial"}]});
     assert_eq!(status_for(partial, &Takeover::Blocked)["state"], "partial");
 }
 
@@ -3442,9 +3450,12 @@ fn x_body() -> String {
     serde_json::json!({"totalUsageEventsCount": 1, "usageEventsDisplay": [x_event()]}).to_string()
 }
 
-/// FIX 2 ✱: an account is covered only by a walk that synced. The default
-/// profile's session for X is refused (401); profile A on the same account
-/// then tries its own session, and X still counts once.
+/// FIX 2 ✱: a walk failure specific to that profile's session does not cover
+/// the account (`covers_account`: expired, removed mid-walk,
+/// `client_unavailable`, `write_failed`; any other failure, a 429 say, does
+/// cover it). The default profile's session for X is refused (401); profile
+/// A on the same account then tries its own session, and X still counts
+/// once.
 #[test]
 fn a_failed_walk_does_not_cover_the_account_for_later_profiles() {
     let Some(root) = crate::roots_acceptance::child_root() else {
@@ -3521,4 +3532,207 @@ fn a_mapped_drive_is_never_read() {
         validate_with(&raw, &cursor_desktop::drive_type, None).unwrap()["reason"],
         "notFixedDrive"
     );
+}
+
+// /code-review (high) findings on W1 ----------------------------------------------
+
+fn delayed(reply: Reply) -> Reply {
+    match reply {
+        Reply::Raw(bytes) => Reply::Delayed(Duration::from_millis(300), bytes),
+        _ => unreachable!(),
+    }
+}
+
+/// Runs `round` on another thread, waits for its first request, then calls
+/// `change` while that request is in flight.
+fn change_mid_walk(
+    seen: &Mutex<Vec<Seen>>,
+    round: impl FnOnce() -> serde_json::Value + Send,
+    change: impl FnOnce(),
+) -> serde_json::Value {
+    std::thread::scope(|scope| {
+        let walk = scope.spawn(round);
+        let started = Instant::now();
+        while seen.lock().unwrap().is_empty() {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        change();
+        walk.join().unwrap()
+    })
+}
+
+/// Finding 1: the 60 s background budget applies once every profile that
+/// could write a file has one. A profile whose last round was `notSignedIn`
+/// or `duplicate` (or refused) writes none however long the round runs, so it
+/// no longer holds every later round at the full budget. A profile changed
+/// since (another root) may take the full budget for its first round, and
+/// "Sync now" always does.
+#[test]
+fn a_profile_that_cannot_write_a_file_does_not_hold_the_full_budget() {
+    let _guard = lock();
+    let tmp = TempDir::new();
+    let default_db = login_db(&tmp.path().join("default"), &valid_token(), USER);
+    let empty = empty_root(tmp.path(), "empty");
+    let same = profile_root(tmp.path(), "same", &valid_token(), USER);
+    let registry = RwLock::new(multi(
+        tmp.path(),
+        true,
+        vec![profile(PROFILE_A, &empty), profile(PROFILE_B, &same)],
+    ));
+    let (url, _) = serve(vec![json_ok(&page(1, &["a"])); 6]);
+    let round = |explicit: bool| {
+        let source = || registry.read().unwrap().clone();
+        let status = sync_with(explicit, &target(&default_db, &url), &source, Some(limits())).0;
+        (states(&status), ROUND_BUDGET.with(std::cell::Cell::get).unwrap())
+    };
+    let (states, budget) = round(false);
+    assert_eq!(states, ["ok", "notSignedIn", "duplicate"]);
+    assert_eq!(budget, FULL_BUDGET, "the default had no file yet");
+    assert_eq!(round(false).1, BACKGROUND_BUDGET);
+    assert_eq!(round(true).1, FULL_BUDGET, "Sync now");
+    assert_eq!(round(false).1, BACKGROUND_BUDGET);
+    registry.write().unwrap().profiles[0].root = tmp.path().join("moved");
+    assert_eq!(round(false).1, FULL_BUDGET, "a changed profile's first round");
+    assert_eq!(round(false).1, BACKGROUND_BUDGET);
+}
+
+/// Finding 5: the default profile's walk does not depend on the added
+/// profiles. Adding the first one (which sets `profiles_dir`) or removing
+/// the last (which clears it) while the default walks leaves that walk alone.
+#[test]
+fn adding_or_removing_profiles_mid_walk_leaves_the_default_walk_alone() {
+    let _guard = lock();
+    let tmp = TempDir::new();
+    let default_db = login_db(&tmp.path().join("default"), &valid_token(), USER);
+    let mut default_only = multi(tmp.path(), true, vec![]);
+    default_only.profiles_dir = None;
+    let with_a = multi(tmp.path(), true, vec![profile(PROFILE_A, &tmp.path().join("a"))]);
+
+    let registry = RwLock::new(default_only.clone());
+    let (url, seen) = serve(vec![delayed(json_ok(&page(1, &["a"])))]);
+    let status = change_mid_walk(
+        &seen,
+        || sync_round(&default_db, &url, &registry),
+        || *registry.write().unwrap() = with_a.clone(),
+    );
+    assert_eq!(states(&status), ["ok"]);
+    assert!(expected_file(&default_sync_dir(tmp.path())).exists());
+
+    *registry.write().unwrap() = with_a;
+    let (url, seen) = serve(vec![delayed(json_ok(&page(1, &["b"])))]);
+    let status = change_mid_walk(
+        &seen,
+        || sync_round(&default_db, &url, &registry),
+        || *registry.write().unwrap() = default_only,
+    );
+    assert_eq!(states(&status), ["ok", "disabled"]);
+    assert_eq!(status["changed"], true, "the default wrote its new file");
+}
+
+/// Finding 6: a profile removed while its last page is in flight writes
+/// nothing and creates nothing: no `<UUID>` dir, no lock file.
+#[test]
+fn a_profile_removed_during_its_last_page_leaves_no_dir() {
+    let _guard = lock();
+    let tmp = TempDir::new();
+    let root = profile_root(tmp.path(), "b", &valid_token(), USER);
+    let registry = RwLock::new(multi(tmp.path(), true, vec![profile(PROFILE_A, &root)]));
+    let (url, seen) = serve(vec![delayed(json_ok(&page(1, &["a"])))]);
+    let status = change_mid_walk(
+        &seen,
+        || sync_round(&tmp.path().join("absent.vscdb"), &url, &registry),
+        || registry.write().unwrap().profiles.clear(),
+    );
+    assert_eq!(states(&status), ["notSignedIn", "disabled"]);
+    assert_eq!(seen.lock().unwrap().len(), 1, "control: the last page was answered");
+    let dir = profile_dir(tmp.path(), PROFILE_A);
+    assert!(!dir.exists(), "the removed profile's dir was created");
+    assert!(!Slot { id: PROFILE_A.into(), root: Some(root), dir: Some(dir) }.candidates()[1].exists());
+}
+
+/// Finding 3: a profile that now resolves to `duplicate` (its folder signed
+/// in to the account an earlier profile covered) drops the file of the
+/// account it held before, under its lock, so that account is no longer
+/// registered; its current account's copy stays (the takeover keeps the
+/// newest copy by name), as a commit keeps it.
+#[test]
+fn a_duplicate_profile_drops_its_old_accounts_file() {
+    let _guard = lock();
+    let tmp = TempDir::new();
+    let default_db = login_db(&tmp.path().join("default"), &valid_token(), USER);
+    let root = profile_root(tmp.path(), "b", &valid_token(), USER);
+    let registry = RwLock::new(multi(tmp.path(), true, vec![profile(PROFILE_A, &root)]));
+    let a_dir = profile_dir(tmp.path(), PROFILE_A);
+    let old_name = format!("usage.{}.json", stem(OTHER_USER).unwrap());
+    write_secure(&a_dir.join(&old_name), b"{}");
+    let current = expected_file(&a_dir);
+    write_secure(&current, b"{}");
+    assert!(
+        newest_per_account(&registry.read().unwrap()).iter().any(|p| p.ends_with(&old_name)),
+        "control: the old account's file is registered before the round"
+    );
+    let (url, _) = serve(vec![json_ok(&page(1, &["a"]))]);
+    let status = sync_round(&default_db, &url, &registry);
+    assert_eq!(states(&status), ["ok", "duplicate"]);
+    assert!(!a_dir.join(&old_name).exists(), "the old account's file stayed");
+    assert!(current.exists(), "the current account's copy was removed");
+    let registered = newest_per_account(&registry.read().unwrap());
+    assert!(registered.iter().all(|p| !p.ends_with(&old_name)), "{registered:?}");
+    assert_eq!(registered.len(), 1);
+}
+
+/// Finding 3: a profile listed again under the same id with another root
+/// starts clean, as a removed one is cleaned; the same root keeps its file.
+#[test]
+fn a_profile_moved_to_another_root_is_cleaned() {
+    let root = DataRoot::new();
+    let push = |at: &str| {
+        set(serde_json::json!({"enabled": true, "profiles": [{"id": PROFILE_A, "root": at}]}))
+            .unwrap()
+    };
+    push(r"C:\x\a");
+    let dir = config().profiles_dir.unwrap().join(PROFILE_A);
+    let file = dir.join(hex_name('a'));
+    write_secure(&file, b"{}");
+    assert_eq!(push(r"C:\x\a")["removedFiles"], 0);
+    assert!(file.exists(), "control: the same root kept its file");
+    assert_eq!(push(r"C:\x\b")["removedFiles"], 1);
+    assert!(!dir.exists(), "the old root's dir was left");
+    drop(root);
+}
+
+/// Finding 8: `changed` only when a file's content changed. A walk whose
+/// bytes equal the file's does not rewrite it and is not `changed` (the app
+/// refreshes on `changed`); its modified time still moves, so
+/// `lastSuccessMs` dates this walk. New content is `changed`. "Not
+/// rewritten" is observed through a std reader held open: a replace fails
+/// under one (`a_std_reader_holding_the_file_fails_the_walk_cleanly`).
+#[test]
+fn an_identical_walk_changes_nothing() {
+    let _guard = lock();
+    let f = fixture();
+    let (url, _) = serve(vec![
+        json_ok(&page(1, &["a"])),
+        json_ok(&page(1, &["a"])),
+        json_ok(&page(1, &["b"])),
+    ]);
+    let on = registry(true, &f.dir);
+    let first = sync_status(&f, &url, &on);
+    assert_eq!(first["changed"], true);
+    let path = expected_file(&f.dir);
+    let bytes = std::fs::read(&path).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let reader = std::fs::File::open(&path).unwrap();
+    let again = sync_status(&f, &url, &on);
+    drop(reader);
+    assert_eq!(states(&again), ["ok"], "the identical file was replaced");
+    assert_eq!(again["changed"], false, "an identical rewrite read as a change");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(
+        again["lastSuccessMs"].as_u64() > first["lastSuccessMs"].as_u64(),
+        "{again} {first}"
+    );
+    let new = sync_status(&f, &url, &on);
+    assert_eq!(new["changed"], true);
 }
