@@ -287,6 +287,9 @@ public sealed class CursorSyncController
             // refresh even when it writes the same event count again.
             if (!run)
             {
+                // A press remembered before the switch went off must not run
+                // after it, even if it is turned back on before the pass ends.
+                _userPending = false;
                 _offPushesPending++;
                 _state = null;
                 _lastSuccessMs = null;
@@ -381,10 +384,14 @@ public sealed class CursorSyncController
     /// <summary>One sync, on the thread pool. Single-flight here as well as in
     /// the core: a request while a sync runs is dropped, since that sync's
     /// result is current. The exception is a user press during a scheduled
-    /// sync: the scheduled one has a short budget, so one user sync (never a
-    /// queue) runs once it finishes, unless sync was turned off meanwhile.
-    /// Before calling the core it waits for the newest config push; a reconfigure during that wait makes it wait again, and if
-    /// sync was turned off meanwhile it returns without calling the core. A
+    /// sync: the scheduled one has a short budget, so the press is remembered
+    /// (one flag, never a queue) and the running call makes one user pass once
+    /// it finishes. The press itself returns immediately, before that user pass
+    /// runs. Turning sync off drops a remembered press, even if sync is turned
+    /// back on before the pass ends.
+    /// Before calling the core it waits for the newest config push; a
+    /// reconfigure during that wait makes it wait again, and if sync was
+    /// turned off meanwhile it returns without calling the core. A
     /// reconfigure while the core runs makes the result stale; it is discarded
     /// and the sync reruns, so the new settings get a fresh result.</summary>
     public async Task RunSync(bool userInitiated)
@@ -405,6 +412,10 @@ public sealed class CursorSyncController
             _syncing = true;
             _runningUser = userInitiated;
         }
+
+        // Whether the current pass is a user press; set again when a remembered
+        // press starts its own pass.
+        var user = userInitiated;
 
         // Set once _syncing has been cleared under the lock that decided this
         // pass was the last, so a sync started right after (the new loop of a
@@ -456,7 +467,7 @@ public sealed class CursorSyncController
                 CursorSyncStatus? result;
                 try
                 {
-                    result = await Task.Run(() => io.Sync(userInitiated)).ConfigureAwait(false);
+                    result = await Task.Run(() => io.Sync(user)).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -495,10 +506,12 @@ public sealed class CursorSyncController
                     {
                         // The pending press is served only once nothing else
                         // is owed. _syncing stays set, so Syncing is true
-                        // across both runs.
-                        if (_userPending && CursorSync.ShouldSync(_store))
+                        // across both runs. No ShouldSync check here: turning
+                        // sync off clears the flag in Reconfigure, and the
+                        // next pass re-checks after its push wait.
+                        if (_userPending)
                         {
-                            userInitiated = true;
+                            user = true;
                             _runningUser = true;
                             again = true;
                         }

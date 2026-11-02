@@ -147,7 +147,8 @@ public sealed partial class SettingsWindow
         syncNow.Content = label;
         // Stays enabled while syncing: a disabled button cannot keep keyboard
         // focus, and moving focus away would strand the user when the sync ends.
-        // RunSync ignores a call made during a running sync.
+        // A press during a background sync runs one user sync after it; a
+        // press during a user sync is ignored (RunSync).
         AutomationProperties.SetName(syncNow, label);
     }
 
@@ -169,10 +170,9 @@ public sealed partial class SettingsWindow
     // Only while the Settings window is visible, active or not: moving focus
     // inside an inactive visible window is harmless and keeps it in the section
     // for when the user returns. The window is hidden, never closed. While it
-    // is hidden the handoff is skipped (no layout or focus calls); a collapsing
-    // focused control can still move WinUI focus there, which is harmless
-    // because Present() -> Rebuild() rebuilds the page when the window is
-    // shown again.
+    // is hidden the handoff is skipped (no layout or focus calls). Present()
+    // -> Rebuild() regenerates the page on show but does not place keyboard
+    // focus; where focus lands after a re-show is not measured.
     private void MoveFocusBeforeHiding(Control leaving, bool staysVisible, Control target)
     {
         if (!staysVisible && AppWindow.IsVisible
