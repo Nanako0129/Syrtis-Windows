@@ -1109,7 +1109,10 @@ public sealed partial class SettingsWindow : Window
         panel.Children.Add(InfoSection(
             ClaudeAccountsCopy.Header, ClaudeAccountsCopy.Summary, ClaudeAccountsCopy.InfoRows,
             BuildClaudeAccounts(store)));
-        // No summary or info for a switch whose controller is missing.
+        // App.OnLaunched sets both controllers (StartAntigravityAccounts,
+        // StartCursorSync) before any SettingsWindow exists. This is the one
+        // check: without its controller a section is not shown at all, no
+        // summary or info for a switch that is not there.
         if (AntigravityAutoCapture.Shared is not null)
         {
             panel.Children.Add(InfoSection(
@@ -1118,11 +1121,11 @@ public sealed partial class SettingsWindow : Window
                 BuildAntigravityAccounts(store)));
         }
 
-        if (CursorSyncController.Shared is not null)
+        if (CursorSyncController.Shared is { } cursor)
         {
             panel.Children.Add(InfoSection(
                 CursorSync.Copy.Header, SettingsCopy.CursorSummary, CursorSync.Copy.InfoRows,
-                BuildCursorSync(store)));
+                BuildCursorSync(store, cursor)));
         }
         return panel;
     }
@@ -2071,8 +2074,8 @@ public sealed partial class SettingsWindow : Window
             Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
             BorderThickness = new Thickness(0),
             Padding = new Thickness(4),
-            // At least 24x24 to hit; the 12 px glyph and 4 px padding alone
-            // came to about 20x20. The glyph size is unchanged.
+            // A 24x24 minimum hit target; the rendered size was not measured.
+            // The glyph size is unchanged.
             MinWidth = 24,
             MinHeight = 24,
             VerticalAlignment = VerticalAlignment.Center,

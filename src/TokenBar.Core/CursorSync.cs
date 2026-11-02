@@ -580,8 +580,7 @@ public sealed class CursorSyncController
     // ---- Actions behind the controls ---------------------------------------
 
     /// <summary>The Settings switch turned off: stores the preference off.
-    /// There is no public way to store it on: that is <see cref="TurnOn"/>
-    /// (consent first) or the Overview card's <see cref="AnswerNotice"/>.</summary>
+    /// Only <see cref="TurnOn"/> (consent first) stores it on.</summary>
     public void TurnOff()
     {
         _store.SetBool(CursorSync.EnabledKey, false);
@@ -609,9 +608,11 @@ public sealed class CursorSyncController
         return true;
     }
 
-    // TurnOn's only write path. Enabled before the notice: in between,
-    // ShouldSync still reads false. Writing the notice again when it is
-    // already answered is a no-op (SettingsStore skips equal values).
+    // TurnOn's only write path. Writing the notice again when it is already
+    // answered is a no-op (SettingsStore skips equal values). When the notice
+    // was unanswered, ShouldSync stays false between the two writes (enabled,
+    // not yet answered). If the preference was stored off, NoticeVisible can
+    // read true in that moment, since it needs enabled and unanswered.
     private void Enable()
     {
         _store.SetBool(CursorSync.EnabledKey, true);
@@ -621,10 +622,9 @@ public sealed class CursorSyncController
 
     /// <summary>The Overview notice card: Continue
     /// (<paramref name="continuing"/>) or Turn Off. Turn Off stores the
-    /// preference off before it answers the notice: the other order leaves a
-    /// moment where the notice is answered and the preference is still the
-    /// default on, so <see cref="CursorSync.ShouldSync"/> reads true and a
-    /// scheduled or pending pass could sync for a user who declined.</summary>
+    /// preference off before it answers the notice, so no reader ever sees
+    /// <see cref="CursorSync.ShouldSync"/> true between the two writes (the
+    /// other order passes through answered plus default on).</summary>
     public void AnswerNotice(bool continuing)
     {
         if (!continuing)

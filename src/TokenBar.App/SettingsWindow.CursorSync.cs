@@ -31,14 +31,10 @@ public sealed partial class SettingsWindow
     // shows the stored state, even if that confirmation never resolves.
     private ToggleSwitch? _csConfirmingToggle;
 
-    private StackPanel BuildCursorSync(SettingsStore store)
+    // Called only with the controller (BuildAccountsPage states the contract).
+    private StackPanel BuildCursorSync(SettingsStore store, CursorSyncController cursor)
     {
         var body = new StackPanel { Spacing = 6 };
-        if (CursorSyncController.Shared is not { } cursor)
-        {
-            return body; // nothing to draw or act on without the controller
-        }
-
         var toggle = new ToggleSwitch { OnContent = null, OffContent = null };
         toggle.Toggled += async (_, _) =>
         {
@@ -49,42 +45,48 @@ public sealed partial class SettingsWindow
 
             try
             {
-                if (!toggle.IsOn)
+                try
                 {
-                    cursor.TurnOff();
-                }
-                else
-                {
-                    // Consent is the controller's (CursorSyncController.TurnOn,
-                    // which also records how this differs from macOS): while the
-                    // notice is unanswered it opens this confirmation, and only
-                    // Continue writes. While it is open, UpdateCursorSync leaves
-                    // this switch's IsOn alone, so a state change (a sync ending,
-                    // the Overview card) does not flip it under the flyout.
-                    _csConfirmingToggle = toggle;
-                    try
+                    if (!toggle.IsOn)
                     {
-                        await cursor.TurnOn(() => ConfirmFlyout(toggle, CursorSync.Copy.Title,
-                            CursorSync.Copy.Privacy, CursorSync.Copy.Continue, CursorSync.Copy.Cancel));
+                        cursor.TurnOff();
                     }
-                    finally
+                    else
                     {
-                        if (ReferenceEquals(_csConfirmingToggle, toggle))
+                        // Consent is the controller's (CursorSyncController.TurnOn,
+                        // which also records how this differs from macOS): while the
+                        // notice is unanswered it opens this confirmation, and only
+                        // Continue writes. While it is open, UpdateCursorSync leaves
+                        // this switch's IsOn alone, so a state change (a sync ending,
+                        // the Overview card) does not flip it under the flyout.
+                        _csConfirmingToggle = toggle;
+                        try
                         {
-                            _csConfirmingToggle = null;
+                            await cursor.TurnOn(() => ConfirmFlyout(toggle, CursorSync.Copy.Title,
+                                CursorSync.Copy.Privacy, CursorSync.Copy.Continue, CursorSync.Copy.Cancel));
+                        }
+                        finally
+                        {
+                            if (ReferenceEquals(_csConfirmingToggle, toggle))
+                            {
+                                _csConfirmingToggle = null;
+                            }
                         }
                     }
+                }
+                finally
+                {
+                    // Cancel or a failure: the switch shows the stored state again.
+                    UpdateCursorSync(store);
                 }
             }
             catch (Exception ex)
             {
-                // async void: nothing above may escape to the dispatcher. The
-                // type only, as elsewhere in Settings.
+                // async void: nothing in this handler, UpdateCursorSync
+                // included, may escape to the dispatcher. The type only, as
+                // elsewhere in Settings.
                 DevLog.Write($"cursor-sync: settings toggle failed: {ex.GetType().Name}");
             }
-
-            // Cancel or a failure: the switch shows the stored state again.
-            UpdateCursorSync(store);
         };
         AutomationProperties.SetName(toggle, CursorSync.Copy.Toggle.Localized());
         _csToggle = toggle;

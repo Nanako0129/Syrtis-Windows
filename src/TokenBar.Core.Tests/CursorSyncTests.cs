@@ -190,15 +190,16 @@ public class CursorSyncTests
 
     // Consent lives in the controller: only TurnOn (its confirmation) and the
     // Overview card's AnswerNotice may turn sync on. Every other public
-    // controller call, with every bool argument, leaves it off, both before
-    // the notice is answered (default-on preference) and after it was
-    // answered and turned off.
+    // controller call (instance or static), with every bool argument, leaves
+    // it off, both before the notice is answered (default-on preference) and
+    // after it was answered and turned off: in the store, and in what reaches
+    // the core (no enabled config push, no sync).
     [Fact]
     public async Task NoPublicCallButTheConsentPathsTurnsSyncOn()
     {
         string[] consent = [nameof(CursorSyncController.TurnOn), nameof(CursorSyncController.AnswerNotice)];
         var calls = typeof(CursorSyncController)
-            .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)
             .Where(m => !m.IsSpecialName && !consent.Contains(m.Name))
             .ToArray();
         // Control: the scan sees the controller's actions.
@@ -220,25 +221,38 @@ public class CursorSyncTests
                         store.SetBool(CursorSync.EnabledKey, false);
                     }
 
-                    var controller = new CursorSyncController(new FakeCore().Io, store, User, interval: Never);
+                    var core = new FakeCore();
+                    var controller = new CursorSyncController(core.Io, store, User, interval: Never);
                     var args = parameters.Select(_ => (object)flag).ToArray();
-                    if (call.Invoke(controller, args) is Task task)
+                    if (call.Invoke(call.IsStatic ? null : controller, args) is Task task)
                     {
                         await task;
                     }
 
+                    // Pushes and syncs run on the thread pool; let them land.
+                    await Task.Delay(50);
                     var what = $"{call.Name}({flag}) answered={answered}";
                     Assert.False(CursorSync.ShouldSync(store), what);
                     Assert.Equal(answered, CursorSync.NoticeAcknowledged(store));
+                    Assert.False(core.Pushes.LastOrDefault().Enabled, what);
+                    Assert.DoesNotContain(core.Log, e => e.StartsWith("sync", StringComparison.Ordinal));
                 }
             }
         }
 
-        // Control: the consent paths do turn it on.
+        // Controls: the consent paths do turn it on, and the core sees it.
         var answeredStore = TempStore();
         new CursorSyncController(new FakeCore().Io, answeredStore, User, interval: Never)
             .AnswerNotice(continuing: true);
         Assert.True(CursorSync.ShouldSync(answeredStore));
+
+        var confirmedStore = TempStore();
+        var confirmedCore = new FakeCore();
+        Assert.True(await new CursorSyncController(confirmedCore.Io, confirmedStore, User, interval: Never)
+            .TurnOn(() => Task.FromResult(true)));
+        Assert.True(CursorSync.ShouldSync(confirmedStore));
+        await Until(() => confirmedCore.Log.Any(e => e.StartsWith("sync", StringComparison.Ordinal)));
+        Assert.True(confirmedCore.Pushes.Last().Enabled);
     }
 
     // Turn Off on the notice card: no reader may see "answered" while the
