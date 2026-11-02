@@ -131,7 +131,7 @@ jobs:
       - name: build native DLL (x64 via shared mapping)
         run: dotnet msbuild src/TokenBar.Smoke/TokenBar.Smoke.csproj -t:BuildTbNative -p:Configuration=Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64 -p:TbNativeCargoLocked=true -p:RestoreLockedMode=true
       - name: build Core.Tests (x64)
-        run: dotnet build src/TokenBar.Core.Tests/TokenBar.Core.Tests.csproj -c Release -p:Platform=x64 --no-restore
+        run: dotnet build src/TokenBar.Core.Tests/TokenBar.Core.Tests.csproj -c Release -p:Platform=x64 -p:TbNativeCargoLocked=true --no-restore
       - name: test Core.Tests (x64)
         run: dotnet test src/TokenBar.Core.Tests/TokenBar.Core.Tests.csproj -c Release -p:Platform=x64 --no-build --no-restore
       - name: build WinUI App (x64)

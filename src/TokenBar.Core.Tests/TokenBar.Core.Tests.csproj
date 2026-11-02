@@ -127,11 +127,12 @@
        tb_test_set_cursor_sync (data parents as arguments). It is built with
        the ci-test profile (release without LTO), so it never lands in the
        release tree the App and every other test load, and is copied here
-       under its own name; only the seam test binds to that name. -->
+       under its own name; only the seam test binds to that name. Locked
+       like BuildTbNative: only when TbNativeCargoLocked is true (CI). -->
   <Target Name="BuildTbNativeTestSupport"
           AfterTargets="CopyTbNativeToBuildOutput"
           Condition="'$(OS)' == 'Windows_NT' and '$(TbNativeRustTarget)' != ''">
-    <Exec Command="cargo build -p tb_core_ffi --locked --profile ci-test --features test-support --target &quot;$(TbNativeRustTarget)&quot;"
+    <Exec Command="cargo build -p tb_core_ffi$(TbNativeCargoLockedArg) --profile ci-test --features test-support --target &quot;$(TbNativeRustTarget)&quot;"
           WorkingDirectory="$(TbNativeRepoDir)" />
     <Copy SourceFiles="$(TbNativeRepoDir)\target\$(TbNativeRustTarget)\ci-test\tb_core_ffi.dll"
           DestinationFiles="$(TargetDir)tb_core_ffi_test_support.dll"
