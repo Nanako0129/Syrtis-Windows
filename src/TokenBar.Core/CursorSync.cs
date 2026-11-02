@@ -287,8 +287,11 @@ public sealed class CursorSyncController
             // refresh even when it writes the same event count again.
             if (!run)
             {
-                // A press remembered before the switch went off must not run
-                // after it, even if it is turned back on before the pass ends.
+                // A press still remembered (not yet promoted to the running
+                // user pass) is dropped when the switch goes off, even if it
+                // is turned back on before the pass ends. A press already
+                // promoted can rerun under the new config if sync is turned
+                // off and back on during that pass.
                 _userPending = false;
                 _offPushesPending++;
                 _state = null;
@@ -387,8 +390,10 @@ public sealed class CursorSyncController
     /// sync: the scheduled one has a short budget, so the press is remembered
     /// (one flag, never a queue) and the running call makes one user pass once
     /// it finishes. The press itself returns immediately, before that user pass
-    /// runs. Turning sync off drops a remembered press, even if sync is turned
-    /// back on before the pass ends.
+    /// runs. Turning sync off drops a press that is still remembered, even if
+    /// sync is turned back on before the pass ends; a press already promoted
+    /// to the running user pass can rerun under the new config if sync is
+    /// turned off and back on during that pass.
     /// Before calling the core it waits for the newest config push; a
     /// reconfigure during that wait makes it wait again, and if sync was
     /// turned off meanwhile it returns without calling the core. A
@@ -506,9 +511,13 @@ public sealed class CursorSyncController
                     {
                         // The pending press is served only once nothing else
                         // is owed. _syncing stays set, so Syncing is true
-                        // across both runs. No ShouldSync check here: turning
-                        // sync off clears the flag in Reconfigure, and the
-                        // next pass re-checks after its push wait.
+                        // across both runs. No ShouldSync check here. Either
+                        // order is covered: Reconfigure clears the flag when
+                        // sync goes off; and SetEnabled/AnswerNotice write the
+                        // store before Reconfigure runs, so a pass can be
+                        // promoted after the store says off, in which case
+                        // the post-push re-check returns without calling the
+                        // core (Syncing stays set through that wait).
                         if (_userPending)
                         {
                             user = true;

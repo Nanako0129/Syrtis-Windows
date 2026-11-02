@@ -344,8 +344,25 @@ public class CursorSyncTests
         // Syncing as seen when the user pass starts: it must not drop between
         // the two passes.
         bool? syncingAtUserPass = null;
-        core.OnSync = user => { if (user) { syncingAtUserPass = controller.Syncing; } };
+        var userStarted = false;
+        var seen = new ConcurrentQueue<bool>();
+        core.OnSync = user =>
+        {
+            if (user)
+            {
+                userStarted = true;
+                syncingAtUserPass = controller.Syncing;
+            }
+        };
         controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        // Every Syncing reading from the auto pass until the user pass starts.
+        controller.StateChanged += () =>
+        {
+            if (!userStarted)
+            {
+                seen.Enqueue(controller.Syncing);
+            }
+        };
         var running = controller.RunSync(userInitiated: false);
         Assert.True(await core.SyncStarted.WaitAsync(Wait));
         await controller.RunSync(userInitiated: true);
@@ -354,6 +371,8 @@ public class CursorSyncTests
         await running;
         Assert.Equal(new[] { "sync:auto", "sync:user" }, core.Log.ToArray());
         Assert.True(syncingAtUserPass);
+        Assert.NotEmpty(seen);
+        Assert.DoesNotContain(false, seen);
         Assert.False(controller.Syncing);
     }
 
@@ -415,6 +434,10 @@ public class CursorSyncTests
         gate.Set();
         await running;
         Assert.Equal(0, core.UserSyncs);
+        // The rerun after the cycle is the second auto pass. At least that: sync turned
+        // back on also starts the schedule loop, whose own auto sync may or
+        // may not get in before the rerun finishes, so the count is not exact.
+        Assert.True(core.Log.Count(e => e == "sync:auto") >= 2);
     }
 
     [Fact]
