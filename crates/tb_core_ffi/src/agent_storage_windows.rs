@@ -1427,6 +1427,20 @@ pub(crate) enum ForeignRefusal {
 }
 
 impl ForeignRefusal {
+    /// Every variant that refuses the database (all but `Absent`, which reads
+    /// as "not signed in"). A new variant must get an arm in `code` (an
+    /// exhaustive match) and in the exhaustive match of the test
+    /// `every_foreign_refusal_but_absent_is_listed`, which checks it is here.
+    pub(crate) const REFUSALS: [Self; 7] = [
+        Self::NotFile,
+        Self::Reparse,
+        Self::NoAclVolume,
+        Self::Remote,
+        Self::NotFixedDrive,
+        Self::ForeignOwner,
+        Self::Unreadable,
+    ];
+
     pub(crate) fn code(self) -> &'static str {
         match self {
             Self::Absent => "not_signed_in",
@@ -1503,20 +1517,12 @@ pub(crate) fn open_foreign_file(
     )
     .map_err(|error| classify_failed_open(path, &error))?;
     let handle = file.as_raw_handle() as HANDLE;
-    // WB2 on the handle, before anything else is asked of the file: not
-    // behind UNC, and on a fixed drive whatever junction or mount folder led
-    // there. A volume with no GUID path cannot be shown to be fixed.
-    let dos = final_path(handle, VOLUME_NAME_DOS).ok_or(ForeignRefusal::Unreadable)?;
-    if dos
-        .get(..8)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\UNC\"))
-    {
-        return Err(ForeignRefusal::Remote);
-    }
-    match handle_volume_root(handle) {
-        Some(volume) if drive_type(&volume) == crate::cursor_desktop::DRIVE_FIXED => {}
-        _ => return Err(ForeignRefusal::NotFixedDrive),
-    }
+    // WB2 on the handle, before anything else is asked of the file.
+    handle_location(
+        final_path(handle, VOLUME_NAME_DOS).as_deref(),
+        handle_volume_root(handle).as_deref(),
+        drive_type,
+    )?;
     // Then: on exFAT (measured on 188) the attribute-tag query below fails
     // with ERROR_INVALID_PARAMETER, and "no ACLs" is the reason worth
     // reporting. Every check must pass whatever the order.
@@ -1614,6 +1620,31 @@ fn foreign_kind(handle: HANDLE) -> Result<(), ForeignRefusal> {
         return Err(ForeignRefusal::NotFile);
     }
     Ok(())
+}
+
+/// WB2 on an opened handle, from its two final paths: a drive-letter (DOS)
+/// final path that is UNC is `Remote`; otherwise the volume the file is on
+/// (its GUID root) must be a fixed drive, whatever junction or mount folder
+/// led there. No DOS path is not an error: the GUID check decides (measured
+/// on 188: a file on a volume mounted only at a folder still has a DOS path,
+/// through the mount folder; this branch covers whatever cannot form one).
+/// No GUID root (a network file, among others) cannot be shown to be fixed:
+/// `NotFixedDrive`.
+fn handle_location(
+    dos: Option<&str>,
+    volume: Option<&Path>,
+    drive_type: &crate::cursor_desktop::DriveType<'_>,
+) -> Result<(), ForeignRefusal> {
+    if dos.is_some_and(|path| {
+        path.get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\UNC\"))
+    }) {
+        return Err(ForeignRefusal::Remote);
+    }
+    match volume {
+        Some(volume) if drive_type(volume) == crate::cursor_desktop::DRIVE_FIXED => Ok(()),
+        _ => Err(ForeignRefusal::NotFixedDrive),
+    }
 }
 
 /// The handle's final path (`GetFinalPathNameByHandleW` with `flags`), or
@@ -4292,5 +4323,62 @@ mod tests {
 
         drop(directory);
         root.cleanup().expect("remove temporary root");
+    }
+
+    /// WB2 on the handle, decided from the two final paths (round-2 finding
+    /// 2). No drive-letter path is not an error: the volume GUID root
+    /// decides; no GUID root is not fixed; a UNC drive-letter path is remote
+    /// whatever the volume answers. The only test of the no-DOS-path branch:
+    /// a real folder-mounted volume has a DOS path on 188.
+    #[test]
+    fn the_handle_location_rule() {
+        let guid = Path::new(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\");
+        let fixed = |_: &Path| crate::cursor_desktop::DRIVE_FIXED;
+        let removable = |_: &Path| 2;
+        assert_eq!(handle_location(None, Some(guid), &fixed), Ok(()), "folder-mounted fixed");
+        assert_eq!(
+            handle_location(None, Some(guid), &removable),
+            Err(ForeignRefusal::NotFixedDrive),
+            "folder-mounted removable"
+        );
+        assert_eq!(handle_location(None, None, &fixed), Err(ForeignRefusal::NotFixedDrive));
+        assert_eq!(
+            handle_location(Some(r"\\?\UNC\host\share\f"), None, &fixed),
+            Err(ForeignRefusal::Remote)
+        );
+        assert_eq!(handle_location(Some(r"\\?\C:\x\f"), Some(guid), &fixed), Ok(()));
+        assert_eq!(
+            handle_location(Some(r"\\?\C:\x\f"), Some(guid), &removable),
+            Err(ForeignRefusal::NotFixedDrive)
+        );
+    }
+
+    /// `ForeignRefusal::REFUSALS` lists every variant but `Absent`. The match
+    /// is exhaustive: a new variant does not compile until it is placed here,
+    /// and its arm checks it is in the list.
+    #[test]
+    fn every_foreign_refusal_but_absent_is_listed() {
+        use ForeignRefusal::*;
+        for refusal in REFUSALS_AND_ABSENT {
+            match refusal {
+                Absent => assert!(!ForeignRefusal::REFUSALS.contains(&refusal)),
+                NotFile | Reparse | NoAclVolume | Remote | NotFixedDrive | ForeignOwner
+                | Unreadable => assert!(ForeignRefusal::REFUSALS.contains(&refusal)),
+            }
+        }
+        const REFUSALS_AND_ABSENT: [ForeignRefusal; 8] = [
+            Absent,
+            NotFile,
+            Reparse,
+            NoAclVolume,
+            Remote,
+            NotFixedDrive,
+            ForeignOwner,
+            Unreadable,
+        ];
+        for refusal in ForeignRefusal::REFUSALS {
+            assert!(crate::cursor_desktop::is_reader_refusal(refusal.code()));
+        }
+        assert!(!crate::cursor_desktop::is_reader_refusal(Absent.code()));
     }
 }

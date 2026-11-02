@@ -47,6 +47,24 @@ pub(crate) fn drive_type(_: &Path) -> u32 {
     0
 }
 
+/// Whether `code` is one of the refusals the readers return as `Err`: every
+/// `ForeignRefusal` code (from the type's own list) and `db_changed`
+/// (`read_login_added`), `login_unreadable` (both readers). Used to tell a
+/// refusal that repeats every round from a transient failure.
+#[cfg(windows)]
+pub(crate) fn is_reader_refusal(code: &str) -> bool {
+    code == "db_changed"
+        || code == "login_unreadable"
+        || crate::agent_storage_windows::ForeignRefusal::REFUSALS
+            .iter()
+            .any(|refusal| refusal.code() == code)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn is_reader_refusal(code: &str) -> bool {
+    code == "login_unreadable"
+}
+
 /// `GetDriveTypeW` values: only a fixed drive is read.
 pub(crate) const DRIVE_NO_ROOT_DIR: u32 = 1;
 pub(crate) const DRIVE_FIXED: u32 = 3;
@@ -517,6 +535,76 @@ mod tests {
         let refused = read_login_added(&profile, &drive_type);
         eprintln!("measured: exFAT added profile -> {:?}", refused.as_ref().err());
         assert_eq!(refused.err(), Some("db_no_acl_volume"));
+    }
+
+    /// WB2 on the handle (round-2 finding 2): a database on a fixed NTFS
+    /// volume mounted only at a folder (no drive letter) is read: its volume
+    /// GUID root answers fixed. Measured on 188: the file still has a
+    /// drive-letter final path through the mount folder, so this is a
+    /// regression check that such a volume is read, not a test of the
+    /// no-DOS-path branch (that is `the_handle_location_rule`). A VHD made and
+    /// mounted with diskpart (needs elevation), so a manual run:
+    /// `cargo test -p tb_core_ffi -- --ignored --exact cursor_desktop::tests::a_fixed_volume_mounted_at_a_folder_is_read`.
+    /// The VHD is always detached and deleted, also when an assertion fails.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "manual: mounts a VHD at a folder with diskpart (needs elevation)"]
+    fn a_fixed_volume_mounted_at_a_folder_is_read() {
+        fn diskpart(script: &str) -> bool {
+            let file = std::env::temp_dir()
+                .join(format!("cmpw-diskpart-mnt-{}.txt", std::process::id()));
+            std::fs::write(&file, script).unwrap();
+            let ok = std::process::Command::new("diskpart")
+                .arg("/s")
+                .arg(&file)
+                .output()
+                .map(|out| {
+                    eprintln!("{}", String::from_utf8_lossy(&out.stdout));
+                    out.status.success()
+                })
+                .unwrap_or(false);
+            let _ = std::fs::remove_file(&file);
+            ok
+        }
+        /// Detaches the VHD (which removes the mount point), then deletes it
+        /// and the work dir.
+        struct Vhd(PathBuf, PathBuf);
+        impl Drop for Vhd {
+            fn drop(&mut self) {
+                let _ = diskpart(&format!(
+                    "select vdisk file=\"{}\"\ndetach vdisk\n",
+                    self.0.display()
+                ));
+                for _ in 0..50 {
+                    if std::fs::remove_file(&self.0).is_ok() || !self.0.exists() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                let _ = std::fs::remove_dir_all(&self.1);
+            }
+        }
+        let work = temp_root("mnt");
+        let mount = work.join("mnt");
+        std::fs::create_dir_all(&mount).unwrap();
+        let vhd = Vhd(work.join("cmpw-ntfs.vhdx"), work.clone());
+        let made = diskpart(&format!(
+            "create vdisk file=\"{0}\" maximum=64 type=expandable\nselect vdisk file=\"{0}\"\nattach vdisk\ncreate partition primary\nformat fs=ntfs quick label=CMPWMNT\nassign mount=\"{1}\"\n",
+            vhd.0.display(),
+            mount.display()
+        ));
+        assert!(made, "fixture: the VHD could not be created and mounted at a folder");
+        let root = mount.join("cmpw-profile");
+        let dir = root.join("User").join("globalStorage");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = empty_db(&dir);
+        use crate::agent_storage_windows::{set_owner_for_test, TestOwner};
+        set_owner_for_test(&db, TestOwner::CurrentUser).unwrap();
+        assert_eq!(drive_type(&root), DRIVE_FIXED, "the root's letter (the system drive) passes");
+        let read = read_login_added(&root, &drive_type);
+        eprintln!("measured: folder-mounted fixed volume -> {:?}", read.as_ref().err());
+        assert!(matches!(read, Ok(None)), "{:?}", read.err());
+        drop(vhd);
     }
 
     /// WB2 on the handle with a real non-fixed volume: an ISO image (made

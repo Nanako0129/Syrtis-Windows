@@ -66,14 +66,18 @@ one Cursor total.
   signed in"). Then the database is opened handle-first: `CreateFileW`
   without following a final reparse point and without `FILE_SHARE_DELETE` (so
   the name cannot be renamed, deleted or replaced while held). On that handle,
-  before anything else: its final path (`GetFinalPathNameByHandleW`) must not
-  be UNC (`db_remote`), and the volume the file is actually on must be a fixed
-  drive: the handle's volume GUID path (`\\?\Volume{…}\`, `VOLUME_NAME_GUID`)
-  goes to `GetDriveTypeW`, so a junction or mount folder under a fixed root
-  that leads onto a removable, optical or other non-fixed volume is
-  `db_not_fixed_drive` too (a volume with no GUID path is refused the same
-  way). Then: a regular disk file with no reparse attribute (symlinks,
-  junctions and cloud placeholders refused), a volume with persistent ACLs,
+  before anything else: its drive-letter final path
+  (`GetFinalPathNameByHandleW`, `VOLUME_NAME_DOS`) must not be UNC
+  (`db_remote`; a file with no drive-letter path goes on to the next check;
+  measured on 188, a file on a volume mounted only at a folder still has one,
+  through the mount folder), and the volume the
+  file is on must be a fixed drive: the handle's volume GUID path
+  (`\\?\Volume{…}\`, `VOLUME_NAME_GUID`) goes to `GetDriveTypeW`, so a
+  junction or mount folder under a fixed root that leads onto a removable,
+  optical or other non-fixed volume is `db_not_fixed_drive` too (a file with
+  no GUID path, a network file among others, is refused the same way).
+  Then: a regular disk file with no reparse attribute (symlinks, junctions
+  and cloud placeholders refused), a volume with persistent ACLs,
   and an owner that
   is the current user or BUILTIN\Administrators (Cursor once run elevated;
   measured owner for a normal run is the user, U4). SQLite then opens the same
@@ -94,39 +98,60 @@ one Cursor total.
   60 s otherwise. A profile whose last round, with the same root and dirs, was
   `duplicate`, `notSignedIn`, `expired` or a refusal of its login or database
   does not hold the background budget at 10 min (it may get 10 min again once
-  its config changes, or after a round it ran out of time). An
+  its config changes, or after a round it ran out of time); the same holds
+  for a profile with no installation key (`key_unavailable`) or no storage
+  (`storage_unavailable`). This is decided per profile, not per account: a
+  profile that signs in to an account with no file yet walks it under the
+  60 s budget first, so a long history can end that round `partial` and is
+  completed under the full budget the round after. An
   account already covered this round by an earlier profile is not walked
   again; that profile reports `duplicate` with `duplicateOf` (a profile id,
   never the account), and any other account's file it still holds is removed
   under its lock (its current account's copy, if any, stays; the takeover
-  keeps the newest copy by name). A failure covers the account too (a second
-  session would only repeat it, e.g. a 429), except one specific to that session or
+  keeps the newest copy by name; a file that cannot be deleted is reported by
+  profile id in the status's `cleanupFailedProfiles`). A failure covers the
+  account too (a second session would only repeat it, e.g. a 429), except one
+  specific to that session or
   this machine: expired, removed mid-walk, `client_unavailable`,
   `write_failed`. Before every page and under the commit lock the walk checks
   that sync is on and its `(id, root)` is still listed (the default profile:
   that sync is on with the same default dir; adding or removing added
   profiles never stops its walk); a profile removed or re-rooted mid-walk
-  sends no further page and writes nothing, not even its dir. The status
+  sends no further page and writes no usage file. Its dir is not created when
+  the removal is seen before the commit starts; a removal that races the
+  commit's first check can leave an empty dir and lock file, which the next
+  accepted push cleans. The status
   carries a headline (`ok` when every profile is `ok` or `duplicate`, else the
   first other state; a `notSignedIn` profile is ignored while another synced),
-  `changed` (some profile's file content changed: new bytes written, or a
-  superseded file removed; a walk whose bytes equal the file's is not
+  `changed` (some profile's usage file content changed: new bytes written,
+  or a superseded usage file removed, an orphan temp not counting; a walk
+  whose bytes equal the file's is not
   rewritten, only its modified time moves to now so `lastSuccessMs` dates
   the walk, and is not a change; C# refreshes on it) and per-profile
-  entries with id, state, reason and `duplicateOf` only.
+  entries with id, state, reason and `duplicateOf` only, plus
+  `cleanupFailedProfiles` (ids).
 - **Takeover.** `extra_scan_paths["cursor"]` holds the newest file per
   account name (`usage.<HMAC(sub)>.json`) across the current config's
   profiles (an added profile's dir and its `.secure` sibling), never a
   directory, so a stale copy left by a failed delete is never counted and a
   removed profile's leftovers are never scanned.
-- **Cleanup.** Only `usage.<64 hex>.json` and the temp prefix are Syrtis's.
+- **Cleanup.** Only `usage.<64 hex>.json`, the temp prefix, the lock and the
+  root record (below) are Syrtis's.
   Disabling cleans every default and added-profile candidate (each `.secure`
   level); an accepted on push cleans profile dirs no longer listed, or listed
-  under the same id with another root than before (non-fatal,
+  under the same id with another root than the dir records (non-fatal,
   `cleanupFailed` / `cleanupFailedProfiles` in the result), under the same
   secure lock a walk commits under. Only real `<UUID>` / `<UUID>.secure` dirs
   are entered (junctions and symlinks at any level are skipped), files are
-  deleted through the secure delete, and an emptied dir is `rmdir`ed.
+  deleted through the secure delete, and an emptied dir is `rmdir`ed. Each
+  added profile's dir records its root as `.cursor-sync.root`: SHA-256 of the
+  root folded like `duplicate_key` (case and `/` vs `\` ignored, so a
+  case-only change is the same root), written under the lock by every commit
+  (after removing another root's usage files, before writing the new one)
+  and compared under the lock at the push's cleanup. A digest, not the path;
+  a dir with no record counts as another root. So a new root cleans the old
+  account's file even after a refused push or a restart lost the old
+  config.
 - **Add-time check.** `tb_validate_cursor_profile` (validate-only, metadata
   only, no database opened) refuses a full list, a path the rule refuses, a
   drive that is not fixed (checked first), Cursor's own folder and a listed

@@ -270,10 +270,12 @@ char *tb_set_cursor_sync(const char *json);
 // Success data: {"state":"ok|partial|expired|notSignedIn|offline|error|
 // disabled|cliPresent","events":N,"lastSuccessMs":ms|null,"changed":bool,
 // "reason"?:"<fixed code>","profiles":[{"id","state","events",
-// "lastSuccessMs","reason"?,"duplicateOf"?}]}. state/reason are the headline
-// (ok when every profile is ok or duplicate, else the first other state);
-// changed = some profile's file content changed (new bytes, or a superseded
-// file removed); a profile's state may also be duplicate (duplicateOf names
+// "lastSuccessMs","reason"?,"duplicateOf"?}],"cleanupFailedProfiles":["<id>"]}
+// (a duplicate whose other-account file could not be deleted). state/reason
+// are the headline (ok when every profile is ok or duplicate, else the first
+// other state); changed = some profile's usage file content changed (new
+// bytes, or a superseded usage file removed); a profile's state may also be
+// duplicate (duplicateOf names
 // the earlier profile, never the account).
 // cliPresent (no reason) = a profile synced but tokscale CLI Cursor files
 // exist and the takeover is not confirmed, so reports read the CLI's files.
