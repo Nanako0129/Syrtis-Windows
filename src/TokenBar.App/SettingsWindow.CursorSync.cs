@@ -26,6 +26,7 @@ public sealed partial class SettingsWindow
     private Button? _csSyncNow;
     private bool _csAnswerConfirms;
     private bool _csUpdating;
+    private bool _csConfirming;
 
     private StackPanel BuildCursorSync(SettingsStore store)
     {
@@ -43,25 +44,31 @@ public sealed partial class SettingsWindow
                 return; // programmatic IsOn from UpdateCursorSync, not the user
             }
 
-            // Consent (macOS switchChanged / confirmEnable): SetEnabled never
-            // answers the notice, so while it is unanswered the switch shows
-            // the privacy paragraph in a confirmation, and only Continue
-            // answers it (AnswerNotice). Cancel or light dismiss leaves the
-            // switch off and changes nothing.
-            if (toggle.IsOn && !CursorSync.NoticeAcknowledged(store))
+            if (!toggle.IsOn)
             {
-                if (!await ConfirmFlyout(toggle, CursorSync.Copy.Title, CursorSync.Copy.Privacy,
-                        CursorSync.Copy.Continue, CursorSync.Copy.Cancel))
-                {
-                    UpdateCursorSync(store); // puts the switch back off
-                    return;
-                }
-
-                cursor.AnswerNotice(continuing: true);
+                cursor.SetEnabled(false);
+                UpdateCursorSync(store);
+                return;
             }
 
-            cursor.SetEnabled(toggle.IsOn);
-            UpdateCursorSync(store);
+            // Consent is the controller's (CursorSyncController.TurnOn, which
+            // also records how this differs from macOS): while the notice is
+            // unanswered it opens this confirmation, and only Continue writes.
+            // While it is open, UpdateCursorSync leaves IsOn alone, so a state
+            // change (a sync ending, the Overview card) does not flip the switch
+            // under the flyout.
+            _csConfirming = true;
+            try
+            {
+                await cursor.TurnOn(() => ConfirmFlyout(toggle, CursorSync.Copy.Title,
+                    CursorSync.Copy.Privacy, CursorSync.Copy.Continue, CursorSync.Copy.Cancel));
+            }
+            finally
+            {
+                _csConfirming = false;
+            }
+
+            UpdateCursorSync(store); // Cancel: puts the switch back off
         };
         AutomationProperties.SetName(toggle, CursorSync.Copy.Toggle.Localized());
         _csToggle = toggle;
@@ -124,14 +131,17 @@ public sealed partial class SettingsWindow
         }
 
         var on = CursorSync.ToggleShowsOn(CursorSync.Enabled(store), CursorSync.NoticeAcknowledged(store));
-        _csUpdating = true;
-        try
+        if (!_csConfirming)
         {
-            toggle.IsOn = on;
-        }
-        finally
-        {
-            _csUpdating = false;
+            _csUpdating = true;
+            try
+            {
+                toggle.IsOn = on;
+            }
+            finally
+            {
+                _csUpdating = false;
+            }
         }
 
         Show(_csCleanupWarning!, CursorSync.CleanupFailedVisible(on, cursor.CleanupFailed));

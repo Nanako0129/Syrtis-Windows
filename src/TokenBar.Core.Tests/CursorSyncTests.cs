@@ -133,10 +133,61 @@ public class CursorSyncTests
         Assert.False(CursorSync.ShouldSync(store));
     }
 
-    // Consent lives in the controller: the Settings switch alone never answers
-    // the notice (its confirmation's Continue does, through AnswerNotice), so
-    // turning it on before the notice is answered tells the core off and
-    // syncs nothing.
+    // The Settings switch's real sequence (TurnOn with the confirmation's
+    // answer): Continue enables with one config push and one sync.
+    [Fact]
+    public async Task TurningTheSwitchOnAndContinuingPushesOnceAndSyncsOnce()
+    {
+        var store = TempStore();
+        var core = new FakeCore();
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var asked = 0;
+        var turnedOn = await controller.TurnOn(() =>
+        {
+            // While the confirmation is open nothing is written or sent, so a
+            // state change then still reads off (the switch must not follow it).
+            asked++;
+            Assert.False(CursorSync.ToggleShowsOn(CursorSync.Enabled(store), CursorSync.NoticeAcknowledged(store)));
+            Assert.Null(store.GetNullableBool(CursorSync.NoticeKey));
+            Assert.Equal(0, core.Calls);
+            return Task.FromResult(true);
+        });
+        Assert.True(turnedOn);
+        Assert.Equal(1, asked);
+        await Until(() => core.Log.Any(e => e.StartsWith("sync", StringComparison.Ordinal)));
+        await Task.Delay(200);
+        Assert.True(CursorSync.NoticeAcknowledged(store));
+        Assert.True(CursorSync.Enabled(store));
+        Assert.Equal(new[] { (true, false) }, core.Pushes.ToArray());
+        Assert.Equal(1, core.Log.Count(e => e.StartsWith("sync", StringComparison.Ordinal)));
+
+        // Once answered, Windows turns on without asking (macOS asks every
+        // time; a decided difference, see TurnOn).
+        controller.SetEnabled(false);
+        Assert.True(await controller.TurnOn(() => throw new InvalidOperationException("asked again")));
+        Assert.True(CursorSync.ShouldSync(store));
+    }
+
+    [Fact]
+    public async Task CancellingTheConfirmationWritesNothingAndCallsNoCore()
+    {
+        var store = TempStore();
+        var core = new FakeCore();
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var changes = 0;
+        controller.StateChanged += () => changes++;
+        Assert.False(await controller.TurnOn(() => Task.FromResult(false)));
+        await Task.Delay(200);
+        Assert.Null(store.GetNullableBool(CursorSync.EnabledKey));
+        Assert.Null(store.GetNullableBool(CursorSync.NoticeKey));
+        Assert.Equal(0, core.Calls);
+        Assert.Equal(0, changes);
+    }
+
+    // Consent lives in the controller: SetEnabled alone never answers the
+    // notice (only TurnOn's Continue or the Overview card's AnswerNotice do),
+    // so turning it on that way before the notice is answered tells the core
+    // off and syncs nothing.
     [Fact]
     public async Task TheSettingsSwitchAloneNeverAnswersTheNotice()
     {
@@ -151,7 +202,7 @@ public class CursorSyncTests
         Assert.False(core.Pushes.Last().Enabled);
         Assert.Equal(0, core.Log.Count(e => e.StartsWith("sync", StringComparison.Ordinal)));
 
-        // Control: the confirmation's Continue answers it, and the core is told on.
+        // Control: the Overview card's Continue answers it, and the core is told on.
         controller.AnswerNotice(continuing: true);
         await Until(() => core.Pushes.Count == 2);
         Assert.True(CursorSync.NoticeAcknowledged(store));

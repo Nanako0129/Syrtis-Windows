@@ -2019,11 +2019,14 @@ public sealed partial class SettingsWindow : Window
         return section;
     }
 
-    /// <summary>A section's caps header, a Level2 heading so Narrator's H key
-    /// moves between sections (Claude / Antigravity / Cursor).</summary>
+    /// <summary>A section's caps header, marked as a Level2 heading for
+    /// screen-reader heading navigation (Narrator's use of it is not measured).
+    /// Its automation name is the title as written, not the upper-cased
+    /// display text.</summary>
     private static TextBlock SectionHeader(string title)
     {
         var header = Ui.Text(title.ToUpperInvariant(), 10, 0.55, bold: true);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(header, title);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetHeadingLevel(
             header, Microsoft.UI.Xaml.Automation.Peers.AutomationHeadingLevel.Level2);
         return header;
@@ -2042,9 +2045,8 @@ public sealed partial class SettingsWindow : Window
         var details = new StackPanel { Spacing = 8, MaxWidth = 320 };
         var name = SettingsCopy.MoreInfo.Localized(title);
         // A ScrollViewer that takes focus when the flyout opens, so arrow keys
-        // and PageDown scroll text that is otherwise unfocusable, and a screen
-        // reader lands inside the flyout; the Antigravity rows are taller than
-        // the 640 px settings window.
+        // and PageDown scroll text that is otherwise unfocusable; the
+        // Antigravity rows are taller than the 640 px settings window.
         var scroller = new ScrollViewer
         {
             Content = details,
@@ -2052,30 +2054,9 @@ public sealed partial class SettingsWindow : Window
             IsTabStop = true,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
         };
-        // Focused on open, so it is what a screen reader names first.
+        // Named like the button. What Narrator announces on open is not measured.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(scroller, name);
         var flyout = new Flyout { Content = scroller, Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Bottom };
-        flyout.Opening += (_, _) =>
-        {
-            details.Children.Clear();
-            foreach (var (text, heading) in rows())
-            {
-                var line = Ui.Text(text.Localized(), 12, bold: heading);
-                line.TextWrapping = TextWrapping.Wrap;
-                line.TextTrimming = TextTrimming.None;
-                line.IsTextSelectionEnabled = true;
-                if (heading)
-                {
-                    Microsoft.UI.Xaml.Automation.AutomationProperties.SetHeadingLevel(
-                        line, Microsoft.UI.Xaml.Automation.Peers.AutomationHeadingLevel.Level2);
-                }
-
-                details.Children.Add(line);
-            }
-        };
-        // Programmatic, not Keyboard: a mouse open must not draw a focus rectangle.
-        flyout.Opened += (_, _) => scroller.Focus(FocusState.Programmatic);
-
         var button = new Button
         {
             Content = new FontIcon { Glyph = "\uE946", FontSize = 12 }, // Info
@@ -2090,6 +2071,35 @@ public sealed partial class SettingsWindow : Window
         // No ToolTip: it would repeat this name to a screen reader, and the
         // glyph is the usual info mark.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, name);
+
+        // The scroller takes the focus state the button has when the flyout
+        // starts opening (Keyboard after Enter/Space, Pointer after a click;
+        // Programmatic if the button has none), so the focus rectangle, which
+        // WinUI draws only for Keyboard focus, follows the input that opened
+        // it. Not observed on screen yet.
+        var openedWith = FocusState.Programmatic;
+        flyout.Opening += (_, _) =>
+        {
+            openedWith = button.FocusState == FocusState.Unfocused
+                ? FocusState.Programmatic : button.FocusState;
+            details.Children.Clear();
+            foreach (var (text, heading) in rows())
+            {
+                var line = Ui.Text(text.Localized(), 12, bold: heading);
+                line.TextWrapping = TextWrapping.Wrap;
+                line.TextTrimming = TextTrimming.None;
+                line.IsTextSelectionEnabled = true;
+                if (heading)
+                {
+                    // Level3: inside a section, whose header is Level2.
+                    Microsoft.UI.Xaml.Automation.AutomationProperties.SetHeadingLevel(
+                        line, Microsoft.UI.Xaml.Automation.Peers.AutomationHeadingLevel.Level3);
+                }
+
+                details.Children.Add(line);
+            }
+        };
+        flyout.Opened += (_, _) => scroller.Focus(openedWith);
 
         var header = new Grid { ColumnSpacing = 4 };
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -2124,11 +2134,10 @@ public sealed partial class SettingsWindow : Window
             panel.Children.Add(line);
         }
 
-        // Focus opens on Cancel, so the disclosure is attached to the flyout
-        // (name = title, description = body) and to the consenting button, not
-        // left as plain text a screen reader passes over.
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(panel, heading.Text);
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetFullDescription(panel, text.Text);
+        // No automation name or description on the panel: a StackPanel has no
+        // automation peer to carry them. The title and body are TextBlocks
+        // (which have peers), and the consenting button is DescribedBy the
+        // body below. How Narrator reads this flyout is not measured.
 
         var flyout = new Flyout
         {

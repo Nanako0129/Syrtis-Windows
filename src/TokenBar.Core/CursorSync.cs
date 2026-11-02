@@ -20,12 +20,14 @@ public static class CursorSync
     /// explicit off differ.</summary>
     public const string EnabledKey = "tokenbar.cursorSync.enabled";
 
-    /// <summary>The one-time notice was answered. Written only by
-    /// <see cref="CursorSyncController.AnswerNotice"/>: Continue or Turn Off on
-    /// the Overview card, or Continue in the confirmation the Settings switch
-    /// opens; both show the privacy paragraph. Turning the switch on
-    /// (<see cref="CursorSyncController.SetEnabled"/>) never writes it, so
-    /// nothing syncs (<see cref="ShouldSync"/>) until one of those was answered.</summary>
+    /// <summary>The one-time notice was answered. Written only where the
+    /// privacy paragraph was shown: <see cref="CursorSyncController.AnswerNotice"/>
+    /// (Continue or Turn Off on the Overview card) and Continue in the
+    /// confirmation the Settings switch opens
+    /// (<see cref="CursorSyncController.TurnOn"/>). Turning the switch on
+    /// through <see cref="CursorSyncController.SetEnabled"/> never writes it,
+    /// so nothing syncs (<see cref="ShouldSync"/>) until one of those was
+    /// answered.</summary>
     public const string NoticeKey = "tokenbar.cursorSync.noticeAcknowledged";
 
     /// <summary>D6: the user chose Syrtis's own sync over tokscale CLI Cursor
@@ -51,7 +53,7 @@ public static class CursorSync
     /// preference alone must not read as "on" with every control inert.
     /// Turning the switch on while unanswered opens a confirmation first, and
     /// only its Continue answers the notice
-    /// (<see cref="CursorSyncController.AnswerNotice"/>).</summary>
+    /// (<see cref="CursorSyncController.TurnOn"/>).</summary>
     public static bool ToggleShowsOn(bool enabled, bool acknowledged) => enabled && acknowledged;
 
     /// <summary>The preference and the notice (D3): what the core is told and
@@ -527,8 +529,9 @@ public sealed class CursorSyncController
                         // is owed. _syncing stays set, so Syncing is true
                         // across both runs. No ShouldSync check here. Either
                         // order is covered: Reconfigure clears the flag when
-                        // sync goes off; and SetEnabled/AnswerNotice write the
-                        // store before Reconfigure runs, so a pass can be
+                        // sync goes off; and SetEnabled, AnswerNotice and
+                        // ConfirmEnable write the store before Reconfigure
+                        // runs, so a pass can be
                         // promoted after the store says off, in which case
                         // the post-push re-check returns without calling the
                         // core (Syncing stays set through that wait).
@@ -577,19 +580,53 @@ public sealed class CursorSyncController
 
     // ---- Actions behind the controls ---------------------------------------
 
-    /// <summary>The Settings switch: stores the preference only. It never
-    /// answers the notice, so turning it on before the notice is answered
-    /// syncs nothing; the switch asks for confirmation first and its Continue
-    /// calls <see cref="AnswerNotice"/>.</summary>
+    /// <summary>Stores the preference only (the Settings switch turned off).
+    /// It never answers the notice, so turning it on this way before the
+    /// notice is answered syncs nothing; Settings turns it on only through
+    /// <see cref="TurnOn"/>.</summary>
     public void SetEnabled(bool on)
     {
         _store.SetBool(CursorSync.EnabledKey, on);
         Reconfigure(refresh: true);
     }
 
-    /// <summary>The notice: Continue (<paramref name="continuing"/>) or Turn
-    /// Off, on the Overview card or in the Settings confirmation. The only
-    /// writer of <see cref="CursorSync.NoticeKey"/>.</summary>
+    /// <summary>Turning the Settings switch on. While the notice is
+    /// unanswered, <paramref name="confirm"/> shows the privacy paragraph
+    /// first: Cancel or light dismiss (false) stores nothing and calls
+    /// nothing; Continue (true) stores the preference on and the notice
+    /// answered, then reconfigures once, so the core gets one config push.
+    /// Once the notice is answered, it turns on without asking.
+    /// This differs from macOS on purpose (maintainer decision 2026-11-02):
+    /// macOS <c>switchChanged(to: true)</c> asks on every turn-on, and only its
+    /// <c>confirmEnable()</c> enables; Windows asks only while the notice is
+    /// unanswered. Returns whether sync was turned on.</summary>
+    public async Task<bool> TurnOn(Func<Task<bool>> confirm)
+    {
+        if (CursorSync.NoticeAcknowledged(_store))
+        {
+            SetEnabled(true);
+            return true;
+        }
+
+        if (!await confirm())
+        {
+            return false;
+        }
+
+        ConfirmEnable();
+        return true;
+    }
+
+    // Continue in the Settings confirmation: both keys, then one Reconfigure.
+    private void ConfirmEnable()
+    {
+        _store.SetBool(CursorSync.EnabledKey, true);
+        _store.SetBool(CursorSync.NoticeKey, true);
+        Reconfigure(refresh: true);
+    }
+
+    /// <summary>The Overview notice card: Continue
+    /// (<paramref name="continuing"/>) or Turn Off.</summary>
     public void AnswerNotice(bool continuing)
     {
         _store.SetBool(CursorSync.NoticeKey, true);
