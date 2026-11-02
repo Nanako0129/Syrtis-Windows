@@ -51,6 +51,7 @@ public class AgentIconsTests
 
     [Theory]
     [InlineData("antigravity-cli", "antigravity")]
+    [InlineData("antigravity-extension", "antigravity")]
     [InlineData("kilo", "kilocode")]
     [InlineData("grok-bot", "grok")]
     public void AliasesResolveToTheSharedIcon(string clientId, string expectedIconId)

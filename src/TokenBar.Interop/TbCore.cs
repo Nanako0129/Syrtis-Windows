@@ -10,7 +10,8 @@ public sealed class TbCoreException(string message) : Exception(message);
 /// Typed facade over the tb_core_ffi C ABI. Mirrors TBCore.swift in the macOS
 /// repo: every entry point returns heap JSON that must be freed with tb_free
 /// exactly once, wrapped in the envelope {"ok":true,"data":…} /
-/// {"ok":false,"err":…} (tb_probe keeps its legacy top-level shape).
+/// {"ok":false,"err":…} (tb_probe keeps its legacy top-level shape,
+/// {"ok":true,"messages":N,"opencodeDb":{…}}; see <see cref="OpenCodeDbReport"/>).
 /// All calls are blocking — invoke off the UI thread; AgentUsage() is also
 /// network-bound (~30s worst case).
 /// </summary>
@@ -319,4 +320,23 @@ public sealed record ProbeResult(
     [property: JsonPropertyName("ok")] bool Ok,
     // The legacy error shape {"ok":false,"err":…} carries no messages field.
     [property: JsonPropertyName("messages")] long Messages = 0,
-    [property: JsonPropertyName("err")] string? Err = null);
+    [property: JsonPropertyName("err")] string? Err = null,
+    [property: JsonPropertyName("opencodeDb")] OpenCodeDbReport? OpencodeDb = null);
+
+/// <summary>
+/// What the last read of the user's OpenCode DB settings found. SettingsFile is
+/// absent | ok | tooLarge | unreadable | invalidJson. Issue reasons are
+/// notAbsolute | emptyEnv (both withheld from the engine) | badFileName |
+/// missing (handed over, the engine probably skips them); Index is the zero-based position within the
+/// source's list ("env" or "file"). No path crosses the ABI. Only Smoke and
+/// tests call Probe(); the app UI does not surface this (deferred decision).
+/// </summary>
+public sealed record OpenCodeDbReport(
+    [property: JsonPropertyName("settingsFile")] string SettingsFile,
+    [property: JsonPropertyName("handedToEngine")] int HandedToEngine,
+    [property: JsonPropertyName("issues")] IReadOnlyList<OpenCodeDbIssue> Issues);
+
+public sealed record OpenCodeDbIssue(
+    [property: JsonPropertyName("source")] string Source,
+    [property: JsonPropertyName("index")] int Index,
+    [property: JsonPropertyName("reason")] string Reason);

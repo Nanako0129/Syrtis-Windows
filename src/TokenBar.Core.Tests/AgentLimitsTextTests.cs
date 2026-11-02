@@ -109,6 +109,11 @@ public class AgentLimitsTextTests
             new TraceBucket("gemini", "a", "m", 0, 0, 0),
         ]);
         Assert.Equal(new HashSet<string> { "claude", "antigravity" }, live);
+
+        // Extension-only usage still lights the antigravity card.
+        Assert.Equal(
+            new HashSet<string> { "antigravity" },
+            AgentLimitsText.LiveClients([new TraceBucket("antigravity-extension", "a", "m", 10, 1, 5)]));
     }
 
     // ---- Setup prompt -----------------------------------------------------

@@ -1081,7 +1081,7 @@ public sealed partial class DashboardView
             body.Children.Add(note);
         }
 
-        var colors = new ModelColorMap(snapshot.Models, snapshot.CostAuthoritative);
+        var colors = new ModelColorMap(snapshot.Models, snapshot.ModelsRankByCost);
         foreach (var row in rows)
         {
             body.Children.Add(HistoryRow(row, history.ByResetAt[row.ResetAtMs], colors, client.LocalUsageUnattributed));

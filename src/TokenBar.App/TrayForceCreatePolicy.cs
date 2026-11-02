@@ -1,11 +1,9 @@
-using System.Diagnostics;
-
 namespace TokenBar.App;
 
 /// <summary>
 /// Pure policy + injectable per-episode ForceCreate state machine.
-/// Free of WinUI types so unit tests can inject attempt, delay, and elapsed
-/// functions without constructing a tray.
+/// Free of WinUI types so unit tests can inject attempt, delay, and a time
+/// provider without constructing a tray.
 /// </summary>
 internal static class TrayForceCreatePolicy
 {
@@ -23,12 +21,10 @@ internal static class TrayForceCreatePolicy
     public const int MinProductionRetryWindowMilliseconds = EpisodeDeadlineMilliseconds;
 
     /// <summary>
-    /// Startup-smoke outer wait for tray readiness. Longer than the episode
-    /// deadline so the DispatcherQueue terminal tick is not raced by the
-    /// thread-pool CancelAfter timer at the same instant.
+    /// Upper bound for one --startup-smoke readiness wait (see TrayReadyGate).
+    /// Three episode deadlines: a single episode always ends well inside it.
     /// </summary>
-    public const int StartupSmokeTimeoutMilliseconds =
-        EpisodeDeadlineMilliseconds + 2_000;
+    public const int ReadyCeilingMilliseconds = EpisodeDeadlineMilliseconds * 3;
 
     /// <summary>Cap on a single inter-attempt delay (ms).</summary>
     public const int MaxDelayMilliseconds = 500;
@@ -53,6 +49,78 @@ internal static class TrayForceCreatePolicy
     /// </summary>
     public static bool IsSoftRetryable(Exception exception) =>
         exception is InvalidOperationException;
+}
+
+/// <summary>Named failure when the smoke readiness ceiling expires.</summary>
+internal sealed class TrayReadyCeilingException(TimeSpan ceiling) : TimeoutException(
+    $"tray readiness not reached within the {ceiling.TotalMilliseconds:0} ms ceiling "
+    + "(creation episodes kept restarting or the dispatcher is wedged)");
+
+/// <summary>
+/// The single terminal result of tray creation. Ready, an exhausted episode,
+/// disposal and the ceiling all complete one TaskCompletionSource, so the first
+/// writer wins and a waiter sees exactly one outcome. The episode deadline
+/// alone cannot bound --startup-smoke: EnsureIconCreated can start a new
+/// episode, restarting that deadline, while the last tick is still queued. The
+/// ceiling is therefore an upper bound well above the episode deadline; its
+/// expiry is a distinct <see cref="TrayReadyCeilingException"/>. It starts when
+/// a caller waits (one timer per wait), so normal launches have no extra timer.
+/// </summary>
+internal sealed class TrayReadyGate
+{
+    private readonly TaskCompletionSource<bool> _tcs =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TimeProvider _time;
+    private readonly TimeSpan _ceiling;
+
+    public TrayReadyGate(TimeProvider? timeProvider = null, TimeSpan? ceiling = null)
+    {
+        _time = timeProvider ?? TimeProvider.System;
+        _ceiling = ceiling
+            ?? TimeSpan.FromMilliseconds(TrayForceCreatePolicy.ReadyCeilingMilliseconds);
+    }
+
+    public bool TrySetReady() => _tcs.TrySetResult(true);
+
+    public bool TrySetFailed(Exception exception) => _tcs.TrySetException(exception);
+
+    public bool TrySetCanceled() => _tcs.TrySetCanceled();
+
+    /// <summary>True once any terminal result (including the ceiling) landed.</summary>
+    public bool IsCompleted => _tcs.Task.IsCompleted;
+
+    /// <summary>
+    /// The gate a waiter should use. With no creation episode running there is
+    /// nothing that could ever complete a gate, so it fails at once instead of
+    /// waiting out the ceiling. Otherwise <paramref name="current"/> is kept
+    /// while pending and replaced once completed: a gate faulted by the ceiling
+    /// must not fail every later wait.
+    /// </summary>
+    public static TrayReadyGate ForNextWait(
+        TrayReadyGate? current, bool episodeRunning, TimeProvider? timeProvider = null)
+    {
+        if (current is { IsCompleted: false })
+        {
+            return current;
+        }
+
+        if (!episodeRunning)
+        {
+            throw new InvalidOperationException("tray creation episode was not started");
+        }
+
+        return new TrayReadyGate(timeProvider);
+    }
+
+    public async Task WaitAsync(CancellationToken cancellationToken)
+    {
+        // One ceiling timer per wait, so a second or concurrent waiter is
+        // bounded too and each timer is released when its own wait ends.
+        using var timer = _time.CreateTimer(
+            _ => _tcs.TrySetException(new TrayReadyCeilingException(_ceiling)),
+            null, _ceiling, Timeout.InfiniteTimeSpan);
+        await _tcs.Task.WaitAsync(cancellationToken).ConfigureAwait(true);
+    }
 }
 
 /// <summary>Result of one ForceCreate tick inside an episode.</summary>
@@ -81,7 +149,7 @@ internal sealed class TrayForceCreateEpisode
 
     public TrayForceCreateEpisode(
         TimeSpan? deadline = null,
-        Func<TimeSpan>? getElapsed = null)
+        TimeProvider? timeProvider = null)
     {
         _deadline = deadline
             ?? TimeSpan.FromMilliseconds(TrayForceCreatePolicy.EpisodeDeadlineMilliseconds);
@@ -90,17 +158,12 @@ internal sealed class TrayForceCreateEpisode
             throw new ArgumentOutOfRangeException(nameof(deadline));
         }
 
-        if (getElapsed is null)
-        {
-            // Stopwatch timestamps are monotonic; wall-clock NTP corrections at
-            // logon must not shrink or stretch the tray-creation window.
-            var startTimestamp = Stopwatch.GetTimestamp();
-            _getElapsed = () => Stopwatch.GetElapsedTime(startTimestamp);
-        }
-        else
-        {
-            _getElapsed = getElapsed;
-        }
+        // Monotonic timestamps (TimeProvider.System is Stopwatch-backed);
+        // wall-clock NTP corrections at logon must not shrink or stretch the
+        // tray-creation window. timeProvider is the single test seam.
+        var clock = timeProvider ?? TimeProvider.System;
+        var startTimestamp = clock.GetTimestamp();
+        _getElapsed = () => clock.GetElapsedTime(startTimestamp);
     }
 
     public int Attempts { get; private set; }

@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using TokenBar.Core;
 
@@ -7,42 +8,39 @@ namespace TokenBar.App;
 // Accounts page → "Cursor" (macOS SettingsPanel cursorSyncSection,
 // shared spec §2). Every action goes through CursorSyncController.Shared; this
 // only draws its state and the stored preferences.
+//
+// The controls are built once and updated in place on every state change
+// (issue #243): recreating them removed the focused control, and WinUI then
+// moved focus to the next focusable one (on the General page, where the
+// section was then, the Discord toggle below it).
 public sealed partial class SettingsWindow
 {
-    private StackPanel? _cursorSyncBody;
     private bool _cursorSyncSubscribed;
+
+    private ToggleSwitch? _csToggle;
+    private TextBlock? _csCleanupWarning;
+    private TextBlock? _csStatusHint;
+    private TextBlock? _csStatusWarning;
+    private TextBlock? _csCliQuestion;
+    private Button? _csAnswer;
+    private Button? _csSyncNow;
+    private bool _csAnswerConfirms;
+    private bool _csUpdating;
 
     private StackPanel BuildCursorSync(SettingsStore store)
     {
-        _cursorSyncBody = new StackPanel { Spacing = 6 };
-        if (!_cursorSyncSubscribed && CursorSyncController.Shared is { } cursor)
+        var body = new StackPanel { Spacing = 6 };
+        if (CursorSyncController.Shared is not { } cursor)
         {
-            // The window is hidden, never closed, so one subscription lives as
-            // long as the app.
-            _cursorSyncSubscribed = true;
-            cursor.StateChanged += () => DispatcherQueue.TryEnqueue(() => FillCursorSync(store));
+            return body; // nothing to draw or act on without the controller
         }
 
-        FillCursorSync(store);
-        return _cursorSyncBody;
-    }
-
-    private void FillCursorSync(SettingsStore store)
-    {
-        if (_cursorSyncBody is not { } body || CursorSyncController.Shared is not { } cursor)
-        {
-            return;
-        }
-
-        body.Children.Clear();
-        var on = CursorSync.ToggleShowsOn(CursorSync.Enabled(store), CursorSync.NoticeAcknowledged(store));
-        var toggle = new ToggleSwitch { IsOn = on, OnContent = null, OffContent = null };
-        var reverting = false;
+        var toggle = new ToggleSwitch { OnContent = null, OffContent = null };
         toggle.Toggled += async (_, _) =>
         {
-            if (reverting)
+            if (_csUpdating)
             {
-                return;
+                return; // programmatic IsOn from UpdateCursorSync, not the user
             }
 
             // Consent (macOS switchChanged / confirmEnable): SetEnabled never
@@ -55,9 +53,7 @@ public sealed partial class SettingsWindow
                 if (!await ConfirmFlyout(toggle, CursorSync.Copy.Title, CursorSync.Copy.Privacy,
                         CursorSync.Copy.Continue, CursorSync.Copy.Cancel))
                 {
-                    reverting = true;
-                    toggle.IsOn = false;
-                    reverting = false;
+                    UpdateCursorSync(store); // puts the switch back off
                     return;
                 }
 
@@ -65,56 +61,149 @@ public sealed partial class SettingsWindow
             }
 
             cursor.SetEnabled(toggle.IsOn);
-            FillCursorSync(store);
+            UpdateCursorSync(store);
         };
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(toggle, CursorSync.Copy.Toggle.Localized());
+        AutomationProperties.SetName(toggle, CursorSync.Copy.Toggle.Localized());
+        _csToggle = toggle;
         body.Children.Add(ToggleRow(CursorSync.Copy.Toggle.Localized(), toggle));
+        // The privacy paragraph is in the section's info flyout, the enable
+        // confirmation and the Overview notice card, not inline.
 
-        if (CursorSync.CleanupFailedVisible(on, cursor.CleanupFailed))
+        _csCleanupWarning = WarningLine(CursorSync.Copy.CleanupFailed.Localized());
+        _csStatusHint = Hint("");
+        _csStatusWarning = WarningLine("");
+        _csCliQuestion = Hint(CursorSync.Copy.CliQuestion.Localized());
+
+        // One button for the takeover answer: its Content and action switch
+        // between "Use Syrtis" and "Keep CLI", so the control that has focus
+        // when the answer lands is never replaced or hidden.
+        _csAnswer = new Button
         {
-            body.Children.Add(WarningLine(CursorSync.Copy.CleanupFailed.Localized()));
+            FontSize = 12,
+            Padding = new Thickness(8, 3, 8, 4),
+        };
+        _csAnswer.Click += (_, _) => cursor.SetTakeoverConfirmed(_csAnswerConfirms);
+
+        _csSyncNow = new Button
+        {
+            FontSize = 12,
+            Padding = new Thickness(8, 3, 8, 4),
+        };
+        _csSyncNow.Click += (_, _) => _ = cursor.RunSync(userInitiated: true);
+        SwallowKeyRepeat(_csSyncNow);
+        SwallowKeyRepeat(_csAnswer);
+
+        foreach (var element in new UIElement[]
+        {
+            _csCleanupWarning, _csStatusHint, _csStatusWarning, _csCliQuestion,
+            _csAnswer, _csSyncNow,
+        })
+        {
+            element.Visibility = Visibility.Collapsed;
+            body.Children.Add(element);
         }
 
-        if (!on)
+        if (!_cursorSyncSubscribed)
+        {
+            // The window is hidden, never closed, so one subscription lives as
+            // long as the app.
+            _cursorSyncSubscribed = true;
+            cursor.StateChanged += () => DispatcherQueue.TryEnqueue(() => UpdateCursorSync(store));
+        }
+
+        UpdateCursorSync(store);
+        return body;
+    }
+
+    private void UpdateCursorSync(SettingsStore store)
+    {
+        if (_csToggle is not { } toggle || _csSyncNow is not { } syncNow
+            || _csAnswer is not { } answer || CursorSyncController.Shared is not { } cursor)
         {
             return;
         }
 
+        var on = CursorSync.ToggleShowsOn(CursorSync.Enabled(store), CursorSync.NoticeAcknowledged(store));
+        _csUpdating = true;
+        try
+        {
+            toggle.IsOn = on;
+        }
+        finally
+        {
+            _csUpdating = false;
+        }
+
+        Show(_csCleanupWarning!, CursorSync.CleanupFailedVisible(on, cursor.CleanupFailed));
+
         var state = cursor.State;
-        if (CursorSync.StatusLine(state, cursor.LastSuccessMs) is { } line)
+        var line = on ? CursorSync.StatusLine(state, cursor.LastSuccessMs) : null;
+        var warning = line is not null && CursorSync.StatusIsWarning(state);
+        _csStatusHint!.Text = line ?? "";
+        _csStatusWarning!.Text = line ?? "";
+        Show(_csStatusHint, line is not null && !warning);
+        Show(_csStatusWarning, line is not null && warning);
+
+        var confirmed = CursorSync.TakeoverConfirmed(store);
+        var askTakeover = on && state == "cliPresent" && !confirmed;
+        Show(_csCliQuestion!, askTakeover);
+        // Question shown: answer "Use Syrtis". Answered: the undo, "Keep CLI".
+        _csAnswerConfirms = askTakeover;
+        answer.Content = (askTakeover ? CursorSync.Copy.UseSyrtis : CursorSync.Copy.KeepCli).Localized();
+        var showAnswer = askTakeover || (on && confirmed);
+
+        if (on)
         {
-            body.Children.Add(CursorSync.StatusIsWarning(state) ? WarningLine(line) : Hint(line));
+            Show(syncNow, true); // before focus can be handed to it
         }
 
-        if (state == "cliPresent" && !CursorSync.TakeoverConfirmed(store))
-        {
-            body.Children.Add(Hint(CursorSync.Copy.CliQuestion.Localized()));
-            body.Children.Add(CursorSyncButton(CursorSync.Copy.UseSyrtis, enabled: true,
-                () => cursor.SetTakeoverConfirmed(true)));
-        }
-        else if (CursorSync.TakeoverConfirmed(store))
-        {
-            // Undo for the D6 answer; the question returns on the next sync.
-            body.Children.Add(CursorSyncButton(CursorSync.Copy.KeepCli, enabled: true,
-                () => cursor.SetTakeoverConfirmed(false)));
-        }
-
+        MoveFocusBeforeHiding(answer, showAnswer, on ? syncNow : toggle);
+        MoveFocusBeforeHiding(syncNow, on, toggle);
+        Show(answer, showAnswer);
+        Show(syncNow, on);
         var syncing = cursor.Syncing;
-        body.Children.Add(CursorSyncButton(
-            syncing ? CursorSync.Copy.Syncing : CursorSync.Copy.SyncNow, enabled: !syncing,
-            () => _ = cursor.RunSync(userInitiated: true)));
+        var label = (syncing ? CursorSync.Copy.Syncing : CursorSync.Copy.SyncNow).Localized();
+        syncNow.Content = label;
+        // Stays enabled while syncing: a disabled button cannot keep keyboard
+        // focus, and moving focus away would strand the user when the sync ends.
+        // What a press during a sync does: see the RunSync summary.
+        AutomationProperties.SetName(syncNow, label);
     }
 
-    private static Button CursorSyncButton(string text, bool enabled, Action click)
-    {
-        var button = new Button
+    // A held Enter repeats Click (the answer button would flip back and forth,
+    // Sync Now would restart). Swallow the key-repeat KeyDowns; the first press
+    // and a Space release (Click fires on KeyUp) still go through.
+    private static void SwallowKeyRepeat(Button button) =>
+        button.PreviewKeyDown += (_, e) =>
         {
-            Content = text.Localized(),
-            FontSize = 12,
-            Padding = new Thickness(8, 3, 8, 4),
-            IsEnabled = enabled,
+            if (e.Key is Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space
+                && e.KeyStatus.WasKeyDown)
+            {
+                e.Handled = true;
+            }
         };
-        button.Click += (_, _) => click();
-        return button;
+
+    // Focus must never be on a control that is about to collapse: WinUI would
+    // move it out of the section. Hand it over first, keeping its FocusState.
+    // Only while the Settings window is visible, active or not: moving focus
+    // inside an inactive visible window is harmless and keeps it in the section
+    // for when the user returns. The window is hidden, never closed. While it
+    // is hidden the handoff is skipped (no layout or focus calls). A focused
+    // control collapsing while hidden can still move WinUI focus (unmeasured).
+    // Present() calls Activate(), which gives the window keyboard focus, and
+    // Rebuild() regenerates the page; which control receives focus after a
+    // re-show is not measured.
+    private void MoveFocusBeforeHiding(Control leaving, bool staysVisible, Control target)
+    {
+        if (!staysVisible && AppWindow.IsVisible
+            && leaving.FocusState != FocusState.Unfocused)
+        {
+            target.Visibility = Visibility.Visible;
+            target.UpdateLayout();
+            target.Focus(leaving.FocusState);
+        }
     }
+
+    private static void Show(UIElement element, bool visible) =>
+        element.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
 }
