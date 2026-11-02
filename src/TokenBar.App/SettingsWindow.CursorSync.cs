@@ -168,9 +168,11 @@ public sealed partial class SettingsWindow
     // move it out of the section. Hand it over first, keeping its FocusState.
     // Only while the Settings window is visible, active or not: moving focus
     // inside an inactive visible window is harmless and keeps it in the section
-    // for when the user returns. The window is hidden, never closed, so when it
-    // is hidden a background sync just collapses the control and must not touch
-    // layout or focus.
+    // for when the user returns. The window is hidden, never closed. While it
+    // is hidden the handoff is skipped (no layout or focus calls); a collapsing
+    // focused control can still move WinUI focus there, which is harmless
+    // because Present() -> Rebuild() rebuilds the page when the window is
+    // shown again.
     private void MoveFocusBeforeHiding(Control leaving, bool staysVisible, Control target)
     {
         if (!staysVisible && AppWindow.IsVisible

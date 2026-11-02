@@ -329,6 +329,65 @@ public class CursorSyncTests
         Assert.Equal("ok", controller.State);
     }
 
+    // A background sync gets a short budget; a press during it must not be lost.
+    [Fact]
+    public async Task APressDuringABackgroundSyncRunsOneUserSyncAfterIt()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore();
+        using var gate = new ManualResetEventSlim(false);
+        core.SyncGate = gate;
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var running = controller.RunSync(userInitiated: false);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        await controller.RunSync(userInitiated: true);
+        await controller.RunSync(userInitiated: true);
+        gate.Set();
+        await running;
+        Assert.Equal(new[] { "sync:auto", "sync:user" }, core.Log.ToArray());
+        Assert.False(controller.Syncing);
+    }
+
+    // Held Enter or Space: presses while a user sync runs start nothing more.
+    [Fact]
+    public async Task PressesDuringAUserSyncStartNoMoreSyncs()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore();
+        using var gate = new ManualResetEventSlim(false);
+        core.SyncGate = gate;
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var running = controller.RunSync(userInitiated: true);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        await controller.RunSync(userInitiated: true);
+        await controller.RunSync(userInitiated: true);
+        await controller.RunSync(userInitiated: true);
+        gate.Set();
+        await running;
+        Assert.Equal(new[] { "sync:user" }, core.Log.ToArray());
+    }
+
+    [Fact]
+    public async Task AnAwaitingPressIsDroppedWhenSyncIsTurnedOffBeforeTheSyncEnds()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore();
+        using var gate = new ManualResetEventSlim(false);
+        core.SyncGate = gate;
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var running = controller.RunSync(userInitiated: false);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        await controller.RunSync(userInitiated: true);
+        controller.SetEnabled(false);
+        gate.Set();
+        await running;
+        Assert.Equal(new[] { "sync:auto" }, core.Log.Where(e => e.StartsWith("sync")).ToArray());
+        Assert.False(controller.Syncing);
+    }
+
     [Fact]
     public async Task AConfigChangeWhileASyncWaitsForAPushWaitsForTheNewestOne()
     {

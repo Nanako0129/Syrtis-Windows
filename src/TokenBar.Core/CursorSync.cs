@@ -175,6 +175,10 @@ public sealed class CursorSyncController
     private int _generation;
     private bool _rerunPending;
     private bool _syncing;
+    // The running pass is a user press, not the schedule.
+    private bool _runningUser;
+    // A press arrived during a scheduled pass; one user sync follows it.
+    private bool _userPending;
     private string? _state;
     private long? _lastSuccessMs;
     private long? _lastRefreshedEvents;
@@ -376,8 +380,10 @@ public sealed class CursorSyncController
 
     /// <summary>One sync, on the thread pool. Single-flight here as well as in
     /// the core: a request while a sync runs is dropped, since that sync's
-    /// result is current. Before calling the core it waits for the newest
-    /// config push; a reconfigure during that wait makes it wait again, and if
+    /// result is current. The exception is a user press during a scheduled
+    /// sync: the scheduled one has a short budget, so one user sync (never a
+    /// queue) runs once it finishes, unless sync was turned off meanwhile.
+    /// Before calling the core it waits for the newest config push; a reconfigure during that wait makes it wait again, and if
     /// sync was turned off meanwhile it returns without calling the core. A
     /// reconfigure while the core runs makes the result stale; it is discarded
     /// and the sync reruns, so the new settings get a fresh result.</summary>
@@ -392,10 +398,12 @@ public sealed class CursorSyncController
         {
             if (_syncing)
             {
+                _userPending |= userInitiated && !_runningUser;
                 return;
             }
 
             _syncing = true;
+            _runningUser = userInitiated;
         }
 
         // Set once _syncing has been cleared under the lock that decided this
@@ -432,6 +440,7 @@ public sealed class CursorSyncController
                     if (!CursorSync.ShouldSync(_store))
                     {
                         _syncing = false;
+                        _userPending = false;
                         released = true;
                         return;
                     }
@@ -484,6 +493,21 @@ public sealed class CursorSyncController
                     again = _rerunPending && CursorSync.ShouldSync(_store);
                     if (!again)
                     {
+                        // The pending press is served only once nothing else
+                        // is owed. _syncing stays set, so Syncing is true
+                        // across both runs.
+                        if (_userPending && CursorSync.ShouldSync(_store))
+                        {
+                            userInitiated = true;
+                            _runningUser = true;
+                            again = true;
+                        }
+
+                        _userPending = false;
+                    }
+
+                    if (!again)
+                    {
                         _syncing = false;
                         released = true;
                     }
@@ -507,6 +531,7 @@ public sealed class CursorSyncController
                 lock (_gate)
                 {
                     _syncing = false;
+                    _userPending = false;
                 }
             }
 
