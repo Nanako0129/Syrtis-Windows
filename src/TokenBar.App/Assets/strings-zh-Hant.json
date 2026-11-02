@@ -600,5 +600,7 @@
   "You also have Cursor usage from tokscale CLI on this PC. Use Syrtis's own sync instead? Choose this only if it's the same Cursor account, or that account's usage will no longer be shown.": "這台電腦上也有 tokscale CLI 的 Cursor 用量。要改用 Syrtis 自己的同步嗎？只有在是同一個 Cursor 帳號時才選，否則那個帳號的用量就不會再顯示。",
   "Use Syrtis Sync": "改用 Syrtis 同步",
   "Keep tokscale CLI Data": "保留 tokscale CLI 的資料",
-  "Cursor sync is off, but some downloaded usage couldn't be deleted. Restart Syrtis to retry.": "Cursor 同步已關閉，但有部分已下載的用量無法刪除。重新啟動 Syrtis 即可再試。"
+  "Cursor sync is off, but some downloaded usage couldn't be deleted. Restart Syrtis to retry.": "Cursor 同步已關閉，但有部分已下載的用量無法刪除。重新啟動 Syrtis 即可再試。",
+  "Cursor sync couldn't be set up, so nothing is being synced.": "無法設定 Cursor 同步，目前不會同步任何用量。",
+  "Add a folder you start Cursor with using --user-data-dir to sync it too (Syrtis keeps the folder path in its settings); each profile's sign-in is handled as described above. All profiles add up to one Cursor total, and an account signed in to several profiles counts once. Removing a profile deletes its downloaded usage the next time Syrtis can.": "加入用 --user-data-dir 啟動 Cursor 的資料夾（資料夾路徑會儲存在 Syrtis 設定中），就能一起同步；每個設定檔的登入資訊都照上一段的方式處理。所有設定檔合計成一個 Cursor 總量，同一個帳號只算一次。移除設定檔後，Syrtis 會在下次能處理時刪除它已下載的用量。"
 }

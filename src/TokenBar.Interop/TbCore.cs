@@ -231,13 +231,21 @@ public static class TbCore
         Unwrap<AntigravityRemoved>(NativeMethods.tb_antigravity_remove(key));
 
     /// <summary>Configure Cursor desktop sync (in-memory, default off: re-apply
-    /// at launch). The native side chooses the directory. Turning sync off
-    /// deletes Syrtis's synced usage; when that cleanup cannot finish this
-    /// throws <see cref="TbCoreException"/> <c>cleanupFailed</c> and sync is
-    /// off all the same. Disk-bound: call off the UI thread.</summary>
-    public static CursorSyncConfig SetCursorSync(bool enabled, bool cliTakeoverConfirmed) =>
-        Unwrap<CursorSyncConfig>(NativeMethods.tb_set_cursor_sync(
-            CursorSyncRequest.Json(enabled, cliTakeoverConfirmed)));
+    /// at launch) with a <see cref="CursorSyncRequest.Json"/> payload. The
+    /// native side chooses every directory. Turning sync off deletes Syrtis's
+    /// synced usage; when that cleanup cannot finish this throws
+    /// <see cref="TbCoreException"/> <c>cleanupFailed</c> and sync is off all
+    /// the same. A refused on push throws its fixed code (the caller stops
+    /// syncing: <c>configRejected</c>). Disk-bound: call off the UI thread.</summary>
+    public static CursorSyncConfig SetCursorSync(string json) =>
+        Unwrap<CursorSyncConfig>(NativeMethods.tb_set_cursor_sync(json));
+
+    /// <summary>Add-time check for a Cursor profile folder: validate-only,
+    /// metadata only (no database is opened), never echoes a path. Call off
+    /// the UI thread.</summary>
+    public static CursorProfileValidation ValidateCursorProfile(string root, IReadOnlyList<string> existing) =>
+        Unwrap<CursorProfileValidation>(NativeMethods.tb_validate_cursor_profile(
+            CursorSyncRequest.ValidationJson(root, existing)));
 
     /// <summary>One Cursor sync now. Blocking (SQLite read + network, up to
     /// 10 minutes): never on the UI thread. Single-flight.</summary>
