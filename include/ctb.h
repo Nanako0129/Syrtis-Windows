@@ -242,28 +242,51 @@ char *tb_antigravity_auto_capture(const char *removed_keys_json);
 char *tb_antigravity_remove(const char *key);
 
 // Configure Cursor desktop sync. `json` is {"enabled":bool,
-// "cliTakeoverConfirmed":bool}; any other key (a "dir" included) is
-// invalidJson. The sync dir is chosen here:
-// %APPDATA%\com.nyanako.tokenbar[.secure]\cursor-cache[.secure]. Full replace,
-// in-memory, default off: the caller re-applies it at launch. Success data:
-// {"enabled","dir","cliTakeoverConfirmed","removedFiles":N} (dir is the
-// resolved sync dir while enabled, null when disabled). Disabling deletes
-// Syrtis usage files from every existing candidate dir (both roots x both
-// child names) and creates no directory. Errors: nullPayload, invalidUtf8,
-// invalidJson (nothing changed), storageUnavailable (enabling; the registry
-// is unchanged, but directories the resolution already created may remain),
-// cleanupFailed (disabling: sync is off and the takeover removed, but a
-// Syrtis usage file could not be deleted). Rechecks the takeover.
+// "cliTakeoverConfirmed":bool,"profiles":[{"id":"<UPPERCASE UUID>",
+// "root":"X:\\..."}]} (profiles optional: added --user-data-dir folders);
+// any other key (a "dir" included) is invalidJson. Every Syrtis dir is chosen
+// here: the default profile's
+// %APPDATA%\com.nyanako.tokenbar[.secure]\cursor-cache[.secure], added
+// profiles' %LOCALAPPDATA%\com.nyanako.tokenbar[.secure]\cursor-profiles[.secure]\<UUID>.
+// Full replace, in-memory, default off: the caller re-applies it at launch.
+// Success data: {"enabled","dir","profilesDir","profiles":[{"id"}],
+// "rejected":[{"index","reason"}],"cliTakeoverConfirmed","removedFiles":N,
+// "cleanupFailed","cleanupFailedProfiles"}: profiles lists "default" then each
+// registered added id (never a folder); a refused root is in rejected by index
+// and the others register. An off push is accepted whatever its profiles and
+// deletes Syrtis usage files from every existing candidate dir (default and
+// added) without creating any. An on push removes our files from profile dirs
+// no longer listed (non-fatal: cleanupFailed). Errors: nullPayload,
+// invalidUtf8, invalidJson, tooManyProfiles, invalidProfileId,
+// storageUnavailable (enabling); after any of these the registry keeps only
+// profiles the refused input also lists. cleanupFailed (disabling: sync is off
+// and the takeover removed, but a Syrtis usage file could not be deleted).
+// Rechecks the takeover.
 char *tb_set_cursor_sync(const char *json);
 
-// Sync Cursor usage from the signed-in Cursor desktop app now. Blocking
-// (SQLite read + network, up to 10 min): never on the UI thread.
-// `user_initiated` non-zero = the user's "Sync now". Single-flight. Success
-// data: {"state":"ok|partial|expired|notSignedIn|offline|error|disabled|
-// cliPresent","events":N,"lastSuccessMs":ms|null,"reason"?:"<fixed code>"}.
-// cliPresent = the walk completed but tokscale CLI Cursor files exist and the
-// takeover is not confirmed, so reports read the CLI's files.
+// Sync Cursor usage now, every profile in turn (default first). Blocking
+// (SQLite reads + network, up to 10 min for the round): never on the UI
+// thread. `user_initiated` non-zero = the user's "Sync now". Single-flight.
+// Success data: {"state":"ok|partial|expired|notSignedIn|offline|error|
+// disabled|cliPresent","events":N,"lastSuccessMs":ms|null,"changed":bool,
+// "reason"?:"<fixed code>","profiles":[{"id","state","events",
+// "lastSuccessMs","reason"?,"duplicateOf"?}]}. state/reason are the headline
+// (ok when every profile is ok or duplicate, else the first other state);
+// changed = some profile wrote its file; a profile's state may also be
+// duplicate (duplicateOf names the earlier profile, never the account).
+// cliPresent (no reason) = a file was written but tokscale CLI Cursor files
+// exist and the takeover is not confirmed, so reports read the CLI's files.
 char *tb_cursor_sync(int32_t user_initiated);
+
+// Add-time check for a Cursor profile folder, validate-only (nothing is
+// committed, no database is opened): `json` is {"root":"X:\\...",
+// "existing":["..."]}; data {"accepted":bool,"reason":code|null}, never a path.
+// Reasons: tooManyProfiles, the path-rule codes (empty, unsupportedPath,
+// rootDirectory, invalidComponent), notFixedDrive (checked before any I/O),
+// cursorDefault (Cursor's own folder), duplicate (a listed folder; both by
+// folded path or directory identity). Errors: nullPayload, invalidUtf8,
+// invalidJson.
+char *tb_validate_cursor_profile(const char *json);
 
 // Whether Cursor desktop's state.vscdb exists: {"present":bool}. Metadata
 // only; nothing in the file is read.

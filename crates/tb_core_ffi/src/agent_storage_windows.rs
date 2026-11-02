@@ -33,7 +33,8 @@ use windows_sys::Win32::Security::{
     GetAclInformation, GetLengthSid, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
     GetSecurityDescriptorLength, GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor,
     IsValidAcl, IsValidSecurityDescriptor, IsValidSid, SetSecurityDescriptorControl,
-    SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, TokenUser, WinLocalSystemSid,
+    SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, TokenUser,
+    WinBuiltinAdministratorsSid, WinLocalSystemSid,
     ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION,
     DACL_SECURITY_INFORMATION, NO_INHERITANCE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
     PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
@@ -41,7 +42,8 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, FileAttributeTagInfo, FileIdInfo, FlushFileBuffers,
-    GetFileInformationByHandleEx, GetFileType, CREATE_NEW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DEVICE,
+    GetDriveTypeW, GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW,
+    GetVolumeInformationByHandleW, CREATE_NEW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DEVICE,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ,
@@ -1388,6 +1390,317 @@ fn inspect_acl(snapshot: &AclSnapshot, current_user: &[u8], local_system: &[u8])
         Ok(())
     } else {
         Err(security_verification_failed())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Foreign files: an added Cursor profile's `state.vscdb` (CMP-W WB1/WB2).
+//
+// Not Syrtis storage: the file belongs to the user's Cursor, so there is no
+// DACL contract to verify. What is verified, on one handle that is kept open
+// while SQLite reads the same file: it is a regular disk file that is not a
+// reparse point of any kind (symlink, junction, cloud placeholder), on a
+// volume that keeps ACLs, not behind a UNC path, and owned by the current
+// user or BUILTIN\Administrators (Cursor once run elevated; a standard user
+// cannot give a file that owner). The handle does not share delete, so the
+// name cannot be renamed, deleted or replaced while it is held.
+
+/// `GetVolumeInformationByHandleW` flag: the file system keeps ACLs.
+const FILE_PERSISTENT_ACLS: u32 = 0x0000_0008;
+
+/// Why an added profile's database was refused. Each maps to one fixed
+/// reason code (`code`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ForeignRefusal {
+    /// Nothing there (or no medium): "not signed in", not an error.
+    Absent,
+    NotFile,
+    Reparse,
+    NoAclVolume,
+    Remote,
+    ForeignOwner,
+    Unreadable,
+}
+
+impl ForeignRefusal {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Absent => "not_signed_in",
+            Self::NotFile => "db_not_file",
+            Self::Reparse => "db_symlink",
+            Self::NoAclVolume => "db_no_acl_volume",
+            Self::Remote => "db_remote",
+            Self::ForeignOwner => "db_foreign_owner",
+            Self::Unreadable => "login_unreadable",
+        }
+    }
+}
+
+/// Volume serial number plus 128-bit file id: one file, whatever its name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FileIdentity(u64, [u8; 16]);
+
+impl From<StorageIdentity> for FileIdentity {
+    fn from(identity: StorageIdentity) -> Self {
+        Self(identity.volume_serial_number, identity.file_id)
+    }
+}
+
+/// `GetDriveTypeW` of the drive `path` starts with (`X:\`). Only meaningful
+/// for an absolute drive path (`claude_config_dirs::normalize`); anything
+/// else is `DRIVE_UNKNOWN` (0). Touches no file on the drive.
+pub(crate) fn drive_type(path: &Path) -> u32 {
+    let text = path.as_os_str().encode_wide().take(3).collect::<Vec<u16>>();
+    let is_drive = text.len() == 3
+        && char::from_u32(u32::from(text[0])).is_some_and(|c| c.is_ascii_alphabetic())
+        && text[1] == u16::from(b':')
+        && (text[2] == u16::from(b'\\') || text[2] == u16::from(b'/'));
+    if !is_drive {
+        return 0;
+    }
+    let root = [text[0], u16::from(b':'), u16::from(b'\\'), 0];
+    unsafe { GetDriveTypeW(root.as_ptr()) }
+}
+
+/// Handle-first open of a foreign regular file for reading (WB1). Returns the
+/// pinned handle and the file's identity; the caller keeps the handle open
+/// until it has finished with every other open of the same name and compares
+/// that open's identity with this one.
+pub(crate) fn open_foreign_file(path: &Path) -> Result<(File, FileIdentity), ForeignRefusal> {
+    let file = open_windows_path_with_share(
+        path,
+        GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+    )
+    .map_err(|error| classify_failed_open(path, &error))?;
+    let handle = file.as_raw_handle() as HANDLE;
+    // First: on exFAT (measured on 188) the attribute-tag query below fails
+    // with ERROR_INVALID_PARAMETER, and "no ACLs" is the reason worth
+    // reporting. Every check must pass whatever the order.
+    let mut flags = 0u32;
+    if unsafe {
+        GetVolumeInformationByHandleW(
+            handle,
+            null_mut(),
+            0,
+            null_mut(),
+            null_mut(),
+            &mut flags,
+            null_mut(),
+            0,
+        )
+    } == 0
+    {
+        return Err(ForeignRefusal::Unreadable);
+    }
+    if flags & FILE_PERSISTENT_ACLS == 0 {
+        return Err(ForeignRefusal::NoAclVolume);
+    }
+    let identity = foreign_identity(handle)?;
+    if final_path_is_unc(handle)? {
+        return Err(ForeignRefusal::Remote);
+    }
+    let owner = read_security_snapshot(handle)
+        .map_err(|_| ForeignRefusal::Unreadable)?
+        .owner;
+    let user = current_process_user_sid().map_err(|_| ForeignRefusal::Unreadable)?;
+    let admins =
+        well_known_sid(WinBuiltinAdministratorsSid).map_err(|_| ForeignRefusal::Unreadable)?;
+    if !owner_is_user_or_admins(&owner, user.as_bytes(), admins.as_bytes()) {
+        return Err(ForeignRefusal::ForeignOwner);
+    }
+    Ok((file, identity))
+}
+
+/// The owner rule (W0 decision 2026-11-02): the current user or
+/// BUILTIN\Administrators, nothing else.
+fn owner_is_user_or_admins(owner: &[u8], user: &[u8], admins: &[u8]) -> bool {
+    !owner.is_empty() && (owner == user || owner == admins)
+}
+
+/// The identity of the file behind a raw handle another library opened (for
+/// example SQLite's, through `SQLITE_FCNTL_WIN32_GET_HANDLE`), held to the
+/// same type and attribute rule; `None` if it is not such a file.
+pub(crate) fn raw_handle_identity(handle: HANDLE) -> Option<FileIdentity> {
+    foreign_identity(handle).ok()
+}
+
+/// A directory's identity, following reparse points (add-time duplicate
+/// check: two spellings of one folder compare equal). Metadata only. `None`
+/// for anything that cannot be opened as a directory.
+pub(crate) fn directory_identity(path: &Path) -> Option<FileIdentity> {
+    let file = open_windows_path_with_share(
+        path,
+        FILE_READ_ATTRIBUTES,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        STORAGE_SHARE_MODE,
+    )
+    .ok()?;
+    storage_identity(file.as_raw_handle() as HANDLE, StorageObjectKind::Directory)
+        .ok()
+        .map(FileIdentity::from)
+}
+
+fn foreign_identity(handle: HANDLE) -> Result<FileIdentity, ForeignRefusal> {
+    foreign_kind(handle)?;
+    storage_identity(handle, StorageObjectKind::RegularFile)
+        .map(FileIdentity::from)
+        .map_err(|_| ForeignRefusal::Unreadable)
+}
+
+/// A regular disk file that is not a reparse point of any kind.
+fn foreign_kind(handle: HANDLE) -> Result<(), ForeignRefusal> {
+    validate_handle(handle).map_err(|_| ForeignRefusal::Unreadable)?;
+    if unsafe { GetFileType(handle) } != FILE_TYPE_DISK {
+        return Err(ForeignRefusal::NotFile);
+    }
+    let mut attributes = FILE_ATTRIBUTE_TAG_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            (&mut attributes as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(ForeignRefusal::Unreadable);
+    }
+    if attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(ForeignRefusal::Reparse);
+    }
+    if attributes.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE) != 0 {
+        return Err(ForeignRefusal::NotFile);
+    }
+    Ok(())
+}
+
+/// The handle's final path is `\\?\UNC\...` (WB2's second check, after the
+/// drive-type check that runs before any I/O).
+fn final_path_is_unc(handle: HANDLE) -> Result<bool, ForeignRefusal> {
+    let mut buffer = vec![0u16; 512];
+    loop {
+        let written =
+            unsafe { GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0) }
+                as usize;
+        if written == 0 {
+            return Err(ForeignRefusal::Unreadable);
+        }
+        if written < buffer.len() {
+            let path = String::from_utf16_lossy(&buffer[..written]);
+            return Ok(path
+                .get(..8)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\UNC\")));
+        }
+        buffer.resize(written + 1, 0);
+    }
+}
+
+/// A failed open, told apart: nothing there, a directory, or anything else.
+fn classify_failed_open(path: &Path, error: &io::Error) -> ForeignRefusal {
+    // FILE_NOT_FOUND, PATH_NOT_FOUND, NOT_READY (no medium).
+    if matches!(error.raw_os_error(), Some(2 | 3 | 21)) {
+        return ForeignRefusal::Absent;
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => ForeignRefusal::Reparse,
+        Ok(meta) if meta.is_dir() => ForeignRefusal::NotFile,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => ForeignRefusal::Absent,
+        _ => ForeignRefusal::Unreadable,
+    }
+}
+
+/// Test fixtures run elevated on 188 (new files are owned by
+/// Administrators), so each fixture sets its owner explicitly.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum TestOwner {
+    CurrentUser,
+    Administrators,
+    /// Someone else (LocalSystem). Needs SeRestorePrivilege, which an
+    /// elevated process holds disabled; this enables it first.
+    LocalSystem,
+}
+
+#[cfg(test)]
+pub(crate) fn set_owner_for_test(path: &Path, owner: TestOwner) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::WRITE_OWNER;
+    let sid = match owner {
+        TestOwner::CurrentUser => current_process_user_sid()?,
+        TestOwner::Administrators => well_known_sid(WinBuiltinAdministratorsSid)?,
+        TestOwner::LocalSystem => {
+            enable_privilege_for_test("SeRestorePrivilege")?;
+            well_known_sid(WinLocalSystemSid)?
+        }
+    };
+    let flags = if path.is_dir() {
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+    } else {
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT
+    };
+    let file = open_windows_path(path, WRITE_OWNER | READ_CONTROL, OPEN_EXISTING, flags)?;
+    let status = unsafe {
+        SetSecurityInfo(
+            file.as_raw_handle() as HANDLE,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            sid.as_psid(),
+            null_mut(),
+            null(),
+            null(),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(win32_status_error(status));
+    }
+    let actual = read_security_snapshot(file.as_raw_handle() as HANDLE)?.owner;
+    if actual == sid.as_bytes() {
+        Ok(())
+    } else {
+        Err(io::Error::other("owner did not change"))
+    }
+}
+
+#[cfg(test)]
+fn enable_privilege_for_test(name: &str) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::{ERROR_NOT_ALL_ASSIGNED, LUID};
+    use windows_sys::Win32::Security::{
+        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES,
+        SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+    };
+    let mut token = null_mut();
+    if unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )
+    } == 0
+    {
+        return Err(last_win32_error());
+    }
+    let token = OwnedHandle(token);
+    let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let mut luid = LUID::default();
+    if unsafe { LookupPrivilegeValueW(null(), wide.as_ptr(), &mut luid) } == 0 {
+        return Err(last_win32_error());
+    }
+    let privileges = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [LUID_AND_ATTRIBUTES {
+            Luid: luid,
+            Attributes: SE_PRIVILEGE_ENABLED,
+        }],
+    };
+    if unsafe { AdjustTokenPrivileges(token.0, 0, &privileges, 0, null_mut(), null_mut()) } == 0 {
+        return Err(last_win32_error());
+    }
+    match unsafe { GetLastError() } {
+        ERROR_NOT_ALL_ASSIGNED => Err(io::Error::other(format!("{name} is not held"))),
+        _ => Ok(()),
     }
 }
 
