@@ -61,8 +61,9 @@ public sealed partial class SettingsWindow : Window
         // state has nothing to fall back to and just clips the labels to
         // "Menu"/"Dash"/"Gene"/"Abou". macOS has no such control either.
         // "Accounts" / 帳號 are shorter than the existing "Attribution" and
-        // "Dashboard" labels, so they are expected to fit the 180 px pane; not
-        // rendered or measured.
+        // "Dashboard" labels. The page was rendered on 188 in zh-Hant
+        // (2026-11-02, screenshot) and the maintainer approved it; the other
+        // languages' labels were not measured.
         IsPaneToggleButtonVisible = false,
         // NavigationView's default is 320, which would eat the width the 732
         // -> 900 widening was meant to give the content column: 900 - 304
@@ -1113,7 +1114,7 @@ public sealed partial class SettingsWindow : Window
             () => AntigravityAccountsCopy.InfoRows(AntigravityAutoCapture.Shared?.IsEnabled),
             BuildAntigravityAccounts(store)));
         panel.Children.Add(InfoSection(
-            CursorSync.Copy.Header, CursorSync.Copy.Summary, CursorSync.Copy.InfoRows,
+            CursorSync.Copy.Header, SettingsCopy.CursorSummary, CursorSync.Copy.InfoRows,
             BuildCursorSync(store)));
         return panel;
     }
@@ -2013,10 +2014,19 @@ public sealed partial class SettingsWindow : Window
     private static StackPanel Section(string title, UIElement content)
     {
         var section = new StackPanel { Spacing = 6 };
-        var header = Ui.Text(title.ToUpperInvariant(), 10, 0.55, bold: true);
-        section.Children.Add(header);
+        section.Children.Add(SectionHeader(title));
         section.Children.Add(content);
         return section;
+    }
+
+    /// <summary>A section's caps header, a Level2 heading so Narrator's H key
+    /// moves between sections (Claude / Antigravity / Cursor).</summary>
+    private static TextBlock SectionHeader(string title)
+    {
+        var header = Ui.Text(title.ToUpperInvariant(), 10, 0.55, bold: true);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHeadingLevel(
+            header, Microsoft.UI.Xaml.Automation.Peers.AutomationHeadingLevel.Level2);
+        return header;
     }
 
     /// <summary>A Section whose header carries an info button and whose only
@@ -2030,6 +2040,7 @@ public sealed partial class SettingsWindow : Window
         // Filled on each open: the rows can depend on live state (the Antigravity
         // note that applies only while automatic capture is off).
         var details = new StackPanel { Spacing = 8, MaxWidth = 320 };
+        var name = SettingsCopy.MoreInfo.Localized(title);
         // A ScrollViewer that takes focus when the flyout opens, so arrow keys
         // and PageDown scroll text that is otherwise unfocusable, and a screen
         // reader lands inside the flyout; the Antigravity rows are taller than
@@ -2041,6 +2052,8 @@ public sealed partial class SettingsWindow : Window
             IsTabStop = true,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
         };
+        // Focused on open, so it is what a screen reader names first.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(scroller, name);
         var flyout = new Flyout { Content = scroller, Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Bottom };
         flyout.Opening += (_, _) =>
         {
@@ -2060,7 +2073,8 @@ public sealed partial class SettingsWindow : Window
                 details.Children.Add(line);
             }
         };
-        flyout.Opened += (_, _) => scroller.Focus(FocusState.Keyboard);
+        // Programmatic, not Keyboard: a mouse open must not draw a focus rectangle.
+        flyout.Opened += (_, _) => scroller.Focus(FocusState.Programmatic);
 
         var button = new Button
         {
@@ -2073,7 +2087,6 @@ public sealed partial class SettingsWindow : Window
             VerticalAlignment = VerticalAlignment.Center,
             Flyout = flyout,
         };
-        var name = SettingsCopy.MoreInfo.Localized(title);
         // No ToolTip: it would repeat this name to a screen reader, and the
         // glyph is the usual info mark.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, name);
@@ -2081,7 +2094,7 @@ public sealed partial class SettingsWindow : Window
         var header = new Grid { ColumnSpacing = 4 };
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        header.Children.Add(Ui.Text(title.ToUpperInvariant(), 10, 0.55, bold: true));
+        header.Children.Add(SectionHeader(title));
         Grid.SetColumn(button, 1);
         header.Children.Add(button);
 
@@ -2090,6 +2103,63 @@ public sealed partial class SettingsWindow : Window
         section.Children.Add(Hint(summary.Localized()));
         section.Children.Add(content);
         return section;
+    }
+
+    /// <summary>A confirmation flyout on a switch whose enabling needs a
+    /// disclosure seen first (Antigravity automatic capture, Cursor usage sync),
+    /// with that switch's own button labels. No ContentDialog: see
+    /// UpdateDialog's note on a second open throwing. Light dismiss counts as
+    /// Cancel.</summary>
+    private static Task<bool> ConfirmFlyout(
+        FrameworkElement anchor, string title, string body, string ok, string cancel)
+    {
+        var answer = new TaskCompletionSource<bool>();
+        var heading = Ui.Text(title.Localized(), 13, bold: true);
+        var text = Ui.Text(body.Localized(), 12);
+        var panel = new StackPanel { Spacing = 10, MaxWidth = 320 };
+        foreach (var line in new[] { heading, text })
+        {
+            line.TextWrapping = TextWrapping.Wrap;
+            line.TextTrimming = TextTrimming.None;
+            panel.Children.Add(line);
+        }
+
+        // Focus opens on Cancel, so the disclosure is attached to the flyout
+        // (name = title, description = body) and to the consenting button, not
+        // left as plain text a screen reader passes over.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(panel, heading.Text);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetFullDescription(panel, text.Text);
+
+        var flyout = new Flyout
+        {
+            Content = panel,
+            Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Bottom,
+        };
+        var cancelButton = new Button { Content = cancel.Localized() };
+        var okButton = new Button
+        {
+            Content = ok.Localized(),
+            Style = (Style)Application.Current.Resources["AccentButtonStyle"],
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.GetDescribedBy(okButton).Add(text);
+        cancelButton.Click += (_, _) => flyout.Hide();
+        okButton.Click += (_, _) =>
+        {
+            answer.TrySetResult(true);
+            flyout.Hide();
+        };
+        flyout.Closed += (_, _) => answer.TrySetResult(false);
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            HorizontalAlignment = HorizontalAlignment.Right,
+        };
+        buttons.Children.Add(cancelButton);
+        buttons.Children.Add(okButton);
+        panel.Children.Add(buttons);
+        flyout.ShowAt(anchor);
+        return answer.Task;
     }
 
     private static StackPanel RadioGroup(

@@ -46,11 +46,14 @@ internal static class SettingsCopy
     // the info button's accessible name (the {0} is its section).
     internal const string AccountsPage = "Accounts";
     internal const string MoreInfo = "More details: {0}";
+    // macOS AccountsCopy.cursorSummary: the Cursor section's one line. Its
+    // zh wording differs from the switch label below it, as on macOS.
+    internal const string CursorSummary = "Sync usage from the Cursor app.";
 
     internal static IReadOnlyList<(string Raw, string Label)> LayoutOptions =>
         [("full", "Layout: Full"), ("classic", "Layout: Classic"), ("chart", "Layout: Chart")];
 
     internal static IReadOnlyList<string> All =>
         [About, TextColorHint, GaugeColoringHint, LiveTraceToggle, LiveTraceHint, RefreshHint,
-            LayoutHint, AccountsPage, MoreInfo, TokenBar.Core.CursorSync.Copy.Summary];
+            LayoutHint, AccountsPage, MoreInfo, CursorSummary];
 }

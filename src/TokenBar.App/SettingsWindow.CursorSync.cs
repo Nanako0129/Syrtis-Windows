@@ -45,17 +45,23 @@ public sealed partial class SettingsWindow
                 return;
             }
 
-            // Turning the switch on before the notice is answered answers it
-            // (CursorSyncController.SetEnabled), so the disclosure must be seen
-            // first. It used to sit beside the switch; it is behind the info
-            // button now, so it is shown in a confirmation instead.
-            if (toggle.IsOn && !CursorSync.NoticeAcknowledged(store)
-                && !await ConfirmFlyout(toggle, CursorSync.Copy.Title, CursorSync.Copy.Privacy))
+            // Consent (macOS switchChanged / confirmEnable): SetEnabled never
+            // answers the notice, so while it is unanswered the switch shows
+            // the privacy paragraph in a confirmation, and only Continue
+            // answers it (AnswerNotice). Cancel or light dismiss leaves the
+            // switch off and changes nothing.
+            if (toggle.IsOn && !CursorSync.NoticeAcknowledged(store))
             {
-                reverting = true;
-                toggle.IsOn = false;
-                reverting = false;
-                return;
+                if (!await ConfirmFlyout(toggle, CursorSync.Copy.Title, CursorSync.Copy.Privacy,
+                        CursorSync.Copy.Continue, CursorSync.Copy.Cancel))
+                {
+                    reverting = true;
+                    toggle.IsOn = false;
+                    reverting = false;
+                    return;
+                }
+
+                cursor.AnswerNotice(continuing: true);
             }
 
             cursor.SetEnabled(toggle.IsOn);

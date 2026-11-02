@@ -100,10 +100,10 @@ public class AccountsPageCopyTests
     [Fact]
     public void CursorKeepsOneLineAndItsPrivacyParagraphInTheInfo()
     {
-        Assert.DoesNotContain('\n', CursorSync.Copy.Summary);
-        Assert.True(CursorSync.Copy.Summary.Length <= 60);
+        Assert.DoesNotContain('\n', SettingsCopy.CursorSummary);
+        Assert.True(SettingsCopy.CursorSummary.Length <= 60);
         Assert.Equal([(CursorSync.Copy.Privacy, false)], CursorSync.Copy.InfoRows());
-        Assert.Contains(CursorSync.Copy.Summary, SettingsCopy.All); // checked in both tables
+        Assert.Contains(SettingsCopy.CursorSummary, SettingsCopy.All); // checked in both tables
 
         // Reads the Cursor login; sends only to Cursor's usage service; what is
         // stored; the login is not stored; turning off deletes the usage.

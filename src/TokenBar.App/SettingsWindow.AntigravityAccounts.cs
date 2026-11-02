@@ -1,6 +1,5 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
 using TokenBar.Core;
 // TokenBar.Core.Grid collides with the XAML Grid (as in SettingsWindow.cs).
 using Grid = Microsoft.UI.Xaml.Controls.Grid;
@@ -128,49 +127,6 @@ public sealed partial class SettingsWindow
     /// flyout on the toggle (no ContentDialog: see UpdateDialog's note on a
     /// second open throwing). Light dismiss counts as Cancel.</summary>
     private static Task<bool> ConfirmAutoCapture(FrameworkElement anchor) =>
-        ConfirmFlyout(anchor, AntigravityAccountsCopy.ConfirmTitle, AntigravityAccountsCopy.ConfirmBody);
-
-    /// <summary>The same flyout for any switch whose enabling needs a
-    /// disclosure shown first (Cursor usage sync uses it too).</summary>
-    private static Task<bool> ConfirmFlyout(FrameworkElement anchor, string title, string body)
-    {
-        var answer = new TaskCompletionSource<bool>();
-        var panel = new StackPanel { Spacing = 10, MaxWidth = 320 };
-        foreach (var line in new[]
-                 {
-                     Ui.Text(title.Localized(), 13, bold: true),
-                     Ui.Text(body.Localized(), 12),
-                 })
-        {
-            line.TextWrapping = TextWrapping.Wrap;
-            line.TextTrimming = TextTrimming.None;
-            panel.Children.Add(line);
-        }
-
-        var flyout = new Flyout { Content = panel, Placement = FlyoutPlacementMode.Bottom };
-        var cancel = new Button { Content = AntigravityAccountsCopy.ConfirmCancel.Localized() };
-        var ok = new Button
-        {
-            Content = AntigravityAccountsCopy.ConfirmOk.Localized(),
-            Style = (Style)Application.Current.Resources["AccentButtonStyle"],
-        };
-        cancel.Click += (_, _) => flyout.Hide();
-        ok.Click += (_, _) =>
-        {
-            answer.TrySetResult(true);
-            flyout.Hide();
-        };
-        flyout.Closed += (_, _) => answer.TrySetResult(false);
-        var buttons = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8,
-            HorizontalAlignment = HorizontalAlignment.Right,
-        };
-        buttons.Children.Add(cancel);
-        buttons.Children.Add(ok);
-        panel.Children.Add(buttons);
-        flyout.ShowAt(anchor);
-        return answer.Task;
-    }
+        ConfirmFlyout(anchor, AntigravityAccountsCopy.ConfirmTitle, AntigravityAccountsCopy.ConfirmBody,
+            AntigravityAccountsCopy.ConfirmOk, AntigravityAccountsCopy.ConfirmCancel);
 }

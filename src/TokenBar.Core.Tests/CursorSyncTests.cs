@@ -131,14 +131,30 @@ public class CursorSyncTests
         Assert.False(CursorSync.ShouldSync(store));
     }
 
+    // Consent lives in the controller: the Settings switch alone never answers
+    // the notice (its confirmation's Continue does, through AnswerNotice), so
+    // turning it on before the notice is answered tells the core off and
+    // syncs nothing.
     [Fact]
-    public void TheSettingsSwitchAnswersTheNoticeWhenTurnedOn()
+    public async Task TheSettingsSwitchAloneNeverAnswersTheNotice()
     {
         var store = TempStore();
-        var controller = new CursorSyncController(new FakeCore().Io, store, User, interval: Never);
+        var core = new FakeCore();
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
         controller.SetEnabled(true);
+        await Until(() => core.Pushes.Count == 1);
+        await Task.Delay(100);
+        Assert.False(CursorSync.NoticeAcknowledged(store));
+        Assert.False(CursorSync.ShouldSync(store));
+        Assert.False(core.Pushes.Last().Enabled);
+        Assert.Equal(0, core.Log.Count(e => e.StartsWith("sync", StringComparison.Ordinal)));
+
+        // Control: the confirmation's Continue answers it, and the core is told on.
+        controller.AnswerNotice(continuing: true);
+        await Until(() => core.Pushes.Count == 2);
         Assert.True(CursorSync.NoticeAcknowledged(store));
         Assert.True(CursorSync.ShouldSync(store));
+        Assert.True(core.Pushes.Last().Enabled);
     }
 
     // ---- notice and switch rules ------------------------------------------------
@@ -611,6 +627,7 @@ public class CursorSyncTests
         ["To show your Cursor usage, Syrtis reads the login of the Cursor app on this PC and sends it only to Cursor's usage service (cursor.com) to download your usage. Syrtis stores the date, model, token counts, cost and conversation ID of each request on this PC; the login itself is never saved or logged. Turning this off deletes the downloaded usage."] =
             "要顯示 Cursor 用量，Syrtis 會讀取這台電腦上 Cursor App 的登入資訊，只送到 Cursor 的用量服務（cursor.com）下載你的用量。Syrtis 會在這台電腦上存下每次請求的日期、模型、token 數、費用和對話 ID；登入資訊本身不會儲存或記錄。關閉這個選項會刪除已下載的用量。",
         ["Continue"] = "繼續",
+        ["Cancel"] = "取消",
         ["Turn Off"] = "關閉",
         ["Last synced {0}"] = "上次同步：{0}",
         ["Only part of your usage was downloaded. Syrtis will try again."] = "只下載到部分用量，Syrtis 會再試一次。",

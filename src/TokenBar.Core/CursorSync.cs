@@ -20,8 +20,12 @@ public static class CursorSync
     /// explicit off differ.</summary>
     public const string EnabledKey = "tokenbar.cursorSync.enabled";
 
-    /// <summary>The one-time notice was answered (Continue, Turn Off, or turning
-    /// the Settings switch on, which shows the same paragraph beside it).</summary>
+    /// <summary>The one-time notice was answered. Written only by
+    /// <see cref="CursorSyncController.AnswerNotice"/>: Continue or Turn Off on
+    /// the Overview card, or Continue in the confirmation the Settings switch
+    /// opens; both show the privacy paragraph. Turning the switch on
+    /// (<see cref="CursorSyncController.SetEnabled"/>) never writes it, so
+    /// nothing syncs (<see cref="ShouldSync"/>) until one of those was answered.</summary>
     public const string NoticeKey = "tokenbar.cursorSync.noticeAcknowledged";
 
     /// <summary>D6: the user chose Syrtis's own sync over tokscale CLI Cursor
@@ -44,9 +48,10 @@ public static class CursorSync
 
     /// <summary>What the Settings switch shows: on only when sync can actually
     /// run. Before the notice is answered nothing syncs, so the default-on
-    /// preference alone must not read as "on" with every control inert;
-    /// turning the switch on answers the notice
-    /// (<see cref="CursorSyncController.SetEnabled"/>).</summary>
+    /// preference alone must not read as "on" with every control inert.
+    /// Turning the switch on while unanswered opens a confirmation first, and
+    /// only its Continue answers the notice
+    /// (<see cref="CursorSyncController.AnswerNotice"/>).</summary>
     public static bool ToggleShowsOn(bool enabled, bool acknowledged) => enabled && acknowledged;
 
     /// <summary>The preference and the notice (D3): what the core is told and
@@ -89,13 +94,12 @@ public static class CursorSync
         public const string Toggle = "Sync Cursor usage from the Cursor app";
         /// <summary>The Accounts page section header: a product name, not translated.</summary>
         public const string Header = "Cursor";
-        /// <summary>The one line kept under the header; <see cref="Privacy"/> is behind the info button.
-        /// Not in <see cref="All"/>: that list is pinned to the shared approved
-        /// text; this one is translated and checked via SettingsCopy.All.</summary>
-        public const string Summary = "Sync usage from the Cursor app.";
         public const string Privacy =
             "To show your Cursor usage, Syrtis reads the login of the Cursor app on this PC and sends it only to Cursor's usage service (cursor.com) to download your usage. Syrtis stores the date, model, token counts, cost and conversation ID of each request on this PC; the login itself is never saved or logged. Turning this off deletes the downloaded usage.";
         public const string Continue = "Continue";
+        /// <summary>macOS <c>CursorSync.Copy.cancel</c>: the Settings
+        /// confirmation's buttons are Cancel / Continue.</summary>
+        public const string Cancel = "Cancel";
         public const string TurnOff = "Turn Off";
         /// <summary>macOS "Last synced %@"; .NET's placeholder is {0}.</summary>
         public const string LastSynced = "Last synced {0}";
@@ -124,7 +128,7 @@ public static class CursorSync
 
         public static readonly string[] All =
         [
-            Title, Toggle, Privacy, Continue, TurnOff, LastSynced, Partial, Expired, NotSignedIn,
+            Title, Toggle, Privacy, Continue, Cancel, TurnOff, LastSynced, Partial, Expired, NotSignedIn,
             Offline, Error, CliPresent, SyncNow, Syncing, CliQuestion, UseSyrtis, KeepCli, CleanupFailed,
         ];
     }
@@ -526,20 +530,19 @@ public sealed class CursorSyncController
 
     // ---- Actions behind the controls ---------------------------------------
 
-    /// <summary>The Settings switch. Turning it on shows the privacy paragraph
-    /// beside it, so it also answers the notice.</summary>
+    /// <summary>The Settings switch: stores the preference only. It never
+    /// answers the notice, so turning it on before the notice is answered
+    /// syncs nothing; the switch asks for confirmation first and its Continue
+    /// calls <see cref="AnswerNotice"/>.</summary>
     public void SetEnabled(bool on)
     {
         _store.SetBool(CursorSync.EnabledKey, on);
-        if (on)
-        {
-            _store.SetBool(CursorSync.NoticeKey, true);
-        }
-
         Reconfigure(refresh: true);
     }
 
-    /// <summary>The notice: Continue (<paramref name="continuing"/>) or Turn Off.</summary>
+    /// <summary>The notice: Continue (<paramref name="continuing"/>) or Turn
+    /// Off, on the Overview card or in the Settings confirmation. The only
+    /// writer of <see cref="CursorSync.NoticeKey"/>.</summary>
     public void AnswerNotice(bool continuing)
     {
         _store.SetBool(CursorSync.NoticeKey, true);
