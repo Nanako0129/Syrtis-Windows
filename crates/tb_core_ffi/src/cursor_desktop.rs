@@ -15,8 +15,9 @@
 //!   profile's database.
 //! - `read_login_default`: the Cursor sync's default profile. `read_login`'s
 //!   checks plus `DEFENSIVE` and `trusted_schema=OFF` (WB10), nothing else.
-//! - `read_login_added`: an added `--user-data-dir` profile. The drive must be
-//!   a fixed one before any I/O (WB2), then the handle-first open in
+//! - `read_login_added`: an added `--user-data-dir` profile. The root's drive
+//!   letter must be a fixed drive before any I/O, and so must the volume the
+//!   opened handle is on (WB2), then the rest of the handle-first open in
 //!   `agent_storage_windows::open_foreign_file` (WB1); SQLite then opens the
 //!   same name and its handle must be that same file. SQLite's
 //!   `SQLITE_OPEN_NOFOLLOW` is not used: on Windows it refuses nothing
@@ -32,7 +33,8 @@ pub(crate) fn profile_db_path(root: &Path) -> PathBuf {
     root.join("User").join("globalStorage").join("state.vscdb")
 }
 
-/// `GetDriveTypeW` of the drive a path starts with; tests inject their own.
+/// `GetDriveTypeW` of a profile root's drive letter, or of a volume GUID root
+/// `\\?\Volume{…}\` (the handle check); tests inject their own.
 pub(crate) type DriveType<'a> = dyn Fn(&Path) -> u32 + Sync + 'a;
 
 #[cfg(windows)]
@@ -133,9 +135,12 @@ fn open_hardened(db_path: &Path) -> rusqlite::Result<rusqlite::Connection> {
     Ok(conn)
 }
 
-/// An added profile's reader (WB1, WB2), every sync. In order: the drive is
-/// fixed (no other I/O before that; an unmounted letter is "not signed in");
-/// the handle-first checks on `<root>\User\globalStorage\state.vscdb`; the
+/// An added profile's reader (WB1, WB2), every sync. In order: the root's
+/// drive letter is a fixed drive (no other I/O before that; an unmounted
+/// letter is "not signed in"); the handle-first checks on
+/// `<root>\User\globalStorage\state.vscdb`, which begin with the UNC check
+/// and with `drive_type` asked again for the volume the opened file is on (a
+/// junction under the root can lead to another volume); the
 /// hardened SQLite open of that name while the checked handle is held; and
 /// SQLite's own handle names the same file. Every refusal is a fixed reason;
 /// `Ok(None)` is no database or no token.
@@ -151,7 +156,7 @@ pub(crate) fn read_login_added(
         _ => return Err("db_not_fixed_drive"),
     }
     let db = profile_db_path(root);
-    let (pinned, identity) = match open_foreign_file(&db) {
+    let (pinned, identity) = match open_foreign_file(&db, drive_type) {
         Ok(opened) => opened,
         Err(ForeignRefusal::Absent) => return Ok(None),
         Err(refusal) => return Err(refusal.code()),
@@ -407,6 +412,47 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// WB2 on the handle (/code-review finding 2): the pre-I/O check sees
+    /// only the root's drive letter, so the volume the opened file is really
+    /// on is asked again, by its volume GUID root. Injected: the root's letter
+    /// answers fixed, the handle's volume answers removable →
+    /// `db_not_fixed_drive`. Control: the real query on this fixed volume
+    /// passes, and answers fixed for that same GUID root.
+    #[cfg(windows)]
+    #[test]
+    fn the_volume_the_handle_is_on_must_be_fixed() {
+        use crate::agent_storage_windows::{set_owner_for_test, TestOwner};
+        const DRIVE_REMOVABLE: u32 = 2;
+        let root = temp_root("volume");
+        let dir = root.join("User").join("globalStorage");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = empty_db(&dir);
+        set_owner_for_test(&db, TestOwner::CurrentUser).unwrap();
+        let asked = std::sync::Mutex::new(Vec::<PathBuf>::new());
+        let removable_volume = |path: &Path| {
+            asked.lock().unwrap().push(path.to_path_buf());
+            if path.to_string_lossy().starts_with(r"\\?\Volume{") {
+                DRIVE_REMOVABLE
+            } else {
+                DRIVE_FIXED
+            }
+        };
+        assert_eq!(
+            read_login_added(&root, &removable_volume).err(),
+            Some("db_not_fixed_drive")
+        );
+        let asked = asked.into_inner().unwrap();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert_eq!(asked[0], root);
+        let volume = asked[1].clone();
+        assert!(volume.to_string_lossy().ends_with("}\\"), "{volume:?}");
+        // Controls: the real query answers fixed for that GUID root, and the
+        // same database on it is read.
+        assert_eq!(drive_type(&volume), DRIVE_FIXED);
+        assert!(matches!(read_login_added(&root, &drive_type), Ok(None)));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /// WB1 on a volume without persistent ACLs: an exFAT VHD, mounted for
     /// this test only (needs elevation, so it is a manual run:
     /// `cargo test -p tb_core_ffi -- --ignored an_exfat_volume_is_refused`).
@@ -471,6 +517,112 @@ mod tests {
         let refused = read_login_added(&profile, &drive_type);
         eprintln!("measured: exFAT added profile -> {:?}", refused.as_ref().err());
         assert_eq!(refused.err(), Some("db_no_acl_volume"));
+    }
+
+    /// WB2 on the handle with a real non-fixed volume: an ISO image (made
+    /// with IMAPI2, holding `gs\state.vscdb`) mounted as an optical drive,
+    /// reached through a junction `<root>\User\globalStorage` under a root on
+    /// the fixed system drive. The root's letter passes the pre-I/O check; the
+    /// handle's volume must refuse it. Mounts an image (needs elevation), so
+    /// it is a manual run:
+    /// `cargo test -p tb_core_ffi -- --ignored --exact cursor_desktop::tests::a_junction_onto_an_optical_volume_is_refused`.
+    /// The image is always dismounted and deleted, and the work dir removed,
+    /// also when an assertion fails.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "manual: mounts an ISO image with Mount-DiskImage (needs elevation)"]
+    fn a_junction_onto_an_optical_volume_is_refused() {
+        /// Removed after the image (declared first, dropped last). The
+        /// junction is removed as a link, never followed.
+        struct Work(PathBuf);
+        impl Drop for Work {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir(self.0.join("root").join("User").join("globalStorage"));
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        struct Iso(PathBuf);
+        impl Drop for Iso {
+            fn drop(&mut self) {
+                let _ = powershell(&format!(
+                    "Dismount-DiskImage -ImagePath '{}' | Out-Null",
+                    self.0.display()
+                ));
+                for _ in 0..50 {
+                    if std::fs::remove_file(&self.0).is_ok() || !self.0.exists() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+        fn powershell(script: &str) -> Option<String> {
+            let out = std::process::Command::new("powershell.exe")
+                .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script])
+                .output()
+                .ok()?;
+            eprintln!("{}", String::from_utf8_lossy(&out.stderr));
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        }
+        let work_dir = Work(temp_root("iso"));
+        let work = work_dir.0.clone();
+        let source = work.join("src");
+        std::fs::create_dir_all(source.join("gs")).unwrap();
+        drop(empty_db(&source.join("gs")));
+        let iso = Iso(work.join("cmpw.iso"));
+        // IMAPI2 writes the image; a tiny C# helper copies its IStream out.
+        let made = powershell(&format!(
+            r#"$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System; using System.IO; using System.Runtime.InteropServices; using System.Runtime.InteropServices.ComTypes;
+public static class CmpwIso {{
+  public static void Save(object stream, string path) {{
+    var s = (IStream)stream; var buf = new byte[65536]; var read = Marshal.AllocHGlobal(4);
+    using (var f = File.Create(path)) {{
+      while (true) {{ s.Read(buf, buf.Length, read); int n = Marshal.ReadInt32(read); if (n == 0) break; f.Write(buf, 0, n); }}
+    }}
+    Marshal.FreeHGlobal(read);
+  }}
+}}
+'@
+$fsi = New-Object -ComObject IMAPI2FS.MsftFileSystemImage
+$fsi.FileSystemsToCreate = 4
+$fsi.VolumeName = 'CMPW'
+$fsi.Root.AddTree('{src}', $false)
+[CmpwIso]::Save($fsi.CreateResultImage().ImageStream, '{iso}')
+$image = Mount-DiskImage -ImagePath '{iso}' -PassThru
+($image | Get-Volume).DriveLetter"#,
+            src = source.display(),
+            iso = iso.0.display()
+        ));
+        let letter = made
+            .as_deref()
+            .and_then(|out| out.lines().last())
+            .and_then(|l| l.trim().chars().next())
+            .expect("fixture: the ISO could not be made and mounted");
+        let target = PathBuf::from(format!("{letter}:\\gs"));
+        eprintln!("measured: GetDriveTypeW({letter}:\\) = {}", drive_type(&target));
+        assert_ne!(drive_type(&target), DRIVE_FIXED, "fixture: the image mounted as a fixed drive");
+        let root = work.join("root");
+        std::fs::create_dir_all(root.join("User")).unwrap();
+        let cmd = std::env::var_os("SystemRoot")
+            .map(|system| PathBuf::from(system).join("System32").join("cmd.exe"))
+            .unwrap();
+        let linked = std::process::Command::new(cmd)
+            .args(["/C", "mklink", "/J"])
+            .arg(root.join("User").join("globalStorage"))
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(linked.status.success(), "mklink /J failed: {linked:?}");
+        assert_eq!(drive_type(&root), DRIVE_FIXED, "the root's letter passes");
+        let refused = read_login_added(&root, &drive_type);
+        eprintln!("measured: junction onto the optical volume -> {:?}", refused.as_ref().err());
+        assert_eq!(refused.err(), Some("db_not_fixed_drive"));
+        drop(iso);
+        drop(work_dir);
     }
 
     /// The presence probe looks at the path only: a directory or a missing

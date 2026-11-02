@@ -47,7 +47,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_TYPE_DISK, OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL,
+    FILE_SHARE_WRITE, FILE_TYPE_DISK, OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL, VOLUME_NAME_DOS,
+    VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -1399,8 +1400,8 @@ fn inspect_acl(snapshot: &AclSnapshot, current_user: &[u8], local_system: &[u8])
 // Not Syrtis storage: the file belongs to the user's Cursor, so there is no
 // DACL contract to verify. What is verified, on one handle that is kept open
 // while SQLite reads the same file: it is a regular disk file that is not a
-// reparse point of any kind (symlink, junction, cloud placeholder), on a
-// volume that keeps ACLs, not behind a UNC path, and owned by the current
+// reparse point of any kind (symlink, junction, cloud placeholder), not
+// behind a UNC path, on a fixed-drive volume that keeps ACLs, and owned by the current
 // user or BUILTIN\Administrators (Cursor once run elevated; a standard user
 // cannot give a file that owner). The handle does not share delete, so the
 // name cannot be renamed, deleted or replaced while it is held.
@@ -1418,6 +1419,9 @@ pub(crate) enum ForeignRefusal {
     Reparse,
     NoAclVolume,
     Remote,
+    /// The volume the opened file is on is not a fixed drive (WB2, on the
+    /// handle: a junction or mount folder can lead off the root's drive).
+    NotFixedDrive,
     ForeignOwner,
     Unreadable,
 }
@@ -1430,6 +1434,7 @@ impl ForeignRefusal {
             Self::Reparse => "db_symlink",
             Self::NoAclVolume => "db_no_acl_volume",
             Self::Remote => "db_remote",
+            Self::NotFixedDrive => "db_not_fixed_drive",
             Self::ForeignOwner => "db_foreign_owner",
             Self::Unreadable => "login_unreadable",
         }
@@ -1446,11 +1451,18 @@ impl From<StorageIdentity> for FileIdentity {
     }
 }
 
-/// `GetDriveTypeW` of the drive `path` starts with (`X:\`). Only meaningful
-/// for an absolute drive path (`claude_config_dirs::normalize`); anything
-/// else is `DRIVE_UNKNOWN` (0). Touches no file on the drive.
+/// `GetDriveTypeW` for one of two inputs: an absolute drive path
+/// (`claude_config_dirs::normalize`), whose drive root `X:\` is queried
+/// (touches no file on the drive), or a volume GUID root `\\?\Volume{…}\`
+/// as `handle_volume_root` returns it, queried as is. Anything else is
+/// `DRIVE_UNKNOWN` (0).
 pub(crate) fn drive_type(path: &Path) -> u32 {
-    let text = path.as_os_str().encode_wide().take(3).collect::<Vec<u16>>();
+    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if is_volume_guid_root(&wide) {
+        let root: Vec<u16> = wide.iter().copied().chain(std::iter::once(0)).collect();
+        return unsafe { GetDriveTypeW(root.as_ptr()) };
+    }
+    let text = wide.into_iter().take(3).collect::<Vec<u16>>();
     let is_drive = text.len() == 3
         && char::from_u32(u32::from(text[0])).is_some_and(|c| c.is_ascii_alphabetic())
         && text[1] == u16::from(b':')
@@ -1462,11 +1474,26 @@ pub(crate) fn drive_type(path: &Path) -> u32 {
     unsafe { GetDriveTypeW(root.as_ptr()) }
 }
 
+/// `\\?\Volume{` + 36-character GUID + `}\`, nothing after it.
+fn is_volume_guid_root(wide: &[u16]) -> bool {
+    let text = String::from_utf16_lossy(wide);
+    text.len() == 49
+        && text
+            .get(..11)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\Volume{"))
+        && text.ends_with("}\\")
+}
+
 /// Handle-first open of a foreign regular file for reading (WB1). Returns the
 /// pinned handle and the file's identity; the caller keeps the handle open
 /// until it has finished with every other open of the same name and compares
-/// that open's identity with this one.
-pub(crate) fn open_foreign_file(path: &Path) -> Result<(File, FileIdentity), ForeignRefusal> {
+/// that open's identity with this one. `drive_type` answers for the volume
+/// the handle's file is on (`drive_type` above in production; tests inject
+/// one): the caller's pre-I/O check saw only the root's drive letter.
+pub(crate) fn open_foreign_file(
+    path: &Path,
+    drive_type: &crate::cursor_desktop::DriveType<'_>,
+) -> Result<(File, FileIdentity), ForeignRefusal> {
     let file = open_windows_path_with_share(
         path,
         GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES,
@@ -1476,7 +1503,21 @@ pub(crate) fn open_foreign_file(path: &Path) -> Result<(File, FileIdentity), For
     )
     .map_err(|error| classify_failed_open(path, &error))?;
     let handle = file.as_raw_handle() as HANDLE;
-    // First: on exFAT (measured on 188) the attribute-tag query below fails
+    // WB2 on the handle, before anything else is asked of the file: not
+    // behind UNC, and on a fixed drive whatever junction or mount folder led
+    // there. A volume with no GUID path cannot be shown to be fixed.
+    let dos = final_path(handle, VOLUME_NAME_DOS).ok_or(ForeignRefusal::Unreadable)?;
+    if dos
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\UNC\"))
+    {
+        return Err(ForeignRefusal::Remote);
+    }
+    match handle_volume_root(handle) {
+        Some(volume) if drive_type(&volume) == crate::cursor_desktop::DRIVE_FIXED => {}
+        _ => return Err(ForeignRefusal::NotFixedDrive),
+    }
+    // Then: on exFAT (measured on 188) the attribute-tag query below fails
     // with ERROR_INVALID_PARAMETER, and "no ACLs" is the reason worth
     // reporting. Every check must pass whatever the order.
     let mut flags = 0u32;
@@ -1499,9 +1540,6 @@ pub(crate) fn open_foreign_file(path: &Path) -> Result<(File, FileIdentity), For
         return Err(ForeignRefusal::NoAclVolume);
     }
     let identity = foreign_identity(handle)?;
-    if final_path_is_unc(handle)? {
-        return Err(ForeignRefusal::Remote);
-    }
     let owner = read_security_snapshot(handle)
         .map_err(|_| ForeignRefusal::Unreadable)?
         .owner;
@@ -1578,25 +1616,32 @@ fn foreign_kind(handle: HANDLE) -> Result<(), ForeignRefusal> {
     Ok(())
 }
 
-/// The handle's final path is `\\?\UNC\...` (WB2's second check, after the
-/// drive-type check that runs before any I/O).
-fn final_path_is_unc(handle: HANDLE) -> Result<bool, ForeignRefusal> {
+/// The handle's final path (`GetFinalPathNameByHandleW` with `flags`), or
+/// `None` when it has none in that form.
+fn final_path(handle: HANDLE, flags: u32) -> Option<String> {
     let mut buffer = vec![0u16; 512];
     loop {
-        let written =
-            unsafe { GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0) }
-                as usize;
+        let written = unsafe {
+            GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, flags)
+        } as usize;
         if written == 0 {
-            return Err(ForeignRefusal::Unreadable);
+            return None;
         }
         if written < buffer.len() {
-            let path = String::from_utf16_lossy(&buffer[..written]);
-            return Ok(path
-                .get(..8)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(r"\\?\UNC\")));
+            return Some(String::from_utf16_lossy(&buffer[..written]));
         }
         buffer.resize(written + 1, 0);
     }
+}
+
+/// `\\?\Volume{GUID}\`: the root of the volume the handle's file is on,
+/// whatever junctions or mount folders its name went through; `None` when the
+/// volume has no GUID path (a network file, among others).
+fn handle_volume_root(handle: HANDLE) -> Option<PathBuf> {
+    let path = final_path(handle, VOLUME_NAME_GUID)?;
+    let end = path.find("}\\")? + 2;
+    let root = &path[..end];
+    is_volume_guid_root(&root.encode_utf16().collect::<Vec<u16>>()).then(|| PathBuf::from(root))
 }
 
 /// A failed open, told apart: nothing there, a directory, or anything else.

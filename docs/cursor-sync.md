@@ -60,14 +60,21 @@ one Cursor total.
   token; C# then shows `configRejected` and sends no sync, scheduled or
   pressed, until a push is accepted. An off push is accepted whatever its
   profiles.
-- **Reading an added profile, every sync.** The drive must be a fixed one
-  (`GetDriveTypeW`) before any I/O, so a network, removable or WSL drive is
-  never touched (an unmounted letter is "not signed in"). Then the database is
-  opened handle-first: `CreateFileW` without following a final reparse point
-  and without `FILE_SHARE_DELETE` (so the name cannot be renamed, deleted or
-  replaced while held), and on that handle: a regular disk file with no
-  reparse attribute (symlinks, junctions and cloud placeholders refused), a
-  volume with persistent ACLs, a final path that is not UNC, and an owner that
+- **Reading an added profile, every sync.** The root's drive letter must be a
+  fixed drive (`GetDriveTypeW` on `X:\`) before any I/O, so a network,
+  removable or WSL drive letter is never touched (an unmounted letter is "not
+  signed in"). Then the database is opened handle-first: `CreateFileW`
+  without following a final reparse point and without `FILE_SHARE_DELETE` (so
+  the name cannot be renamed, deleted or replaced while held). On that handle,
+  before anything else: its final path (`GetFinalPathNameByHandleW`) must not
+  be UNC (`db_remote`), and the volume the file is actually on must be a fixed
+  drive: the handle's volume GUID path (`\\?\Volume{…}\`, `VOLUME_NAME_GUID`)
+  goes to `GetDriveTypeW`, so a junction or mount folder under a fixed root
+  that leads onto a removable, optical or other non-fixed volume is
+  `db_not_fixed_drive` too (a volume with no GUID path is refused the same
+  way). Then: a regular disk file with no reparse attribute (symlinks,
+  junctions and cloud placeholders refused), a volume with persistent ACLs,
+  and an owner that
   is the current user or BUILTIN\Administrators (Cursor once run elevated;
   measured owner for a normal run is the user, U4). SQLite then opens the same
   name read-only with `DEFENSIVE` and `trusted_schema=OFF`, and the file behind
