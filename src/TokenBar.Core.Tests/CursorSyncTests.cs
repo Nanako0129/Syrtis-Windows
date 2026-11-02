@@ -43,6 +43,7 @@ public class CursorSyncTests
         public Func<bool, bool, Exception?> PushError = (_, _) => null;
         public Func<bool, ManualResetEventSlim?> PushGate = _ => null;
         public ManualResetEventSlim? SyncGate;
+        public Action<bool>? OnSync;
         public readonly SemaphoreSlim SyncStarted = new(0);
         public Func<CursorSyncStatus> Result = () => Status("ok", 1);
         public bool Present = true;
@@ -68,6 +69,7 @@ public class CursorSyncTests
             Sync: userInitiated =>
             {
                 Log.Enqueue(userInitiated ? "sync:user" : "sync:auto");
+                OnSync?.Invoke(userInitiated);
                 SyncStarted.Release();
                 SyncGate?.Wait(Wait);
                 return Result();
@@ -327,6 +329,115 @@ public class CursorSyncTests
         // make this two.
         Assert.Equal(2, core.UserSyncs);
         Assert.Equal("ok", controller.State);
+    }
+
+    // A background sync gets a short budget; a press during it must not be lost.
+    [Fact]
+    public async Task APressDuringABackgroundSyncRunsOneUserSyncAfterIt()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore();
+        using var gate = new ManualResetEventSlim(false);
+        core.SyncGate = gate;
+        CursorSyncController controller = null!;
+        // Syncing as seen when the user pass starts: it must not drop between
+        // the two passes.
+        bool? syncingAtUserPass = null;
+        var userStarted = false;
+        var seen = new ConcurrentQueue<bool>();
+        core.OnSync = user =>
+        {
+            if (user)
+            {
+                userStarted = true;
+                syncingAtUserPass = controller.Syncing;
+            }
+        };
+        controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        // Every Syncing reading from the auto pass until the user pass starts.
+        controller.StateChanged += () =>
+        {
+            if (!userStarted)
+            {
+                seen.Enqueue(controller.Syncing);
+            }
+        };
+        var running = controller.RunSync(userInitiated: false);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        await controller.RunSync(userInitiated: true);
+        await controller.RunSync(userInitiated: true);
+        gate.Set();
+        await running;
+        Assert.Equal(new[] { "sync:auto", "sync:user" }, core.Log.ToArray());
+        Assert.True(syncingAtUserPass);
+        Assert.NotEmpty(seen);
+        Assert.DoesNotContain(false, seen);
+        Assert.False(controller.Syncing);
+    }
+
+    // Held Enter or Space: presses while a user sync runs start nothing more.
+    [Fact]
+    public async Task PressesDuringAUserSyncStartNoMoreSyncs()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore();
+        using var gate = new ManualResetEventSlim(false);
+        core.SyncGate = gate;
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var running = controller.RunSync(userInitiated: true);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        await controller.RunSync(userInitiated: true);
+        await controller.RunSync(userInitiated: true);
+        await controller.RunSync(userInitiated: true);
+        gate.Set();
+        await running;
+        Assert.Equal(new[] { "sync:user" }, core.Log.ToArray());
+    }
+
+    [Fact]
+    public async Task ARememberedPressIsDroppedWhenSyncIsTurnedOffBeforeThePassEnds()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore();
+        using var gate = new ManualResetEventSlim(false);
+        core.SyncGate = gate;
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var running = controller.RunSync(userInitiated: false);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        await controller.RunSync(userInitiated: true);
+        controller.SetEnabled(false);
+        gate.Set();
+        await running;
+        Assert.Equal(new[] { "sync:auto" }, core.Log.Where(e => e.StartsWith("sync")).ToArray());
+        Assert.False(controller.Syncing);
+    }
+
+    // The off clears the remembered press; turning sync back on before the pass
+    // ends (so it reruns under the new config) must not bring the press back.
+    [Fact]
+    public async Task ARememberedPressDoesNotSurviveAnOffOnCycle()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore();
+        using var gate = new ManualResetEventSlim(false);
+        core.SyncGate = gate;
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var running = controller.RunSync(userInitiated: false);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        await controller.RunSync(userInitiated: true);
+        controller.SetEnabled(false);
+        controller.SetEnabled(true);
+        gate.Set();
+        await running;
+        Assert.Equal(0, core.UserSyncs);
+        // The rerun after the cycle is the second auto pass. At least that: sync turned
+        // back on also starts the schedule loop, whose own auto sync may or
+        // may not get in before the rerun finishes, so the count is not exact.
+        Assert.True(core.Log.Count(e => e == "sync:auto") >= 2);
     }
 
     [Fact]
