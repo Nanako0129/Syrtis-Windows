@@ -24,10 +24,9 @@ public static class CursorSync
     /// privacy paragraph was shown: <see cref="CursorSyncController.AnswerNotice"/>
     /// (Continue or Turn Off on the Overview card) and Continue in the
     /// confirmation the Settings switch opens
-    /// (<see cref="CursorSyncController.TurnOn"/>). Turning the switch on
-    /// through <see cref="CursorSyncController.SetEnabled"/> never writes it,
-    /// so nothing syncs (<see cref="ShouldSync"/>) until one of those was
-    /// answered.</summary>
+    /// (<see cref="CursorSyncController.TurnOn"/>). No other controller call
+    /// writes it, and none of them stores the preference on, so nothing syncs
+    /// (<see cref="ShouldSync"/>) until one of those was answered.</summary>
     public const string NoticeKey = "tokenbar.cursorSync.noticeAcknowledged";
 
     /// <summary>D6: the user chose Syrtis's own sync over tokscale CLI Cursor
@@ -529,8 +528,8 @@ public sealed class CursorSyncController
                         // is owed. _syncing stays set, so Syncing is true
                         // across both runs. No ShouldSync check here. Either
                         // order is covered: Reconfigure clears the flag when
-                        // sync goes off; and SetEnabled, AnswerNotice and
-                        // ConfirmEnable write the store before Reconfigure
+                        // sync goes off; and TurnOff, Enable and AnswerNotice
+                        // write the store before Reconfigure
                         // runs, so a pass can be
                         // promoted after the store says off, in which case
                         // the post-push re-check returns without calling the
@@ -580,13 +579,12 @@ public sealed class CursorSyncController
 
     // ---- Actions behind the controls ---------------------------------------
 
-    /// <summary>Stores the preference only (the Settings switch turned off).
-    /// It never answers the notice, so turning it on this way before the
-    /// notice is answered syncs nothing; Settings turns it on only through
-    /// <see cref="TurnOn"/>.</summary>
-    public void SetEnabled(bool on)
+    /// <summary>The Settings switch turned off: stores the preference off.
+    /// There is no public way to store it on: that is <see cref="TurnOn"/>
+    /// (consent first) or the Overview card's <see cref="AnswerNotice"/>.</summary>
+    public void TurnOff()
     {
-        _store.SetBool(CursorSync.EnabledKey, on);
+        _store.SetBool(CursorSync.EnabledKey, false);
         Reconfigure(refresh: true);
     }
 
@@ -602,23 +600,19 @@ public sealed class CursorSyncController
     /// unanswered. Returns whether sync was turned on.</summary>
     public async Task<bool> TurnOn(Func<Task<bool>> confirm)
     {
-        if (CursorSync.NoticeAcknowledged(_store))
-        {
-            SetEnabled(true);
-            return true;
-        }
-
-        if (!await confirm())
+        if (!CursorSync.NoticeAcknowledged(_store) && !await confirm())
         {
             return false;
         }
 
-        ConfirmEnable();
+        Enable();
         return true;
     }
 
-    // Continue in the Settings confirmation: both keys, then one Reconfigure.
-    private void ConfirmEnable()
+    // TurnOn's only write path. Enabled before the notice: in between,
+    // ShouldSync still reads false. Writing the notice again when it is
+    // already answered is a no-op (SettingsStore skips equal values).
+    private void Enable()
     {
         _store.SetBool(CursorSync.EnabledKey, true);
         _store.SetBool(CursorSync.NoticeKey, true);
@@ -626,15 +620,19 @@ public sealed class CursorSyncController
     }
 
     /// <summary>The Overview notice card: Continue
-    /// (<paramref name="continuing"/>) or Turn Off.</summary>
+    /// (<paramref name="continuing"/>) or Turn Off. Turn Off stores the
+    /// preference off before it answers the notice: the other order leaves a
+    /// moment where the notice is answered and the preference is still the
+    /// default on, so <see cref="CursorSync.ShouldSync"/> reads true and a
+    /// scheduled or pending pass could sync for a user who declined.</summary>
     public void AnswerNotice(bool continuing)
     {
-        _store.SetBool(CursorSync.NoticeKey, true);
         if (!continuing)
         {
             _store.SetBool(CursorSync.EnabledKey, false);
         }
 
+        _store.SetBool(CursorSync.NoticeKey, true);
         Reconfigure(refresh: false);
     }
 

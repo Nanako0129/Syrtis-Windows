@@ -1109,13 +1109,21 @@ public sealed partial class SettingsWindow : Window
         panel.Children.Add(InfoSection(
             ClaudeAccountsCopy.Header, ClaudeAccountsCopy.Summary, ClaudeAccountsCopy.InfoRows,
             BuildClaudeAccounts(store)));
-        panel.Children.Add(InfoSection(
-            AntigravityAccountsCopy.Header, AntigravityAccountsCopy.Summary,
-            () => AntigravityAccountsCopy.InfoRows(AntigravityAutoCapture.Shared?.IsEnabled),
-            BuildAntigravityAccounts(store)));
-        panel.Children.Add(InfoSection(
-            CursorSync.Copy.Header, SettingsCopy.CursorSummary, CursorSync.Copy.InfoRows,
-            BuildCursorSync(store)));
+        // No summary or info for a switch whose controller is missing.
+        if (AntigravityAutoCapture.Shared is not null)
+        {
+            panel.Children.Add(InfoSection(
+                AntigravityAccountsCopy.Header, AntigravityAccountsCopy.Summary,
+                () => AntigravityAccountsCopy.InfoRows(AntigravityAutoCapture.Shared?.IsEnabled),
+                BuildAntigravityAccounts(store)));
+        }
+
+        if (CursorSyncController.Shared is not null)
+        {
+            panel.Children.Add(InfoSection(
+                CursorSync.Copy.Header, SettingsCopy.CursorSummary, CursorSync.Copy.InfoRows,
+                BuildCursorSync(store)));
+        }
         return panel;
     }
 
@@ -2063,8 +2071,10 @@ public sealed partial class SettingsWindow : Window
             Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
             BorderThickness = new Thickness(0),
             Padding = new Thickness(4),
-            MinWidth = 0,
-            MinHeight = 0,
+            // At least 24x24 to hit; the 12 px glyph and 4 px padding alone
+            // came to about 20x20. The glyph size is unchanged.
+            MinWidth = 24,
+            MinHeight = 24,
             VerticalAlignment = VerticalAlignment.Center,
             Flyout = flyout,
         };
@@ -2151,6 +2161,10 @@ public sealed partial class SettingsWindow : Window
             Style = (Style)Application.Current.Resources["AccentButtonStyle"],
         };
         Microsoft.UI.Xaml.Automation.AutomationProperties.GetDescribedBy(okButton).Add(text);
+        // #264's key-repeat guard, as on Sync Now: the repeats of a held
+        // Enter or Space are swallowed at these buttons.
+        SwallowKeyRepeat(cancelButton);
+        SwallowKeyRepeat(okButton);
         cancelButton.Click += (_, _) => flyout.Hide();
         okButton.Click += (_, _) =>
         {

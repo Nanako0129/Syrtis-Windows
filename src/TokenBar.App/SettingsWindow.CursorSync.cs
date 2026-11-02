@@ -26,7 +26,10 @@ public sealed partial class SettingsWindow
     private Button? _csSyncNow;
     private bool _csAnswerConfirms;
     private bool _csUpdating;
-    private bool _csConfirming;
+    // The switch whose enable confirmation is open. UpdateCursorSync leaves
+    // only that switch's IsOn alone; a switch built later (Rebuild) always
+    // shows the stored state, even if that confirmation never resolves.
+    private ToggleSwitch? _csConfirmingToggle;
 
     private StackPanel BuildCursorSync(SettingsStore store)
     {
@@ -44,31 +47,44 @@ public sealed partial class SettingsWindow
                 return; // programmatic IsOn from UpdateCursorSync, not the user
             }
 
-            if (!toggle.IsOn)
-            {
-                cursor.SetEnabled(false);
-                UpdateCursorSync(store);
-                return;
-            }
-
-            // Consent is the controller's (CursorSyncController.TurnOn, which
-            // also records how this differs from macOS): while the notice is
-            // unanswered it opens this confirmation, and only Continue writes.
-            // While it is open, UpdateCursorSync leaves IsOn alone, so a state
-            // change (a sync ending, the Overview card) does not flip the switch
-            // under the flyout.
-            _csConfirming = true;
             try
             {
-                await cursor.TurnOn(() => ConfirmFlyout(toggle, CursorSync.Copy.Title,
-                    CursorSync.Copy.Privacy, CursorSync.Copy.Continue, CursorSync.Copy.Cancel));
+                if (!toggle.IsOn)
+                {
+                    cursor.TurnOff();
+                }
+                else
+                {
+                    // Consent is the controller's (CursorSyncController.TurnOn,
+                    // which also records how this differs from macOS): while the
+                    // notice is unanswered it opens this confirmation, and only
+                    // Continue writes. While it is open, UpdateCursorSync leaves
+                    // this switch's IsOn alone, so a state change (a sync ending,
+                    // the Overview card) does not flip it under the flyout.
+                    _csConfirmingToggle = toggle;
+                    try
+                    {
+                        await cursor.TurnOn(() => ConfirmFlyout(toggle, CursorSync.Copy.Title,
+                            CursorSync.Copy.Privacy, CursorSync.Copy.Continue, CursorSync.Copy.Cancel));
+                    }
+                    finally
+                    {
+                        if (ReferenceEquals(_csConfirmingToggle, toggle))
+                        {
+                            _csConfirmingToggle = null;
+                        }
+                    }
+                }
             }
-            finally
+            catch (Exception ex)
             {
-                _csConfirming = false;
+                // async void: nothing above may escape to the dispatcher. The
+                // type only, as elsewhere in Settings.
+                DevLog.Write($"cursor-sync: settings toggle failed: {ex.GetType().Name}");
             }
 
-            UpdateCursorSync(store); // Cancel: puts the switch back off
+            // Cancel or a failure: the switch shows the stored state again.
+            UpdateCursorSync(store);
         };
         AutomationProperties.SetName(toggle, CursorSync.Copy.Toggle.Localized());
         _csToggle = toggle;
@@ -131,7 +147,7 @@ public sealed partial class SettingsWindow
         }
 
         var on = CursorSync.ToggleShowsOn(CursorSync.Enabled(store), CursorSync.NoticeAcknowledged(store));
-        if (!_csConfirming)
+        if (!ReferenceEquals(toggle, _csConfirmingToggle))
         {
             _csUpdating = true;
             try
