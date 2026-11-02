@@ -1506,7 +1506,13 @@ pub(crate) fn open_foreign_file(
     // WB2 on the handle, before anything else is asked of the file.
     let dos = final_path(handle, VOLUME_NAME_DOS);
     #[cfg(test)]
-    let dos = dos.filter(|_| !NO_DOS_PATH_FOR_TEST.with(std::cell::Cell::get));
+    let dos = dos.filter(|_| {
+        let fault = NO_DOS_PATH_FOR_TEST.with(std::cell::Cell::get);
+        if fault {
+            NO_DOS_PATH_HITS_FOR_TEST.with(|hits| hits.set(hits.get() + 1));
+        }
+        !fault
+    });
     handle_location(dos.as_deref(), handle_volume_root(handle).as_deref(), drive_type)?;
     // Then: on exFAT (measured on 188) the attribute-tag query below fails
     // with ERROR_INVALID_PARAMETER, and "no ACLs" is the reason worth
@@ -1613,6 +1619,9 @@ thread_local! {
     /// answers nothing on this thread (no real volume was found that does).
     pub(crate) static NO_DOS_PATH_FOR_TEST: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// How many DOS paths that fault dropped on this thread.
+    pub(crate) static NO_DOS_PATH_HITS_FOR_TEST: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// WB2 on an opened handle, from its two final paths: a drive-letter (DOS)

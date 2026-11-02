@@ -462,7 +462,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_file_without_a_dos_path_is_decided_by_its_volume() {
-        use crate::agent_storage_windows::{set_owner_for_test, TestOwner, NO_DOS_PATH_FOR_TEST};
+        use crate::agent_storage_windows::{
+            set_owner_for_test, TestOwner, NO_DOS_PATH_FOR_TEST, NO_DOS_PATH_HITS_FOR_TEST,
+        };
         let root = temp_root("nodos");
         let dir = root.join("User").join("globalStorage");
         std::fs::create_dir_all(&dir).unwrap();
@@ -475,10 +477,16 @@ mod tests {
                 DRIVE_FIXED
             }
         };
+        NO_DOS_PATH_HITS_FOR_TEST.with(|hits| hits.set(0));
         NO_DOS_PATH_FOR_TEST.with(|fault| fault.set(true));
         let fixed = read_login_added(&root, &drive_type);
         let removable = read_login_added(&root, &removable_volume);
         NO_DOS_PATH_FOR_TEST.with(|fault| fault.set(false));
+        assert_eq!(
+            NO_DOS_PATH_HITS_FOR_TEST.with(std::cell::Cell::get),
+            2,
+            "the fault did not fire: both opens still had a DOS path"
+        );
         assert!(matches!(fixed, Ok(None)), "{:?}", fixed.err());
         assert_eq!(removable.err(), Some("db_not_fixed_drive"));
         std::fs::remove_dir_all(&root).unwrap();

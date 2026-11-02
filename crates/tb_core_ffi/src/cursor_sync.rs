@@ -57,6 +57,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const USAGE_EVENTS_URL: &str = "https://cursor.com/api/dashboard/get-filtered-usage-events";
 const FILE_NAME_DOMAIN: &str = "cursor-sync-file";
 const LOCK_FILE_NAME: &str = ".cursor-sync.lock";
+/// A file earlier W1 builds (review round 2) left in added profiles' dirs;
+/// nothing writes it now. Ours for removal, so such a dir can be emptied
+/// and `rmdir`ed.
+const LEGACY_ROOT_FILE_NAME: &str = ".cursor-sync.root";
 /// Starts with a dot so it can never match the engine's `usage*` patterns: a
 /// half-written temp file must not be scanned.
 const TEMP_FILE_PREFIX: &str = ".cursor-sync.tmp-";
@@ -380,6 +384,7 @@ impl Cleanup {
         let Some(local) = local else {
             return;
         };
+        let kept: Vec<String> = keep.iter().map(profile_dir_name).collect();
         for parent in candidates(local, PROFILES_DIR_NAME) {
             match real_dir(&parent) {
                 Ok(true) => {}
@@ -406,7 +411,7 @@ impl Cleanup {
                 let Some(id) = profile_dir_id(dir_name) else {
                     continue;
                 };
-                if keep.iter().any(|p| profile_dir_name(p) == dir_name) {
+                if kept.iter().any(|name| name == dir_name) {
                     continue;
                 }
                 let id = id.to_string();
@@ -456,7 +461,10 @@ fn clean_candidate(dir: &Path, remove_dir: bool, keep: Option<&str>) -> io::Resu
     }
     let lock = secure::open_lock(&dir.join(LOCK_FILE_NAME))?;
     let removal = remove_usage_files(dir, keep)?;
-    if remove_dir && removal.left == 0 {
+    // A kept file (a duplicate's current account) stays with its dir and
+    // lock: no lock deleted, no rmdir attempted under a dir still in use.
+    let kept = keep.is_some_and(|name| dir.join(name).exists());
+    if remove_dir && removal.left == 0 && !kept {
         // The lock handle does not share delete: release it first.
         drop(lock);
         let _ = secure::remove_file(&dir.join(LOCK_FILE_NAME));
@@ -506,9 +514,10 @@ pub(crate) fn set_from_json(raw: &str) -> Result<serde_json::Value, String> {
 /// other entries register (WB3). On any refusal the committed config keeps
 /// only the profiles that are also in this input (none when the input cannot
 /// be read), so a profile the user removed is never walked by a stale config.
-/// An accepted on push removes our files from every profile dir no longer
-/// listed, or listed under the same id with another root than its dir
-/// records (non-fatal: `cleanupFailed` / `cleanupFailedProfiles`).
+/// An accepted on push removes our files from every profile dir it does not
+/// list (a dir's name follows its root, so a profile listed with another
+/// root leaves its old dir unlisted) (non-fatal: `cleanupFailed` /
+/// `cleanupFailedProfiles`).
 pub(crate) fn set_with_bases(raw: &str, bases: &Bases) -> Result<serde_json::Value, String> {
     let input: SetInput = match serde_json::from_str(raw) {
         Ok(input) => input,
@@ -554,9 +563,8 @@ pub(crate) fn set_with_bases(raw: &str, bases: &Bases) -> Result<serde_json::Val
         cli_takeover_confirmed: input.cli_takeover_confirmed,
     };
     commit_config(new.clone());
-    // A listed profile whose dir records another root is cleaned like a
-    // removed one (its files came from the old root's account), whatever
-    // the config before this push was.
+    // Every unlisted profile dir goes, whatever the config before this push
+    // was: a removed profile's, and a re-rooted one's old dir.
     let mut cleanup = Cleanup::default();
     cleanup.profile_dirs(bases.local.as_deref(), &new.profiles);
     Ok(set_result(&new, &rejected, cleanup.removed, &cleanup.failed))
@@ -567,7 +575,11 @@ fn keep_only(listed: &[Profile]) {
     let mut guard = CONFIG
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.profiles.retain(|profile| listed.contains(profile));
+    guard.profiles.retain(|profile| {
+        listed
+            .iter()
+            .any(|p| p.id == profile.id && folded_root(&p.root) == folded_root(&profile.root))
+    });
 }
 
 /// Success data. `profiles` echoes ids only (WB9: no root in any result);
@@ -1005,9 +1017,10 @@ mod secure {
     }
 }
 
-/// Exactly our file names: `usage.<64 hex>.json` and our temp prefix.
+/// Exactly our file names: `usage.<64 hex>.json`, our temp prefix, and the
+/// leftover `LEGACY_ROOT_FILE_NAME`.
 fn is_ours(name: &str) -> bool {
-    is_sync_file_name(name) || name.starts_with(TEMP_FILE_PREFIX)
+    is_sync_file_name(name) || name.starts_with(TEMP_FILE_PREFIX) || name == LEGACY_ROOT_FILE_NAME
 }
 
 /// What `remove_usage_files` did: usage files and orphan temps removed, and
@@ -1620,13 +1633,17 @@ async fn run(
             refused: false,
         };
     }
-    let Ok(mut cookie) = reqwest::header::HeaderValue::from_str(&format!(
-        "WorkosCursorSessionToken={user}%3A%3A{}",
-        login.access_token
-    )) else {
-        return stopped(Stop::error("token_unreadable"));
+    #[allow(unused_mut)]
+    let mut value = format!("WorkosCursorSessionToken={user}%3A%3A{}", login.access_token);
+    #[cfg(test)]
+    if BAD_COOKIE_FOR_TEST.with(std::cell::Cell::get) {
+        value.push('\n');
+    }
+    let Ok(mut cookie) = reqwest::header::HeaderValue::from_str(&value) else {
+        return Outcome::refused(Stop::error("token_unreadable"));
     };
     cookie.set_sensitive(true);
+    drop(value);
     drop(login);
     let events = match walk(target, &cookie, limits, enabled).await {
         Ok(events) => events,
@@ -1664,7 +1681,11 @@ struct LastRound {
     status: Option<serde_json::Value>,
     /// The slots (`Slot::key`: id and folded root) whose outcome writes no
     /// file (`writes_no_file`). A slot changed since (another root) is not in
-    /// it, so its first round may take the full budget; a respelling is.
+    /// it, so its first round may take the full budget; a respelling is. The
+    /// dir is not part of the key: a slot coming back from
+    /// `storage_unavailable` with the same root is still in it, so its first
+    /// walk gets the 60 s budget (and may end `partial`, completed under the
+    /// full budget the round after).
     no_file: Vec<(String, Option<String>)>,
 }
 
@@ -1912,6 +1933,13 @@ pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 pub(crate) fn set_config_for_test(config: Config) {
     commit_config(config);
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test fault: the cookie header cannot be built (unreachable otherwise:
+    /// `token_user` admits only characters a header value takes).
+    static BAD_COOKIE_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]

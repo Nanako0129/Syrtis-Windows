@@ -2999,8 +2999,9 @@ fn removed_and_orphaned_profiles_are_cleaned_and_nothing_else() {
     let parent = local.join(APP_DIR_NAME).join(PROFILES_DIR_NAME);
     secure_tree(&local, &parent);
     let temp = format!("{TEMP_FILE_PREFIX}9-9");
-    // A (kept) holds a temp file of ours and a foreign file; A's bare
-    // `<UUID>` dir from an earlier W1 build holds ours.
+    // A (kept) holds a temp file of ours and a foreign file. A's bare
+    // `<UUID>` dir is what review round 2's build left: its usage file, its
+    // lock and its `.cursor-sync.root` record.
     let a = parent.join(profile_dir_name(&profile(PROFILE_A, Path::new(r"C:\x\a"))));
     secure_tree(&parent, &a);
     write_secure(&a.join(&temp), b"x");
@@ -3008,6 +3009,8 @@ fn removed_and_orphaned_profiles_are_cleaned_and_nothing_else() {
     let a_bare = parent.join(PROFILE_A);
     secure_tree(&parent, &a_bare);
     write_secure(&a_bare.join(hex_name('a')), b"x");
+    drop(secure::open_lock(&a_bare.join(LOCK_FILE_NAME)).unwrap());
+    write_secure(&a_bare.join(LEGACY_ROOT_FILE_NAME), "0".repeat(64).as_bytes());
     // B (orphan) holds ours plus a foreign file named like usage; its
     // `.secure` variant holds ours.
     let b = parent.join(PROFILE_B);
@@ -3042,7 +3045,9 @@ fn removed_and_orphaned_profiles_are_cleaned_and_nothing_else() {
     let result = set(serde_json::json!({"enabled": true,
         "profiles": [{"id": PROFILE_A, "root": r"C:\x\a"}]}))
     .unwrap();
-    assert_eq!(result["removedFiles"], 4, "{result}");
+    // B's usage file and temp, B.secure's usage file, the bare dir's usage
+    // file and leftover record (its lock goes uncounted, as every lock does).
+    assert_eq!(result["removedFiles"], 5, "{result}");
     assert_eq!(result["cleanupFailed"], false);
     let mut left = names(&a);
     left.sort();
@@ -3689,6 +3694,8 @@ fn a_duplicate_profile_drops_its_old_accounts_file() {
     assert!(!a_dir.join(&old_name).exists(), "the old account's file stayed");
     assert!(current.exists(), "the current account's copy was removed");
     assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([]));
+    // Round-4 finding 4: a dir that keeps a file keeps its lock; no rmdir.
+    assert!(a_dir.join(LOCK_FILE_NAME).exists(), "the kept dir's lock was deleted");
     let registered = newest_per_account(&registry.read().unwrap());
     assert!(registered.iter().all(|p| !p.ends_with(&old_name)), "{registered:?}");
     assert_eq!(registered.len(), 1);
@@ -3969,4 +3976,58 @@ fn a_partly_failed_duplicate_cleanup_still_counts_as_a_change() {
     assert!(!removable.exists() && loose.exists(), "fixture");
     assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([PROFILE_A]));
     assert_eq!(status["changed"], true, "a removed file was not a change");
+}
+
+// Round 4 of the /code-review findings ------------------------------------------
+
+/// Round-4 finding 2: a login whose cookie header cannot be built
+/// (`token_unreadable`) is a refusal like every other unreadable token, so
+/// it does not hold the full budget; nothing is sent. Reached only through a
+/// test fault: `token_user` admits only characters a header value takes.
+#[test]
+fn an_unbuildable_cookie_is_a_refusal() {
+    let f = fixture();
+    let (url, seen) = serve(vec![json_ok(&page(1, &["a"]))]);
+    BAD_COOKIE_FOR_TEST.with(|fault| fault.set(true));
+    let outcome = run_with(&f.db, &f.dir, &url, limits(), &|| true);
+    BAD_COOKIE_FOR_TEST.with(|fault| fault.set(false));
+    assert_eq!(outcome.stop, Stop::error("token_unreadable"));
+    assert!(outcome.refused, "an unbuildable cookie was not a refusal");
+    assert!(seen.lock().unwrap().is_empty());
+    // Control: without the fault the same login is sent.
+    assert_eq!(run_with(&f.db, &f.dir, &url, limits(), &|| true), ok(1));
+}
+
+/// Round-4 finding 7: a refused push keeps the profiles it lists, compared
+/// by folded root like everywhere else, so a respelled root in the refused
+/// push keeps the profile.
+#[test]
+fn a_refused_push_with_a_respelled_root_keeps_the_profile() {
+    let root = DataRoot::new();
+    let folder = root.path().join("Folder");
+    set(serde_json::json!({"enabled": true, "profiles": [{"id": PROFILE_A, "root": folder}]}))
+        .unwrap();
+    let respelled = folder.to_string_lossy().to_uppercase().replace('\\', "/");
+    let no_roaming = Bases {
+        roaming: None,
+        local: Some(root.path().join(TEST_LOCAL_DIR)),
+    };
+    let refused = set_with_bases(
+        &serde_json::json!({"enabled": true,
+            "profiles": [{"id": PROFILE_A, "root": respelled}]})
+        .to_string(),
+        &no_roaming,
+    );
+    assert_eq!(refused, Err("storageUnavailable".to_string()));
+    let ids: Vec<String> = config().profiles.iter().map(|p| p.id.clone()).collect();
+    assert_eq!(ids, [PROFILE_A], "a respelled root dropped the profile");
+    // Control: a refused push with another root does drop it.
+    let other = root.path().join("Other").to_string_lossy().into_owned();
+    let _ = set_with_bases(
+        &serde_json::json!({"enabled": true, "profiles": [{"id": PROFILE_A, "root": other}]})
+            .to_string(),
+        &no_roaming,
+    );
+    assert!(config().profiles.is_empty());
+    drop(root);
 }
