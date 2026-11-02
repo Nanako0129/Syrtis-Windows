@@ -8,19 +8,23 @@ difference is called out.
 ## Data flow
 
 ```
+per profile, one at a time (the default first, then each added --user-data-dir folder):
 Cursor state.vscdb (read-only)
   └─ access token + its own JWT `sub`
        └─ POST https://cursor.com/api/dashboard/get-filtered-usage-events   (paginated, full history)
-            └─ usage.<hmac>.json  in  %APPDATA%\com.nyanako.tokenbar\cursor-cache
-                 └─ engine scans the dir as an extra Cursor root (only while the takeover is on)
+            └─ usage.<hmac>.json  in  %APPDATA%\com.nyanako.tokenbar\cursor-cache                      (default profile)
+                                  or  %LOCALAPPDATA%\com.nyanako.tokenbar\cursor-profiles\<UUID>        (added profile)
+                 └─ engine scans the newest copy of each account's file as an extra Cursor root
+                    (files only, never a directory; only while the takeover is on)
 ```
 
 | Piece | Where |
 | --- | --- |
 | Login reader, shared with the Grok Bot Cursor fallback | `crates/tb_core_ffi/src/cursor_desktop.rs` |
 | Walk, file, registry, takeover decision | `crates/tb_core_ffi/src/cursor_sync.rs` |
-| Takeover applied to the process scan, recheck, exports | `crates/tb_core_ffi/src/lib.rs` (`capture_process_context`, `recheck_cursor_takeover`, `tb_set_cursor_sync`, `tb_cursor_sync`, `tb_cursor_present`) |
-| C# surface | `src/TokenBar.Interop/CursorSync.cs`, `TbCore.SetCursorSync` / `CursorSync` / `CursorPresent` |
+| Takeover applied to the process scan, recheck, exports | `crates/tb_core_ffi/src/lib.rs` (`capture_process_context`, `recheck_cursor_takeover`, `tb_set_cursor_sync`, `tb_cursor_sync`, `tb_validate_cursor_profile`, `tb_cursor_present`) |
+| Added-profile database checks (handle-first) | `crates/tb_core_ffi/src/agent_storage_windows.rs` (`open_foreign_file`, `drive_type`, `directory_identity`) |
+| C# surface | `src/TokenBar.Interop/CursorSync.cs`, `TbCore.SetCursorSync` / `CursorSync` / `ValidateCursorProfile` / `CursorPresent`; `src/TokenBar.Core/CursorSync.cs` (controller, `configRejected`), `CursorProfileStore.cs` (local-only list of added folders) |
 | ABI | `include/ctb.h` |
 
 ## A second consumer of the Cursor token
@@ -33,6 +37,82 @@ cookie (header marked sensitive), keyed by the user id taken from the token's
 own JWT `sub`; a stored glass or profile id that differs refuses the walk. An
 expired token, or one within 60 s of `exp`, is refused before any request;
 Cursor's refresh token is never used.
+
+## Several Cursor profiles (CMP-W, port of macOS #532)
+
+Besides the default Cursor profile, the user can add folders Cursor is started
+with using `--user-data-dir`. Each is synced on its own; their usage adds up to
+one Cursor total.
+
+- **Input.** `tb_set_cursor_sync` takes `profiles: [{id, root}]`: an uppercase
+  UUID made by C# and the folder. Rust derives the database,
+  `<root>\User\globalStorage\state.vscdb` (layout measured with
+  `cursor --user-data-dir`, CMP-W U4), and every Syrtis dir. Whole-push
+  refusals: bad JSON or an unknown key, more than 32 profiles, an id that is
+  not an uppercase UUID, a duplicate id, and (enabling) the default dir's
+  storage. A root that fails the path rule (`claude_config_dirs::normalize`:
+  absolute drive path; no UNC, `\\?\`, device paths, reserved names, drive
+  roots) or is Cursor's own `%APPDATA%\Cursor` is refused by index and the
+  other entries register. A folder that does not exist, is unmounted or cannot
+  be read is accepted: it reports its own state at sync time. On any refusal
+  the registry keeps only profiles the refused push also lists (none when its
+  list cannot be read), so a profile the user removed never keeps sending its
+  token; C# then shows `configRejected` and sends no sync, scheduled or
+  pressed, until a push is accepted. An off push is accepted whatever its
+  profiles.
+- **Reading an added profile, every sync.** The drive must be a fixed one
+  (`GetDriveTypeW`) before any I/O, so a network, removable or WSL drive is
+  never touched (an unmounted letter is "not signed in"). Then the database is
+  opened handle-first: `CreateFileW` without following a final reparse point
+  and without `FILE_SHARE_DELETE` (so the name cannot be renamed, deleted or
+  replaced while held), and on that handle: a regular disk file with no
+  reparse attribute (symlinks, junctions and cloud placeholders refused), a
+  volume with persistent ACLs, a final path that is not UNC, and an owner that
+  is the current user or BUILTIN\Administrators (Cursor once run elevated;
+  measured owner for a normal run is the user, U4). SQLite then opens the same
+  name read-only with `DEFENSIVE` and `trusted_schema=OFF`, and the file behind
+  SQLite's own handle (`SQLITE_FCNTL_WIN32_GET_HANDLE`) must be the one the
+  checks ran on (volume serial + 128-bit file id), else `db_changed`.
+  `SQLITE_OPEN_NOFOLLOW` is not used: on Windows it refuses nothing (measured,
+  CMP-W0). An ancestor junction onto the user's own folder is allowed (no
+  final-path comparison; a duplicate is counted once anyway). Refusals are
+  fixed reasons: `db_not_fixed_drive`, `db_symlink`, `db_not_file`,
+  `db_no_acl_volume`, `db_remote`, `db_foreign_owner`, `db_changed`,
+  `login_unreadable`.
+- **The default profile** reads what every release read, now with `DEFENSIVE`
+  and `trusted_schema=OFF`; it has no owner or reparse checks. Grok Bot reads
+  only the default profile's database.
+- **Rounds.** Profiles are walked one at a time under one time budget. An
+  account already covered this round by an earlier profile is not walked
+  again; that profile reports `duplicate` with `duplicateOf` (a profile id,
+  never the account). A failure covers the account too (a second session
+  would only repeat it, e.g. a 429), except one specific to that session or
+  this machine: expired, removed mid-walk, `client_unavailable`,
+  `write_failed`. Before every page and under the commit lock the walk checks
+  that sync is on and its `(id, root)` is still listed; a profile removed or
+  re-rooted mid-walk sends no further page and writes nothing. The status
+  carries a headline (`ok` when every profile is `ok` or `duplicate`, else the
+  first other state; a `notSignedIn` profile is ignored while another synced),
+  `changed` (some profile wrote its file; C# refreshes on it) and per-profile
+  entries with id, state, reason and `duplicateOf` only.
+- **Takeover.** `extra_scan_paths["cursor"]` holds the newest file per
+  account name (`usage.<HMAC(sub)>.json`) across the current config's
+  profiles (an added profile's dir and its `.secure` sibling), never a
+  directory, so a stale copy left by a failed delete is never counted and a
+  removed profile's leftovers are never scanned.
+- **Cleanup.** Only `usage.<64 hex>.json` and the temp prefix are Syrtis's.
+  Disabling cleans every default and added-profile candidate (each `.secure`
+  level); an accepted on push cleans profile dirs no longer listed (non-fatal,
+  `cleanupFailed` / `cleanupFailedProfiles` in the result), under the same
+  secure lock a walk commits under. Only real `<UUID>` / `<UUID>.secure` dirs
+  are entered (junctions and symlinks at any level are skipped), files are
+  deleted through the secure delete, and an emptied dir is `rmdir`ed.
+- **Add-time check.** `tb_validate_cursor_profile` (validate-only, metadata
+  only, no database opened) refuses a full list, a path the rule refuses, a
+  drive that is not fixed (checked first), Cursor's own folder and a listed
+  folder, by folded path or by directory identity (a junction to a listed
+  folder is the same folder); an unreadable folder never counts as a match.
+  Results carry reason codes, never a path.
 
 ## Takeover and the D6 rule
 
@@ -78,8 +158,10 @@ walk (at most one sync interval), and the status then says `cliPresent`.
 
 - The sync dir is chosen by Rust, never passed in: `<root>\cursor-cache`,
   where `<root>` is `%APPDATA%\com.nyanako.tokenbar` resolved exactly as quota
-  history resolves it (following its `.secure` fallback). `tb_set_cursor_sync`
-  refuses any key besides `enabled` and `cliTakeoverConfirmed`.
+  history resolves it (following its `.secure` fallback). Added profiles live
+  in `<local root>\cursor-profiles\<UUID>` under `%LOCALAPPDATA%`, resolved
+  the same way. `tb_set_cursor_sync` refuses any key besides `enabled`,
+  `cliTakeoverConfirmed` and `profiles`.
 - Every file operation goes through `agent_storage_windows`: owner = current
   user, protected DACL with exactly {current user, SYSTEM}, final-component
   reparse points refused, existing objects used only if they already meet that
@@ -107,11 +189,20 @@ walk (at most one sync interval), and the status then says `cliPresent`.
 
 ### Roaming and two PCs
 
-The file lives in roaming `%APPDATA%`, like quota history, and it holds no
-secret (only timestamp, model, token counts, cost fields, conversation id).
-Its name is an HMAC of the Cursor user id under the installation key, which
-also roams. A second PC that receives the roamed file and has an empty CLI
-cache may take over from it for the same account; that is accepted.
+The default profile's file lives in roaming `%APPDATA%`, like quota history,
+and it holds no secret (only timestamp, model, token counts, cost fields,
+conversation id). Its name is an HMAC of the Cursor user id under the
+installation key, which also roams. A second PC that receives the roamed file
+and has an empty CLI cache may take over from it for the same account; that is
+accepted.
+
+Added profiles are local only (maintainer decision 2026-11-02, CMP-W WB5):
+the list of folders is in `%LOCALAPPDATA%\TokenBar\cursor-profiles.json`,
+never in the roaming `settings.json`, and their usage files are under
+`%LOCALAPPDATA%\com.nyanako.tokenbar\cursor-profiles`. So another PC's
+folders (and the consent given there) never arrive on this one, and two PCs
+never delete each other's profile files: cleanup touches the local scope
+only.
 
 ## Threat model
 
@@ -123,6 +214,7 @@ cache may take over from it for the same account; that is accepted.
 | Local planting (pre-created dir, junction, loose ACL) | yes | `agent_storage_windows` contract and `.secure` fallback |
 | Network attacker, proxy, DNS | yes | TLS, https-only, constant endpoint, redirects never followed (a 3xx means `expired`), body caps (64 MiB per walk) |
 | Concurrent readers | partly | see below |
+| Other local users and an added profile's folder | no (not Syrtis's to change) | A folder readable by other local users (for example one directly under `C:\`, whose children inherit Authenticated Users Modify, measured on 188) exposes the token to them through Cursor's own storage; Syrtis neither adds nor removes that exposure. Others with write access can also alter that database or plant `-wal` / `-journal` sidecars, which SQLite opens by path (integrity). Syrtis checks the database file's owner and type, not the folder's DACL (CMP-W WB6, decision 2026-11-02). |
 
 TLS and proxy, read from `Cargo.toml` and the reqwest 0.13.4 source (not
 measured): reqwest is built without default features, with `json` and
@@ -154,3 +246,9 @@ once.
 - `tb_cursor_present` lets the app's notice ask whether Cursor is installed
   without re-deriving Cursor's path in C#.
 - No `TOKENBAR_CURSOR_STATE_VSCDB` override; tests pass paths by parameter.
+- Added profiles (CMP-W): no bundle id in the input; a refused root is
+  reported by index and the rest register (macOS refuses the whole push); an
+  off push with an unknown key is still `invalidJson`; the added-profile
+  reader is handle-first with a fixed-drive rule (macOS: `SQLITE_OPEN_NOFOLLOW`
+  plus an owner uid check), and accepts BUILTIN\Administrators as an owner;
+  added profiles and their list are local only.
