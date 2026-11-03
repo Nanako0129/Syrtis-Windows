@@ -2000,6 +2000,17 @@ fn hex_name(c: char) -> String {
     format!("usage.{}.json", c.to_string().repeat(64))
 }
 
+/// The profiles exactly as stored, root spelling included (`Profile`'s
+/// equality folds roots, so a whole-config comparison cannot see a
+/// respelling).
+fn raw_profiles(config: &Config) -> Vec<(String, PathBuf)> {
+    config
+        .profiles
+        .iter()
+        .map(|p| (p.id.clone(), p.root.clone()))
+        .collect()
+}
+
 fn profile(id: &str, root: &Path) -> Profile {
     Profile {
         id: id.to_string(),
@@ -2897,6 +2908,15 @@ fn a_refused_push_keeps_only_profiles_it_lists() {
     let b = serde_json::json!({"id": PROFILE_B, "root": r"C:\x\b"});
     set(serde_json::json!({"enabled": true, "profiles": [a, b]})).unwrap();
     assert_eq!(config().profiles.len(), 2);
+    // A push keeps the exact spelling it was given (case included).
+    let mixed = serde_json::json!({"id": PROFILE_C, "root": r"C:\X\MixedCase"});
+    set(serde_json::json!({"enabled": true, "profiles": [a, b, mixed]})).unwrap();
+    assert_eq!(
+        raw_profiles(&config())[2],
+        (PROFILE_C.to_string(), PathBuf::from(r"C:\X\MixedCase")),
+        "the stored root was respelled"
+    );
+    set(serde_json::json!({"enabled": true, "profiles": [a, b]})).unwrap();
     assert_eq!(
         set(serde_json::json!({"enabled": true, "profiles": [a, {"id": "bad", "root": r"C:\x\c"}]})),
         Err("invalidProfileId".to_string())
@@ -2910,7 +2930,10 @@ fn a_refused_push_keeps_only_profiles_it_lists() {
         set(serde_json::json!({"enabled": true, "profiles": [a]})),
         Err("storageUnavailable".to_string())
     );
-    assert_eq!(config().profiles, [profile(PROFILE_A, Path::new(r"C:\x\a"))]);
+    assert_eq!(
+        raw_profiles(&config()),
+        [(PROFILE_A.to_string(), PathBuf::from(r"C:\x\a"))]
+    );
     drop(root);
 }
 
@@ -3218,6 +3241,7 @@ fn add_time_validation_answers_without_committing() {
         );
     }
     assert_eq!(config(), before, "validation committed something");
+    assert_eq!(raw_profiles(&config()), raw_profiles(&before));
     assert_eq!(
         validate_with(r#"{"root":"C:\\x","extra":1}"#, fixed, None),
         Err("invalidJson".to_string())
@@ -4053,7 +4077,8 @@ fn a_kept_file_that_cannot_be_stated_still_keeps_the_dir() {
     let a_dir = profile_dir(tmp.path(), &profile(PROFILE_A, &root));
     drop(secure::ensure_dir(&a_dir).unwrap());
     let kept = expected_file(&a_dir);
-    std::os::windows::fs::symlink_file(tmp.path().join("nowhere.json"), &kept).unwrap();
+    std::os::windows::fs::symlink_file(tmp.path().join("nowhere.json"), &kept)
+        .expect("fixture: file symlink (needs elevation or developer mode)");
     assert!(!kept.exists() && std::fs::symlink_metadata(&kept).is_ok(), "fixture");
     let (url, _) = serve(vec![json_ok(&page(1, &["a"]))]);
     let status = sync_round(&default_db, &url, &registry);
@@ -4061,9 +4086,10 @@ fn a_kept_file_that_cannot_be_stated_still_keeps_the_dir() {
     assert!(a_dir.join(LOCK_FILE_NAME).exists(), "the kept dir's lock was deleted");
 }
 
-/// Round-5 finding 5: a profile dir that fails the storage contract and
-/// holds only the leftover `.cursor-sync.root` is no usage-file deletion
-/// failure: neither an on push nor turning sync off reports cleanupFailed.
+/// Round-5 finding 5 / delta 1: a profile dir that fails the storage
+/// contract and holds only the leftover `.cursor-sync.root` is no usage-file
+/// deletion failure (neither an on push nor turning sync off reports
+/// cleanupFailed), and nothing in it is deleted.
 #[test]
 fn a_leftover_root_record_alone_is_never_a_cleanup_failure() {
     let root = DataRoot::new();
@@ -4080,6 +4106,8 @@ fn a_leftover_root_record_alone_is_never_a_cleanup_failure() {
     assert_eq!(on["cleanupFailed"], false, "{on}");
     assert_eq!(on["removedFiles"], 0);
     assert!(set(serde_json::json!({"enabled": false})).is_ok(), "disable reported cleanupFailed");
+    // Report only: nothing is deleted from a dir failing the contract.
+    assert!(loose.join(LEGACY_ROOT_FILE_NAME).exists(), "a contract-failing dir was written to");
     // Control: a usage file in the same loose dir is a failure.
     std::fs::write(loose.join(hex_name('b')), b"{}").unwrap();
     assert_eq!(

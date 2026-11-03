@@ -156,9 +156,11 @@ one Cursor total.
   any level are skipped), files are deleted through the secure delete, and an
   emptied dir is `rmdir`ed. A bare `<UUID>` dir comes from an earlier W1 build
   (test machines only; added profiles never shipped): it is never listed, so
-  the first accepted push cleans it like a removed profile's, together with
-  the `.cursor-sync.root` file review round 2's build left in it (nothing
-  writes that file now).
+  an accepted push or turning sync off cleans it like a removed profile's.
+  The `.cursor-sync.root` file review round 2's build left in it (nothing
+  writes that file now) is removed best-effort, with the lock, once that
+  dir's usage files are gone; in a dir failing the storage contract nothing
+  is deleted, and that file alone never counts as a cleanup failure.
 - **Limits of the folding.** Roots are folded with Unicode lowercase and
   `/` to `\`, not with NTFS's own case table. Two added profiles whose roots
   differ only by case (folders that can both exist inside a directory with

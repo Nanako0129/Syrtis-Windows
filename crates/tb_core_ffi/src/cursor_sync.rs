@@ -39,7 +39,10 @@
 //! - W2: storage only through `agent_storage_windows` (protected DACL
 //!   {user, SYSTEM}, owner = user, final-component reparse points refused);
 //!   deletion only of Syrtis names (`is_ours`), each re-verified before
-//!   removal; an emptied profile dir is `rmdir`ed, never `remove_dir_all`.
+//!   removal, plus the leftover `.cursor-sync.root` of an earlier W1 build
+//!   (`LEGACY_ROOT_FILE_NAME`), removed best-effort with the lock when a
+//!   contract-meeting profile dir is emptied; an emptied profile dir is
+//!   `rmdir`ed, never `remove_dir_all`.
 //! - Added profiles: the input carries `(UUID, root)` only; the database is
 //!   always `<root>\User\globalStorage\state.vscdb`, read handle-first on a
 //!   fixed drive each sync (`cursor_desktop::read_login_added`). `sub` never
@@ -459,7 +462,8 @@ impl Cleanup {
 /// followed, as the storage contract allows (same-user planting, out of
 /// scope). `remove_dir`: an added profile's dir; once our files are gone,
 /// the lock file and a leftover `LEGACY_ROOT_FILE_NAME` go too (secure
-/// delete, best-effort) and the dir is `rmdir`ed, which succeeds only if
+/// delete, best-effort; never in a dir failing the contract, never for the
+/// default profile's dirs) and the dir is `rmdir`ed, which succeeds only if
 /// nothing else is left. `keep`: one file name to leave (a duplicate profile
 /// keeps its current account's copy, as a commit does); when that file is
 /// there (as the listing saw it), the dir keeps its lock and no `rmdir` is
@@ -476,8 +480,9 @@ fn clean_candidate(dir: &Path, remove_dir: bool, keep: Option<&str>) -> io::Resu
                 is_ours(&name) && Some(name.as_str()) != keep
             })
         });
-        // The legacy record alone is no deletion failure.
-        let _ = secure::remove_file(&dir.join(LEGACY_ROOT_FILE_NAME));
+        // Report only: nothing is deleted from a dir failing the contract.
+        // The legacy record is not one of our names, so alone it is no
+        // deletion failure.
         return match ours {
             Ok(false) => Ok(Removal::default()),
             _ => Err(io::Error::other("a Syrtis usage file could not be deleted")),
@@ -772,8 +777,8 @@ impl Slot {
     /// compared), so a respelling of the same folder is the same slot.
     fn same_slot(&self, other: &Slot) -> bool {
         self.id == other.id
-            && match (self.profile(), other.profile()) {
-                (Some(mine), Some(theirs)) => mine.same_slot(&theirs),
+            && match (&self.root, &other.root) {
+                (Some(mine), Some(theirs)) => folded_root(mine) == folded_root(theirs),
                 (None, None) => true,
                 _ => false,
             }
