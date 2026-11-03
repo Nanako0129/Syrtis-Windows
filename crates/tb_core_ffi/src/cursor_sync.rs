@@ -112,13 +112,13 @@ pub(crate) struct Profile {
 }
 
 impl Profile {
-    /// The one way profiles compare: the same id and the same root folded
-    /// like `duplicate_key` (`folded_root`), so a respelling of the folder is
-    /// the same profile. `keep_only`, `Slot::still_in`, the budget's memory of
-    /// a slot and `PartialEq` all use it; `profile_dirs` matches dir names
-    /// made from the same folded root (`profile_dir_name`).
+    /// The same id and `same_root`, so a respelling of the folder is the
+    /// same profile. `keep_only`, `Slot::still_in` and `PartialEq` use it;
+    /// the budget compares slots with `Slot::same_slot` (the same id and
+    /// `same_root` check); `profile_dirs` matches dir names made from the
+    /// folded root (`profile_dir_name`).
     pub(crate) fn same_slot(&self, other: &Profile) -> bool {
-        self.id == other.id && folded_root(&self.root) == folded_root(&other.root)
+        self.id == other.id && same_root(&self.root, &other.root)
     }
 }
 
@@ -302,6 +302,11 @@ fn resolve_under(base: Option<&Path>, child: &str) -> io::Result<PathBuf> {
 /// same root.
 fn folded_root(root: &Path) -> String {
     crate::claude_config_dirs::duplicate_key(&root.to_string_lossy())
+}
+
+/// The one root comparison: equal once folded (`folded_root`).
+fn same_root(a: &Path, b: &Path) -> bool {
+    folded_root(a) == folded_root(b)
 }
 
 /// Length of the root digest in an added profile's dir name.
@@ -773,12 +778,14 @@ impl Slot {
         })
     }
 
-    /// How the budget remembers a slot (`Profile::same_slot`; the dir is not
-    /// compared), so a respelling of the same folder is the same slot.
+    /// How the budget remembers a slot: the same id and, for added
+    /// profiles, `same_root` (the check `Profile::same_slot` makes, without
+    /// building a `Profile`); the default matches only the default; the dir
+    /// is not compared. So a respelling of the same folder is the same slot.
     fn same_slot(&self, other: &Slot) -> bool {
         self.id == other.id
             && match (&self.root, &other.root) {
-                (Some(mine), Some(theirs)) => folded_root(mine) == folded_root(theirs),
+                (Some(mine), Some(theirs)) => same_root(mine, theirs),
                 (None, None) => true,
                 _ => false,
             }

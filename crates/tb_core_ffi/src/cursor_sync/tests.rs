@@ -4101,7 +4101,11 @@ fn a_leftover_root_record_alone_is_never_a_cleanup_failure() {
     // The record as review round 2's build wrote it (a file meeting the
     // storage contract, so a secure delete would succeed), in a dir that
     // fails the contract (loosened since).
-    drop(secure::create_new(&loose.join(LEGACY_ROOT_FILE_NAME)).expect("fixture: secure record"));
+    // (`write_secure` cannot be used: it secures the parent dir first.)
+    let mut record = secure::create_new(&loose.join(LEGACY_ROOT_FILE_NAME))
+        .expect("fixture: secure record");
+    record.write_all("5f3c".repeat(16).as_bytes()).unwrap(); // a 64-hex digest
+    drop(record);
     assert!(secure::ensure_dir(&loose).is_err(), "fixture: the dir meets the contract");
     let on = set(serde_json::json!({"enabled": true,
         "profiles": [{"id": PROFILE_A, "root": r"C:\x\a"}]}))
@@ -4110,7 +4114,10 @@ fn a_leftover_root_record_alone_is_never_a_cleanup_failure() {
     assert_eq!(on["removedFiles"], 0);
     assert!(set(serde_json::json!({"enabled": false})).is_ok(), "disable reported cleanupFailed");
     // Report only: nothing is deleted from a dir failing the contract.
-    assert!(loose.join(LEGACY_ROOT_FILE_NAME).exists(), "a contract-failing dir was written to");
+    assert!(
+        loose.join(LEGACY_ROOT_FILE_NAME).exists(),
+        "a file was deleted from a contract-failing dir"
+    );
     // Control: a usage file in the same loose dir is a failure.
     std::fs::write(loose.join(hex_name('b')), b"{}").unwrap();
     assert_eq!(

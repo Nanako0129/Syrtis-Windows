@@ -759,6 +759,35 @@ public class CursorSyncTests
         await Until(() => controller.State == "ok");
     }
 
+    /// <summary>W1 and the Accounts page's consent flow (#267) together: the
+    /// on push made by <see cref="CursorSyncController.TurnOn"/>'s Continue is
+    /// refused, so consent is recorded but nothing syncs, scheduled or
+    /// pressed; turning off and on again (no question now: the notice is
+    /// answered) with an accepted push syncs.</summary>
+    [Fact]
+    public async Task ARejectedPushAfterTurnOnStopsSyncUntilAnAcceptedPush()
+    {
+        var store = TempStore(); // notice unanswered, preference default on
+        var core = new FakeCore();
+        var refuse = true;
+        core.PushError = (enabled, _) => enabled && refuse ? new TbCoreException("invalidProfileId") : null;
+        var controller = new CursorSyncController(core.Io, store, User, interval: TimeSpan.FromMilliseconds(20));
+        int Syncs() => core.Log.Count(e => e.StartsWith("sync", StringComparison.Ordinal));
+
+        Assert.True(await controller.TurnOn(() => Task.FromResult(true)));
+        Assert.True(CursorSync.NoticeAcknowledged(store));
+        await Until(() => controller.State == CursorSync.ConfigRejectedState);
+        await controller.RunSync(userInitiated: true); // Sync Now
+        await Task.Delay(150); // several intervals of the schedule
+        Assert.Equal(0, Syncs());
+
+        refuse = false;
+        controller.TurnOff();
+        Assert.True(await controller.TurnOn(NeverAsked));
+        await Until(() => Syncs() > 0);
+        await Until(() => controller.State == "ok");
+    }
+
     /// <summary>Turning sync off after a refusal clears the line (sync is off),
     /// and an off push is never treated as a refusal.</summary>
     [Fact]
