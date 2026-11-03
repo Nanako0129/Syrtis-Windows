@@ -1021,13 +1021,16 @@ mod secure {
         if old != bytes {
             return None;
         }
-        let touched = file.set_modified(std::time::SystemTime::now());
+        // The test fault stands in for the call (the time is then not set),
+        // so the production expression below is what decides.
         #[cfg(test)]
         let touched = if super::TOUCH_FAILS_FOR_TEST.with(std::cell::Cell::get) {
             Err(io::Error::other("injected touch failure"))
         } else {
-            touched
+            file.set_modified(std::time::SystemTime::now())
         };
+        #[cfg(not(test))]
+        let touched = file.set_modified(std::time::SystemTime::now());
         Some(touched.is_ok())
     }
 
@@ -2053,8 +2056,8 @@ thread_local! {
     /// Test fault: the cookie header cannot be built (unreachable otherwise:
     /// `token_user` admits only characters a header value takes).
     static BAD_COOKIE_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Test fault: setting an identical file's modified time fails (the
-    /// result of the real call is replaced by an error).
+    /// Test fault: setting an identical file's modified time fails (the call
+    /// is replaced by an error; the time is not set).
     static TOUCH_FAILS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test fault: listing a dir for cleanup yields one unreadable entry
     /// after the real ones.
