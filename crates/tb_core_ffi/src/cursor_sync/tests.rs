@@ -4098,7 +4098,10 @@ fn a_leftover_root_record_alone_is_never_a_cleanup_failure() {
     .unwrap();
     let loose = config().profiles_dir.unwrap().join(PROFILE_B);
     std::fs::create_dir(&loose).unwrap();
-    std::fs::write(loose.join(LEGACY_ROOT_FILE_NAME), b"0").unwrap();
+    // The record as review round 2's build wrote it (a file meeting the
+    // storage contract, so a secure delete would succeed), in a dir that
+    // fails the contract (loosened since).
+    drop(secure::create_new(&loose.join(LEGACY_ROOT_FILE_NAME)).expect("fixture: secure record"));
     assert!(secure::ensure_dir(&loose).is_err(), "fixture: the dir meets the contract");
     let on = set(serde_json::json!({"enabled": true,
         "profiles": [{"id": PROFILE_A, "root": r"C:\x\a"}]}))
