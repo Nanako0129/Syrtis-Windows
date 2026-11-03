@@ -357,7 +357,7 @@ public class CursorSyncTests
             var core = new FakeCore();
             var controller = new CursorSyncController(core.Io, store, ["Syrtis.exe", flag], interval: Never);
             controller.Reconfigure(refresh: true);
-            await controller.TurnOn(NeverAsked);
+            Assert.True(await controller.TurnOn(NeverAsked));
             controller.SetTakeoverConfirmed(true);
             controller.AnswerNotice(continuing: true);
             await controller.RunSync(userInitiated: true);
@@ -569,7 +569,7 @@ public class CursorSyncTests
         Assert.True(await core.SyncStarted.WaitAsync(Wait));
         await controller.RunSync(userInitiated: true);
         controller.TurnOff();
-        await controller.TurnOn(NeverAsked);
+        Assert.True(await controller.TurnOn(NeverAsked));
         gate.Set();
         await running;
         Assert.Equal(0, core.UserSyncs);
@@ -759,13 +759,17 @@ public class CursorSyncTests
         await Until(() => controller.State == "ok");
     }
 
-    /// <summary>W1 and the Accounts page's consent flow (#267) together: the
-    /// on push made by <see cref="CursorSyncController.TurnOn"/>'s Continue is
-    /// refused, so consent is recorded but nothing syncs, scheduled or
-    /// pressed; turning off and on again (no question now: the notice is
-    /// answered) with an accepted push syncs.</summary>
-    [Fact]
-    public async Task ARejectedPushAfterTurnOnStopsSyncUntilAnAcceptedPush()
+    /// <summary>W1 and the Accounts page's consent flow (#267) together, over
+    /// both consent paths: the on push made by
+    /// <see cref="CursorSyncController.TurnOn"/>'s Continue, or by the
+    /// Overview card's <see cref="CursorSyncController.AnswerNotice"/>
+    /// Continue, is refused, so consent is recorded but nothing syncs,
+    /// scheduled or pressed; turning off and on again (no question now: the
+    /// notice is answered) with an accepted push syncs.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ARejectedPushAfterTurnOnStopsSyncUntilAnAcceptedPush(bool viaTurnOn)
     {
         var store = TempStore(); // notice unanswered, preference default on
         var core = new FakeCore();
@@ -774,8 +778,17 @@ public class CursorSyncTests
         var controller = new CursorSyncController(core.Io, store, User, interval: TimeSpan.FromMilliseconds(20));
         int Syncs() => core.Log.Count(e => e.StartsWith("sync", StringComparison.Ordinal));
 
-        Assert.True(await controller.TurnOn(() => Task.FromResult(true)));
+        if (viaTurnOn)
+        {
+            Assert.True(await controller.TurnOn(() => Task.FromResult(true)));
+        }
+        else
+        {
+            controller.AnswerNotice(continuing: true);
+        }
+
         Assert.True(CursorSync.NoticeAcknowledged(store));
+        Assert.True(CursorSync.ShouldSync(store));
         await Until(() => controller.State == CursorSync.ConfigRejectedState);
         await controller.RunSync(userInitiated: true); // Sync Now
         await Task.Delay(150); // several intervals of the schedule
@@ -786,6 +799,41 @@ public class CursorSyncTests
         Assert.True(await controller.TurnOn(NeverAsked));
         await Until(() => Syncs() > 0);
         await Until(() => controller.State == "ok");
+    }
+
+    /// <summary>Merge-delta 1: an on push refused only after a later
+    /// Reconfigure turned sync off belongs to a superseded configuration, so
+    /// it must not leave configRejected behind: not while off, and not as a
+    /// stale warning when sync is turned on again (seen before that push
+    /// lands).</summary>
+    [Fact]
+    public async Task ARefusalThatLandsAfterTurningOffLeavesNoStaleWarning()
+    {
+        var store = TempStore(); // notice unanswered
+        var core = new FakeCore();
+        var refuse = true;
+        core.PushError = (enabled, _) => enabled && refuse ? new TbCoreException("invalidProfileId") : null;
+        var held = new ManualResetEventSlim(false);
+        ManualResetEventSlim? gate = held;
+        core.PushGate = enabled => enabled ? gate : null;
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+
+        Assert.True(await controller.TurnOn(() => Task.FromResult(true))); // on push, held
+        controller.TurnOff();
+        held.Set(); // the on push is refused now, after the off
+        await Until(() => core.Pushes.Count == 2);
+        await Task.Delay(50);
+        Assert.NotEqual(CursorSync.ConfigRejectedState, controller.State);
+
+        // Turning on again: before its push lands, no stale warning.
+        refuse = false;
+        using var next = new ManualResetEventSlim(false);
+        gate = next;
+        Assert.True(await controller.TurnOn(NeverAsked));
+        Assert.NotEqual(CursorSync.ConfigRejectedState, controller.State);
+        next.Set();
+        await Until(() => core.Pushes.Count == 3);
+        held.Dispose();
     }
 
     /// <summary>Turning sync off after a refusal clears the line (sync is off),
@@ -909,7 +957,7 @@ public class CursorSyncTests
         // Turning sync on hides the line ("sync is off" would be false) but
         // does not clear it: only a successful cleanup does.
         failCleanup = false;
-        await controller.TurnOn(NeverAsked);
+        Assert.True(await controller.TurnOn(NeverAsked));
         await Until(() => core.Pushes.Count == 2);
         await Task.Delay(50);
         Assert.True(controller.CleanupFailed);

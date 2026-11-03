@@ -358,8 +358,9 @@ public sealed class CursorSyncController
 
             // Each push waits for the one before it, so rapid toggles reach
             // the core in the order they were made. Push never throws.
+            var generation = _generation;
             push = _configPush.ContinueWith(
-                _ => Push(io, json, run), CancellationToken.None,
+                _ => Push(io, json, run, generation), CancellationToken.None,
                 TaskContinuationOptions.None, TaskScheduler.Default);
             _configPush = push;
         }
@@ -370,7 +371,11 @@ public sealed class CursorSyncController
             CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
     }
 
-    private void Push(Io io, string json, bool enabled)
+    /// <param name="generation">The <see cref="Reconfigure"/> this push
+    /// belongs to: a refusal is applied only while that is still the newest
+    /// configuration, so an on push refused after a later Reconfigure (sync
+    /// turned off meanwhile) cannot leave configRejected behind.</param>
+    private void Push(Io io, string json, bool enabled, int generation)
     {
         // The off push's cleanup outcome; null = no answer (another error),
         // which keeps the previous one. On off the core can only fail with
@@ -406,7 +411,10 @@ public sealed class CursorSyncController
                 {
                     if (rejected)
                     {
-                        _state = CursorSync.ConfigRejectedState;
+                        if (generation == _generation)
+                        {
+                            _state = CursorSync.ConfigRejectedState;
+                        }
                     }
                     else
                     {
@@ -602,9 +610,9 @@ public sealed class CursorSyncController
                         // is owed. _syncing stays set, so Syncing is true
                         // across both runs. No ShouldSync check here. Either
                         // order is covered: Reconfigure clears the flag when
-                        // sync goes off; and TurnOff, Enable and AnswerNotice
-                        // write the store before Reconfigure
-                        // runs, so a pass can be
+                        // sync goes off; and every writer (TurnOff, Enable,
+                        // AnswerNotice, SetTakeoverConfirmed) stores before it
+                        // calls Reconfigure, so a pass can be
                         // promoted after the store says off, in which case
                         // the post-push re-check returns without calling the
                         // core (Syncing stays set through that wait).
