@@ -10,18 +10,248 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `15204f4e870716da9f0b42216ad63d98f1c5a320` |
-| TokenBar alignment | macOS registered the same client in `cc13f64e` and advanced its pin to the same `15204f4e` in Nanako0129/syrtis PR #529 (merge `7f26e712`) |
-| Engine alignment | `2d64ec420e696486278e2190d1a1cef663008589` → `15204f4e870716da9f0b42216ad63d98f1c5a320` (engine `main`) |
+| Reviewed pin | `fc339e98237fcb71f32ab1208b61aa77c3c35c02` |
+| TokenBar alignment | macOS `main` pins `0ece74befada3f56fd37312cdc5fdcb517e93429` (Nanako0129/syrtis PRs #537, #539, #541, #542 advanced it over `15204f4e`). This pin additionally carries engine #86 (ledger text only) and #87 (Goose Windows database, `RESOLVER_CONTRACT_VERSION` 4 to 5); macOS has not advanced to `fc339e98` |
+| Engine alignment | `15204f4e870716da9f0b42216ad63d98f1c5a320` → `fc339e98237fcb71f32ab1208b61aa77c3c35c02` (engine `main`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/15204f4e870716da9f0b42216ad63d98f1c5a320/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/fc339e98237fcb71f32ab1208b61aa77c3c35c02/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `15204f4e`, Antigravity extension client (engine PRs #70, #71, #73)
+## Current pin: `fc339e98`, the 2026-11 upstream sync (engine PRs #75 to #87)
+
+The reviewed pin is the merge commit of tokscale-core PR #87 on the engine's
+`main`, covering `15204f4e` → `fc339e98`: 13 first-parent merges, PRs #75 to
+#87. The diff touches 21 files (`src/lib.rs`, `src/message_cache.rs`,
+`src/scanner.rs`, `src/source_context.rs`, `src/pricing/lookup.rs`,
+`src/pricing/aliases.rs`, `src/provider_identity.rs`, `src/sessions/claudecode.rs`,
+`antigravity_cli.rs`, `cline.rs`, `droid.rs`, `hermes.rs`, `hindsight.rs`,
+`kilo.rs`, `kilocode.rs`, `qwen.rs`, `roocode.rs`, `tests/hermes.rs`,
+`Cargo.toml`, `Cargo.lock`, `UPSTREAM.md`). `src/clients.rs` is not among
+them.
+
+| PRs | What |
+|---|---|
+| #75, #76 | #75 adds a `get_window_usage` cc-mirror test only. #76 applies `excluded_scan_paths` where each source is selected, with a final sweep, instead of only on the scan task list (narrowing only) |
+| #77, #78, #79 | Claude parser fixes (Claude `parser_version` 4 → 5), resume from a cached checkpoint (macOS arm64 only), and a subagent's fingerprint no longer lists its parent session |
+| #80 | Droid replies counted on their own dates (Droid 2 → 3) |
+| #81 | Hermes reasoning counted once; Qwen cached prefix and reasoning counted once (Qwen 1 → 2) |
+| #82 | Roo Code / Kilo Code / Cline VS Code roots and parser (RooCode, KiloCode, Cline 2 → 3), `RESOLVER_CONTRACT_VERSION` 3 → 4 |
+| #83, #84 | Pricing: Google-hinted rows from Google's own entry, the hinted vendor's root row wins, Antigravity route labels folded; then a pricing memo (output byte-identical) |
+| #85, #86 | Ledger text only |
+| #87 | Goose database under `%APPDATA%\Block\goose\data\sessions\`, `RESOLVER_CONTRACT_VERSION` 4 → 5. The one Windows-visible item |
+
+Measured on this advance, not relayed:
+
+- `ClientId` is unchanged (`clients.rs` is not in the diff), so
+  `Fixtures/engine-client-ids.json`, the C# registry and the C header needed no
+  edit. `engine_client_ids_match_the_fixture` passes on 188 without a fixture
+  change. `crates/tb_core_ffi` compiled against the new engine and needed no
+  production change.
+- `CACHE_FORMAT_VERSION` stays 4 (`message_cache.rs:39`). Claude shards are
+  written in an envelope of their own, `CLAUDE_CACHE_FORMAT_VERSION = 100`
+  (`message_cache.rs:48`), on every target. Only the checkpoint inside it is
+  macOS-arm64-only (`CLAUDE_CHECKPOINTS`, `sessions/claudecode.rs:737`), so on
+  Windows the shards take the new envelope and pv 5 but never carry a
+  checkpoint, and a grown transcript is still parsed from byte 0.
+- `RESOLVER_CONTRACT_VERSION` is 5 (`source_context.rs:183`). The consumer
+  grep for it is empty: nothing in `crates`, `src` or `include` binds a scope
+  approval to it. The only persisted source-context id is the one
+  `GraphSnapshotStore` writes into each snapshot envelope, where a differing
+  id reads as `ContextMismatch` (`src/TokenBar.Core/GraphSnapshotStore.cs:104`), so by the code
+  path the first launch after this update waits for the live pass instead of
+  drawing the restored picture. Not observed on a Windows machine.
+- The root `Cargo.lock` gains `sha2-asm` 0.6.4 (same entry as the engine's own
+  lock; its dependency `cc` was already locked). The engine enables sha2's
+  `asm` feature for macOS arm64 only (`Cargo.toml`, target-specific table), so
+  the Windows build does not compile `sha2-asm`; the lock lists it because a
+  lockfile covers every target, and `--locked` fails without it.
+- On 188 (`win188`, lane `x4-pin`): `cargo test -p tb_core_ffi --locked`
+  passes, 854 passed, 0 failed, 11 ignored, including
+  `engine_client_ids_match_the_fixture`. `cargo clippy -D warnings` still
+  fails, with the same 28 lib / 31 test errors, the same multiset of messages,
+  on the commit before this pin (`dcf1b68`) and on this one; all are in
+  `crates/tb_core_ffi`, none in the engine, none from this advance.
+  `dotnet test` (TokenBar.Core.Tests) passes, 2288 passed, 0 failed, 0
+  skipped, and `build-app` (`dotnet build src/TokenBar.App`, x64, win-x64)
+  succeeds with 0 warnings and 0 errors. The gates ran on the gitlink and
+  `Cargo.lock` of this commit; this document was edited afterwards.
+- Not compared against a real Windows corpus: no before/after totals were run
+  on Windows. The figures below that carry numbers come from the engine's
+  ledger or from macOS measurements and say so.
+
+### Release-note items
+
+These are the items the next Windows release that carries this pin should
+state. The repository keeps no unreleased-notes file; `.github/release-notes/`
+holds one file per released version, written at the `chore(release)` commit.
+
+1. **Claude is re-parsed once.** The first scan after updating re-parses every
+   Claude transcript once (Claude `parser_version` 4 → 5). By the code path
+   (`message_cache.rs:1573-1580`) the upgrade loses nothing: an entry on an
+   older Claude `parser_version` is migrated rather than dropped, so turns that
+   only the cache still holds survive. Observed on 188 (2026-11-04, X4 build, real
+   cache): the first launch rewrote all 246 non-empty pv4 shards as pv5 within about
+   10.6 s of launch, the next launch rewrote none, and no crash or error-log entry
+   appeared. Whether any cache-only turn was kept was not checked (totals were not
+   compared). On macOS the same step took 25 to 27 s for 256 shards. Claude input tokens fall because input is now taken from the
+   line that carries the cache split instead of the larger of a prompt
+   snapshot and the split (#77): on the maintainer's Mac, Claude only, input
+   47,960,589 → 19,631,634 (-59.1%) and cost -0.23%, the change confined to
+   two Claude Code rows routed to non-Claude models. The size depends on the
+   corpus. Not measured on Windows.
+2. **Going back to an older version loses cache-only Claude history unless the
+   cache is backed up before pressing Install in the update dialog.** The
+   updater relaunches the new build at once, so afterwards it is too late. See
+   the procedure below.
+3. **Goose usage is detected on Windows.** A Goose database at
+   `%APPDATA%\Block\goose\data\sessions\sessions.db` is now found; it is
+   ranked after an explicit `GOOSE_PATH_ROOT` and before the XDG and legacy
+   candidates, so a stale leftover cannot mask it. `GOOSE_PATH_ROOT` itself
+   behaves as before (UPSTREAM.md, decision D7). 0 → N for a profile with that
+   file; not seen on a Windows machine, because 188 has no Goose data.
+4. **Pricing.** Rows with a Google provider hint are priced from Google's own
+   `gemini/<model>` entry; the hinted vendor's own root row wins over a longer
+   reseller row; Antigravity `gemini-3.8-flash-*` route labels fold onto
+   `gemini-3.8-flash`. Engine measurement on the maintainer's data, one frozen
+   pricing snapshot: total -$521.12 (-1.54%), anthropic -$452.16
+   (`claude-sonnet-5-5`), openai -$68.97 (`gpt-5.3-codex`), google and xai 0;
+   tokens and messages identical. One machine, not re-measured on Windows. The
+   memo (#84) leaves output byte-identical. Cached Claude, Muse, DSH, Junie and
+   OpenCodeReview messages keep their old folded-label names until re-parsed.
+5. **Other clients move.** Roo Code and Kilo Code (and Cline) are read under
+   `%APPDATA%\Code\User\globalStorage\<extension-id>\tasks` (`scanner.rs:970-986`), and their cost is
+   the extension's own; Hermes and Qwen totals drop where reasoning and cached
+   prefix had been counted twice; Droid replies are counted on their own
+   dates. Roo, Kilo, Cline, Droid and Qwen re-parse once. None of this was
+   compared against Windows data.
+
+### Windows backup and rollback of the Claude cache (D8)
+
+An engine at Claude `parser_version` 4 reads a pv 5 shard as stale and
+rewrites it from an empty map, dropping the Claude turns that only the cache
+still holds; an engine without the format 100 envelope does the same
+(`message_cache.rs:46-47` says "rolling back needs the Claude-cache backup";
+`message_cache.rs:1573-1574`: a downgrade cannot be migrated). The only way
+back is a backup taken before the new build first scans.
+
+Which releases this covers: v0.3.0 (pins `d6512f5`, Claude pv 4) up to and
+including v1.3.0 (pins `2d64ec42`, Claude pv 4); `ClientId::Claude => 4` at
+both pins (`message_cache.rs`), and no advance in between moved it (see the
+sections below). v0.1.0 to v0.2.2 (v0.2.2 pins `84e0d66`) predate the
+format 4 / pv 4 layout, so v0.3.0 is the oldest version this procedure can
+roll back to.
+
+Where the cache is, derived from the engine:
+
+| Step | Source |
+|---|---|
+| The app does not set `TOKSCALE_CONFIG_DIR` (only tests and CI do), so unless the user set it, the engine's default applies | `paths.rs:55-59` (the override), `paths.rs:52` (doc: Windows is `dirs::config_dir().join("tokscale")`), `paths.rs:68-70` (the code) |
+| `dirs::config_dir()` on Windows is the Roaming AppData known folder (FOLDERID_RoamingAppData), so the config root is `<ApplicationData>\tokscale`, usually `%APPDATA%\tokscale`. The commands below ask Windows for that folder instead of reading the environment variable | `dirs` 5 (`Cargo.toml:36`); `clients.rs:93-95` states default Windows scans read "the same %APPDATA% root used by cache writers"; `docs/lite-distribution.md:18` |
+| The cache is `<config>\cache` | `paths.rs` `get_cache_dir` (`<config_dir>/cache`) |
+| Shards are under `source-message-cache-v2`, one folder per client namespace | `message_cache.rs:57`, `message_cache.rs:2101-2103` |
+
+So the folder to keep is
+`<ApplicationData>\tokscale\cache\source-message-cache-v2\claude\` (or
+`<TOKSCALE_CONFIG_DIR>\cache\source-message-cache-v2\claude\` when that
+variable is set to a non-empty value; then set `$claude` below to it). Seen on
+188 (read-only listing): that folder holds 256 files `shard-00.bin` to
+`shard-ff.bin`, and the first bytes of each are `04 06 63 6c 61 75 64 65 04`,
+that is format 4, the string `claude`, `parser_version` 4. A shard written by
+this pin starts `64 06 63 6c 61 75 64 65 05` (format 100, `claude`, pv 5),
+which is what `bincode::options()` writes for the envelope fields at
+`message_cache.rs:2474-2485`. The first bytes do not prove a restore: a pv 4
+engine that rebuilt a shard from an empty map writes the same
+`04 06 63 6c 61 75 64 65 04`. The restore is therefore checked by comparing the
+restored folder with the backup, not by looking at the header.
+
+Windows PowerShell 5.1 and PowerShell 7 both run these commands. They were
+exercised on 188 against a scratch folder (backup equals source and a changed
+file shows as a difference; restore leaves no nested `claude\claude`; running
+the restore twice gives the same result); not against a real Claude cache.
+
+Setup, used by both procedures (paste it first in each PowerShell window):
+
+```powershell
+$claude = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'tokscale\cache\source-message-cache-v2\claude'
+$h = { param($d) Get-ChildItem -LiteralPath $d -File | Sort-Object Name | ForEach-Object { '{0} {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash, $_.Name } }
+```
+
+Backup, before pressing Install in the update dialog. The in-app updater
+quits Syrtis and relaunches the new build at once
+(`src/TokenBar.App/UpdateFlow.cs:219-222`, `restart: true`), so there is no
+moment between the update and the first scan in which to back up. A user who
+has already updated can no longer back up the pv 4 shards: the first scan has
+rewritten them.
+
+1. Quit Syrtis (tray menu, Quit) and any other program that uses the tokscale
+   engine, such as a `tokscale` CLI, then run the setup above.
+2. Copy to a new, dated destination outside `...\tokscale\cache`. The
+   destination does not exist yet, so the copy cannot nest and an earlier
+   backup is never overwritten:
+
+   ```powershell
+   $backup = Join-Path $env:USERPROFILE ('syrtis-claude-cache-backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+   Copy-Item -Recurse -LiteralPath $claude -Destination $backup
+   Compare-Object (& $h $claude) (& $h $backup)
+   $backup
+   ```
+
+   `Compare-Object` printing nothing means the copy matches file for file
+   (SHA-256 and name). Note the printed `$backup` folder name; the restore
+   needs it. Optionally, also write down the Claude totals shown before the
+   update.
+3. Only then press Install.
+
+Rollback to an older Syrtis (v0.3.0 or later), in this order:
+
+1. Quit every program running the new engine: this Syrtis, a test build, any
+   other tokscale build that writes the cache. The cache lock is advisory and
+   taken only when the engine saves, so a running pv 5 process re-parses the
+   restored pv 4 entries and writes them back as pv 5. Do not start the older
+   Syrtis yet.
+2. Run the setup, then set `$backup` to the folder the backup printed, and
+   restore:
+
+   ```powershell
+   $backup = Join-Path $env:USERPROFILE 'syrtis-claude-cache-backup-<the stamp printed by the backup>'
+   & {
+     if (Test-Path -LiteralPath $claude) { Remove-Item -Recurse -Force -LiteralPath $claude -ErrorAction Stop }
+     if (Test-Path -LiteralPath $claude) { throw 'claude folder still exists; quit every Syrtis/tokscale process and retry' }
+     Copy-Item -Recurse -LiteralPath $backup -Destination $claude -ErrorAction Stop
+   }
+   Compare-Object (& $h $backup) (& $h $claude)
+   ```
+
+   `claude` is removed first and then recreated as a copy of the backup, so
+   the result is `...\claude\shard-00.bin`, never `...\claude\claude\...`. The
+   backup is only read, so the step can be run again and gives the same
+   result. If a shard is still held open, `Remove-Item` stops the block
+   (`-ErrorAction Stop`) before anything is copied, so a partial delete never
+   turns into a nested `claude\<backup>` copy. The three lines sit in one `& { }`
+   block so the first error ends all of them, also when pasted into a console.
+3. Check that `Compare-Object` printed nothing. If it printed anything, do not
+   start the older Syrtis; repeat step 2.
+4. Install and start the older Syrtis. Optionally compare its Claude totals
+   with the ones written down before the update.
+
+The shard header (`04 06 63 6c 61 75 64 65 04`) is not a restore check, see
+above.
+
+Without a backup the loss is accepted. A pv 4 build that runs on the same
+profile after a pv 5 build has written the cache drops the cache-only turns on
+every scan, so do not run an older Syrtis or tokscale against this profile
+between the update and the restore.
+
+Known limit: neither the app nor the engine takes this backup, and a pv 5
+build shares the one cache folder with older builds instead of using a cache
+directory of its own. Both were considered and not done (user decision D1,
+2026-11-02); the procedure above is the only protection.
+
+## Historical: `15204f4e`, Antigravity extension client (engine PRs #70, #71, #73)
 
 The reviewed pin is the merge commit of tokscale-core PR #73 on the engine's
 `main`, covering `2d64ec42` → `af1cb144` (#71) → `52815d03` (#70) →
@@ -394,7 +624,9 @@ source-token, and live-tail work through the context-aware APIs. The engine
 source token includes report-visible retained-only Claude cache state, and that
 slice kept the cache schema and public interfaces unchanged. That statement
 is about that advance only. The format moved 3 to 4 later, at `d6512f5`, and
-has stayed 4 through the current pin.
+stayed 4 for every namespace until `fc339e98`, where Claude shards are written
+at format 100 (`CLAUDE_CACHE_FORMAT_VERSION`); the generic
+`CACHE_FORMAT_VERSION` is still 4.
 
 ## Ownership
 
