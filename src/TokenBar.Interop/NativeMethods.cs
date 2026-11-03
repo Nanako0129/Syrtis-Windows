@@ -93,6 +93,9 @@ internal static partial class NativeMethods
     [LibraryImport(Lib)]
     internal static partial nint tb_cursor_sync(int userInitiated);
 
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_validate_cursor_profile(string json);
+
     [LibraryImport(Lib)]
     internal static partial nint tb_cursor_present();
 

@@ -32,8 +32,8 @@ public class CursorSyncTests
     private static SettingsStore TempStore() =>
         new(Path.Combine(Path.GetTempPath(), "tokenbar-tests", Guid.NewGuid().ToString("N"), "settings.json"));
 
-    private static CursorSyncStatus Status(string state, long events = 0, long? last = 1) =>
-        new(state, events, last);
+    private static CursorSyncStatus Status(string state, long events = 0, long? last = 1, bool? changed = null) =>
+        new(state, events, last, changed ?? state == "ok", []);
 
     /// <summary>Fake core. Every call is logged in order; the optional gates
     /// hold a push or a sync until the test releases it.</summary>
@@ -41,6 +41,8 @@ public class CursorSyncTests
     {
         public readonly ConcurrentQueue<string> Log = new();
         public readonly ConcurrentQueue<(bool Enabled, bool Takeover)> Pushes = new();
+        /// <summary>Every push's exact JSON, in order.</summary>
+        public readonly ConcurrentQueue<string> Json = new();
         public Func<bool, bool, Exception?> PushError = (_, _) => null;
         public Func<bool, ManualResetEventSlim?> PushGate = _ => null;
         public ManualResetEventSlim? SyncGate;
@@ -48,15 +50,21 @@ public class CursorSyncTests
         public readonly SemaphoreSlim SyncStarted = new(0);
         public Func<CursorSyncStatus> Result = () => Status("ok", 1);
         public bool Present = true;
+        /// <summary>An accepted on push's <c>cleanupFailed</c>.</summary>
+        public volatile bool PushCleanupFailed;
         public int PresenceProbes;
         public volatile bool CoreTakeover;
 
         public int Calls => Log.Count + PresenceProbes;
 
         public CursorSyncController.Io Io => new(
-            SetConfig: (enabled, takeover) =>
+            SetConfig: json =>
             {
+                using var doc = JsonDocument.Parse(json);
+                var enabled = doc.RootElement.GetProperty("enabled").GetBoolean();
+                var takeover = doc.RootElement.GetProperty("cliTakeoverConfirmed").GetBoolean();
                 PushGate(enabled)?.Wait(Wait);
+                Json.Enqueue(json);
                 Pushes.Enqueue((enabled, takeover));
                 CoreTakeover = takeover;
                 Log.Enqueue(enabled ? "push:on" : "push:off");
@@ -65,7 +73,8 @@ public class CursorSyncTests
                     throw error;
                 }
 
-                return new CursorSyncConfig(enabled, null, takeover, 0);
+                return new CursorSyncConfig(
+                    enabled, null, takeover, 0, [], [], enabled && PushCleanupFailed, []);
             },
             Sync: userInitiated =>
             {
@@ -99,31 +108,33 @@ public class CursorSyncTests
 
     // ---- preferences → config ---------------------------------------------------
 
+    /// <summary>The exact JSON the core is given (CMP-W shape). W1 pushes no
+    /// added profile (WB11: W2 reads the store behind its disclosure).</summary>
     [Fact]
-    public async Task ThePreferencesReachTheCoreAsTheTwoKeyConfig()
+    public async Task ThePreferencesReachTheCoreAsTheConfigJson()
     {
         var store = TempStore();
         var core = new FakeCore();
         var controller = new CursorSyncController(core.Io, store, User, interval: Never);
-        string Last() => CursorSyncRequest.Json(core.Pushes.Last().Enabled, core.Pushes.Last().Takeover);
+        string Last() => core.Json.Last();
 
         Assert.True(CursorSync.Enabled(store)); // D3: default ON
         controller.Reconfigure(refresh: false);
         await Until(() => core.Pushes.Count == 1);
         // Default on, but the notice is unanswered: the core is told off.
-        Assert.Equal("""{"enabled":false,"cliTakeoverConfirmed":false}""", Last());
+        Assert.Equal("""{"enabled":false,"cliTakeoverConfirmed":false,"profiles":[]}""", Last());
 
         controller.AnswerNotice(continuing: true);
         await Until(() => core.Pushes.Count == 2);
-        Assert.Equal("""{"enabled":true,"cliTakeoverConfirmed":false}""", Last());
+        Assert.Equal("""{"enabled":true,"cliTakeoverConfirmed":false,"profiles":[]}""", Last());
 
         controller.SetTakeoverConfirmed(true);
         await Until(() => core.Pushes.Count == 3);
-        Assert.Equal("""{"enabled":true,"cliTakeoverConfirmed":true}""", Last());
+        Assert.Equal("""{"enabled":true,"cliTakeoverConfirmed":true,"profiles":[]}""", Last());
 
         controller.TurnOff();
         await Until(() => core.Pushes.Count == 4);
-        Assert.Equal("""{"enabled":false,"cliTakeoverConfirmed":true}""", Last());
+        Assert.Equal("""{"enabled":false,"cliTakeoverConfirmed":true,"profiles":[]}""", Last());
     }
 
     [Fact]
@@ -346,7 +357,7 @@ public class CursorSyncTests
             var core = new FakeCore();
             var controller = new CursorSyncController(core.Io, store, ["Syrtis.exe", flag], interval: Never);
             controller.Reconfigure(refresh: true);
-            await controller.TurnOn(NeverAsked);
+            Assert.True(await controller.TurnOn(NeverAsked));
             controller.SetTakeoverConfirmed(true);
             controller.AnswerNotice(continuing: true);
             await controller.RunSync(userInitiated: true);
@@ -558,7 +569,7 @@ public class CursorSyncTests
         Assert.True(await core.SyncStarted.WaitAsync(Wait));
         await controller.RunSync(userInitiated: true);
         controller.TurnOff();
-        await controller.TurnOn(NeverAsked);
+        Assert.True(await controller.TurnOn(NeverAsked));
         gate.Set();
         await running;
         Assert.Equal(0, core.UserSyncs);
@@ -645,26 +656,286 @@ public class CursorSyncTests
         await Until(() => core.Log.Contains("sync:auto"));
     }
 
+    /// <summary>The dashboard refreshes on <c>changed</c> (some profile's
+    /// file content changed), not on the headline or the event count: a round
+    /// whose headline is an error can still have written a file, another
+    /// profile can write the same count, and an ok walk whose bytes equal the
+    /// file's changes nothing.</summary>
     [Fact]
-    public async Task OffThenOnRefreshesAgainForTheSameEventCount()
+    public async Task EveryRoundThatWroteAFileRefreshesAndNoOther()
     {
         var store = TempStore();
         store.SetBool(CursorSync.NoticeKey, true);
-        var core = new FakeCore { Result = () => Status("ok", 7) };
+        var next = Status("ok", 7);
+        var core = new FakeCore { Result = () => next };
         var controller = new CursorSyncController(core.Io, store, User, interval: Never);
         var data = 0;
         controller.DataChanged += () => Interlocked.Increment(ref data);
 
         await controller.RunSync(userInitiated: true);
-        Assert.Equal(1, data); // a changed count refreshes
+        Assert.Equal(1, data);
         await controller.RunSync(userInitiated: true);
-        Assert.Equal(1, data); // the same count does not
+        Assert.Equal(2, data); // the same count, new content: refreshes
 
-        store.SetBool(CursorSync.EnabledKey, false);
-        controller.Reconfigure(refresh: false);
-        store.SetBool(CursorSync.EnabledKey, true);
+        next = Status("error", 7, changed: true); // one profile failed, another wrote
         await controller.RunSync(userInitiated: true);
-        Assert.Equal(2, data); // off deleted the files: the same count refreshes again
+        Assert.Equal(3, data);
+
+        // e.g. every profile a duplicate, or a walk whose bytes equal the
+        // file's (core: cursor_sync an_identical_walk_changes_nothing)
+        next = Status("ok", 7, changed: false);
+        await controller.RunSync(userInitiated: true);
+        Assert.Equal(3, data);
+        next = Status("partial", 0, changed: false);
+        await controller.RunSync(userInitiated: true);
+        Assert.Equal(3, data);
+    }
+
+    /// <summary>CMP-W W1 review round 3 (C): a round whose status lists
+    /// <c>cleanupFailedProfiles</c>, or an accepted on push whose cleanup
+    /// failed, raises <see cref="CursorSyncController.ProfileCleanupFailed"/>;
+    /// a clean round or push clears its own part, and an off push clears
+    /// both.</summary>
+    [Fact]
+    public async Task ProfileCleanupFailuresAreRaisedWhileOn()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var next = Status("ok", 1) with { CleanupFailedProfiles = ["0A1B2C3D-0000-4000-8000-00000000000A"] };
+        var core = new FakeCore { Result = () => next };
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+
+        await controller.RunSync(userInitiated: true);
+        Assert.True(controller.ProfileCleanupFailed, "the round's cleanupFailedProfiles was dropped");
+        next = Status("ok", 1) with { CleanupFailedProfiles = [] };
+        await controller.RunSync(userInitiated: true);
+        Assert.False(controller.ProfileCleanupFailed);
+
+        core.PushCleanupFailed = true;
+        controller.Reconfigure(refresh: false);
+        await Until(() => controller.ProfileCleanupFailed);
+        core.PushCleanupFailed = false;
+        controller.Reconfigure(refresh: false);
+        await Until(() => !controller.ProfileCleanupFailed);
+
+        core.PushCleanupFailed = true;
+        controller.Reconfigure(refresh: false);
+        await Until(() => controller.ProfileCleanupFailed);
+        controller.TurnOff();
+        await Until(() => !controller.ProfileCleanupFailed);
+    }
+
+    // ---- configRejected (CMP-W WB3) -----------------------------------------------
+
+    /// <summary>A refused on push stops sync: the fake core's Sync count stays
+    /// 0 for the schedule and for a user's Sync Now, until a push is accepted.
+    /// The core kept only profiles that push listed; anything else could walk
+    /// a profile the user removed.</summary>
+    [Fact]
+    public async Task ARejectedOnPushStopsEverySyncUntilAPushIsAccepted()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore();
+        var refuse = true;
+        core.PushError = (enabled, _) => enabled && refuse ? new TbCoreException("invalidProfileId") : null;
+        var interval = TimeSpan.FromMilliseconds(20);
+        var controller = new CursorSyncController(core.Io, store, User, interval: interval);
+        int Syncs() => core.Log.Count(e => e.StartsWith("sync", StringComparison.Ordinal));
+
+        controller.Reconfigure(refresh: false); // the schedule's push, refused
+        await Until(() => controller.State == CursorSync.ConfigRejectedState);
+        await controller.RunSync(userInitiated: true); // Sync Now
+        await controller.RunSync(userInitiated: false);
+        await Task.Delay(200); // several intervals of the schedule
+        Assert.Equal(0, Syncs());
+        Assert.Equal(CursorSync.Copy.ConfigRejected, CursorSync.StatusLine(controller.State, null));
+        Assert.True(CursorSync.StatusIsWarning(controller.State));
+
+        // An accepted push clears it and sync runs again.
+        refuse = false;
+        controller.Reconfigure(refresh: false);
+        await Until(() => Syncs() > 0);
+        await Until(() => controller.State == "ok");
+    }
+
+    /// <summary>W1 and the Accounts page's consent flow (#267) together, over
+    /// both consent paths: the on push made by
+    /// <see cref="CursorSyncController.TurnOn"/>'s Continue, or by the
+    /// Overview card's <see cref="CursorSyncController.AnswerNotice"/>
+    /// Continue, is refused, so consent is recorded but nothing syncs,
+    /// scheduled or pressed; turning off and on again (no question now: the
+    /// notice is answered) with an accepted push syncs.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ARejectedPushAfterTurnOnStopsSyncUntilAnAcceptedPush(bool viaTurnOn)
+    {
+        var store = TempStore(); // notice unanswered, preference default on
+        var core = new FakeCore();
+        var refuse = true;
+        core.PushError = (enabled, _) => enabled && refuse ? new TbCoreException("invalidProfileId") : null;
+        var controller = new CursorSyncController(core.Io, store, User, interval: TimeSpan.FromMilliseconds(20));
+        int Syncs() => core.Log.Count(e => e.StartsWith("sync", StringComparison.Ordinal));
+
+        if (viaTurnOn)
+        {
+            Assert.True(await controller.TurnOn(() => Task.FromResult(true)));
+        }
+        else
+        {
+            controller.AnswerNotice(continuing: true);
+        }
+
+        Assert.True(CursorSync.NoticeAcknowledged(store));
+        Assert.True(CursorSync.ShouldSync(store));
+        await Until(() => controller.State == CursorSync.ConfigRejectedState);
+        await controller.RunSync(userInitiated: true); // Sync Now
+        await Task.Delay(150); // several intervals of the schedule
+        Assert.Equal(0, Syncs());
+
+        refuse = false;
+        controller.TurnOff();
+        Assert.True(await controller.TurnOn(NeverAsked));
+        await Until(() => Syncs() > 0);
+        await Until(() => controller.State == "ok");
+    }
+
+    /// <summary>Merge-delta 1: an on push refused only after a later
+    /// Reconfigure turned sync off belongs to a superseded configuration, so
+    /// it must not leave configRejected behind: not while off, and not as a
+    /// stale warning when sync is turned on again (seen before that push
+    /// lands).</summary>
+    [Fact]
+    public async Task ARefusalThatLandsAfterTurningOffLeavesNoStaleWarning()
+    {
+        var store = TempStore(); // notice unanswered
+        var core = new FakeCore();
+        var refuse = true;
+        core.PushError = (enabled, _) => enabled && refuse ? new TbCoreException("invalidProfileId") : null;
+        var held = new ManualResetEventSlim(false);
+        ManualResetEventSlim? gate = held;
+        core.PushGate = enabled => enabled ? gate : null;
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+
+        Assert.True(await controller.TurnOn(() => Task.FromResult(true))); // on push, held
+        controller.TurnOff();
+        held.Set(); // the on push is refused now, after the off
+        await Until(() => core.Pushes.Count == 2);
+        await Task.Delay(50);
+        Assert.NotEqual(CursorSync.ConfigRejectedState, controller.State);
+
+        // Turning on again: before its push lands, no stale warning.
+        refuse = false;
+        using var next = new ManualResetEventSlim(false);
+        gate = next;
+        Assert.True(await controller.TurnOn(NeverAsked));
+        Assert.NotEqual(CursorSync.ConfigRejectedState, controller.State);
+        next.Set();
+        await Until(() => core.Pushes.Count == 3);
+        held.Dispose();
+    }
+
+    /// <summary>Turning sync off after a refusal clears the line (sync is off),
+    /// and an off push is never treated as a refusal.</summary>
+    [Fact]
+    public async Task AnOffPushNeverReadsAsRejected()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore { PushError = (_, _) => new TbCoreException("tb_set_cursor_sync panicked: x") };
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        controller.Reconfigure(refresh: false);
+        await Until(() => controller.State == CursorSync.ConfigRejectedState);
+        controller.TurnOff();
+        await Until(() => core.Pushes.Count == 2);
+        await Task.Delay(50);
+        Assert.Null(controller.State);
+    }
+
+    /// <summary>WB9, C# side: what the controller logs is a type name or a
+    /// fixed code, never a native message (a panic payload could carry
+    /// anything).</summary>
+    [Fact]
+    public async Task TheLogCarriesNoNativeMessage()
+    {
+        const string Canary = "TOKENCANARY-eyJ.SIGCANARY.user_CANARY01234567890";
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var lines = new ConcurrentQueue<string>();
+        var core = new FakeCore
+        {
+            PushError = (_, _) => new TbCoreException($"tb_set_cursor_sync panicked: {Canary}"),
+            Result = () => throw new TbCoreException($"tb_cursor_sync panicked: {Canary}"),
+            Present = true,
+        };
+        var controller = new CursorSyncController(core.Io, store, User, lines.Enqueue, Never);
+        controller.Reconfigure(refresh: false);
+        await Until(() => controller.State == CursorSync.ConfigRejectedState);
+        core.PushError = (_, _) => null;
+        controller.Reconfigure(refresh: false);
+        await Until(() => core.Pushes.Count == 2);
+        await controller.RunSync(userInitiated: true);
+        controller.TurnOff();
+        await Until(() => core.Pushes.Count == 3);
+        Assert.NotEmpty(lines);
+        Assert.All(lines, line => Assert.DoesNotContain("CANARY", line, StringComparison.Ordinal));
+    }
+
+    // ---- added profiles: store and consent (W1 plumbing, no UI) -------------------
+
+    /// <summary>WB5 + WB11: W1 never pushes an added profile, whatever the
+    /// local store or the roaming settings hold (another PC's folders could
+    /// arrive through the roaming file).</summary>
+    [Fact]
+    public async Task NoAddedProfileIsPushedInW1()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        store.SetString("tokenbar.cursorSync.profiles", """[{"id":"0A1B2C3D-0000-4000-8000-00000000000A","root":"D:\other-pc"}]""");
+        var local = new CursorProfileStore(Path.Combine(Path.GetTempPath(), "tokenbar-tests", Guid.NewGuid().ToString("N"), "cursor-profiles.json"));
+        local.Save([new CursorProfile(CursorProfileStore.NewId(), @"C:\CursorProfileTest")]);
+        Assert.Single(local.Load()); // control: the store does hold one
+        var core = new FakeCore();
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        controller.Reconfigure(refresh: false);
+        await Until(() => core.Json.Count == 1);
+        using var doc = JsonDocument.Parse(core.Json.Single());
+        Assert.Equal(0, doc.RootElement.GetProperty("profiles").GetArrayLength());
+    }
+
+    [Fact]
+    public void TheProfileStoreIsLocalAndKeepsOnlyUppercaseGuidIds()
+    {
+        Assert.StartsWith(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            CursorProfileStore.DefaultPath, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) + Path.DirectorySeparatorChar,
+            CursorProfileStore.DefaultPath, StringComparison.Ordinal);
+        var id = CursorProfileStore.NewId();
+        Assert.Matches("^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$", id);
+
+        var path = Path.Combine(Path.GetTempPath(), "tokenbar-tests", Guid.NewGuid().ToString("N"), "cursor-profiles.json");
+        var store = new CursorProfileStore(path);
+        Assert.Empty(store.Load()); // absent file
+        store.Save([new CursorProfile(id, @"C:"), new CursorProfile(id.ToLowerInvariant(), @"C:"), new CursorProfile("default", @"C:\c")]);
+        Assert.Equal([new CursorProfile(id, @"C:")], store.Load());
+        File.WriteAllText(path, "{not json");
+        Assert.Empty(store.Load());
+        // Null entries are dropped, not dereferenced (`[null]` is the empty list).
+        File.WriteAllText(path, "[null]");
+        Assert.Empty(store.Load());
+        File.WriteAllText(path, $$"""[null,{"Id":"{{id}}","Root":"C:/d"}]""");
+        Assert.Equal([new CursorProfile(id, "C:/d")], store.Load());
+    }
+
+    [Fact]
+    public void ConsentParagraphsFollowTheList()
+    {
+        Assert.Equal([CursorSync.Copy.Privacy], CursorSync.ConsentParagraphs(0));
+        Assert.Equal([CursorSync.Copy.Privacy, CursorSync.Copy.ProfilesPrivacy], CursorSync.ConsentParagraphs(1));
+        Assert.Equal(2, CursorSync.ConsentParagraphs(32).Count);
     }
 
     // ---- cleanupFailed ----------------------------------------------------------
@@ -691,7 +962,7 @@ public class CursorSyncTests
         // Turning sync on hides the line ("sync is off" would be false) but
         // does not clear it: only a successful cleanup does.
         failCleanup = false;
-        await controller.TurnOn(NeverAsked);
+        Assert.True(await controller.TurnOn(NeverAsked));
         await Until(() => core.Pushes.Count == 2);
         await Task.Delay(50);
         Assert.True(controller.CleanupFailed);
@@ -823,8 +1094,8 @@ public class CursorSyncTests
         Assert.Null(CursorSync.StatusLine(null, null, now));
         Assert.Null(CursorSync.StatusLine("ok", null, now));
         Assert.Null(CursorSync.StatusLine("somethingNew", hourAgo, now));
-        string[] problems = ["partial", "expired", "notSignedIn", "offline", "error", "cliPresent"];
-        Assert.Equal(6, problems.Select(s => CursorSync.StatusLine(s, null)).Distinct().Count());
+        string[] problems = ["partial", "expired", "notSignedIn", "offline", "error", "cliPresent", CursorSync.ConfigRejectedState];
+        Assert.Equal(7, problems.Select(s => CursorSync.StatusLine(s, null)).Distinct().Count());
     }
 
     [Fact]
@@ -867,6 +1138,10 @@ public class CursorSyncTests
         ["Keep tokscale CLI Data"] = "保留 tokscale CLI 的資料",
         ["Cursor sync is off, but some downloaded usage couldn't be deleted. Restart Syrtis to retry."] =
             "Cursor 同步已關閉，但有部分已下載的用量無法刪除。重新啟動 Syrtis 即可再試。",
+        // CMP-W, verbatim from macOS #532 / #535 zh-Hant.
+        ["Cursor sync couldn't be set up, so nothing is being synced."] = "無法設定 Cursor 同步，目前不會同步任何用量。",
+        ["Add a folder you start Cursor with using --user-data-dir to sync it too (Syrtis keeps the folder path in its settings); each profile's sign-in is handled as described above. All profiles add up to one Cursor total, and an account signed in to several profiles counts once. Removing a profile deletes its downloaded usage the next time Syrtis can."] =
+            "加入用 --user-data-dir 啟動 Cursor 的資料夾（資料夾路徑會儲存在 Syrtis 設定中），就能一起同步；每個設定檔的登入資訊都照上一段的方式處理。所有設定檔合計成一個 Cursor 總量，同一個帳號只算一次。移除設定檔後，Syrtis 會在下次能處理時刪除它已下載的用量。",
     };
 
     private static Dictionary<string, string> Catalog(string tag) =>

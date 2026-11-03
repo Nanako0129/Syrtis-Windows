@@ -12,6 +12,12 @@ publish = false
 # repo's vendor re-sync is a byte-identical copy (no local re-apply).
 crate-type = ["cdylib", "staticlib"]
 
+[features]
+# Test-support builds only (the C# seam test's own DLL, built into a separate
+# target dir by TokenBar.Core.Tests): exports `tb_test_set_cursor_sync`, which
+# takes the data parents as arguments. Never enabled for the shipping DLL.
+test-support = []
+
 [dependencies]
 tokscale-core = { path = "../../vendor/tokscale-core" }
 serde = { version = "1", features = ["derive"] }
@@ -49,6 +55,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Credentials",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
+    # DeviceIoControl: the cursor_sync tests' cloud-placeholder fixture
+    # (FSCTL_SET_REPARSE_POINT), as the CMP-W0 probe measured it.
+    "Win32_System_IO",
     "Win32_System_Registry",
     "Win32_System_Threading",
 ] }

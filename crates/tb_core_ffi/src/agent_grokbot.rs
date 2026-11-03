@@ -1080,6 +1080,132 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// CMP-W item 9 (macOS CMP-520 11): Grok Bot's Cursor fallback reads only
+    /// the default profile's database, under the config root it is given by
+    /// parameter; an added Cursor sync profile never feeds it, even while one
+    /// is configured and enabled.
+    #[test]
+    fn added_cursor_profiles_never_feed_grok_bot() {
+        fn yes() -> bool {
+            true
+        }
+        let _guard = crate::cursor_sync::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let config_dir = temp_dir("cmp_default");
+        let default_db = cursor_state_db_path(&config_dir);
+        std::fs::create_dir_all(default_db.parent().unwrap()).unwrap();
+        write_state_db(
+            &default_db,
+            &[
+                ("cursorAuth/accessToken", "DEFAULTPROFILETOKEN"),
+                ("glass.lastSignedInAuthId", USER_ID),
+            ],
+        );
+        let added = temp_dir("cmp_added");
+        let added_db = crate::cursor_desktop::profile_db_path(&added);
+        std::fs::create_dir_all(added_db.parent().unwrap()).unwrap();
+        write_state_db(
+            &added_db,
+            &[
+                ("cursorAuth/accessToken", "ADDEDPROFILETOKEN"),
+                ("glass.lastSignedInAuthId", "user_ADDEDprofile01234567890"),
+            ],
+        );
+        crate::cursor_sync::set_config_for_test(crate::cursor_sync::Config {
+            enabled: true,
+            dir: Some(added.join("sync")),
+            profiles_dir: Some(added.join("profiles")),
+            profiles: vec![crate::cursor_sync::Profile {
+                id: "0A1B2C3D-0000-4000-8000-00000000000A".to_string(),
+                root: added.clone(),
+            }],
+            cli_takeover_confirmed: false,
+        });
+        let loaded = load_credentials(
+            &config_dir,
+            DesktopAccess {
+                consent: &yes,
+                load_key: &no_key,
+            },
+        );
+        crate::cursor_sync::set_config_for_test(crate::cursor_sync::Config::default());
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let _ = std::fs::remove_dir_all(&added);
+        match loaded {
+            Ok(Some(GrokBotCredentials::Cursor(credentials, path))) => {
+                assert_eq!(credentials.access_token, "DEFAULTPROFILETOKEN");
+                assert_eq!(credentials.user_id, USER_ID);
+                assert_eq!(path, default_db);
+            }
+            _ => panic!("expected the default profile's Cursor credentials"),
+        }
+    }
+
+    /// CodeRabbit 7 on PR #268: with no default Cursor database at all, an
+    /// enabled added profile holding a token still never feeds Grok Bot: no
+    /// Cursor credentials load (there is no fallback to added profiles).
+    #[test]
+    fn no_default_database_and_an_added_profile_load_no_cursor_credentials() {
+        fn yes() -> bool {
+            true
+        }
+        let _guard = crate::cursor_sync::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let config_dir = temp_dir("cmp_no_default");
+        let default_db = cursor_state_db_path(&config_dir);
+        assert!(!default_db.exists(), "fixture: a default database");
+        let added = temp_dir("cmp_added_only");
+        let added_db = crate::cursor_desktop::profile_db_path(&added);
+        std::fs::create_dir_all(added_db.parent().unwrap()).unwrap();
+        let rows = [
+            ("cursorAuth/accessToken", "ADDEDPROFILETOKEN"),
+            ("glass.lastSignedInAuthId", "user_ADDEDprofile01234567890"),
+        ];
+        write_state_db(&added_db, &rows);
+        // Positive control: the same database at the default path loads.
+        std::fs::create_dir_all(default_db.parent().unwrap()).unwrap();
+        write_state_db(&default_db, &rows);
+        let control = load_credentials(
+            &config_dir,
+            DesktopAccess {
+                consent: &yes,
+                load_key: &no_key,
+            },
+        );
+        assert!(
+            matches!(control, Ok(Some(GrokBotCredentials::Cursor(..)))),
+            "control: the database did not load at the default path"
+        );
+        std::fs::remove_file(&default_db).unwrap();
+        assert!(!default_db.exists());
+        crate::cursor_sync::set_config_for_test(crate::cursor_sync::Config {
+            enabled: true,
+            dir: Some(added.join("sync")),
+            profiles_dir: Some(added.join("profiles")),
+            profiles: vec![crate::cursor_sync::Profile {
+                id: "0A1B2C3D-0000-4000-8000-00000000000A".to_string(),
+                root: added.clone(),
+            }],
+            cli_takeover_confirmed: false,
+        });
+        let loaded = load_credentials(
+            &config_dir,
+            DesktopAccess {
+                consent: &yes,
+                load_key: &no_key,
+            },
+        );
+        crate::cursor_sync::set_config_for_test(crate::cursor_sync::Config::default());
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let _ = std::fs::remove_dir_all(&added);
+        assert!(
+            !matches!(loaded, Ok(Some(GrokBotCredentials::Cursor(..)))),
+            "an added profile fed Grok Bot"
+        );
+    }
+
     /// The production paths are `<config>\Grok Bot\sand-secrets.json` and
     /// `<config>\Cursor\User\globalStorage\state.vscdb`.
     #[test]

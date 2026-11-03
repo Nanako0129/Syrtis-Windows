@@ -3784,8 +3784,9 @@ where
 
 /// SHA-256 of the exact bytes, lower-case hex. Unlike `sha256_hex` it never
 /// trims: two directories differing only in surrounding whitespace must not
-/// share a history series.
-fn sha256_hex_exact(value: &[u8]) -> String {
+/// share a history series. Also names added Cursor profiles' dirs
+/// (`cursor_sync::profile_dir_name`).
+pub(crate) fn sha256_hex_exact(value: &[u8]) -> String {
     Sha256::digest(value)
         .iter()
         .map(|byte| format!("{byte:02x}"))

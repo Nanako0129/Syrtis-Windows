@@ -1361,19 +1361,28 @@ pub unsafe extern "C" fn tb_antigravity_remove(key: *const c_char) -> *mut c_cha
 }
 
 /// Configure Cursor desktop sync (see the `cursor_sync` module doc). `json`
-/// is `{"enabled":bool,"cliTakeoverConfirmed":bool}`; any other key (a `dir`
-/// included) is `invalidJson`: Rust chooses the dir (Plan W1),
-/// `<%APPDATA%>\com.nyanako.tokenbar[.secure]\cursor-cache[.secure]`. Full
-/// replace, in-memory, default off: the caller re-applies it at launch.
-/// Success data is `{"enabled","dir","cliTakeoverConfirmed","removedFiles":N}`
-/// with the resolved `dir` while enabled, `null` when disabled. Disabling
-/// deletes Syrtis usage files from every existing candidate dir (both roots
-/// × both child names) and creates no directory. Errors are fixed codes:
-/// `nullPayload`, `invalidUtf8`, `invalidJson` (nothing changed),
-/// `storageUnavailable` (enabling: registry unchanged, but directories the
-/// resolution already created may remain), `cleanupFailed` (disabling: sync
-/// IS off and the takeover removed, but a Syrtis usage file could not be
-/// deleted, W7). Rechecks the takeover (W5).
+/// is `{"enabled":bool,"cliTakeoverConfirmed":bool,"profiles":[{"id","root"}]}`
+/// (`profiles` optional, each id an uppercase UUID, each root an added
+/// `--user-data-dir` folder); any other key (a `dir` included) is
+/// `invalidJson`. Rust chooses every Syrtis dir (Plan W1): the default
+/// profile's `<%APPDATA%>\com.nyanako.tokenbar[.secure]\cursor-cache[.secure]`,
+/// added profiles under the local
+/// `<%LOCALAPPDATA%>\com.nyanako.tokenbar[.secure]\cursor-profiles[.secure]`
+/// (WB5). Full replace, in-memory, default off: the caller re-applies it at
+/// launch. Success data is `{"enabled","dir","profilesDir","profiles":[{"id"}],
+/// "rejected":[{"index","reason"}],"cliTakeoverConfirmed","removedFiles":N,
+/// "cleanupFailed","cleanupFailedProfiles"}`: `profiles` lists `default` then
+/// each registered added id (never a root), `rejected` the refused roots by
+/// index (the rest register). An off push is accepted whatever its
+/// profiles and deletes Syrtis usage files from every existing candidate dir
+/// (default and added) without creating any. An on push removes our files
+/// from profile dirs no longer listed (non-fatal, `cleanupFailed`). Errors
+/// are fixed codes: `nullPayload`, `invalidUtf8`, `invalidJson`,
+/// `tooManyProfiles`, `invalidProfileId`, `storageUnavailable` (enabling), and
+/// on any of these the registry keeps only profiles the refused input also
+/// lists (WB3); `cleanupFailed` (disabling: sync IS off and the takeover
+/// removed, but a Syrtis usage file could not be deleted, W7). Rechecks the
+/// takeover (W5).
 ///
 /// # Safety
 /// `json` must be NULL or a valid NUL-terminated string.
@@ -1386,21 +1395,89 @@ pub unsafe extern "C" fn tb_set_cursor_sync(json: *const c_char) -> *mut c_char 
 
 fn set_cursor_sync(raw: &str) -> Result<serde_json::Value, String> {
     let result = cursor_sync::set_from_json(raw);
-    // Also after an error: `cleanupFailed` has already turned sync off.
+    // Also after an error: `cleanupFailed` has already turned sync off, and a
+    // refused push may have dropped profiles.
     recheck_cursor_takeover();
     result
 }
 
-/// Run one Cursor desktop sync now. Blocking (SQLite read + network, up to
-/// 10 min): never call on the UI thread. `user_initiated` non-zero = the
-/// user's "Sync now" (10 min budget); zero = background (10 min until a
-/// complete file exists, then 60 s). Single-flight: a call made while one
+/// Test-support builds only (`--features test-support`, never the shipping
+/// DLL): `tb_set_cursor_sync` against caller-chosen roaming and local data
+/// parents, so the C# seam test can push production JSON without touching
+/// the real `%APPDATA%` / `%LOCALAPPDATA%`. Both must be absolute paths.
+///
+/// # Safety
+/// Each argument must be NULL or a valid NUL-terminated string.
+#[cfg(feature = "test-support")]
+#[no_mangle]
+pub unsafe extern "C" fn tb_test_set_cursor_sync(
+    json: *const c_char,
+    roaming: *const c_char,
+    local: *const c_char,
+) -> *mut c_char {
+    guarded("tb_test_set_cursor_sync", || {
+        let base = |raw: *const c_char| {
+            unsafe { json_arg(raw) }
+                .ok()
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .ok_or_else(|| "invalidBase".to_string())
+        };
+        envelope((|| {
+            let bases = cursor_sync::Bases {
+                roaming: Some(base(roaming)?),
+                local: Some(base(local)?),
+            };
+            let result = cursor_sync::set_with_bases(&unsafe { json_arg(json) }?, &bases);
+            recheck_cursor_takeover();
+            result
+        })())
+    })
+}
+
+/// Add-time check for a Cursor profile folder (CMP-W item 2), validate-only:
+/// nothing is committed. `json` is `{"root":"X:\\...","existing":["..."]}`;
+/// data is `{"accepted":bool,"reason":code|null}`, never a path. Reasons:
+/// `tooManyProfiles`, the `normalize` codes (`empty`, `unsupportedPath`,
+/// `rootDirectory`, `invalidComponent`), `notFixedDrive` (checked before any
+/// I/O on the folder), `cursorDefault` (Cursor's own folder) and `duplicate`
+/// (a listed folder), both by folded path or by directory identity. Metadata
+/// only: no database is opened. Errors: `nullPayload`, `invalidUtf8`,
+/// `invalidJson`.
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_validate_cursor_profile(json: *const c_char) -> *mut c_char {
+    guarded("tb_validate_cursor_profile", || {
+        envelope(unsafe { json_arg(json) }.and_then(|raw| cursor_sync::validate_from_json(&raw)))
+    })
+}
+
+/// Run one Cursor desktop sync round now, every profile in turn. Blocking
+/// (SQLite reads + network, up to 10 min for the whole round): never call on
+/// the UI thread. `user_initiated` non-zero = the user's "Sync now" (10 min
+/// budget); zero = background (10 min while a profile that could write a file
+/// has none, then 60 s; a profile whose last round was a duplicate, not
+/// signed in or refused does not count). Single-flight: a call made while one
 /// runs waits for it and returns its status. Success data is
 /// `{"state":"ok|partial|expired|notSignedIn|offline|error|disabled|cliPresent",
-/// "events":N,"lastSuccessMs":ms|null,"reason"?:"<fixed code>"}`. After the
-/// walk the takeover is rechecked (W5); `cliPresent` = the walk completed but
-/// CLI Cursor files exist and the takeover is not confirmed, so reports read
-/// the CLI's files.
+/// "events":N,"lastSuccessMs":ms|null,"changed":bool,"reason"?:"<fixed code>",
+/// "profiles":[{"id","state","events","lastSuccessMs","reason"?,"duplicateOf"?}],
+/// "cleanupFailedProfiles":["<id>"]}` (a profile one of whose files of ours
+/// could not be deleted this round: a duplicate's other-account file, or a
+/// superseded file after a commit; it can be `"default"`, the default
+/// profile's id, which is not a stored profile):
+/// `state`/`reason` are the headline (`ok` when every profile is `ok` or
+/// `duplicate`, else the first other state, a `notSignedIn` profile ignored
+/// while another synced); `changed` = some profile's usage file content
+/// changed (new bytes written, or a usage file removed; not an orphan temp,
+/// not a rewrite of the same bytes); a
+/// profile's `duplicate` names the earlier profile that covered the same
+/// account (`duplicateOf`), never the account. After the walk the takeover is
+/// rechecked (W5); `cliPresent` (no reason) = a profile synced but CLI
+/// Cursor files exist and the takeover is not confirmed, so reports read the
+/// CLI's files.
 #[no_mangle]
 pub extern "C" fn tb_cursor_sync(user_initiated: i32) -> *mut c_char {
     guarded("tb_cursor_sync", || {

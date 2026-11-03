@@ -9,8 +9,12 @@ namespace TokenBar.Core;
 /// <para>
 /// The core switch (<c>tb_set_cursor_sync</c>) is in-memory and starts off
 /// every launch, so the settings file is the source of truth and
-/// <see cref="CursorSyncController.Reconfigure"/> re-applies it. The sync dir
-/// is chosen by the native side (Plan W1); nothing here names a path.
+/// <see cref="CursorSyncController.Reconfigure"/> re-applies it. Every sync
+/// dir is chosen by the native side (Plan W1); nothing here names a Syrtis
+/// path. Added Cursor profiles (CMP-W) have their own local-only store,
+/// <see cref="CursorProfileStore"/>, which W1 defines but does not push: the
+/// push carries <c>profiles: []</c> until W2 wires the store in behind its
+/// disclosure (WB11).
 /// </para>
 /// </summary>
 public static class CursorSync
@@ -40,6 +44,12 @@ public static class CursorSync
     /// sync off could not delete every synced file (Plan W7). Sync is off all
     /// the same.</summary>
     public const string CleanupFailedCode = "cleanupFailed";
+
+    /// <summary>App-side state: the core refused the newest on push, so
+    /// nothing syncs (neither the schedule nor Sync Now) until a push is
+    /// accepted. A profile the user removed is therefore never walked by the
+    /// configuration the core kept.</summary>
+    public const string ConfigRejectedState = "configRejected";
 
     public static bool Enabled(SettingsStore store) => store.GetNullableBool(EnabledKey) ?? true;
 
@@ -122,6 +132,14 @@ public static class CursorSync
         /// retry. The launch off push is the retry (App.StartCursorSync).</summary>
         public const string CleanupFailed =
             "Cursor sync is off, but some downloaded usage couldn't be deleted. Restart Syrtis to retry.";
+        /// <summary>The core refused the settings (<see cref="ConfigRejectedState"/>):
+        /// nothing syncs. macOS #532 wording.</summary>
+        public const string ConfigRejected = "Cursor sync couldn't be set up, so nothing is being synced.";
+        /// <summary>Second consent paragraph once added profiles exist
+        /// (<see cref="ConsentParagraphs"/>), macOS #535 wording. W2 shows it;
+        /// each sentence is held to the code there.</summary>
+        public const string ProfilesPrivacy =
+            "Add a folder you start Cursor with using --user-data-dir to sync it too (Syrtis keeps the folder path in its settings); each profile's sign-in is handled as described above. All profiles add up to one Cursor total, and an account signed in to several profiles counts once. Removing a profile deletes its downloaded usage the next time Syrtis can.";
 
         /// <summary>The info flyout's rows. The privacy paragraph is also what
         /// the enable confirmation and the first-run notice card show.</summary>
@@ -131,8 +149,15 @@ public static class CursorSync
         [
             Title, Toggle, Privacy, Continue, Cancel, TurnOff, LastSynced, Partial, Expired, NotSignedIn,
             Offline, Error, CliPresent, SyncNow, Syncing, CliQuestion, UseSyrtis, KeepCli, CleanupFailed,
+            ConfigRejected, ProfilesPrivacy,
         ];
     }
+
+    /// <summary>What a consent surface shows: the privacy paragraph, plus the
+    /// added profiles' paragraph once any folder is stored (they are read
+    /// too). macOS <c>consentParagraphs</c>; W2 wires it to the store.</summary>
+    public static IReadOnlyList<string> ConsentParagraphs(int addedProfiles) =>
+        addedProfiles > 0 ? [Copy.Privacy, Copy.ProfilesPrivacy] : [Copy.Privacy];
 
     /// <summary>The status line for a core state; null where there is nothing
     /// to say (<c>disabled</c>, not yet synced, or <c>ok</c> with no recorded
@@ -148,6 +173,7 @@ public static class CursorSync
             "offline" => Copy.Offline.Localized(),
             "error" => Copy.Error.Localized(),
             "cliPresent" => Copy.CliPresent.Localized(),
+            ConfigRejectedState => Copy.ConfigRejected.Localized(),
             _ => null,
         };
 
@@ -161,7 +187,8 @@ public static class CursorSync
 /// <c>CursorSyncController</c> with the #488 fixes): config pushes reach the
 /// core in the order they were made; a sync waits for the newest push; a
 /// result that returns after a newer configuration is discarded and the sync
-/// reruns; off resets the refresh bookkeeping so off→on refreshes again.
+/// reruns; a refused on push stops every sync until a push is accepted
+/// (<see cref="CursorSync.ConfigRejectedState"/>).
 /// Every native call runs on the thread pool; state lives under one lock.
 /// </summary>
 public sealed class CursorSyncController
@@ -169,7 +196,7 @@ public sealed class CursorSyncController
     /// <summary>The native calls, replaced by fakes in tests. Each throws
     /// <see cref="TbCoreException"/> (a fixed code) on an error envelope.</summary>
     public sealed record Io(
-        Func<bool, bool, CursorSyncConfig> SetConfig,
+        Func<string, CursorSyncConfig> SetConfig,
         Func<bool, CursorSyncStatus> Sync,
         Func<bool> CursorPresent);
 
@@ -196,8 +223,12 @@ public sealed class CursorSyncController
     private bool _userPending;
     private string? _state;
     private long? _lastSuccessMs;
-    private long? _lastRefreshedEvents;
     private bool _cleanupFailed;
+    // While on: the last accepted on push could not clean a profile it no
+    // longer lists, or the last round could not delete one of a profile's
+    // files (cleanupFailedProfiles). Cleared by an off push.
+    private bool _pushProfileCleanupFailed;
+    private bool _roundProfileCleanupFailed;
     private int _offPushesPending;
     private bool _cursorPresent;
 
@@ -206,9 +237,10 @@ public sealed class CursorSyncController
     /// handlers must not block.</summary>
     public event Action? StateChanged;
 
-    /// <summary>Raised when what the dashboard shows may have changed (a
-    /// completed sync with a new event count, or a toggle / D6 answer): the
-    /// core already dropped its caches, so the app only re-asks.</summary>
+    /// <summary>Raised when what the dashboard shows may have changed (a sync
+    /// round in which some profile's file content changed, <c>changed</c>, or a
+    /// toggle / D6 answer): the core already dropped its caches, so the app
+    /// only re-asks.</summary>
     public event Action? DataChanged;
 
     /// <param name="arguments">This process's arguments. In a non-user run
@@ -238,6 +270,17 @@ public sealed class CursorSyncController
     /// clears it). In memory only: the next launch pushes off again while sync
     /// is off, which is the retry the copy ("Restart Syrtis to retry") names.</summary>
     public bool CleanupFailed { get { lock (_gate) { return _cleanupFailed && _offPushesPending == 0; } } }
+
+    /// <summary>While sync is on, some Syrtis usage file of a profile could
+    /// not be deleted: by the last accepted on push (a profile it no
+    /// longer lists, <c>cleanupFailed</c> in its result) or by the last round
+    /// (<c>cleanupFailedProfiles</c> in its status). Not shown by W1: the
+    /// <see cref="CleanupFailed"/> line's copy is about sync being off, and an
+    /// on-state line needs its own approved copy (W2).</summary>
+    public bool ProfileCleanupFailed
+    {
+        get { lock (_gate) { return _pushProfileCleanupFailed || _roundProfileCleanupFailed; } }
+    }
 
     /// <summary>Cursor desktop's state.vscdb exists; false until
     /// <see cref="ProbeCursorPresent"/> has answered.</summary>
@@ -289,7 +332,9 @@ public sealed class CursorSyncController
         }
 
         var run = CursorSync.ShouldSync(_store);
-        var takeover = CursorSync.TakeoverConfirmed(_store);
+        // WB11: no added profile is pushed until W2 reads CursorProfileStore
+        // behind its disclosure.
+        var json = CursorSyncRequest.Json(run, CursorSync.TakeoverConfirmed(_store), []);
         Task push;
         CancellationToken token;
         lock (_gate)
@@ -298,8 +343,6 @@ public sealed class CursorSyncController
             _loop = new CancellationTokenSource();
             token = _loop.Token;
             _generation++;
-            // Off deletes the synced files, so the next completed sync must
-            // refresh even when it writes the same event count again.
             if (!run)
             {
                 // A press still remembered (not yet promoted to the running
@@ -311,13 +354,13 @@ public sealed class CursorSyncController
                 _offPushesPending++;
                 _state = null;
                 _lastSuccessMs = null;
-                _lastRefreshedEvents = null;
             }
 
             // Each push waits for the one before it, so rapid toggles reach
             // the core in the order they were made. Push never throws.
+            var generation = _generation;
             push = _configPush.ContinueWith(
-                _ => Push(io, run, takeover), CancellationToken.None,
+                _ => Push(io, json, run, generation), CancellationToken.None,
                 TaskContinuationOptions.None, TaskScheduler.Default);
             _configPush = push;
         }
@@ -328,17 +371,25 @@ public sealed class CursorSyncController
             CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
     }
 
-    private void Push(Io io, bool enabled, bool takeover)
+    /// <param name="generation">The <see cref="Reconfigure"/> this push
+    /// belongs to: a refusal is applied only while that is still the newest
+    /// configuration, so an on push refused after a later Reconfigure (sync
+    /// turned off meanwhile) cannot leave configRejected behind.</param>
+    private void Push(Io io, string json, bool enabled, int generation)
     {
         // The off push's cleanup outcome; null = no answer (another error),
         // which keeps the previous one. On off the core can only fail with
         // cleanupFailed, invalidJson (not reachable: this side builds the JSON)
         // or a panic; storageUnavailable is enable-only (cursor_sync.rs
-        // set_from_json), so "another error" here means a panic.
+        // set_with_bases), so "another error" here means a panic.
         bool? failed = null;
+        // An on push's outcome: refused (any error) stops every sync until an
+        // accepted push; the core then keeps only profiles this push listed.
+        var rejected = false;
+        var profileCleanupFailed = false;
         try
         {
-            io.SetConfig(enabled, takeover);
+            profileCleanupFailed = io.SetConfig(json).CleanupFailed;
             failed = false;
         }
         catch (TbCoreException ex) when (!enabled && ex.Message == CursorSync.CleanupFailedCode)
@@ -350,10 +401,32 @@ public sealed class CursorSyncController
         {
             // The type name only: a native message can carry a panic payload.
             _log($"cursor-sync: config push failed {ex.GetType().Name}");
+            rejected = enabled;
         }
         finally
         {
-            if (!enabled)
+            if (enabled)
+            {
+                lock (_gate)
+                {
+                    if (rejected)
+                    {
+                        if (generation == _generation)
+                        {
+                            _state = CursorSync.ConfigRejectedState;
+                        }
+                    }
+                    else
+                    {
+                        _pushProfileCleanupFailed = profileCleanupFailed;
+                        if (_state == CursorSync.ConfigRejectedState)
+                        {
+                            _state = null;
+                        }
+                    }
+                }
+            }
+            else
             {
                 // Outcome and end of pending in one step, so the line never
                 // flashes the previous answer between them.
@@ -363,6 +436,9 @@ public sealed class CursorSyncController
                     {
                         _cleanupFailed = outcome;
                     }
+
+                    _pushProfileCleanupFailed = false;
+                    _roundProfileCleanupFailed = false;
 
                     _offPushesPending--;
                 }
@@ -380,7 +456,8 @@ public sealed class CursorSyncController
             DataChanged?.Invoke();
         }
 
-        if (!run)
+        // A refused on push stops the schedule (configRejected).
+        if (!run || State == CursorSync.ConfigRejectedState)
         {
             return;
         }
@@ -468,7 +545,9 @@ public sealed class CursorSyncController
                     // switch may have been turned off while this waited (a Sync
                     // Now pressed during a pending "on" push), and that answer
                     // wins. Still on but reconfigured: wait for the newer push.
-                    if (!CursorSync.ShouldSync(_store))
+                    // The core refused the newest settings: nothing is
+                    // sent, a press included (configRejected).
+                    if (!CursorSync.ShouldSync(_store) || _state == CursorSync.ConfigRejectedState)
                     {
                         _syncing = false;
                         _userPending = false;
@@ -514,11 +593,14 @@ public sealed class CursorSyncController
                     {
                         _state = result.State;
                         _lastSuccessMs = result.LastSuccessMs;
-                        if (result.State == "ok" && result.Events != _lastRefreshedEvents)
-                        {
-                            _lastRefreshedEvents = result.Events;
-                            refresh = true;
-                        }
+                        _roundProfileCleanupFailed = result.CleanupFailedProfiles is { Count: > 0 };
+                        // A round that changed a file already invalidated
+                        // the core's caches; refresh on `changed`, not on the
+                        // headline (one profile can write while another
+                        // fails) and not on the event count (another profile
+                        // can write the same count). An identical rewrite is
+                        // not `changed` in the core.
+                        refresh = result.Changed;
                     }
 
                     again = _rerunPending && CursorSync.ShouldSync(_store);
@@ -528,9 +610,9 @@ public sealed class CursorSyncController
                         // is owed. _syncing stays set, so Syncing is true
                         // across both runs. No ShouldSync check here. Either
                         // order is covered: Reconfigure clears the flag when
-                        // sync goes off; and TurnOff, Enable and AnswerNotice
-                        // write the store before Reconfigure
-                        // runs, so a pass can be
+                        // sync goes off; and every writer (TurnOff, Enable,
+                        // AnswerNotice, SetTakeoverConfirmed) stores before it
+                        // calls Reconfigure, so a pass can be
                         // promoted after the store says off, in which case
                         // the post-push re-check returns without calling the
                         // core (Syncing stays set through that wait).
