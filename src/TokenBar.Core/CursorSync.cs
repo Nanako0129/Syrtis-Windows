@@ -225,8 +225,8 @@ public sealed class CursorSyncController
     private long? _lastSuccessMs;
     private bool _cleanupFailed;
     // While on: the last accepted on push could not clean a profile it no
-    // longer lists, or the last round could not clean a duplicate's other
-    // account's file (cleanupFailedProfiles). Cleared by an off push.
+    // longer lists, or the last round could not delete one of a profile's
+    // files (cleanupFailedProfiles). Cleared by an off push.
     private bool _pushProfileCleanupFailed;
     private bool _roundProfileCleanupFailed;
     private int _offPushesPending;
@@ -271,8 +271,8 @@ public sealed class CursorSyncController
     /// is off, which is the retry the copy ("Restart Syrtis to retry") names.</summary>
     public bool CleanupFailed { get { lock (_gate) { return _cleanupFailed && _offPushesPending == 0; } } }
 
-    /// <summary>While sync is on, some Syrtis usage file of an added profile
-    /// could not be deleted: by the last accepted on push (a profile it no
+    /// <summary>While sync is on, some Syrtis usage file of a profile could
+    /// not be deleted: by the last accepted on push (a profile it no
     /// longer lists, <c>cleanupFailed</c> in its result) or by the last round
     /// (<c>cleanupFailedProfiles</c> in its status). Not shown by W1: the
     /// <see cref="CleanupFailed"/> line's copy is about sync being off, and an

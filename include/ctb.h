@@ -272,7 +272,8 @@ char *tb_set_cursor_sync(const char *json);
 // disabled|cliPresent","events":N,"lastSuccessMs":ms|null,"changed":bool,
 // "reason"?:"<fixed code>","profiles":[{"id","state","events",
 // "lastSuccessMs","reason"?,"duplicateOf"?}],"cleanupFailedProfiles":["<id>"]}
-// (a duplicate whose other-account file could not be deleted). state/reason
+// (a profile one of whose files of ours could not be deleted this round: a
+// duplicate's other-account file, or a superseded file after a commit). state/reason
 // are the headline (ok when every profile is ok or duplicate, else the first
 // other state); changed = some profile's usage file content changed (new
 // bytes, or a usage file removed; not an orphan temp, not a rewrite of the

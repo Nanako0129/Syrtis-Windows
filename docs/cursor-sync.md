@@ -42,7 +42,9 @@ Cursor's refresh token is never used.
 
 Besides the default Cursor profile, the user can add folders Cursor is started
 with using `--user-data-dir`. Each is synced on its own; their usage adds up to
-one Cursor total.
+one Cursor total. In this build added profiles cannot be set up yet: the core
+and its C# plumbing are in place, but no UI adds a folder and the app pushes
+no added profile (WB11); the Accounts page adds them in a later slice (W2).
 
 - **Input.** `tb_set_cursor_sync` takes `profiles: [{id, root}]`: an uppercase
   UUID made by C# and the folder. Rust derives the database,
@@ -132,9 +134,13 @@ one Cursor total.
   or a superseded usage file removed, an orphan temp not counting; a walk
   whose bytes equal the file's is not
   rewritten, only its modified time moves to now so `lastSuccessMs` dates
-  the walk, and is not a change; C# refreshes on it) and per-profile
+  the walk (where that time cannot be set, the same bytes are rewritten to
+  move it), and is not a change; C# refreshes on it) and per-profile
   entries with id, state, reason and `duplicateOf` only, plus
-  `cleanupFailedProfiles` (ids).
+  `cleanupFailedProfiles`: ids of profiles one of whose files of ours could
+  not be deleted this round (a duplicate's other-account file, or a
+  superseded file after a commit; a file failing the storage contract is
+  never deleted).
 - **Takeover.** `extra_scan_paths["cursor"]` holds the newest file per
   account name (`usage.<HMAC(sub)>.json`) across the current config's
   profiles (an added profile's dir and its `.secure` sibling), never a

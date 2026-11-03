@@ -1003,27 +1003,29 @@ mod secure {
     }
 
     /// Whether the Syrtis file at `path` (meeting the storage contract)
-    /// already holds exactly `bytes`; if so its modified time is set to now,
+    /// already holds exactly `bytes`. If so its modified time is set to now,
     /// on the same handle, so it still dates the last complete walk
-    /// (`lastSuccessMs`, the newest copy per account) without a rewrite.
-    /// Any failure answers `false`: the caller then writes as usual.
-    pub(super) fn refresh_if_same(path: &Path, bytes: &[u8]) -> bool {
+    /// (`lastSuccessMs`, the newest copy per account) without a rewrite:
+    /// `Some(true)`, or `Some(false)` when that time could not be set (the
+    /// caller rewrites the same bytes to move it). `None`: different bytes,
+    /// or the file could not be read through the contract.
+    pub(super) fn refresh_if_same(path: &Path, bytes: &[u8]) -> Option<bool> {
         use std::io::Read as _;
-        (|| -> io::Result<bool> {
-            let mut file = storage::open_existing_secure_file(path, true)?;
-            storage::verify_secure_file_path(&file, path)?;
-            if file.metadata()?.len() != bytes.len() as u64 {
-                return Ok(false);
-            }
-            let mut old = Vec::new();
-            file.read_to_end(&mut old)?;
-            if old != bytes {
-                return Ok(false);
-            }
-            file.set_modified(std::time::SystemTime::now())?;
-            Ok(true)
-        })()
-        .unwrap_or(false)
+        let mut file = storage::open_existing_secure_file(path, true).ok()?;
+        storage::verify_secure_file_path(&file, path).ok()?;
+        if file.metadata().ok()?.len() != bytes.len() as u64 {
+            return None;
+        }
+        let mut old = Vec::new();
+        file.read_to_end(&mut old).ok()?;
+        if old != bytes {
+            return None;
+        }
+        #[cfg(test)]
+        if super::TOUCH_FAILS_FOR_TEST.with(std::cell::Cell::get) {
+            return Some(false);
+        }
+        Some(file.set_modified(std::time::SystemTime::now()).is_ok())
     }
 
     /// Delete one Syrtis file by pathname, only if it is a regular file that
@@ -1064,8 +1066,8 @@ mod secure {
     pub(super) fn replace(_: &File, _: &Path, _: &Path, _: &Path) -> io::Result<()> {
         Err(unsupported())
     }
-    pub(super) fn refresh_if_same(_: &Path, _: &[u8]) -> bool {
-        false
+    pub(super) fn refresh_if_same(_: &Path, _: &[u8]) -> Option<bool> {
+        None
     }
     pub(super) fn remove_file(_: &Path) -> io::Result<()> {
         Err(unsupported())
@@ -1159,18 +1161,20 @@ struct UsageFile<'a> {
 /// last page, say) from creating its dir; that check is not atomic with the
 /// creation, so a removal racing it can leave an empty dir and lock file,
 /// cleaned at the next accepted push. `resolve`: an added profile's dir,
-/// resolved (and created) only now. Returns whether a
-/// usage file's content changed: a file whose bytes already equal the new
-/// ones is not rewritten (only its modified time moves to now), so an
-/// identical walk changes nothing (finding 8) unless a superseded usage file
-/// was removed (an orphan temp does not count).
+/// resolved (and created) only now. Returns whether a usage file's content
+/// changed (`Commit::changed`): a file whose bytes already equal the new ones
+/// is not rewritten (only its modified time moves to now; if that fails the
+/// same bytes are rewritten to move it, still no change), so an identical
+/// walk changes nothing (finding 8) unless a superseded usage file was
+/// removed (an orphan temp does not count); and how many of our files it
+/// could not delete (`Commit::left`, reported as `cleanupFailedProfiles`).
 fn commit_file(
     dir: &Path,
     resolve: bool,
     stem: &str,
     events: &[Event],
     still_wanted: &dyn Fn() -> bool,
-) -> Result<bool, Stop> {
+) -> Result<Commit, Stop> {
     let failed = || Stop::error("write_failed");
     if !still_wanted() {
         return Err(Stop::new(State::Disabled, None));
@@ -1196,16 +1200,26 @@ fn commit_file(
     // Read only through the storage contract: a file that fails it is
     // replaced, never compared.
     let same = secure::refresh_if_same(&dir.join(&final_name), &payload);
-    if !same {
+    if same != Some(true) {
         write_file(&directory, dir, &final_name, &payload).map_err(|_| failed())?;
     }
-    // Superseded files and orphan temps go. A Syrtis-named file that fails
-    // the storage contract (planted, or written by something else) is left
-    // in place and not reported here: putting one in this protected dir
-    // needs a process running as the same user, which is out of scope
-    // (Plan threat model). Disable-time cleanup does report it (W7).
-    let removed = remove_usage_files(dir, Some(&final_name)).map_or(0, |r| r.usage);
-    Ok(!same || removed > 0)
+    // Superseded files and orphan temps go. A Syrtis-named file that cannot
+    // be deleted (one failing the storage contract is never deleted) stays,
+    // and is counted so the round reports this profile in
+    // `cleanupFailedProfiles`: a superseded account's file left there would
+    // still be registered.
+    let removal = remove_usage_files(dir, Some(&final_name)).unwrap_or_default();
+    Ok(Commit {
+        changed: same.is_none() || removal.usage > 0,
+        left: removal.left,
+    })
+}
+
+/// What `commit_file` did besides writing: whether a usage file's content
+/// changed, and how many of our files it could not delete.
+struct Commit {
+    changed: bool,
+    left: usize,
 }
 
 /// Secure temp, flush, secure replace (it flushes the directory); the temp
@@ -1350,7 +1364,8 @@ struct Outcome {
     /// A usage file in this profile's dirs was written with new bytes or
     /// removed.
     changed: bool,
-    /// A duplicate's cleanup could not delete one of our files (reported in
+    /// One of our files in this profile's dirs could not be deleted: by a
+    /// duplicate's cleanup, or a superseded file after a commit (reported in
     /// `cleanupFailedProfiles`).
     cleanup_failed: bool,
     /// Stopped by a refusal decided where it arose, so no list of codes can
@@ -1717,14 +1732,14 @@ async fn run(
     };
     drop(cookie);
     match commit_file(dir, slot.root.is_some(), &stem, &events, enabled) {
-        Ok(changed) => {
+        Ok(commit) => {
             claim(&stem, true);
             Outcome {
                 stop: Stop::new(State::Ok, None),
                 events: events.len(),
                 duplicate_of: None,
-                changed,
-                cleanup_failed: false,
+                changed: commit.changed,
+                cleanup_failed: commit.left > 0,
                 refused: false,
             }
         }
@@ -2002,6 +2017,8 @@ thread_local! {
     /// Test fault: the cookie header cannot be built (unreachable otherwise:
     /// `token_user` admits only characters a header value takes).
     static BAD_COOKIE_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test fault: setting an identical file's modified time fails.
+    static TOUCH_FAILS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]

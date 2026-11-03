@@ -4148,3 +4148,55 @@ fn a_trailing_separator_is_the_same_root() {
         assert_eq!(validate_with(&raw, &fixed, None).unwrap()["reason"], "duplicate", "{root}");
     }
 }
+
+// CodeRabbit review on PR #268 ---------------------------------------------------
+
+/// CodeRabbit 1: `changed` follows the content comparison, not whether the
+/// identical file's modified time could be set. With that set failing (test
+/// fault), the same bytes are rewritten so the time still moves
+/// (`lastSuccessMs` dates the walk), and the round is still not a change.
+#[test]
+fn an_identical_walk_whose_time_cannot_be_set_is_still_no_change() {
+    let _guard = lock();
+    let f = fixture();
+    let (url, _) = serve(vec![json_ok(&page(1, &["a"])), json_ok(&page(1, &["a"]))]);
+    let on = registry(true, &f.dir);
+    let first = sync_status(&f, &url, &on);
+    assert_eq!(first["changed"], true);
+    let bytes = std::fs::read(expected_file(&f.dir)).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    TOUCH_FAILS_FOR_TEST.with(|fault| fault.set(true));
+    let again = sync_status(&f, &url, &on);
+    TOUCH_FAILS_FOR_TEST.with(|fault| fault.set(false));
+    assert_eq!(states(&again), ["ok"]);
+    assert_eq!(again["changed"], false, "a failed time update read as a change");
+    assert_eq!(std::fs::read(expected_file(&f.dir)).unwrap(), bytes);
+    assert!(
+        again["lastSuccessMs"].as_u64() > first["lastSuccessMs"].as_u64(),
+        "the rewrite did not move the time: {again} {first}"
+    );
+}
+
+/// CodeRabbit 2: a commit that cannot delete a superseded usage file (here
+/// one failing the storage contract, an old account's) reports its profile
+/// in `cleanupFailedProfiles`; the file would otherwise stay registered
+/// unnoticed. Control: none reported once it is gone.
+#[test]
+fn a_commit_that_cannot_delete_a_superseded_file_reports_it() {
+    let _guard = lock();
+    let tmp = TempDir::new();
+    let root = profile_root(tmp.path(), "b", &valid_token(), USER);
+    let registry = RwLock::new(multi(tmp.path(), true, vec![profile(PROFILE_A, &root)]));
+    let a_dir = profile_dir(tmp.path(), &profile(PROFILE_A, &root));
+    drop(secure::ensure_dir(&a_dir).unwrap());
+    let loose = a_dir.join(format!("usage.{}.json", stem(OTHER_USER).unwrap()));
+    std::fs::write(&loose, b"{}").unwrap();
+    let (url, _) = serve(vec![json_ok(&page(1, &["a"])), json_ok(&page(1, &["a"]))]);
+    let status = sync_round(&tmp.path().join("absent.vscdb"), &url, &registry);
+    assert_eq!(states(&status), ["notSignedIn", "ok"]);
+    assert!(expected_file(&a_dir).exists() && loose.exists(), "fixture");
+    assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([PROFILE_A]));
+    std::fs::remove_file(&loose).unwrap();
+    let status = sync_round(&tmp.path().join("absent.vscdb"), &url, &registry);
+    assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([]));
+}
