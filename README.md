@@ -155,6 +155,8 @@ commands below — without them `ValidateTbNativeConfiguration` rejects the defa
 tuple before any test runs. The escape hatch lifts the SDK pin; it does not remove the native
 prerequisites.
 
+`TokenBar.Core.Tests` points `TOKSCALE_CONFIG_DIR` at a throwaway temp directory when it is unset (`ConfigDirIsolation.cs`), so a run never touches the real `%APPDATA%\tokscale`; a value you set is kept.
+
 Use it for tests only. Builds and packaging go through the root pin, which is what makes them
 reproducible.
 
