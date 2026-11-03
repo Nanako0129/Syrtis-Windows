@@ -27,15 +27,15 @@ public sealed class CursorProfileStore(string path)
     private sealed record Entry(string Id, string Root);
 
     /// <summary>The stored list; empty when the file is absent or unreadable.
-    /// Entries whose id is not an uppercase GUID are dropped (the core would
-    /// refuse the whole push for one).</summary>
+    /// Null entries and entries whose id is not an uppercase GUID are dropped
+    /// (the core would refuse the whole push for one).</summary>
     public IReadOnlyList<CursorProfile> Load()
     {
         try
         {
             var entries = JsonSerializer.Deserialize<List<Entry>>(File.ReadAllText(path)) ?? [];
             return entries
-                .Where(e => e.Id is not null && e.Root is not null && IsId(e.Id))
+                .Where(e => e is not null && e.Id is not null && e.Root is not null && IsId(e.Id))
                 .Select(e => new CursorProfile(e.Id, e.Root))
                 .ToList();
         }

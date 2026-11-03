@@ -923,6 +923,11 @@ public class CursorSyncTests
         Assert.Equal([new CursorProfile(id, @"C:")], store.Load());
         File.WriteAllText(path, "{not json");
         Assert.Empty(store.Load());
+        // Null entries are dropped, not dereferenced (`[null]` is the empty list).
+        File.WriteAllText(path, "[null]");
+        Assert.Empty(store.Load());
+        File.WriteAllText(path, $$"""[null,{"Id":"{{id}}","Root":"C:/d"}]""");
+        Assert.Equal([new CursorProfile(id, "C:/d")], store.Load());
     }
 
     [Fact]
