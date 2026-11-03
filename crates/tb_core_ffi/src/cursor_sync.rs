@@ -58,8 +58,8 @@ const USAGE_EVENTS_URL: &str = "https://cursor.com/api/dashboard/get-filtered-us
 const FILE_NAME_DOMAIN: &str = "cursor-sync-file";
 const LOCK_FILE_NAME: &str = ".cursor-sync.lock";
 /// A file earlier W1 builds (review round 2) left in added profiles' dirs;
-/// nothing writes it now. Ours for removal, so such a dir can be emptied
-/// and `rmdir`ed.
+/// nothing writes it now. Removed best-effort when such a dir is emptied
+/// (`clean_candidate`), never counted and never a cleanup failure.
 const LEGACY_ROOT_FILE_NAME: &str = ".cursor-sync.root";
 /// Starts with a dot so it can never match the engine's `usage*` patterns: a
 /// half-written temp file must not be scanned.
@@ -100,12 +100,32 @@ const EXP_SKEW_SECS: f64 = 60.0;
 
 /// An added Cursor profile: a caller-made uppercase UUID and the
 /// `--user-data-dir` folder the user chose (normalized). Never an account id
-/// or anything derived from one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// or anything derived from one. Equality is `same_slot` (no derived,
+/// raw-root comparison).
+#[derive(Debug, Clone)]
 pub(crate) struct Profile {
     pub id: String,
     pub root: PathBuf,
 }
+
+impl Profile {
+    /// The one way profiles compare: the same id and the same root folded
+    /// like `duplicate_key` (`folded_root`), so a respelling of the folder is
+    /// the same profile. `keep_only`, `Slot::still_in`, the budget's memory of
+    /// a slot and `PartialEq` all use it; `profile_dirs` matches dir names
+    /// made from the same folded root (`profile_dir_name`).
+    pub(crate) fn same_slot(&self, other: &Profile) -> bool {
+        self.id == other.id && folded_root(&self.root) == folded_root(&other.root)
+    }
+}
+
+impl PartialEq for Profile {
+    fn eq(&self, other: &Self) -> bool {
+        self.same_slot(other)
+    }
+}
+
+impl Eq for Profile {}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Config {
@@ -438,11 +458,13 @@ impl Cleanup {
 /// real directory (a junction included) is skipped; ancestor junctions are
 /// followed, as the storage contract allows (same-user planting, out of
 /// scope). `remove_dir`: an added profile's dir; once our files are gone,
-/// the lock file goes too (secure delete) and the dir is `rmdir`ed, which
-/// succeeds only if nothing else is left. `keep`: one file name to leave (a
-/// duplicate profile keeps its current account's copy, as a commit does).
-/// Files that could not be deleted are counted in `left`, next to what was
-/// removed (`Removal::complete` makes them an error).
+/// the lock file and a leftover `LEGACY_ROOT_FILE_NAME` go too (secure
+/// delete, best-effort) and the dir is `rmdir`ed, which succeeds only if
+/// nothing else is left. `keep`: one file name to leave (a duplicate profile
+/// keeps its current account's copy, as a commit does); when that file is
+/// there (as the listing saw it), the dir keeps its lock and no `rmdir` is
+/// attempted. Files that could not be deleted are counted in `left`, next to
+/// what was removed (`Removal::complete` makes them an error).
 fn clean_candidate(dir: &Path, remove_dir: bool, keep: Option<&str>) -> io::Result<Removal> {
     if !real_dir(dir)? {
         return Ok(Removal::default());
@@ -454,6 +476,8 @@ fn clean_candidate(dir: &Path, remove_dir: bool, keep: Option<&str>) -> io::Resu
                 is_ours(&name) && Some(name.as_str()) != keep
             })
         });
+        // The legacy record alone is no deletion failure.
+        let _ = secure::remove_file(&dir.join(LEGACY_ROOT_FILE_NAME));
         return match ours {
             Ok(false) => Ok(Removal::default()),
             _ => Err(io::Error::other("a Syrtis usage file could not be deleted")),
@@ -463,10 +487,10 @@ fn clean_candidate(dir: &Path, remove_dir: bool, keep: Option<&str>) -> io::Resu
     let removal = remove_usage_files(dir, keep)?;
     // A kept file (a duplicate's current account) stays with its dir and
     // lock: no lock deleted, no rmdir attempted under a dir still in use.
-    let kept = keep.is_some_and(|name| dir.join(name).exists());
-    if remove_dir && removal.left == 0 && !kept {
+    if remove_dir && removal.left == 0 && !removal.kept {
         // The lock handle does not share delete: release it first.
         drop(lock);
+        let _ = secure::remove_file(&dir.join(LEGACY_ROOT_FILE_NAME));
         let _ = secure::remove_file(&dir.join(LOCK_FILE_NAME));
         let _ = std::fs::remove_dir(dir);
     }
@@ -575,11 +599,9 @@ fn keep_only(listed: &[Profile]) {
     let mut guard = CONFIG
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.profiles.retain(|profile| {
-        listed
-            .iter()
-            .any(|p| p.id == profile.id && folded_root(&p.root) == folded_root(&profile.root))
-    });
+    guard
+        .profiles
+        .retain(|profile| listed.iter().any(|p| p.same_slot(profile)));
 }
 
 /// Success data. `profiles` echoes ids only (WB9: no root in any result);
@@ -691,7 +713,7 @@ fn folder_identity(_: &Path) -> Option<()> {
 // Profiles in one round.
 
 /// One profile to sync: where its usage file goes and which login it reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct Slot {
     id: String,
     /// `None` for the default profile.
@@ -731,19 +753,30 @@ impl Slot {
     fn still_in(&self, start: &Config, now: &Config) -> bool {
         now.enabled
             && now.dir == start.dir
-            && self.root.as_ref().is_none_or(|root| {
+            && self.profile().is_none_or(|me| {
                 now.profiles_dir == start.profiles_dir
-                    && now
-                        .profiles
-                        .iter()
-                        .any(|p| p.id == self.id && folded_root(&p.root) == folded_root(root))
+                    && now.profiles.iter().any(|p| p.same_slot(&me))
             })
     }
 
-    /// What the budget remembers a slot by: its id and folded root, so a
-    /// respelling of the same folder is the same slot.
-    fn key(&self) -> (String, Option<String>) {
-        (self.id.clone(), self.root.as_deref().map(folded_root))
+    /// An added profile's slot as the profile it syncs; `None` for the
+    /// default.
+    fn profile(&self) -> Option<Profile> {
+        self.root.clone().map(|root| Profile {
+            id: self.id.clone(),
+            root,
+        })
+    }
+
+    /// How the budget remembers a slot (`Profile::same_slot`; the dir is not
+    /// compared), so a respelling of the same folder is the same slot.
+    fn same_slot(&self, other: &Slot) -> bool {
+        self.id == other.id
+            && match (self.profile(), other.profile()) {
+                (Some(mine), Some(theirs)) => mine.same_slot(&theirs),
+                (None, None) => true,
+                _ => false,
+            }
     }
 
     /// Where this profile's files can be: the default's one resolved dir
@@ -1017,20 +1050,22 @@ mod secure {
     }
 }
 
-/// Exactly our file names: `usage.<64 hex>.json`, our temp prefix, and the
-/// leftover `LEGACY_ROOT_FILE_NAME`.
+/// Exactly our file names: `usage.<64 hex>.json` and our temp prefix. The
+/// leftover `LEGACY_ROOT_FILE_NAME` is not counted here: `clean_candidate`
+/// removes it best-effort with the lock.
 fn is_ours(name: &str) -> bool {
-    is_sync_file_name(name) || name.starts_with(TEMP_FILE_PREFIX) || name == LEGACY_ROOT_FILE_NAME
+    is_sync_file_name(name) || name.starts_with(TEMP_FILE_PREFIX)
 }
 
-/// What `remove_usage_files` did: usage files and orphan temps removed, and
-/// our names that could not be deleted (a file failing the storage contract
-/// is never deleted).
+/// What `remove_usage_files` did: usage files and orphan temps removed, our
+/// names that could not be deleted (a file failing the storage contract is
+/// never deleted), and whether the listing held the `keep` file.
 #[derive(Debug, Default)]
 struct Removal {
     usage: usize,
     temps: usize,
     left: usize,
+    kept: bool,
 }
 
 impl Removal {
@@ -1052,7 +1087,11 @@ fn remove_usage_files(dir: &Path, keep: Option<&str>) -> io::Result<Removal> {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !is_ours(&name) || Some(name.as_ref()) == keep {
+        if Some(name.as_ref()) == keep {
+            removal.kept = true;
+            continue;
+        }
+        if !is_ours(&name) {
             continue;
         }
         match secure::remove_file(&entry.path()) {
@@ -1633,7 +1672,7 @@ async fn run(
             refused: false,
         };
     }
-    #[allow(unused_mut)]
+    #[cfg_attr(not(test), allow(unused_mut))]
     let mut value = format!("WorkosCursorSessionToken={user}%3A%3A{}", login.access_token);
     #[cfg(test)]
     if BAD_COOKIE_FOR_TEST.with(std::cell::Cell::get) {
@@ -1679,14 +1718,15 @@ async fn run(
 /// starting another.
 struct LastRound {
     status: Option<serde_json::Value>,
-    /// The slots (`Slot::key`: id and folded root) whose outcome writes no
-    /// file (`writes_no_file`). A slot changed since (another root) is not in
+    /// The slots whose outcome writes no file (`writes_no_file`), compared
+    /// with `Slot::same_slot`. A slot changed since (another root) is not in
     /// it, so its first round may take the full budget; a respelling is. The
-    /// dir is not part of the key: a slot coming back from
-    /// `storage_unavailable` with the same root is still in it, so its first
-    /// walk gets the 60 s budget (and may end `partial`, completed under the
-    /// full budget the round after).
-    no_file: Vec<(String, Option<String>)>,
+    /// dir is not compared: a slot coming back from `storage_unavailable` with
+    /// the same root is still in it, so in a background round its first walk
+    /// gets the 60 s budget (and may end `partial`, completed under the full
+    /// budget the round after). "Sync now", or another profile that still
+    /// needs the full budget, gives that round 10 min.
+    no_file: Vec<Slot>,
 }
 
 static IN_FLIGHT: Mutex<LastRound> = Mutex::new(LastRound {
@@ -1708,12 +1748,12 @@ fn round_budget(
     explicit: bool,
     slots: &[Slot],
     files: &[Option<SystemTime>],
-    no_file: &[(String, Option<String>)],
+    no_file: &[Slot],
 ) -> Duration {
     let wants_full = slots
         .iter()
         .zip(files)
-        .any(|(slot, file)| file.is_none() && !no_file.contains(&slot.key()));
+        .any(|(slot, file)| file.is_none() && !no_file.iter().any(|s| s.same_slot(slot)));
     if explicit || wants_full {
         FULL_BUDGET
     } else {
@@ -1889,7 +1929,7 @@ fn sync_with(
         .iter()
         .zip(&outcomes)
         .filter(|(_, outcome)| writes_no_file(outcome))
-        .map(|(profile, _)| profile.key())
+        .map(|(profile, _)| profile.clone())
         .collect();
     last.status = Some(status.clone());
     (status, changed)

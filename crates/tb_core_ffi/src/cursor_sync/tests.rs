@@ -3046,8 +3046,8 @@ fn removed_and_orphaned_profiles_are_cleaned_and_nothing_else() {
         "profiles": [{"id": PROFILE_A, "root": r"C:\x\a"}]}))
     .unwrap();
     // B's usage file and temp, B.secure's usage file, the bare dir's usage
-    // file and leftover record (its lock goes uncounted, as every lock does).
-    assert_eq!(result["removedFiles"], 5, "{result}");
+    // file; the bare dir's lock and leftover record go uncounted.
+    assert_eq!(result["removedFiles"], 4, "{result}");
     assert_eq!(result["cleanupFailed"], false);
     let mut left = names(&a);
     left.sort();
@@ -4021,13 +4021,70 @@ fn a_refused_push_with_a_respelled_root_keeps_the_profile() {
     assert_eq!(refused, Err("storageUnavailable".to_string()));
     let ids: Vec<String> = config().profiles.iter().map(|p| p.id.clone()).collect();
     assert_eq!(ids, [PROFILE_A], "a respelled root dropped the profile");
-    // Control: a refused push with another root does drop it.
+    // Control: a refused push with another root, refused for the storage
+    // alone (its root is valid), does drop it.
     let other = root.path().join("Other").to_string_lossy().into_owned();
-    let _ = set_with_bases(
-        &serde_json::json!({"enabled": true, "profiles": [{"id": PROFILE_A, "root": other}]})
-            .to_string(),
+    let control = serde_json::json!([{"id": PROFILE_A, "root": other}]);
+    let (parsed, rejected) = parse_profiles(control.clone(), None).unwrap();
+    assert!(rejected.is_empty(), "fixture: the control root was rejected: {rejected:?}");
+    assert_eq!(parsed.len(), 1);
+    let refused = set_with_bases(
+        &serde_json::json!({"enabled": true, "profiles": control}).to_string(),
         &no_roaming,
     );
+    assert_eq!(refused, Err("storageUnavailable".to_string()));
     assert!(config().profiles.is_empty());
+    drop(root);
+}
+
+// Round 5 of the /code-review findings ------------------------------------------
+
+/// Round-5 finding 4: whether a duplicate's dir keeps its current account's
+/// file is decided from the listing, not by stat'ing the name. Here the kept
+/// name is a dangling symlink (listed, but `exists()` is false): the dir still
+/// keeps its lock and no rmdir is attempted.
+#[test]
+fn a_kept_file_that_cannot_be_stated_still_keeps_the_dir() {
+    let _guard = lock();
+    let tmp = TempDir::new();
+    let default_db = login_db(&tmp.path().join("default"), &valid_token(), USER);
+    let root = profile_root(tmp.path(), "b", &valid_token(), USER);
+    let registry = RwLock::new(multi(tmp.path(), true, vec![profile(PROFILE_A, &root)]));
+    let a_dir = profile_dir(tmp.path(), &profile(PROFILE_A, &root));
+    drop(secure::ensure_dir(&a_dir).unwrap());
+    let kept = expected_file(&a_dir);
+    std::os::windows::fs::symlink_file(tmp.path().join("nowhere.json"), &kept).unwrap();
+    assert!(!kept.exists() && std::fs::symlink_metadata(&kept).is_ok(), "fixture");
+    let (url, _) = serve(vec![json_ok(&page(1, &["a"]))]);
+    let status = sync_round(&default_db, &url, &registry);
+    assert_eq!(states(&status), ["ok", "duplicate"]);
+    assert!(a_dir.join(LOCK_FILE_NAME).exists(), "the kept dir's lock was deleted");
+}
+
+/// Round-5 finding 5: a profile dir that fails the storage contract and
+/// holds only the leftover `.cursor-sync.root` is no usage-file deletion
+/// failure: neither an on push nor turning sync off reports cleanupFailed.
+#[test]
+fn a_leftover_root_record_alone_is_never_a_cleanup_failure() {
+    let root = DataRoot::new();
+    set(serde_json::json!({"enabled": true,
+        "profiles": [{"id": PROFILE_A, "root": r"C:\x\a"}]}))
+    .unwrap();
+    let loose = config().profiles_dir.unwrap().join(PROFILE_B);
+    std::fs::create_dir(&loose).unwrap();
+    std::fs::write(loose.join(LEGACY_ROOT_FILE_NAME), b"0").unwrap();
+    assert!(secure::ensure_dir(&loose).is_err(), "fixture: the dir meets the contract");
+    let on = set(serde_json::json!({"enabled": true,
+        "profiles": [{"id": PROFILE_A, "root": r"C:\x\a"}]}))
+    .unwrap();
+    assert_eq!(on["cleanupFailed"], false, "{on}");
+    assert_eq!(on["removedFiles"], 0);
+    assert!(set(serde_json::json!({"enabled": false})).is_ok(), "disable reported cleanupFailed");
+    // Control: a usage file in the same loose dir is a failure.
+    std::fs::write(loose.join(hex_name('b')), b"{}").unwrap();
+    assert_eq!(
+        set(serde_json::json!({"enabled": false})),
+        Err("cleanupFailed".to_string())
+    );
     drop(root);
 }

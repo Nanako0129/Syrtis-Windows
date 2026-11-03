@@ -101,13 +101,14 @@ one Cursor total.
   does not hold the background budget at 10 min (it may get 10 min again once
   its config changes, or after a round it ran out of time); the same holds
   for a profile with no installation key (`key_unavailable`) or no storage
-  (`storage_unavailable`). This is decided per profile, not per account: a
-  profile that signs in to an account with no file yet walks it under the
-  60 s budget first, so a long history can end that round `partial` and is
-  completed under the full budget the round after. The same holds for a
-  profile coming back from `storage_unavailable` with the same root: the
-  budget remembers it by id and folded root, not by dir, so its first walk
-  gets the 60 s budget. An
+  (`storage_unavailable`). This is decided per profile, not per account: in
+  a background round, a profile that signs in to an account with no file yet
+  walks it under the 60 s budget first, so a long history can end that round
+  `partial` and is completed under the full budget the round after. The same
+  holds for a profile coming back from `storage_unavailable` with the same
+  root: the budget remembers it by id and folded root, not by dir. "Sync
+  now", or a round in which another profile still needs the full budget,
+  gives those walks 10 min instead. An
   account already covered this round by an earlier profile is not walked
   again; that profile reports `duplicate` with `duplicateOf` (a profile id,
   never the account), and any other account's file it still holds is removed
@@ -158,19 +159,27 @@ one Cursor total.
   the first accepted push cleans it like a removed profile's, together with
   the `.cursor-sync.root` file review round 2's build left in it (nothing
   writes that file now).
-- **Limits of the folding and the paths.** Roots are folded with Unicode
-  lowercase and `/` to `\`, not with NTFS's own case table: two folders that
-  differ only by case inside a directory with NTFS case sensitivity turned
-  on, or by a character whose Unicode lowercase differs from NTFS's
-  upper-casing, are treated as one root (one dir, one walk per round). Paths
-  are not `\\?\`-prefixed, so they stay under MAX_PATH (260): the longest,
-  with the `.secure` fallback taken at all three levels
+- **Limits of the folding.** Roots are folded with Unicode lowercase and
+  `/` to `\`, not with NTFS's own case table. Two added profiles whose roots
+  differ only by case (folders that can both exist inside a directory with
+  NTFS case sensitivity turned on, or differ by a character whose Unicode
+  lowercase differs from NTFS's upper-casing) are still two ids, two dirs
+  and two walks. The fold decides two things for them: the add-time check
+  refuses the second such folder as already listed (`duplicate`), and a
+  case-only re-root of one id keeps that id's dir and file.
+- **Path length.** The longest path Syrtis writes, with the `.secure`
+  fallback taken at all three levels
   (`%LOCALAPPDATA%\com.nyanako.tokenbar.secure\cursor-profiles.secure\<UUID>-<digest>.secure\usage.<64 hex>.json`),
-  is about 211 characters plus the user name's length, so with a user name
-  longer than about 48 characters that case passes MAX_PATH.
-  `agent_storage_windows` hands `CreateFileW` the plain path, so whether it
-  then works depends on Windows long-path support for the process; expected
-  to end `write_failed` where that is off (not measured).
+  is about 211 characters plus the length of the profile folder's name under
+  `C:\Users` (longer with a domain suffix, or for a profile moved or
+  redirected elsewhere). Past MAX_PATH (260) the two kinds of call differ:
+  the `std::fs` calls (listing, metadata, `rmdir`) add the `\\?\` prefix
+  themselves, while the `CreateFileW`-based secure calls (the storage
+  contract's opens, `remove_file`, `refresh_if_same`, the temp write and
+  replace) pass the plain path. So such a path would leave commits failing
+  (`write_failed`) and removals reported as `cleanupFailed`, while reads
+  still see the file. Whether that happens depends on Windows long-path
+  support for the process; not measured.
 - **Add-time check.** `tb_validate_cursor_profile` (validate-only, metadata
   only, no database opened) refuses a full list, a path the rule refuses, a
   drive that is not fixed (checked first), Cursor's own folder and a listed
