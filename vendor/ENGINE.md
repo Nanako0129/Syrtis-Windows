@@ -90,10 +90,10 @@ state. The repository keeps no unreleased-notes file; `.github/release-notes/`
 holds one file per released version, written at the `chore(release)` commit.
 
 1. **Claude is re-parsed once.** The first scan after updating re-parses every
-   Claude transcript once (Claude `parser_version` 4 → 5). The upgrade loses
-   nothing: an entry on an older Claude `parser_version` is migrated rather
-   than dropped (`message_cache.rs:1573-1580`), so turns that only the cache
-   still holds survive. On macOS this took 25 to 27 s for 256 shards; Windows
+   Claude transcript once (Claude `parser_version` 4 → 5). By the code path
+   (`message_cache.rs:1573-1580`) the upgrade loses nothing: an entry on an
+   older Claude `parser_version` is migrated rather than dropped, so turns that
+   only the cache still holds survive. Not yet observed on Windows. On macOS this took 25 to 27 s for 256 shards; Windows
    was not timed. Claude input tokens fall because input is now taken from the
    line that carries the cache split instead of the larger of a prompt
    snapshot and the split (#77): on the maintainer's Mac, Claude only, input
@@ -101,7 +101,9 @@ holds one file per released version, written at the `chore(release)` commit.
    two Claude Code rows routed to non-Claude models. The size depends on the
    corpus. Not measured on Windows.
 2. **Going back to an older version loses cache-only Claude history unless the
-   cache is backed up first.** See the procedure below.
+   cache is backed up before pressing Install in the update dialog.** The
+   updater relaunches the new build at once, so afterwards it is too late. See
+   the procedure below.
 3. **Goose usage is detected on Windows.** A Goose database at
    `%APPDATA%\Block\goose\data\sessions\sessions.db` is now found; it is
    ranked after an explicit `GOOSE_PATH_ROOT` and before the XDG and legacy
@@ -126,56 +128,119 @@ holds one file per released version, written at the `chore(release)` commit.
 
 ### Windows backup and rollback of the Claude cache (D8)
 
-An engine at Claude `parser_version` 4 (every Windows release before this pin)
-reads a pv 5 shard as stale and rewrites it from an empty map, dropping the
-Claude turns that only the cache still holds; an engine without the format 100
-envelope does the same (`message_cache.rs:46-47` says "rolling back needs the
-Claude-cache backup"; `message_cache.rs:1573-1574`: a downgrade cannot be
-migrated). The only way back is a backup taken before the new build first
-scans.
+An engine at Claude `parser_version` 4 reads a pv 5 shard as stale and
+rewrites it from an empty map, dropping the Claude turns that only the cache
+still holds; an engine without the format 100 envelope does the same
+(`message_cache.rs:46-47` says "rolling back needs the Claude-cache backup";
+`message_cache.rs:1573-1574`: a downgrade cannot be migrated). The only way
+back is a backup taken before the new build first scans.
+
+Which releases this covers: v0.3.0 (pins `d6512f5`, Claude pv 4) up to and
+including v1.3.0 (pins `2d64ec42`, Claude pv 4); `ClientId::Claude => 4` at
+both pins (`message_cache.rs`), and no advance in between moved it (see the
+sections below). v0.1.0 to v0.2.2 (v0.2.2 pins `84e0d66`) predate the
+format 4 / pv 4 layout, so v0.3.0 is the oldest version this procedure can
+roll back to.
 
 Where the cache is, derived from the engine:
 
 | Step | Source |
 |---|---|
 | The app does not set `TOKSCALE_CONFIG_DIR` (only tests and CI do), so unless the user set it, the engine's default applies | `paths.rs:55-59` (the override), `paths.rs:52` (doc: Windows is `dirs::config_dir().join("tokscale")`), `paths.rs:68-70` (the code) |
-| `dirs::config_dir()` on Windows is the Roaming AppData folder, so the config root is `%APPDATA%\tokscale` | `dirs` 5 (`Cargo.toml:36`); `clients.rs:93-95` states default Windows scans read "the same %APPDATA% root used by cache writers"; `docs/lite-distribution.md:18` |
+| `dirs::config_dir()` on Windows is the Roaming AppData known folder (FOLDERID_RoamingAppData), so the config root is `<ApplicationData>\tokscale`, usually `%APPDATA%\tokscale`. The commands below ask Windows for that folder instead of reading the environment variable | `dirs` 5 (`Cargo.toml:36`); `clients.rs:93-95` states default Windows scans read "the same %APPDATA% root used by cache writers"; `docs/lite-distribution.md:18` |
 | The cache is `<config>\cache` | `paths.rs` `get_cache_dir` (`<config_dir>/cache`) |
 | Shards are under `source-message-cache-v2`, one folder per client namespace | `message_cache.rs:57`, `message_cache.rs:2101-2103` |
 
-So the folder to keep is `%APPDATA%\tokscale\cache\source-message-cache-v2\claude\`
-(or `<TOKSCALE_CONFIG_DIR>\cache\source-message-cache-v2\claude\` when that
-variable is set to a non-empty value). Seen on 188 (read-only listing): that
-folder holds 256 files `shard-00.bin` to `shard-ff.bin`, and the first bytes of
-each are `04 06 63 6c 61 75 64 65 04`, that is format 4, the string `claude`,
-`parser_version` 4. A shard written by this pin starts `64 06 63 6c 61 75 64
-65 05` (format 100, `claude`, pv 5), which is what `bincode::options()` writes
-for the envelope fields at `message_cache.rs:2474-2485`.
+So the folder to keep is
+`<ApplicationData>\tokscale\cache\source-message-cache-v2\claude\` (or
+`<TOKSCALE_CONFIG_DIR>\cache\source-message-cache-v2\claude\` when that
+variable is set to a non-empty value; then set `$claude` below to it). Seen on
+188 (read-only listing): that folder holds 256 files `shard-00.bin` to
+`shard-ff.bin`, and the first bytes of each are `04 06 63 6c 61 75 64 65 04`,
+that is format 4, the string `claude`, `parser_version` 4. A shard written by
+this pin starts `64 06 63 6c 61 75 64 65 05` (format 100, `claude`, pv 5),
+which is what `bincode::options()` writes for the envelope fields at
+`message_cache.rs:2474-2485`. The first bytes do not prove a restore: a pv 4
+engine that rebuilt a shard from an empty map writes the same
+`04 06 63 6c 61 75 64 65 04`. The restore is therefore checked by comparing the
+restored folder with the backup, not by looking at the header.
 
-Backup, before the first launch of a build that carries this pin:
+Windows PowerShell 5.1 and PowerShell 7 both run these commands. They were
+exercised on 188 against a scratch folder (backup equals source and a changed
+file shows as a difference; restore leaves no nested `claude\claude`; running
+the restore twice gives the same result); not against a real Claude cache.
+
+Setup, used by both procedures (paste it first in each PowerShell window):
+
+```powershell
+$claude = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'tokscale\cache\source-message-cache-v2\claude'
+$h = { param($d) Get-ChildItem -LiteralPath $d -File | Sort-Object Name | ForEach-Object { '{0} {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash, $_.Name } }
+```
+
+Backup, before pressing Install in the update dialog. The in-app updater
+quits Syrtis and relaunches the new build at once
+(`src/TokenBar.App/UpdateFlow.cs:219-222`, `restart: true`), so there is no
+moment between the update and the first scan in which to back up. A user who
+has already updated can no longer back up the pv 4 shards: the first scan has
+rewritten them.
 
 1. Quit Syrtis (tray menu, Quit) and any other program that uses the tokscale
-   engine, such as a `tokscale` CLI.
-2. In PowerShell:
-   `Copy-Item -Recurse "$env:APPDATA\tokscale\cache\source-message-cache-v2\claude" "$env:USERPROFILE\syrtis-claude-cache-backup"`
-   Keep the copy outside `%APPDATA%\tokscale\cache`.
+   engine, such as a `tokscale` CLI, then run the setup above.
+2. Copy to a new, dated destination outside `...\tokscale\cache`. The
+   destination does not exist yet, so the copy cannot nest and an earlier
+   backup is never overwritten:
 
-Rollback to an older Syrtis, in this order:
+   ```powershell
+   $backup = Join-Path $env:USERPROFILE ('syrtis-claude-cache-backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+   Copy-Item -Recurse -LiteralPath $claude -Destination $backup
+   Compare-Object (& $h $claude) (& $h $backup)
+   $backup
+   ```
+
+   `Compare-Object` printing nothing means the copy matches file for file
+   (SHA-256 and name). Note the printed `$backup` folder name; the restore
+   needs it. Optionally, also write down the Claude totals shown before the
+   update.
+3. Only then press Install.
+
+Rollback to an older Syrtis (v0.3.0 or later), in this order:
 
 1. Quit every program running the new engine: this Syrtis, a test build, any
    other tokscale build that writes the cache. The cache lock is advisory and
    taken only when the engine saves, so a running pv 5 process re-parses the
-   restored pv 4 entries and writes them back as pv 5.
-2. Delete the `claude` folder and copy the backup back to the same path.
-3. Install and start the older Syrtis.
-4. After its first scan, check that a shard still starts `04 06 63 6c 61 75 64
-   65 04`, for example
-   `$s=[IO.File]::OpenRead("$env:APPDATA\tokscale\cache\source-message-cache-v2\claude\shard-00.bin"); $b=New-Object byte[] 9; [void]$s.Read($b,0,9); $s.Dispose(); ($b | % { $_.ToString('x2') }) -join ' '`.
+   restored pv 4 entries and writes them back as pv 5. Do not start the older
+   Syrtis yet.
+2. Run the setup, then set `$backup` to the folder the backup printed, and
+   restore:
+
+   ```powershell
+   $backup = Join-Path $env:USERPROFILE 'syrtis-claude-cache-backup-<the stamp printed by the backup>'
+   Remove-Item -Recurse -Force -LiteralPath $claude
+   Copy-Item -Recurse -LiteralPath $backup -Destination $claude
+   Compare-Object (& $h $backup) (& $h $claude)
+   ```
+
+   `claude` is removed first and then recreated as a copy of the backup, so
+   the result is `...\claude\shard-00.bin`, never `...\claude\claude\...`. The
+   backup is only read, so the step can be run again and gives the same
+   result.
+3. Check that `Compare-Object` printed nothing. If it printed anything, do not
+   start the older Syrtis; repeat step 2.
+4. Install and start the older Syrtis. Optionally compare its Claude totals
+   with the ones written down before the update.
+
+The shard header (`04 06 63 6c 61 75 64 65 04`) is not a restore check, see
+above.
 
 Without a backup the loss is accepted. A pv 4 build that runs on the same
 profile after a pv 5 build has written the cache drops the cache-only turns on
 every scan, so do not run an older Syrtis or tokscale against this profile
 between the update and the restore.
+
+Known limit: neither the app nor the engine takes this backup, and a pv 5
+build shares the one cache folder with older builds instead of using a cache
+directory of its own. Both were considered and not done (user decision D1,
+2026-11-02); the procedure above is the only protection.
 
 ## Historical: `15204f4e`, Antigravity extension client (engine PRs #70, #71, #73)
 
@@ -550,7 +615,9 @@ source-token, and live-tail work through the context-aware APIs. The engine
 source token includes report-visible retained-only Claude cache state, and that
 slice kept the cache schema and public interfaces unchanged. That statement
 is about that advance only. The format moved 3 to 4 later, at `d6512f5`, and
-has stayed 4 through the current pin.
+stayed 4 for every namespace until `fc339e98`, where Claude shards are written
+at format 100 (`CLAUDE_CACHE_FORMAT_VERSION`); the generic
+`CACHE_FORMAT_VERSION` is still 4.
 
 ## Ownership
 
