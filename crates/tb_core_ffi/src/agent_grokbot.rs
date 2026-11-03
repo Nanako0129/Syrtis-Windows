@@ -1154,17 +1154,32 @@ pub(crate) mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let config_dir = temp_dir("cmp_no_default");
-        assert!(!cursor_state_db_path(&config_dir).exists(), "fixture: a default database");
+        let default_db = cursor_state_db_path(&config_dir);
+        assert!(!default_db.exists(), "fixture: a default database");
         let added = temp_dir("cmp_added_only");
         let added_db = crate::cursor_desktop::profile_db_path(&added);
         std::fs::create_dir_all(added_db.parent().unwrap()).unwrap();
-        write_state_db(
-            &added_db,
-            &[
-                ("cursorAuth/accessToken", "ADDEDPROFILETOKEN"),
-                ("glass.lastSignedInAuthId", "user_ADDEDprofile01234567890"),
-            ],
+        let rows = [
+            ("cursorAuth/accessToken", "ADDEDPROFILETOKEN"),
+            ("glass.lastSignedInAuthId", "user_ADDEDprofile01234567890"),
+        ];
+        write_state_db(&added_db, &rows);
+        // Positive control: the same database at the default path loads.
+        std::fs::create_dir_all(default_db.parent().unwrap()).unwrap();
+        write_state_db(&default_db, &rows);
+        let control = load_credentials(
+            &config_dir,
+            DesktopAccess {
+                consent: &yes,
+                load_key: &no_key,
+            },
         );
+        assert!(
+            matches!(control, Ok(Some(GrokBotCredentials::Cursor(..)))),
+            "control: the database did not load at the default path"
+        );
+        std::fs::remove_file(&default_db).unwrap();
+        assert!(!default_db.exists());
         crate::cursor_sync::set_config_for_test(crate::cursor_sync::Config {
             enabled: true,
             dir: Some(added.join("sync")),
