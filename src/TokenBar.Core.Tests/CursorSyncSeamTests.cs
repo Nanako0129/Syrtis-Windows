@@ -129,8 +129,8 @@ public class CursorSyncSeamTests
             () => false);
         var store = new SettingsStore(Path.Combine(Path.GetTempPath(), "tokenbar-tests", Guid.NewGuid().ToString("N"), "settings.json"));
         var controller = new CursorSyncController(io, store, ["Syrtis.exe"], interval: TimeSpan.FromHours(1));
-        controller.SetEnabled(true);
-        controller.SetEnabled(false);
+        Assert.True(await controller.TurnOn(() => Task.FromResult(true)));
+        controller.TurnOff();
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
         while (pushed.Count < 2)
         {

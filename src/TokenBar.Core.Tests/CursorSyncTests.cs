@@ -828,7 +828,7 @@ public class CursorSyncTests
         controller.Reconfigure(refresh: false);
         await Until(() => core.Pushes.Count == 2);
         await controller.RunSync(userInitiated: true);
-        controller.SetEnabled(false);
+        controller.TurnOff();
         await Until(() => core.Pushes.Count == 3);
         Assert.NotEmpty(lines);
         Assert.All(lines, line => Assert.DoesNotContain("CANARY", line, StringComparison.Ordinal));
