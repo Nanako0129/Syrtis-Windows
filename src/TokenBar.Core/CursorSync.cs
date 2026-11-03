@@ -24,8 +24,13 @@ public static class CursorSync
     /// explicit off differ.</summary>
     public const string EnabledKey = "tokenbar.cursorSync.enabled";
 
-    /// <summary>The one-time notice was answered (Continue, Turn Off, or turning
-    /// the Settings switch on, which shows the same paragraph beside it).</summary>
+    /// <summary>The one-time notice was answered. Written only where the
+    /// privacy paragraph was shown: <see cref="CursorSyncController.AnswerNotice"/>
+    /// (Continue or Turn Off on the Overview card) and Continue in the
+    /// confirmation the Settings switch opens
+    /// (<see cref="CursorSyncController.TurnOn"/>). No other controller call
+    /// writes it, and none of them stores the preference on, so nothing syncs
+    /// (<see cref="ShouldSync"/>) until one of those was answered.</summary>
     public const string NoticeKey = "tokenbar.cursorSync.noticeAcknowledged";
 
     /// <summary>D6: the user chose Syrtis's own sync over tokscale CLI Cursor
@@ -54,9 +59,10 @@ public static class CursorSync
 
     /// <summary>What the Settings switch shows: on only when sync can actually
     /// run. Before the notice is answered nothing syncs, so the default-on
-    /// preference alone must not read as "on" with every control inert;
-    /// turning the switch on answers the notice
-    /// (<see cref="CursorSyncController.SetEnabled"/>).</summary>
+    /// preference alone must not read as "on" with every control inert.
+    /// Turning the switch on while unanswered opens a confirmation first, and
+    /// only its Continue answers the notice
+    /// (<see cref="CursorSyncController.TurnOn"/>).</summary>
     public static bool ToggleShowsOn(bool enabled, bool acknowledged) => enabled && acknowledged;
 
     /// <summary>The preference and the notice (D3): what the core is told and
@@ -97,9 +103,14 @@ public static class CursorSync
     {
         public const string Title = "Cursor usage sync";
         public const string Toggle = "Sync Cursor usage from the Cursor app";
+        /// <summary>The Accounts page section header: a product name, not translated.</summary>
+        public const string Header = "Cursor";
         public const string Privacy =
             "To show your Cursor usage, Syrtis reads the login of the Cursor app on this PC and sends it only to Cursor's usage service (cursor.com) to download your usage. Syrtis stores the date, model, token counts, cost and conversation ID of each request on this PC; the login itself is never saved or logged. Turning this off deletes the downloaded usage.";
         public const string Continue = "Continue";
+        /// <summary>macOS <c>CursorSync.Copy.cancel</c>: the Settings
+        /// confirmation's buttons are Cancel / Continue.</summary>
+        public const string Cancel = "Cancel";
         public const string TurnOff = "Turn Off";
         /// <summary>macOS "Last synced %@"; .NET's placeholder is {0}.</summary>
         public const string LastSynced = "Last synced {0}";
@@ -130,9 +141,13 @@ public static class CursorSync
         public const string ProfilesPrivacy =
             "Add a folder you start Cursor with using --user-data-dir to sync it too (Syrtis keeps the folder path in its settings); each profile's sign-in is handled as described above. All profiles add up to one Cursor total, and an account signed in to several profiles counts once. Removing a profile deletes its downloaded usage the next time Syrtis can.";
 
+        /// <summary>The info flyout's rows. The privacy paragraph is also what
+        /// the enable confirmation and the first-run notice card show.</summary>
+        public static IEnumerable<(string Text, bool Heading)> InfoRows() => [(Privacy, false)];
+
         public static readonly string[] All =
         [
-            Title, Toggle, Privacy, Continue, TurnOff, LastSynced, Partial, Expired, NotSignedIn,
+            Title, Toggle, Privacy, Continue, Cancel, TurnOff, LastSynced, Partial, Expired, NotSignedIn,
             Offline, Error, CliPresent, SyncNow, Syncing, CliQuestion, UseSyrtis, KeepCli, CleanupFailed,
             ConfigRejected, ProfilesPrivacy,
         ];
@@ -587,8 +602,9 @@ public sealed class CursorSyncController
                         // is owed. _syncing stays set, so Syncing is true
                         // across both runs. No ShouldSync check here. Either
                         // order is covered: Reconfigure clears the flag when
-                        // sync goes off; and SetEnabled/AnswerNotice write the
-                        // store before Reconfigure runs, so a pass can be
+                        // sync goes off; and TurnOff, Enable and AnswerNotice
+                        // write the store before Reconfigure
+                        // runs, so a pass can be
                         // promoted after the store says off, in which case
                         // the post-push re-check returns without calling the
                         // core (Syncing stays set through that wait).
@@ -637,28 +653,60 @@ public sealed class CursorSyncController
 
     // ---- Actions behind the controls ---------------------------------------
 
-    /// <summary>The Settings switch. Turning it on shows the privacy paragraph
-    /// beside it, so it also answers the notice.</summary>
-    public void SetEnabled(bool on)
+    /// <summary>The Settings switch turned off: stores the preference off.
+    /// Only <see cref="TurnOn"/> (consent first) stores it on.</summary>
+    public void TurnOff()
     {
-        _store.SetBool(CursorSync.EnabledKey, on);
-        if (on)
-        {
-            _store.SetBool(CursorSync.NoticeKey, true);
-        }
-
+        _store.SetBool(CursorSync.EnabledKey, false);
         Reconfigure(refresh: true);
     }
 
-    /// <summary>The notice: Continue (<paramref name="continuing"/>) or Turn Off.</summary>
+    /// <summary>Turning the Settings switch on. While the notice is
+    /// unanswered, <paramref name="confirm"/> shows the privacy paragraph
+    /// first: Cancel or light dismiss (false) stores nothing and calls
+    /// nothing; Continue (true) stores the preference on and the notice
+    /// answered, then reconfigures once, so the core gets one config push.
+    /// Once the notice is answered, it turns on without asking.
+    /// This differs from macOS on purpose (maintainer decision 2026-11-02):
+    /// macOS <c>switchChanged(to: true)</c> asks on every turn-on, and only its
+    /// <c>confirmEnable()</c> enables; Windows asks only while the notice is
+    /// unanswered. Returns whether sync was turned on.</summary>
+    public async Task<bool> TurnOn(Func<Task<bool>> confirm)
+    {
+        if (!CursorSync.NoticeAcknowledged(_store) && !await confirm())
+        {
+            return false;
+        }
+
+        Enable();
+        return true;
+    }
+
+    // TurnOn's only write path. Writing the notice again when it is already
+    // answered is a no-op (SettingsStore skips equal values). When the notice
+    // was unanswered, ShouldSync stays false between the two writes (enabled,
+    // not yet answered). If the preference was stored off, NoticeVisible can
+    // read true in that moment, since it needs enabled and unanswered.
+    private void Enable()
+    {
+        _store.SetBool(CursorSync.EnabledKey, true);
+        _store.SetBool(CursorSync.NoticeKey, true);
+        Reconfigure(refresh: true);
+    }
+
+    /// <summary>The Overview notice card: Continue
+    /// (<paramref name="continuing"/>) or Turn Off. Turn Off stores the
+    /// preference off before it answers the notice, so no reader ever sees
+    /// <see cref="CursorSync.ShouldSync"/> true between the two writes (the
+    /// other order passes through answered plus default on).</summary>
     public void AnswerNotice(bool continuing)
     {
-        _store.SetBool(CursorSync.NoticeKey, true);
         if (!continuing)
         {
             _store.SetBool(CursorSync.EnabledKey, false);
         }
 
+        _store.SetBool(CursorSync.NoticeKey, true);
         Reconfigure(refresh: false);
     }
 

@@ -1,13 +1,12 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
 using TokenBar.Core;
 // TokenBar.Core.Grid collides with the XAML Grid (as in SettingsWindow.cs).
 using Grid = Microsoft.UI.Xaml.Controls.Grid;
 
 namespace TokenBar.App;
 
-// General page → "Antigravity accounts" (macOS SettingsPanel
+// Accounts page → "Antigravity" (macOS SettingsPanel
 // antigravityAccountsSection). Every action goes through
 // AntigravityAutoCapture.Shared; this only draws its state and the stored list.
 public sealed partial class SettingsWindow
@@ -115,20 +114,6 @@ public sealed partial class SettingsWindow
         {
             body.Children.Add(WarningLine(AntigravityAccountsCopy.Paused.Localized()));
         }
-
-        if (!enabled)
-        {
-            body.Children.Add(Hint(AntigravityAccountsCopy.MergeOnlyUntilRefresh.Localized()));
-        }
-
-        foreach (var hint in new[]
-                 {
-                     AntigravityAccountsCopy.WhenOn, AntigravityAccountsCopy.HowTo, AntigravityAccountsCopy.Reads,
-                     AntigravityAccountsCopy.RemoveMeans, AntigravityAccountsCopy.TwiceFromIde,
-                 })
-        {
-            body.Children.Add(Hint(hint.Localized()));
-        }
     }
 
     private static TextBlock WarningLine(string text)
@@ -141,45 +126,7 @@ public sealed partial class SettingsWindow
     /// <summary>The confirmation before automatic capture turns on, as a
     /// flyout on the toggle (no ContentDialog: see UpdateDialog's note on a
     /// second open throwing). Light dismiss counts as Cancel.</summary>
-    private static Task<bool> ConfirmAutoCapture(FrameworkElement anchor)
-    {
-        var answer = new TaskCompletionSource<bool>();
-        var panel = new StackPanel { Spacing = 10, MaxWidth = 320 };
-        foreach (var line in new[]
-                 {
-                     Ui.Text(AntigravityAccountsCopy.ConfirmTitle.Localized(), 13, bold: true),
-                     Ui.Text(AntigravityAccountsCopy.ConfirmBody.Localized(), 12),
-                 })
-        {
-            line.TextWrapping = TextWrapping.Wrap;
-            line.TextTrimming = TextTrimming.None;
-            panel.Children.Add(line);
-        }
-
-        var flyout = new Flyout { Content = panel, Placement = FlyoutPlacementMode.Bottom };
-        var cancel = new Button { Content = AntigravityAccountsCopy.ConfirmCancel.Localized() };
-        var ok = new Button
-        {
-            Content = AntigravityAccountsCopy.ConfirmOk.Localized(),
-            Style = (Style)Application.Current.Resources["AccentButtonStyle"],
-        };
-        cancel.Click += (_, _) => flyout.Hide();
-        ok.Click += (_, _) =>
-        {
-            answer.TrySetResult(true);
-            flyout.Hide();
-        };
-        flyout.Closed += (_, _) => answer.TrySetResult(false);
-        var buttons = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8,
-            HorizontalAlignment = HorizontalAlignment.Right,
-        };
-        buttons.Children.Add(cancel);
-        buttons.Children.Add(ok);
-        panel.Children.Add(buttons);
-        flyout.ShowAt(anchor);
-        return answer.Task;
-    }
+    private static Task<bool> ConfirmAutoCapture(FrameworkElement anchor) =>
+        ConfirmFlyout(anchor, AntigravityAccountsCopy.ConfirmTitle, AntigravityAccountsCopy.ConfirmBody,
+            AntigravityAccountsCopy.ConfirmOk, AntigravityAccountsCopy.ConfirmCancel);
 }
