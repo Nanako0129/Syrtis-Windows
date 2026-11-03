@@ -93,8 +93,11 @@ holds one file per released version, written at the `chore(release)` commit.
    Claude transcript once (Claude `parser_version` 4 → 5). By the code path
    (`message_cache.rs:1573-1580`) the upgrade loses nothing: an entry on an
    older Claude `parser_version` is migrated rather than dropped, so turns that
-   only the cache still holds survive. Not yet observed on Windows. On macOS this took 25 to 27 s for 256 shards; Windows
-   was not timed. Claude input tokens fall because input is now taken from the
+   only the cache still holds survive. Observed on 188 (2026-11-04, X4 build, real
+   cache): the first launch rewrote all 246 non-empty pv4 shards as pv5 within about
+   10.6 s of launch, the next launch rewrote none, and no crash or error-log entry
+   appeared. Whether any cache-only turn was kept was not checked (totals were not
+   compared). On macOS the same step took 25 to 27 s for 256 shards. Claude input tokens fall because input is now taken from the
    line that carries the cache split instead of the larger of a prompt
    snapshot and the split (#77): on the maintainer's Mac, Claude only, input
    47,960,589 → 19,631,634 (-59.1%) and cost -0.23%, the change confined to
