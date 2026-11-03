@@ -218,9 +218,11 @@ Rollback to an older Syrtis (v0.3.0 or later), in this order:
 
    ```powershell
    $backup = Join-Path $env:USERPROFILE 'syrtis-claude-cache-backup-<the stamp printed by the backup>'
-   if (Test-Path -LiteralPath $claude) { Remove-Item -Recurse -Force -LiteralPath $claude -ErrorAction Stop }
-   if (Test-Path -LiteralPath $claude) { throw 'claude folder still exists; quit every Syrtis/tokscale process and retry' }
-   Copy-Item -Recurse -LiteralPath $backup -Destination $claude -ErrorAction Stop
+   & {
+     if (Test-Path -LiteralPath $claude) { Remove-Item -Recurse -Force -LiteralPath $claude -ErrorAction Stop }
+     if (Test-Path -LiteralPath $claude) { throw 'claude folder still exists; quit every Syrtis/tokscale process and retry' }
+     Copy-Item -Recurse -LiteralPath $backup -Destination $claude -ErrorAction Stop
+   }
    Compare-Object (& $h $backup) (& $h $claude)
    ```
 
@@ -229,7 +231,8 @@ Rollback to an older Syrtis (v0.3.0 or later), in this order:
    backup is only read, so the step can be run again and gives the same
    result. If a shard is still held open, `Remove-Item` stops the block
    (`-ErrorAction Stop`) before anything is copied, so a partial delete never
-   turns into a nested `claude\<backup>` copy.
+   turns into a nested `claude\<backup>` copy. The three lines sit in one `& { }`
+   block so the first error ends all of them, also when pasted into a console.
 3. Check that `Compare-Object` printed nothing. If it printed anything, do not
    start the older Syrtis; repeat step 2.
 4. Install and start the older Syrtis. Optionally compare its Claude totals
