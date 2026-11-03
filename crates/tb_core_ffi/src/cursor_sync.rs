@@ -233,11 +233,7 @@ fn cursor_own_root() -> Option<PathBuf> {
 /// sync time.
 fn root_rule(raw: &str, cursor_own: Option<&Path>) -> Result<PathBuf, &'static str> {
     let root = crate::claude_config_dirs::normalize(raw)?;
-    let key = crate::claude_config_dirs::duplicate_key(&root);
-    if cursor_own.is_some_and(|own| {
-        crate::claude_config_dirs::duplicate_key(&own.to_string_lossy()).trim_end_matches('\\')
-            == key
-    }) {
+    if cursor_own.is_some_and(|own| same_root_str(&own.to_string_lossy(), &root)) {
         return Err("cursorDefault");
     }
     Ok(PathBuf::from(root))
@@ -298,15 +294,30 @@ fn resolve_under(base: Option<&Path>, child: &str) -> io::Result<PathBuf> {
 }
 
 /// A root as roots compare everywhere (`claude_config_dirs::duplicate_key`:
-/// case and `/` vs `\` folded), so a respelling of the same folder is the
-/// same root.
-fn folded_root(root: &Path) -> String {
-    crate::claude_config_dirs::duplicate_key(&root.to_string_lossy())
+/// case and `/` vs `\` folded, then a trailing `\` dropped), so a
+/// respelling of the same folder is the same root. Roots from `normalize`
+/// never end in a separator, so their dir names (`profile_dir_name`) are what
+/// they were before the trim.
+fn folded_str(root: &str) -> String {
+    crate::claude_config_dirs::duplicate_key(root)
+        .trim_end_matches('\\')
+        .to_string()
 }
 
-/// The one root comparison: equal once folded (`folded_root`).
+fn folded_root(root: &Path) -> String {
+    folded_str(&root.to_string_lossy())
+}
+
+/// The one root comparison: equal once folded (`folded_str`), both sides
+/// the same way.
 fn same_root(a: &Path, b: &Path) -> bool {
     folded_root(a) == folded_root(b)
+}
+
+/// `same_root` for roots still held as strings (the push and add-time
+/// checks).
+fn same_root_str(a: &str, b: &str) -> bool {
+    folded_str(a) == folded_str(b)
 }
 
 /// Length of the root digest in an added profile's dir name.
@@ -685,13 +696,12 @@ fn validate_with(
         if drive_type(Path::new(&root)) != cursor_desktop::DRIVE_FIXED {
             return Some("notFixedDrive");
         }
-        let key = crate::claude_config_dirs::duplicate_key(&root);
         let identity = folder_identity(Path::new(&root));
         let same = |other: &str| {
             let Ok(other) = crate::claude_config_dirs::normalize(other) else {
                 return false;
             };
-            if crate::claude_config_dirs::duplicate_key(&other) == key {
+            if same_root_str(&other, &root) {
                 return true;
             }
             identity.is_some()

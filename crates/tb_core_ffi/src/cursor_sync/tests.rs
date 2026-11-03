@@ -4126,3 +4126,25 @@ fn a_leftover_root_record_alone_is_never_a_cleanup_failure() {
     );
     drop(root);
 }
+
+// Merge-delta review ------------------------------------------------------------
+
+/// Merge-delta 8: roots that differ only by a trailing `\` are the same
+/// root, whichever side carries it: Cursor's own folder is refused, an
+/// already listed folder is a duplicate, and `same_root` agrees.
+#[test]
+fn a_trailing_separator_is_the_same_root() {
+    let own = Path::new(r"C:\Users\me\AppData\Roaming\Cursor");
+    let own_slash = Path::new(r"C:\Users\me\AppData\Roaming\Cursor\");
+    assert_eq!(root_rule(r"C:\Users\me\AppData\Roaming\Cursor\", Some(own)), Err("cursorDefault"));
+    assert_eq!(root_rule(r"C:\Users\me\AppData\Roaming\Cursor", Some(own_slash)), Err("cursorDefault"));
+    assert!(root_rule(r"C:\Users\me\AppData\Roaming\Cursor2", Some(own_slash)).is_ok(), "control");
+    assert!(same_root(Path::new(r"C:\x\a\"), Path::new(r"C:\x\a")));
+    assert!(same_root_str(r"C:\x\a", r"c:/x/a/"));
+    assert!(!same_root_str(r"C:\x\a", r"C:\x\ab"), "control");
+    let fixed = |_: &Path| cursor_desktop::DRIVE_FIXED;
+    for (root, existing) in [(r"C:\x\a\", r"C:\x\a"), (r"C:\x\a", r"C:\x\a\")] {
+        let raw = serde_json::json!({"root": root, "existing": [existing]}).to_string();
+        assert_eq!(validate_with(&raw, &fixed, None).unwrap()["reason"], "duplicate", "{root}");
+    }
+}
