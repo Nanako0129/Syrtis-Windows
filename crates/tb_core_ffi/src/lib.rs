@@ -1466,7 +1466,8 @@ pub unsafe extern "C" fn tb_validate_cursor_profile(json: *const c_char) -> *mut
 /// "profiles":[{"id","state","events","lastSuccessMs","reason"?,"duplicateOf"?}],
 /// "cleanupFailedProfiles":["<id>"]}` (a profile one of whose files of ours
 /// could not be deleted this round: a duplicate's other-account file, or a
-/// superseded file after a commit):
+/// superseded file after a commit; it can be `"default"`, the default
+/// profile's id, which is not a stored profile):
 /// `state`/`reason` are the headline (`ok` when every profile is `ok` or
 /// `duplicate`, else the first other state, a `notSignedIn` profile ignored
 /// while another synced); `changed` = some profile's usage file content

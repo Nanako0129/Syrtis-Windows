@@ -52,7 +52,8 @@ public sealed record CursorProfileStatus(
 /// not a change), whatever the headline says (the dashboard refreshes on it).
 /// <see cref="CleanupFailedProfiles"/>: ids of profiles one of whose files
 /// could not be deleted this round, a duplicate's other-account file or a
-/// superseded file after a commit (null from an older core).</summary>
+/// superseded file after a commit; it can hold <c>default</c>, the default
+/// profile's id, which is not a stored profile (null from an older core).</summary>
 public sealed record CursorSyncStatus(
     string State, long Events, long? LastSuccessMs, bool Changed,
     IReadOnlyList<CursorProfileStatus> Profiles, string? Reason = null,

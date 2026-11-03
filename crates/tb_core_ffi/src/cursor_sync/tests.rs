@@ -4200,3 +4200,58 @@ fn a_commit_that_cannot_delete_a_superseded_file_reports_it() {
     let status = sync_round(&tmp.path().join("absent.vscdb"), &url, &registry);
     assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([]));
 }
+
+// Local review of the PR #268 commit cleanup -------------------------------------
+
+/// Commit cleanup 1: a listing error during the commit's cleanup is a
+/// cleanup failure (the profile is in `cleanupFailedProfiles`), and a
+/// superseded file removed before the error still counts toward `changed`.
+/// The walk's bytes are identical, so only that removal can make it a change.
+#[test]
+fn a_listing_error_during_the_commit_cleanup_is_reported_and_removals_still_count() {
+    let _guard = lock();
+    let tmp = TempDir::new();
+    let root = profile_root(tmp.path(), "b", &valid_token(), USER);
+    let registry = RwLock::new(multi(tmp.path(), true, vec![profile(PROFILE_A, &root)]));
+    let a_dir = profile_dir(tmp.path(), &profile(PROFILE_A, &root));
+    let (url, _) = serve(vec![json_ok(&page(1, &["a"])), json_ok(&page(1, &["a"]))]);
+    let first = sync_round(&tmp.path().join("absent.vscdb"), &url, &registry);
+    assert_eq!(states(&first), ["notSignedIn", "ok"]);
+    let old = a_dir.join(format!("usage.{}.json", stem(OTHER_USER).unwrap()));
+    write_secure(&old, b"{}");
+    LISTING_ERROR_FOR_TEST.with(|fault| fault.set(true));
+    let status = sync_round(&tmp.path().join("absent.vscdb"), &url, &registry);
+    LISTING_ERROR_FOR_TEST.with(|fault| fault.set(false));
+    assert_eq!(states(&status), ["notSignedIn", "ok"]);
+    assert!(!old.exists(), "control: the superseded file was not removed");
+    assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([PROFILE_A]));
+    assert_eq!(status["changed"], true, "a removal before the listing error was not counted");
+}
+
+/// Commit cleanup 2: a commit cleans every candidate dir of the profile, not
+/// only the one it resolved. With the sticky `.secure` fallback in use the
+/// commit goes there; an older account's file in the plain dir is removed
+/// too (and that emptied dir goes).
+#[test]
+fn a_commit_cleans_the_profiles_other_candidate_dir() {
+    let _guard = lock();
+    let tmp = TempDir::new();
+    let root = profile_root(tmp.path(), "b", &valid_token(), USER);
+    let registry = RwLock::new(multi(tmp.path(), true, vec![profile(PROFILE_A, &root)]));
+    let plain = profile_dir(tmp.path(), &profile(PROFILE_A, &root));
+    let mut sibling = plain.clone().into_os_string();
+    sibling.push(secure::FALLBACK_SUFFIX);
+    let sibling = PathBuf::from(sibling);
+    drop(secure::ensure_dir(&sibling).unwrap());
+    let old = plain.join(format!("usage.{}.json", stem(OTHER_USER).unwrap()));
+    write_secure(&old, b"{}");
+    let (url, _) = serve(vec![json_ok(&page(1, &["a"]))]);
+    let status = sync_round(&tmp.path().join("absent.vscdb"), &url, &registry);
+    assert_eq!(states(&status), ["notSignedIn", "ok"]);
+    assert!(expected_file(&sibling).exists(), "fixture: the commit did not use the fallback");
+    assert!(!old.exists(), "the other candidate's old-account file stayed");
+    assert!(!plain.exists(), "the emptied other candidate was left");
+    assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([]));
+    let registered = newest_per_account(&registry.read().unwrap());
+    assert_eq!(registered, [expected_file(&sibling)]);
+}

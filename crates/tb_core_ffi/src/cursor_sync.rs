@@ -1021,11 +1021,14 @@ mod secure {
         if old != bytes {
             return None;
         }
+        let touched = file.set_modified(std::time::SystemTime::now());
         #[cfg(test)]
-        if super::TOUCH_FAILS_FOR_TEST.with(std::cell::Cell::get) {
-            return Some(false);
-        }
-        Some(file.set_modified(std::time::SystemTime::now()).is_ok())
+        let touched = if super::TOUCH_FAILS_FOR_TEST.with(std::cell::Cell::get) {
+            Err(io::Error::other("injected touch failure"))
+        } else {
+            touched
+        };
+        Some(touched.is_ok())
     }
 
     /// Delete one Syrtis file by pathname, only if it is a regular file that
@@ -1105,10 +1108,23 @@ impl Removal {
 
 /// Delete Syrtis usage files and temp leftovers in `dir` except `keep`.
 /// Never touches anything else. Caller holds the dir lock.
+/// An entry the listing cannot read counts in `left` and the listing goes
+/// on, so files removed before it still count; only a dir that cannot be
+/// listed at all is an `Err` (nothing removed).
 fn remove_usage_files(dir: &Path, keep: Option<&str>) -> io::Result<Removal> {
     let mut removal = Removal::default();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
+    let entries = std::fs::read_dir(dir)?;
+    #[cfg(test)]
+    let entries = entries.chain(
+        LISTING_ERROR_FOR_TEST
+            .with(std::cell::Cell::get)
+            .then(|| Err(io::Error::other("injected listing error"))),
+    );
+    for entry in entries {
+        let Ok(entry) = entry else {
+            removal.left += 1;
+            continue;
+        };
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if Some(name.as_ref()) == keep {
@@ -1204,22 +1220,28 @@ fn commit_file(
         write_file(&directory, dir, &final_name, &payload).map_err(|_| failed())?;
     }
     // Superseded files and orphan temps go. A Syrtis-named file that cannot
-    // be deleted (one failing the storage contract is never deleted) stays,
-    // and is counted so the round reports this profile in
-    // `cleanupFailedProfiles`: a superseded account's file left there would
-    // still be registered.
-    let removal = remove_usage_files(dir, Some(&final_name)).unwrap_or_default();
+    // be deleted (one failing the storage contract is never deleted), or a
+    // dir that cannot be listed, is a cleanup failure, so the round reports
+    // this profile in `cleanupFailedProfiles`: a superseded account's file
+    // left there would still be registered.
+    let (removed, cleanup_failed) = match remove_usage_files(dir, Some(&final_name)) {
+        Ok(removal) => (removal.usage, removal.left > 0),
+        Err(_) => (0, true),
+    };
     Ok(Commit {
-        changed: same.is_none() || removal.usage > 0,
-        left: removal.left,
+        changed: same.is_none() || removed > 0,
+        cleanup_failed,
+        dir: dir.to_path_buf(),
     })
 }
 
 /// What `commit_file` did besides writing: whether a usage file's content
-/// changed, and how many of our files it could not delete.
+/// changed, whether one of our files could not be deleted (or the dir could
+/// not be listed), and the dir it committed into (the resolved one).
 struct Commit {
     changed: bool,
-    left: usize,
+    cleanup_failed: bool,
+    dir: PathBuf,
 }
 
 /// Secure temp, flush, secure replace (it flushes the directory); the temp
@@ -1734,12 +1756,26 @@ async fn run(
     match commit_file(dir, slot.root.is_some(), &stem, &events, enabled) {
         Ok(commit) => {
             claim(&stem, true);
+            // The profile's other candidate dir (an added profile's dir and
+            // its `.secure` sibling; the commit cleaned the one it resolved)
+            // can still hold an older account's file: it goes too, under that
+            // dir's lock, or the profile is reported.
+            let (mut changed, mut cleanup_failed) = (commit.changed, commit.cleanup_failed);
+            for other in slot.candidates().into_iter().filter(|d| *d != commit.dir) {
+                match clean_candidate(&other, slot.root.is_some(), None) {
+                    Ok(removal) => {
+                        changed |= removal.usage > 0;
+                        cleanup_failed |= removal.left > 0;
+                    }
+                    Err(_) => cleanup_failed = true,
+                }
+            }
             Outcome {
                 stop: Stop::new(State::Ok, None),
                 events: events.len(),
                 duplicate_of: None,
-                changed: commit.changed,
-                cleanup_failed: commit.left > 0,
+                changed,
+                cleanup_failed,
                 refused: false,
             }
         }
@@ -2017,8 +2053,12 @@ thread_local! {
     /// Test fault: the cookie header cannot be built (unreachable otherwise:
     /// `token_user` admits only characters a header value takes).
     static BAD_COOKIE_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Test fault: setting an identical file's modified time fails.
+    /// Test fault: setting an identical file's modified time fails (the
+    /// result of the real call is replaced by an error).
     static TOUCH_FAILS_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test fault: listing a dir for cleanup yields one unreadable entry
+    /// after the real ones.
+    static LISTING_ERROR_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]

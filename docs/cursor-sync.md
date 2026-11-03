@@ -139,8 +139,9 @@ no added profile (WB11); the Accounts page adds them in a later slice (W2).
   entries with id, state, reason and `duplicateOf` only, plus
   `cleanupFailedProfiles`: ids of profiles one of whose files of ours could
   not be deleted this round (a duplicate's other-account file, or a
-  superseded file after a commit; a file failing the storage contract is
-  never deleted).
+  superseded file after a commit in any of the profile's dirs; a file
+  failing the storage contract is never deleted). It can contain `default`,
+  the default profile's id, which is not a stored profile.
 - **Takeover.** `extra_scan_paths["cursor"]` holds the newest file per
   account name (`usage.<HMAC(sub)>.json`) across the current config's
   profiles (an added profile's dir and its `.secure` sibling), never a
