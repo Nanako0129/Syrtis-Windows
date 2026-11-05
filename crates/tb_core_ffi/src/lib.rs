@@ -1247,9 +1247,17 @@ pub unsafe extern "C" fn tb_set_antigravity_binding(json: *const c_char) -> *mut
 /// Copy agy's current Google login into a Syrtis-owned Credential Manager
 /// generic credential (target `com.nyanako.tokenbar.antigravity-account:<key>`,
 /// persist local machine). Reads agy's `gemini:antigravity` credential once and
-/// never writes it, starts no process, and proves the token with one refresh
-/// at Google using the client named by its `aud`. Success data is
-/// `{"key":"<64 hex>","label":"<email or fallback>"}`. The error text is
+/// never writes it, starts no process, and proves the token with a refresh at
+/// Google, using the client named by its stored `id_token`'s `aud`, or, for
+/// agy 1.4.x's credential (no `id_token`, only `id_token_email`), trying each
+/// client found in agy's files. It writes only when that response carries an
+/// `id_token` whose `aud` is the client used and that names agy's account:
+/// agy's stored `sub`, or, for agy 1.4.x, an `email` equal to
+/// `id_token_email` ignoring ASCII case (`account_mismatch` otherwise,
+/// `invalid_credential_format` when there is no usable `id_token`). The key
+/// is derived from Google's `sub`. Success data is
+/// `{"key":"<64 hex>","label":"<email or fallback>"}`, the label being
+/// Google's email, else agy's local one. The error text is
 /// exactly one fixed code: `agy_not_signed_in`, `agy_login_unreadable`,
 /// `agy_login_missing_identity`, `oauth_client_not_found`,
 /// `oauth_client_rejected`, `refresh_rejected`, `refresh_unreachable`,
@@ -1287,12 +1295,18 @@ pub extern "C" fn tb_antigravity_login_marker() -> *mut c_char {
 /// One automatic capture of agy's current login, run by the app once per
 /// login-marker change while automatic capture is on. `removed_keys_json` is
 /// a JSON array of the keys the user removed (`["<64 hex>", ...]`); an account
-/// whose key is listed is skipped before any request. Success data is
+/// whose key is listed is never written: with agy's stored `id_token` it is
+/// skipped before any request, while agy 1.4.x's credential (no `id_token`)
+/// names its account only in Google's answer, so it is skipped after the
+/// refresh and before the write. Success data is
 /// `{"status":"captured"|"unchanged","key":"<64 hex>","label":"..."}` or
-/// `{"status":"skipped_removed"}`. `unchanged` means Syrtis's own credential
-/// already holds this refresh token: nothing was scanned, requested or
-/// written. `captured` requires Google's refresh response to carry an
-/// `id_token` with the stored `sub`. The error is one fixed code: the
+/// `{"status":"skipped_removed"}`. `unchanged` means a Syrtis credential
+/// already holds this refresh token (its own key's, or, for agy 1.4.x, any
+/// registered account's not in the removed keys): nothing was scanned,
+/// requested or written. `captured` requires Google's refresh response to
+/// pass the checks of `tb_antigravity_capture` (`account_mismatch` for
+/// another account or client, `invalid_credential_format` when there is no
+/// usable `id_token`). The error is one fixed code: the
 /// `tb_antigravity_capture` codes (except `agy_not_signed_in`), plus
 /// `not_signed_in` (agy has no credential), `paused` (agy's credential read
 /// failed any other way) and `invalid_removed_keys`. Blocking (network): call

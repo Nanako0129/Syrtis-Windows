@@ -234,7 +234,8 @@ public sealed class AntigravityAutoCapture
             catch (Exception ex)
             {
                 code = CodeOf(ex);
-                _log($"antigravity auto-capture failed: {ex.GetType().Name}");
+                // Only the fixed code: the message may be free text (S2 G3).
+                _log($"antigravity auto-capture failed: {code}");
             }
 
             if (outcome is { Status: ("captured" or "unchanged") and var status, Key: { } key, Label: { } label })
