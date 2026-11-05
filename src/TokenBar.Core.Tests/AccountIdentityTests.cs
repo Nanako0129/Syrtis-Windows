@@ -401,6 +401,34 @@ public class AccountIdentityTests
         Assert.Equal(Desktop, WindowCardText.WindowCardAccount(desktopOnly, "claude", ""));
     }
 
+    /// <summary>MA-37/38: the core re-sends last-good windows beside an error.
+    /// Such an account is not live: it is not picked (stored or default), the
+    /// card falls back to a live account, and its pill stays so the stored
+    /// choice comes back when it recovers.</summary>
+    [Fact]
+    public void AnErroredAccountWithLastGoodWindowsIsNotLiveButKeepsItsPill()
+    {
+        var erroredDesktop = Payload(
+            Card(null, "P", null, Window("session.v1", "Session", 80, "session.v1")),
+            Card(Desktop, "S", "expired", Window("session.v1", "Session", 30, "session.v1")));
+
+        // Selected (stored) account errored with windows => fallback to the primary.
+        Assert.Null(WindowCardText.WindowCardAccount(erroredDesktop, "claude", Desktop));
+        Assert.Null(WindowCardText.Blocked(
+            erroredDesktop, "claude", WindowCardText.WindowCardAccount(erroredDesktop, "claude", Desktop), true, []));
+        // Pills stay: both accounts still listed.
+        Assert.Equal([null, Desktop], WindowCardText.AccountPills(erroredDesktop, "claude").Select(p => p.Key));
+
+        // Errored primary with windows, live other account => the other one.
+        var erroredPrimary = Payload(
+            Card(null, "P", "timeout", Window("session.v1", "Session", 80, "session.v1")),
+            Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
+        Assert.Equal(Desktop, WindowCardText.WindowCardAccount(erroredPrimary, "claude"));
+
+        // Control: the same stored choice, healthy => honoured.
+        Assert.Equal(Desktop, WindowCardText.WindowCardAccount(TwoAccounts(), "claude", Desktop));
+    }
+
     private static QuotaLensProjection.Client ClientFor(
         string? stored, string? storedTab = null, IReadOnlyCollection<string>? localClients = null,
         IReadOnlyList<UsageAttribution.Record>? records = null)
