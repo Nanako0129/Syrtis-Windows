@@ -119,6 +119,10 @@ public static class CursorSync
         public const string NotSignedIn = "Sign in to the Cursor app to sync your usage.";
         public const string Offline = "Can't reach Cursor. Syrtis will try again.";
         public const string Error = "Cursor usage couldn't be synced. Syrtis will try again later.";
+        /// <summary><see cref="Error"/> plus the core's fixed reason code, so a
+        /// screenshot can be diagnosed (#547; macOS <c>errorWithReason</c>, whose
+        /// <c>%@</c> is {0} here).</summary>
+        public const string ErrorWithReason = "Cursor usage couldn't be synced ({0}). Syrtis will try again later.";
         public const string CliPresent = "Showing Cursor usage from tokscale CLI.";
         public const string SyncNow = "Sync Now";
         public const string Syncing = "Syncing…";
@@ -135,6 +139,41 @@ public static class CursorSync
         /// <summary>The core refused the settings (<see cref="ConfigRejectedState"/>):
         /// nothing syncs. macOS #532 wording.</summary>
         public const string ConfigRejected = "Cursor sync couldn't be set up, so nothing is being synced.";
+        // --- Cursor 3.27+ encrypted sign-in consent (S3b, U3) ----------------
+        // DRAFT copy: the disclosure (C4) is final only after the maintainer
+        // approves it. Windows has no OS dialog (DPAPI is silent), so this
+        // in-app confirmation is the only gate. No "Keychain" wording.
+
+        /// <summary>The status line when the core reports
+        /// <c>keychain_consent</c>: a sealed sign-in and no "cursor" grant yet
+        /// (or it was withdrawn). The Allow control sits beside it.</summary>
+        public const string KeychainConsentCode = "keychain_consent";
+        public const string KeychainConsentLine =
+            "Cursor stores its sign-in encrypted. Syrtis needs your permission to read it.";
+
+        /// <summary>The button that opens the disclosure confirmation.</summary>
+        public const string KeychainAllowAccess = "Allow reading Cursor's encrypted sign-in…";
+
+        /// <summary>The disclosure shown before Allow (C4 required content:
+        /// the Local State key decrypts everything Cursor stores encrypted;
+        /// Windows does not ask, so this is the only check; only the sign-in
+        /// token is used; the key stays in memory for that read only; the
+        /// sign-in is sent only to cursor.com; Withdraw stops reading the
+        /// encrypted sign-in and does not stop reading an unencrypted
+        /// one).</summary>
+        public const string KeychainDisclosure =
+            "Cursor 3.27 and later can store its sign-in encrypted. To read it, Syrtis unlocks the key Cursor keeps in its \"Local State\" file on this PC. Windows does not ask, so this confirmation is the only check. That key can decrypt everything Cursor stores encrypted, but Syrtis uses it only to read your Cursor sign-in, keeps it in memory for that read alone, and never saves or logs it. The sign-in is sent only to Cursor's usage service (cursor.com). Turning on Cursor sync does not grant this. Withdraw stops Syrtis reading Cursor's encrypted sign-in; if Cursor stores its sign-in unencrypted, Syrtis still reads that and Withdraw does not change it.";
+
+        /// <summary>The Withdraw control shown once the grant is stored.</summary>
+        public const string KeychainWithdraw = "Withdraw";
+
+        /// <summary>The confirmation's Allow button: an English source string
+        /// (localized once, by the flyout). Not the semantic
+        /// <c>consent.action.allow</c> key, which renders as the key itself
+        /// in English through <c>Localized()</c>, and not bare "Allow", the
+        /// status badge ("待授權").</summary>
+        public const string KeychainAllow = "Allow access";
+
         /// <summary>Second consent paragraph once added profiles exist
         /// (<see cref="ConsentParagraphs"/>), macOS #535 wording. W2 shows it;
         /// each sentence is held to the code there.</summary>
@@ -148,8 +187,9 @@ public static class CursorSync
         public static readonly string[] All =
         [
             Title, Toggle, Privacy, Continue, Cancel, TurnOff, LastSynced, Partial, Expired, NotSignedIn,
-            Offline, Error, CliPresent, SyncNow, Syncing, CliQuestion, UseSyrtis, KeepCli, CleanupFailed,
+            Offline, Error, ErrorWithReason, CliPresent, SyncNow, Syncing, CliQuestion, UseSyrtis, KeepCli, CleanupFailed,
             ConfigRejected, ProfilesPrivacy,
+            KeychainConsentLine, KeychainAllowAccess, KeychainDisclosure, KeychainWithdraw, KeychainAllow,
         ];
     }
 
@@ -161,8 +201,12 @@ public static class CursorSync
 
     /// <summary>The status line for a core state; null where there is nothing
     /// to say (<c>disabled</c>, not yet synced, or <c>ok</c> with no recorded
-    /// time). The relative time is this app's own (<see cref="Format.RelativeTime"/>).</summary>
-    public static string? StatusLine(string? state, long? lastSuccessMs, DateTimeOffset? now = null) =>
+    /// time). The relative time is this app's own (<see cref="Format.RelativeTime"/>).
+    /// For <c>error</c>, <paramref name="reason"/> is shown only if it looks
+    /// like one of the core's fixed codes (<c>^[a-z_]{1,40}$</c>), so the line
+    /// never carries free text (macOS <c>statusLine</c>, #547).</summary>
+    public static string? StatusLine(
+        string? state, long? lastSuccessMs, DateTimeOffset? now = null, string? reason = null) =>
         state switch
         {
             "ok" when lastSuccessMs is { } ms =>
@@ -171,6 +215,14 @@ public static class CursorSync
             "expired" => Copy.Expired.Localized(),
             "notSignedIn" => Copy.NotSignedIn.Localized(),
             "offline" => Copy.Offline.Localized(),
+            // A sealed sign-in with no "cursor" grant: the consent prompt, not
+            // the generic error-with-reason line (the Allow control sits beside
+            // it). Checked before the reason-code branch, which would otherwise
+            // match this lowercase code.
+            "error" when reason == Copy.KeychainConsentCode => Copy.KeychainConsentLine.Localized(),
+            // A char test, not a Regex: .NET's `$` also matches before a final "\n".
+            "error" when reason is { Length: >= 1 and <= 40 } && reason.All(c => c is '_' or >= 'a' and <= 'z') =>
+                Copy.ErrorWithReason.Localized(reason),
             "error" => Copy.Error.Localized(),
             "cliPresent" => Copy.CliPresent.Localized(),
             ConfigRejectedState => Copy.ConfigRejected.Localized(),
@@ -180,6 +232,13 @@ public static class CursorSync
     /// <summary>ok is drawn in the secondary colour, every other line in
     /// orange (shared spec §2).</summary>
     public static bool StatusIsWarning(string? state) => state != "ok";
+
+    /// <summary>The Cursor section needs the Allow control: a sealed sign-in
+    /// with no "cursor" grant (the core reports <c>keychain_consent</c>, U3).
+    /// Unlike macOS there is no <c>keychain_denied</c>/<c>keychain_unlock</c>:
+    /// Windows has no OS dialog and no first-round rule.</summary>
+    public static bool NeedsKeychainAllow(string? state, string? reason) =>
+        state == "error" && reason == Copy.KeychainConsentCode;
 }
 
 /// <summary>
@@ -215,6 +274,11 @@ public sealed class CursorSyncController
     private Task _configPush = Task.CompletedTask;
     private CancellationTokenSource? _loop;
     private int _generation;
+    // Bumped by ConsentChanged, with the answer it reported: an Allow during a
+    // round the core refused for want of consent, or that threw, reruns it as
+    // a user round.
+    private int _consentEpoch;
+    private bool _consentGranted;
     private bool _rerunPending;
     private bool _syncing;
     // The running pass is a user press, not the schedule.
@@ -222,6 +286,9 @@ public sealed class CursorSyncController
     // A press arrived during a scheduled pass; one user sync follows it.
     private bool _userPending;
     private string? _state;
+    // The core's fixed reason code for the last round, written with every
+    // "error" state (null when the round threw); StatusLine checks its shape.
+    private string? _reason;
     private long? _lastSuccessMs;
     private bool _cleanupFailed;
     // While on: the last accepted on push could not clean a profile it no
@@ -258,6 +325,9 @@ public sealed class CursorSyncController
     }
 
     public string? State { get { lock (_gate) { return _state; } } }
+
+    /// <summary>The last round's <see cref="CursorSyncStatus.Reason"/> (#547).</summary>
+    public string? Reason { get { lock (_gate) { return _reason; } } }
 
     public long? LastSuccessMs { get { lock (_gate) { return _lastSuccessMs; } } }
 
@@ -490,7 +560,14 @@ public sealed class CursorSyncController
     /// reconfigure during that wait makes it wait again, and if sync was
     /// turned off meanwhile it returns without calling the core. A
     /// reconfigure while the core runs makes the result stale; it is discarded
-    /// and the sync reruns, so the new settings get a fresh result.</summary>
+    /// and the sync reruns, so the new settings get a fresh result.
+    /// A second exception to single-flight is <see cref="ConsentChanged"/>: an
+    /// Allow pressed while a round runs, when that round ends refused for want
+    /// of the "cursor" consent, applies that round's result (its writes are real,
+    /// so <see cref="DataChanged"/> still fires on <c>changed</c>); when it
+    /// throws there is no result: the state is "error" with a null reason, no
+    /// refresh happens and <see cref="DataChanged"/> does not fire. Either way
+    /// it then runs one user round, which also serves a remembered Sync Now.</summary>
     public async Task RunSync(bool userInitiated)
     {
         if (_io is not { } io || !CursorSync.ShouldSync(_store))
@@ -526,6 +603,7 @@ public sealed class CursorSyncController
             while (true)
             {
                 int started;
+                int startedConsent;
                 Task push;
                 lock (_gate)
                 {
@@ -533,6 +611,7 @@ public sealed class CursorSyncController
                     // Read the generation BEFORE waiting: a settings change
                     // during the wait makes this pass stale.
                     started = _generation;
+                    startedConsent = _consentEpoch;
                     push = _configPush;
                 }
 
@@ -576,8 +655,19 @@ public sealed class CursorSyncController
 
                 var refresh = false;
                 bool again;
+                bool consentRerun;
                 lock (_gate)
                 {
+                    // Allow pressed while this ran, and this round was refused
+                    // for want of that consent (keychain_consent) or threw (no
+                    // result says it did not depend on the old answer): it
+                    // reruns. A plaintext round that synced never read
+                    // consent, and a Withdraw needs no rerun (a round that
+                    // had not yet opened the sealed sign-in already reports
+                    // keychain_consent; one that had, read it under the yes
+                    // then in force and reports true data).
+                    consentRerun = startedConsent != _consentEpoch && _consentGranted
+                        && (result is null || AskedForConsent(result));
                     if (started != _generation || !CursorSync.ShouldSync(_store))
                     {
                         // A reconfigure (turning sync off, say) happened while
@@ -588,10 +678,12 @@ public sealed class CursorSyncController
                     else if (result is null)
                     {
                         _state = "error";
+                        _reason = null;
                     }
                     else
                     {
                         _state = result.State;
+                        _reason = result.Reason;
                         _lastSuccessMs = result.LastSuccessMs;
                         _roundProfileCleanupFailed = result.CleanupFailedProfiles is { Count: > 0 };
                         // A round that changed a file already invalidated
@@ -599,11 +691,26 @@ public sealed class CursorSyncController
                         // headline (one profile can write while another
                         // fails) and not on the event count (another profile
                         // can write the same count). An identical rewrite is
-                        // not `changed` in the core.
+                        // not `changed` in the core. A round rerun for consent
+                        // is still applied: what it wrote is real.
                         refresh = result.Changed;
                     }
 
+                    if (consentRerun)
+                    {
+                        _rerunPending = true;
+                    }
+
                     again = _rerunPending && CursorSync.ShouldSync(_store);
+                    if (again && consentRerun)
+                    {
+                        // The Allow press is served as a user round, and that
+                        // round also serves a Sync Now remembered meanwhile.
+                        user = true;
+                        _runningUser = true;
+                        _userPending = false;
+                    }
+
                     if (!again)
                     {
                         // The pending press is served only once nothing else
@@ -660,6 +767,39 @@ public sealed class CursorSyncController
     }
 
     // ---- Actions behind the controls ---------------------------------------
+
+    /// <summary>The Cursor encrypted-sign-in answer changed to
+    /// <paramref name="granted"/> (Allow or Withdraw in Settings; the caller has
+    /// already installed it through <see cref="KeychainConsentComposer"/>).
+    /// With no round running, one user round starts now. While a round runs:
+    /// an Allow whose round ends refused for want of consent
+    /// (<c>keychain_consent</c>) or throws is served by one user round right
+    /// after it (an exception to single-flight; a plain Sync Now during a user
+    /// round is dropped). Otherwise the press adds no round, and the running
+    /// round ends as it would have without it: a Sync Now remembered during a
+    /// scheduled round still runs one user round after it, and a reconfigure
+    /// during it still reruns it (see <see cref="RunSync"/>).</summary>
+    public Task ConsentChanged(bool granted)
+    {
+        lock (_gate)
+        {
+            _consentEpoch++;
+            _consentGranted = granted;
+            if (_syncing)
+            {
+                return Task.CompletedTask;
+            }
+        }
+
+        return RunSync(userInitiated: true);
+    }
+
+    /// <summary>The round, headline or any profile, was refused because the
+    /// "cursor" consent was missing.</summary>
+    private static bool AskedForConsent(CursorSyncStatus? result) =>
+        result is not null
+        && (result.Reason == CursorSync.Copy.KeychainConsentCode
+            || result.Profiles?.Any(p => p.Reason == CursorSync.Copy.KeychainConsentCode) == true);
 
     /// <summary>The Settings switch turned off: stores the preference off.
     /// Only <see cref="TurnOn"/> (consent first) stores it on.</summary>

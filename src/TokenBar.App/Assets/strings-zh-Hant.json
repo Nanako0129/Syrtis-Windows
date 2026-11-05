@@ -592,6 +592,7 @@
   "Sign in to the Cursor app to sync your usage.": "在 Cursor App 登入後就能同步用量。",
   "Can't reach Cursor. Syrtis will try again.": "連不上 Cursor，Syrtis 會再試一次。",
   "Cursor usage couldn't be synced. Syrtis will try again later.": "無法同步 Cursor 用量，Syrtis 稍後會再試。",
+  "Cursor usage couldn't be synced ({0}). Syrtis will try again later.": "無法同步 Cursor 用量（{0}），Syrtis 稍後會再試。",
   "Showing Cursor usage from tokscale CLI.": "目前顯示的是 tokscale CLI 的 Cursor 用量。",
   "Sync Now": "立即同步",
   "Syncing…": "同步中…",
@@ -605,5 +606,10 @@
   "More details: {0}": "詳細說明：{0}",
   "Extra accounts join your totals.": "額外的帳號會併入你的總計。",
   "Capture a Google account agy signs into.": "擷取 agy 登入的 Google 帳號。",
-  "Sync usage from the Cursor app.": "同步 Cursor App 的用量。"
+  "Sync usage from the Cursor app.": "同步 Cursor App 的用量。",
+  "Cursor stores its sign-in encrypted. Syrtis needs your permission to read it.": "Cursor 把登入資訊加密儲存，Syrtis 需要你的授權才能讀取。",
+  "Allow reading Cursor's encrypted sign-in…": "允許讀取 Cursor 的加密登入…",
+  "Cursor 3.27 and later can store its sign-in encrypted. To read it, Syrtis unlocks the key Cursor keeps in its \"Local State\" file on this PC. Windows does not ask, so this confirmation is the only check. That key can decrypt everything Cursor stores encrypted, but Syrtis uses it only to read your Cursor sign-in, keeps it in memory for that read alone, and never saves or logs it. The sign-in is sent only to Cursor's usage service (cursor.com). Turning on Cursor sync does not grant this. Withdraw stops Syrtis reading Cursor's encrypted sign-in; if Cursor stores its sign-in unencrypted, Syrtis still reads that and Withdraw does not change it.": "Cursor 3.27 以後的版本可能會把登入資訊加密儲存。要讀取它，Syrtis 會解開 Cursor 存在這台電腦「Local State」檔案裡的金鑰。Windows 不會詢問，所以這個確認是唯一的把關。那把金鑰能解開 Cursor 所有加密儲存的資料，但 Syrtis 只用它來讀取你的 Cursor 登入，而且只在那次讀取時留在記憶體中，不會儲存或記錄。登入資訊只會送到 Cursor 的用量服務（cursor.com）。開啟 Cursor 同步並不代表授權這件事。撤回後，Syrtis 就不再讀取 Cursor 的加密登入；如果 Cursor 以未加密的方式儲存登入，Syrtis 仍會讀取，撤回不會改變這一點。",
+  "Withdraw": "撤回",
+  "Allow access": "允許存取"
 }

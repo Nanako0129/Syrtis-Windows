@@ -1109,6 +1109,276 @@ public class CursorSyncTests
         Assert.Equal("error", controller.State);
     }
 
+    /// <summary>#547 (macOS <c>statusLine</c>): an error line names the core's
+    /// reason code when it has the core's shape, <c>^[a-z_]{1,40}$</c>; any
+    /// other reason falls back to the generic line, so no free text reaches
+    /// it. Only the error line carries a reason.</summary>
+    [Fact]
+    public void AnErrorLineShowsTheReasonCodeOnlyWhenItHasTheCoreShape()
+    {
+        Assert.Equal(
+            "Cursor usage couldn't be synced (token_unreadable). Syrtis will try again later.",
+            CursorSync.StatusLine("error", null, reason: "token_unreadable"));
+        var forty = new string('a', 40);
+        Assert.Equal(
+            $"Cursor usage couldn't be synced ({forty}). Syrtis will try again later.",
+            CursorSync.StatusLine("error", null, reason: forty));
+        string?[] invalid =
+        [
+            null, "", "Token_unreadable", "token unreadable", "token-unreadable",
+            "token_unreadable\n", "tökén", new string('a', 41),
+        ];
+        foreach (var reason in invalid)
+        {
+            Assert.Equal(CursorSync.Copy.Error, CursorSync.StatusLine("error", null, reason: reason));
+        }
+
+        Assert.Equal(CursorSync.Copy.Offline, CursorSync.StatusLine("offline", null, reason: "token_unreadable"));
+    }
+
+    /// <summary>S3b: a sealed sign-in with no "cursor" grant
+    /// (<c>keychain_consent</c>) shows the consent line, not the generic
+    /// error-with-reason line (the Allow control sits beside it), even though
+    /// the code has the lowercase shape the reason-code branch would match.
+    /// Mutation: drop the <c>keychain_consent</c> branch in
+    /// <see cref="CursorSync.StatusLine"/> -> the line reads
+    /// "Cursor usage couldn't be synced (keychain_consent)…".</summary>
+    [Fact]
+    public void AKeychainConsentReasonShowsTheConsentLine()
+    {
+        Assert.Equal(
+            CursorSync.Copy.KeychainConsentLine,
+            CursorSync.StatusLine("error", null, reason: "keychain_consent"));
+        Assert.True(CursorSync.NeedsKeychainAllow("error", "keychain_consent"));
+        // Not any other error, and not another state.
+        Assert.False(CursorSync.NeedsKeychainAllow("error", "token_sealed_unreadable"));
+        Assert.False(CursorSync.NeedsKeychainAllow("error", null));
+        Assert.False(CursorSync.NeedsKeychainAllow("ok", "keychain_consent"));
+    }
+
+    private static CursorSyncStatus NeedsConsent(bool changed = false) =>
+        new("error", 0, null, changed, [], Reason: "keychain_consent");
+
+    /// <summary>A controller whose first sync blocks on the returned gate and
+    /// answers <paramref name="results"/> in order (the last one repeats).</summary>
+    private static (FakeCore Core, CursorSyncController Controller, ManualResetEventSlim Gate) Gated(
+        params CursorSyncStatus[] results)
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore();
+        var gate = new ManualResetEventSlim(false);
+        core.SyncGate = gate;
+        var next = -1;
+        core.Result = () => results[Math.Min(Interlocked.Increment(ref next), results.Length - 1)];
+        return (core, new CursorSyncController(core.Io, store, User, interval: Never), gate);
+    }
+
+    /// <summary>S3b: an Allow pressed while a user round runs, when that round
+    /// ends refused for want of consent (<c>keychain_consent</c>), is served by
+    /// one user round right after it; with no round running,
+    /// <see cref="CursorSyncController.ConsentChanged"/> starts one.
+    /// Mutation: CursorSync.cs <c>RunSync</c>
+    /// <c>                    if (consentRerun)\n                    {\n                        _rerunPending = true;\n                    }</c>
+    /// -> (delete) -> one round; the keychain_consent line stays.</summary>
+    [Fact]
+    public async Task AnAllowDuringARoundRefusedForConsentRerunsAsAUserRound()
+    {
+        var (core, controller, gate) = Gated(NeedsConsent(), Status("ok", 1));
+        using var gateLease = gate;
+        var running = controller.RunSync(userInitiated: true);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        Assert.True(controller.ConsentChanged(granted: true).IsCompleted, "queued behind the running round");
+        gate.Set();
+        await running;
+        Assert.Equal(2, core.UserSyncs);
+        Assert.Equal("ok", controller.State);
+        Assert.Null(controller.Reason);
+
+        await controller.ConsentChanged(granted: true);
+        Assert.Equal(3, core.UserSyncs);
+    }
+
+    /// <summary>Round-3 item 1: the round an Allow reruns is still applied, so
+    /// what it wrote reaches the dashboard: <c>DataChanged</c> fires on its
+    /// <c>changed</c>.
+    /// Mutation: CursorSync.cs <c>RunSync</c>
+    /// <c>if (started != _generation || !CursorSync.ShouldSync(_store))</c>
+    /// -> <c>if (started != _generation || consentRerun || !CursorSync.ShouldSync(_store))</c>
+    /// (discard it) -> no DataChanged.</summary>
+    [Fact]
+    public async Task ARoundRerunForConsentStillRaisesDataChanged()
+    {
+        var (core, controller, gate) = Gated(NeedsConsent(changed: true), Status("ok", 1, changed: false));
+        using var gateLease = gate;
+        var data = 0;
+        controller.DataChanged += () => Interlocked.Increment(ref data);
+        var running = controller.RunSync(userInitiated: true);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        _ = controller.ConsentChanged(granted: true);
+        gate.Set();
+        await running;
+        Assert.Equal(2, core.UserSyncs);
+        Assert.Equal(1, data);
+    }
+
+    /// <summary>Round-3 item 2: a SCHEDULED round interrupted by an Allow is
+    /// rerun as a user round (<c>io.Sync(true)</c>).
+    /// Mutation: CursorSync.cs <c>RunSync</c> delete the block
+    /// <c>if (again &amp;&amp; consentRerun) { user = true; _runningUser = true; _userPending = false; }</c>
+    /// -> the rerun is <c>sync:auto</c>.</summary>
+    [Fact]
+    public async Task AnAllowDuringAScheduledRoundRerunsAsAUserRound()
+    {
+        var (core, controller, gate) = Gated(NeedsConsent(), Status("ok", 1));
+        using var gateLease = gate;
+        var running = controller.RunSync(userInitiated: false);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        _ = controller.ConsentChanged(granted: true);
+        gate.Set();
+        await running;
+        Assert.Equal(["sync:auto", "sync:user"], core.Log.ToArray());
+    }
+
+    /// <summary>Round-3 item 3: scheduled round + Sync Now + Allow -> exactly
+    /// one extra round, a user one: the promoted round serves the remembered
+    /// press.
+    /// Mutation: CursorSync.cs <c>RunSync</c>, in the promotion block,
+    /// <c>                        _userPending = false;</c> -> (delete) -> two user rounds.</summary>
+    [Fact]
+    public async Task APromotedConsentRoundServesARememberedSyncNow()
+    {
+        var (core, controller, gate) = Gated(NeedsConsent(), Status("ok", 1));
+        using var gateLease = gate;
+        var running = controller.RunSync(userInitiated: false);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        await controller.RunSync(userInitiated: true); // remembered, returns at once
+        _ = controller.ConsentChanged(granted: true);
+        gate.Set();
+        await running;
+        Assert.Equal(["sync:auto", "sync:user"], core.Log.ToArray());
+    }
+
+    /// <summary>Round-4 F4: an Allow pressed while a round runs whose
+    /// <c>io.Sync</c> throws (no result, so nothing says the round did not
+    /// depend on the old answer) is served by one user round after it, which
+    /// replaces the generic error. A Withdraw during a throwing round adds no
+    /// round (assumption 6).
+    /// Mutations: CursorSync.cs
+    /// <c>                        &amp;&amp; (result is null || AskedForConsent(result));</c>
+    /// -> <c>                        &amp;&amp; AskedForConsent(result);</c> -> one round, the generic error stays (first half fails);
+    /// <c>consentRerun = startedConsent != _consentEpoch &amp;&amp; _consentGranted</c>
+    /// -> <c>consentRerun = startedConsent != _consentEpoch</c> -> the Withdraw reruns (second half fails).</summary>
+    [Fact]
+    public async Task AnAllowDuringARoundWhoseSyncThrowsRerunsAsAUserRound()
+    {
+        static Func<CursorSyncStatus> ThrowsFirst()
+        {
+            var calls = 0;
+            return () => Interlocked.Increment(ref calls) == 1
+                ? throw new TbCoreException("tb_cursor_sync panicked")
+                : Status("ok", 1);
+        }
+
+        var (core, controller, gate) = Gated(Status("ok", 1));
+        core.Result = ThrowsFirst();
+        using (gate)
+        {
+            var running = controller.RunSync(userInitiated: false);
+            Assert.True(await core.SyncStarted.WaitAsync(Wait));
+            _ = controller.ConsentChanged(granted: true);
+            gate.Set();
+            await running;
+            Assert.Equal(["sync:auto", "sync:user"], core.Log.ToArray());
+            Assert.Equal("ok", controller.State);
+        }
+
+        var (withdrawn, withdrawnController, withdrawnGate) = Gated(Status("ok", 1));
+        withdrawn.Result = ThrowsFirst();
+        using (withdrawnGate)
+        {
+            var running = withdrawnController.RunSync(userInitiated: false);
+            Assert.True(await withdrawn.SyncStarted.WaitAsync(Wait));
+            _ = withdrawnController.ConsentChanged(granted: false);
+            withdrawnGate.Set();
+            await running;
+            Assert.Equal(["sync:auto"], withdrawn.Log.ToArray());
+            Assert.Equal("error", withdrawnController.State);
+            Assert.Null(withdrawnController.Reason);
+        }
+    }
+
+    /// <summary>Round-3 item 4: a consent press reruns only a round that
+    /// depended on the old answer. An Allow during a round that synced (a
+    /// plaintext sign-in never reads consent; still one round after the
+    /// round-4 change that reruns a thrown round), and a Withdraw during a
+    /// round refused for consent, both leave one round.
+    /// Mutations: CursorSync.cs
+    /// <c>consentRerun = startedConsent != _consentEpoch &amp;&amp; _consentGranted\n                        &amp;&amp; (result is null || AskedForConsent(result));</c>
+    /// -> <c>consentRerun = startedConsent != _consentEpoch &amp;&amp; _consentGranted;</c> (first half fails), or
+    /// -> <c>consentRerun = startedConsent != _consentEpoch\n                        &amp;&amp; (result is null || AskedForConsent(result));</c> (second half fails).</summary>
+    [Fact]
+    public async Task AConsentPressDuringAnIndependentRoundDoesNotRerun()
+    {
+        var (core, controller, gate) = Gated(Status("ok", 1));
+        using (gate)
+        {
+            var running = controller.RunSync(userInitiated: true);
+            Assert.True(await core.SyncStarted.WaitAsync(Wait));
+            _ = controller.ConsentChanged(granted: true);
+            gate.Set();
+            await running;
+            Assert.Equal(1, core.UserSyncs);
+        }
+
+        var (refused, refusedController, refusedGate) = Gated(NeedsConsent());
+        using (refusedGate)
+        {
+            var running = refusedController.RunSync(userInitiated: true);
+            Assert.True(await refused.SyncStarted.WaitAsync(Wait));
+            _ = refusedController.ConsentChanged(granted: false);
+            refusedGate.Set();
+            await running;
+            Assert.Equal(1, refused.UserSyncs);
+            Assert.Equal("keychain_consent", refusedController.Reason);
+        }
+    }
+
+    /// <summary>Control: a plain Sync Now pressed during a user round is
+    /// dropped (why the consent controls use <c>ConsentChanged</c>).</summary>
+    [Fact]
+    public async Task APlainSyncNowDuringAUserRoundIsDropped()
+    {
+        var (core, controller, gate) = Gated(Status("ok", 1));
+        using var gateLease = gate;
+        var running = controller.RunSync(userInitiated: true);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        await controller.RunSync(userInitiated: true);
+        gate.Set();
+        await running;
+        Assert.Equal(1, core.UserSyncs);
+    }
+
+    /// <summary>#547: the controller keeps the round's reason for the status
+    /// line, and a round that threw has none.</summary>
+    [Fact]
+    public async Task TheControllerKeepsTheRoundsReason()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        Func<CursorSyncStatus> next = () => Status("error") with { Reason = "token_unreadable" };
+        var core = new FakeCore { Result = () => next() };
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        await controller.RunSync(userInitiated: true);
+        Assert.Equal("error", controller.State);
+        Assert.Equal("token_unreadable", controller.Reason);
+
+        next = () => throw new TbCoreException("tb_cursor_sync panicked");
+        await controller.RunSync(userInitiated: true);
+        Assert.Equal("error", controller.State);
+        Assert.Null(controller.Reason);
+    }
+
     // ---- copy in the catalogs -----------------------------------------------------
 
     /// <summary>Shared spec §3 with the approved Windows wording (this PC /
@@ -1129,6 +1399,8 @@ public class CursorSyncTests
         ["Sign in to the Cursor app to sync your usage."] = "在 Cursor App 登入後就能同步用量。",
         ["Can't reach Cursor. Syrtis will try again."] = "連不上 Cursor，Syrtis 會再試一次。",
         ["Cursor usage couldn't be synced. Syrtis will try again later."] = "無法同步 Cursor 用量，Syrtis 稍後會再試。",
+        // #547, verbatim from macOS zh-Hant (%@ -> {0}).
+        ["Cursor usage couldn't be synced ({0}). Syrtis will try again later."] = "無法同步 Cursor 用量（{0}），Syrtis 稍後會再試。",
         ["Showing Cursor usage from tokscale CLI."] = "目前顯示的是 tokscale CLI 的 Cursor 用量。",
         ["Sync Now"] = "立即同步",
         ["Syncing…"] = "同步中…",
@@ -1142,6 +1414,15 @@ public class CursorSyncTests
         ["Cursor sync couldn't be set up, so nothing is being synced."] = "無法設定 Cursor 同步，目前不會同步任何用量。",
         ["Add a folder you start Cursor with using --user-data-dir to sync it too (Syrtis keeps the folder path in its settings); each profile's sign-in is handled as described above. All profiles add up to one Cursor total, and an account signed in to several profiles counts once. Removing a profile deletes its downloaded usage the next time Syrtis can."] =
             "加入用 --user-data-dir 啟動 Cursor 的資料夾（資料夾路徑會儲存在 Syrtis 設定中），就能一起同步；每個設定檔的登入資訊都照上一段的方式處理。所有設定檔合計成一個 Cursor 總量，同一個帳號只算一次。移除設定檔後，Syrtis 會在下次能處理時刪除它已下載的用量。",
+        // S3b: DRAFT encrypted-sign-in consent copy (C4), pending maintainer
+        // approval before merge.
+        ["Cursor stores its sign-in encrypted. Syrtis needs your permission to read it."] =
+            "Cursor 把登入資訊加密儲存，Syrtis 需要你的授權才能讀取。",
+        ["Allow reading Cursor's encrypted sign-in…"] = "允許讀取 Cursor 的加密登入…",
+        ["Cursor 3.27 and later can store its sign-in encrypted. To read it, Syrtis unlocks the key Cursor keeps in its \"Local State\" file on this PC. Windows does not ask, so this confirmation is the only check. That key can decrypt everything Cursor stores encrypted, but Syrtis uses it only to read your Cursor sign-in, keeps it in memory for that read alone, and never saves or logs it. The sign-in is sent only to Cursor's usage service (cursor.com). Turning on Cursor sync does not grant this. Withdraw stops Syrtis reading Cursor's encrypted sign-in; if Cursor stores its sign-in unencrypted, Syrtis still reads that and Withdraw does not change it."] =
+            "Cursor 3.27 以後的版本可能會把登入資訊加密儲存。要讀取它，Syrtis 會解開 Cursor 存在這台電腦「Local State」檔案裡的金鑰。Windows 不會詢問，所以這個確認是唯一的把關。那把金鑰能解開 Cursor 所有加密儲存的資料，但 Syrtis 只用它來讀取你的 Cursor 登入，而且只在那次讀取時留在記憶體中，不會儲存或記錄。登入資訊只會送到 Cursor 的用量服務（cursor.com）。開啟 Cursor 同步並不代表授權這件事。撤回後，Syrtis 就不再讀取 Cursor 的加密登入；如果 Cursor 以未加密的方式儲存登入，Syrtis 仍會讀取，撤回不會改變這一點。",
+        ["Withdraw"] = "撤回",
+        ["Allow access"] = "允許存取",
     };
 
     private static Dictionary<string, string> Catalog(string tag) =>
