@@ -191,9 +191,10 @@ pub(crate) fn set_from_json(raw: &str) -> Result<(serde_json::Value, Vec<String>
 /// rule: the home folder itself (`homeDirectory`) and the primary's `.claude`
 /// or any folder above it (`defaultConfigDir`, security review R2); a folded
 /// duplicate; more than eight. A directory nested in another is allowed (the
-/// window_usage direct-children rule and macOS support it). The registered
-/// `projects`/`transcripts` roots overlap only when one sits inside the
-/// other's roots, which the scan registry refuses (`overlappingRoot`).
+/// window_usage direct-children rule and macOS support it). This function
+/// does not compare the `projects`/`transcripts` roots: [`validate`] refuses
+/// roots that overlap another account's (`overlappingRoot`) before a save,
+/// and the scan registry refuses them again when the pusher registers them.
 /// Known gap, not handled here: an account's window is captured with the
 /// account directory as home, and the engine also scans
 /// `<home>\.claude\projects`, so an inner account at `<outer>\.claude` is
