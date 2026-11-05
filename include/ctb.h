@@ -216,10 +216,12 @@ char *tb_set_antigravity_binding(const char *json);
 // Copy agy's current Google login (Credential Manager gemini:antigravity,
 // read only) into a Syrtis generic credential
 // com.nyanako.tokenbar.antigravity-account:<key> (persist local machine),
-// after a refresh at Google: with a stored id_token, one refresh with the
-// client named by its aud; for agy 1.4.x's login (no id_token, only
-// id_token_email), the candidate clients from agy's files tried in turn
-// until one succeeds. Google's answer must carry an id_token naming the
+// after a refresh at Google: with a stored id_token, the client named by its
+// aud, the secrets found next to that client id tried until one is accepted;
+// for agy 1.4.x's login (no id_token, only id_token_email), the candidate
+// clients from agy's files tried in turn until one succeeds. Either search
+// stops on a transport failure or an answer that is not an OAuth one.
+// Google's answer must carry an id_token naming the
 // client used and agy's account (account_mismatch otherwise); a response
 // without a usable id_token fails with invalid_credential_format. The key
 // comes from Google's sub. Starts no process. Success data: {"key","label"}.

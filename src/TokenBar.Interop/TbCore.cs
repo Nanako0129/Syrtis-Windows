@@ -208,9 +208,11 @@ public static class TbCore
         Unwrap<JsonElement>(NativeMethods.tb_set_antigravity_binding(json));
 
     /// <summary>Copy agy's current Google login into Syrtis's own Credential
-    /// Manager entry, after a refresh at Google: with a stored id_token, one
-    /// refresh with the client named by its aud; for agy 1.4.x's login (no
-    /// id_token), the candidate clients tried in turn until one succeeds. A
+    /// Manager entry, after a refresh at Google: with a stored id_token, the
+    /// client named by its aud, the secrets found next to that client id
+    /// tried until one is accepted; for agy 1.4.x's login (no id_token), the
+    /// candidate clients tried in turn until one succeeds. Either search stops
+    /// on a transport failure or an answer that is not an OAuth one. A
     /// response without a usable id_token fails with
     /// <c>invalid_credential_format</c>. Blocking, network. Throws
     /// <see cref="TbCoreException"/> carrying a fixed code (ctb.h). Does not
