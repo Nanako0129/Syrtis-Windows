@@ -436,6 +436,15 @@ public class AccountIdentityTests
             Card(Desktop, "S", "expired", Window("session.v1", "Session", 30, "session.v1")));
         Assert.Null(WindowCardText.WindowCardAccount(bothErrored, "claude"));
 
+        // Nothing live, primary without windows, two errored accounts: the stored one.
+        const string Other = @"E:\other";
+        var twoErrored = Payload(
+            Card(null, "P", error: "x"),
+            Card(Desktop, "S", "expired", Window("session.v1", "Session", 30, "session.v1")),
+            Card(Other, "O", "expired", Window("session.v1", "Session", 20, "session.v1")));
+        Assert.Equal(Other, WindowCardText.WindowCardAccount(twoErrored, "claude", Other));
+        Assert.Equal(Desktop, WindowCardText.WindowCardAccount(twoErrored, "claude"));
+
         // Control: the same stored choice, healthy => honoured.
         Assert.Equal(Desktop, WindowCardText.WindowCardAccount(TwoAccounts(), "claude", Desktop));
     }

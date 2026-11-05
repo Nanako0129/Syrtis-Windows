@@ -11,12 +11,27 @@ namespace TokenBar.App;
 // (ClaudeRootsPusher), which also refreshes the dashboard when it lands.
 public sealed partial class SettingsWindow
 {
-    private StackPanel? _claudeAccountsBody;
     private string? _claudeAccountsNotice;
     private bool _claudeAccountsSubscribed;
-    private readonly List<ClaudeAccountRow> _claudeRows = [];
-    private Button? _claudeAdd;
-    private TextBlock? _claudeNoticeText;
+    private ClaudeSection? _claude;
+
+    /// <summary>Everything one page build owns. Rebuild() makes a new body
+    /// (every Present and some store keys), and a handler of an older build
+    /// may still be running; each handler captures its own section and touches
+    /// only that, so a stale one is inert and the window's Fill uses
+    /// <see cref="_claude"/>.</summary>
+    private sealed class ClaudeSection
+    {
+        public StackPanel Body { get; } = new() { Spacing = 6 };
+        public List<ClaudeAccountRow> Rows { get; } = [];
+        public Button Add { get; } = new()
+        {
+            Content = ClaudeAccountsCopy.Add.Localized(),
+            FontSize = 12,
+            Padding = new Thickness(8, 3, 8, 4),
+        };
+        public TextBlock Notice { get; } = Ui.Dim("", 11);
+    }
 
     /// <summary>One saved directory's row, kept across redraws (MA-43): the
     /// controls are updated in place so a focused Remove button survives a
@@ -26,43 +41,39 @@ public sealed partial class SettingsWindow
 
     private StackPanel BuildClaudeAccounts(SettingsStore store)
     {
-        // Rebuild() makes a new body each time (every Present and some store
-        // keys), so rows kept from the old one are parented to it: start over.
-        _claudeAccountsBody = new StackPanel { Spacing = 6 };
-        _claudeRows.Clear();
-        _claudeAdd = new Button
-        {
-            Content = ClaudeAccountsCopy.Add.Localized(),
-            FontSize = 12,
-            Padding = new Thickness(8, 3, 8, 4),
-        };
-        _claudeAdd.Click += async (_, _) => await AddClaudeAccount(store);
-        _claudeNoticeText = Ui.Dim("", 11);
-        _claudeNoticeText.Foreground = Ui.BrushFromHex(DashboardView.PaceOrange);
-        _claudeNoticeText.Visibility = Visibility.Collapsed;
-        _claudeAccountsBody.Children.Add(_claudeAdd);
-        _claudeAccountsBody.Children.Add(_claudeNoticeText);
+        var section = _claude = new ClaudeSection();
+        section.Add.Click += async (_, _) => await AddClaudeAccount(store, section);
+        section.Notice.Foreground = Ui.BrushFromHex(DashboardView.PaceOrange);
+        section.Notice.Visibility = Visibility.Collapsed;
+        section.Body.Children.Add(section.Add);
+        section.Body.Children.Add(section.Notice);
         if (!_claudeAccountsSubscribed && ClaudeExtraRoots.Shared is { } pusher)
         {
             // The window is hidden, never closed, so one subscription lives as
             // long as the app.
             _claudeAccountsSubscribed = true;
-            pusher.Pushed += _ => DispatcherQueue.TryEnqueue(() => FillClaudeAccounts(store));
+            pusher.Pushed += _ => DispatcherQueue.TryEnqueue(() =>
+            {
+                if (_claude is { } current)
+                {
+                    FillClaudeAccounts(store, current);
+                }
+            });
         }
 
-        FillClaudeAccounts(store);
-        return _claudeAccountsBody;
+        FillClaudeAccounts(store, section);
+        return section.Body;
     }
 
     // Updates the rows in place: a row that stays keeps its controls (and so
     // keyboard focus); a row that goes hands focus to a neighbour first; only a
     // new directory builds controls (MA-43).
-    private void FillClaudeAccounts(SettingsStore store)
+    private void FillClaudeAccounts(SettingsStore store, ClaudeSection section)
     {
-        if (_claudeAccountsBody is not { } body || _claudeAdd is not { } add || _claudeNoticeText is not { } noticeText)
-        {
-            return;
-        }
+        var body = section.Body;
+        var add = section.Add;
+        var noticeText = section.Notice;
+        var rows = section.Rows;
 
         var dirs = ClaudeExtraRoots.Load(store);
         var keys = SectionRows.Keys(dirs);
@@ -73,23 +84,23 @@ public sealed partial class SettingsWindow
             ? last.Rejected
             : new Dictionary<int, string>();
 
-        var focused = _claudeRows.FirstOrDefault(r => r.Remove.FocusState != FocusState.Unfocused);
-        var (move, to) = SectionRows.FocusHandoff([.. _claudeRows.Select(r => r.Key)], keys, focused?.Key);
+        var focused = rows.FirstOrDefault(r => r.Remove.FocusState != FocusState.Unfocused);
+        var (move, to) = SectionRows.FocusHandoff([.. rows.Select(r => r.Key)], keys, focused?.Key);
         if (move && focused is not null)
         {
-            Control target = to is not null ? _claudeRows.First(r => r.Key == to).Remove : add;
+            Control target = to is not null ? rows.First(r => r.Key == to).Remove : add;
             MoveFocusBeforeHiding(focused.Remove, false, target);
         }
 
-        foreach (var gone in _claudeRows.Where(r => !keys.Contains(r.Key)).ToList())
+        foreach (var gone in rows.Where(r => !keys.Contains(r.Key)).ToList())
         {
             body.Children.Remove(gone.Panel);
-            _claudeRows.Remove(gone);
+            rows.Remove(gone);
         }
 
         for (var i = 0; i < dirs.Count; i++)
         {
-            var row = _claudeRows.FirstOrDefault(r => r.Key == keys[i]) ?? NewClaudeRow(store, keys[i], dirs[i]);
+            var row = rows.FirstOrDefault(r => r.Key == keys[i]) ?? NewClaudeRow(store, section, keys[i], dirs[i]);
             if (body.Children.IndexOf(row.Panel) != i)
             {
                 body.Children.Remove(row.Panel);
@@ -127,7 +138,7 @@ public sealed partial class SettingsWindow
         noticeText.Visibility = _claudeAccountsNotice is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    private ClaudeAccountRow NewClaudeRow(SettingsStore store, string key, string dir)
+    private ClaudeAccountRow NewClaudeRow(SettingsStore store, ClaudeSection section, string key, string dir)
     {
         var grid = new Grid { ColumnSpacing = 6 };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -169,7 +180,7 @@ public sealed partial class SettingsWindow
                 next.RemoveAt(index);
                 _claudeAccountsNotice = null;
                 ClaudeExtraRoots.Save(store, next);
-                FillClaudeAccounts(store);
+                FillClaudeAccounts(store, section);
             }
         };
         Grid.SetColumn(remove, 2);
@@ -183,11 +194,11 @@ public sealed partial class SettingsWindow
         panel.Children.Add(grid);
         panel.Children.Add(why);
         var row = new ClaudeAccountRow(key, dir, panel, missing, remove, why);
-        _claudeRows.Add(row);
+        section.Rows.Add(row);
         return row;
     }
 
-    private async Task AddClaudeAccount(SettingsStore store)
+    private async Task AddClaudeAccount(SettingsStore store, ClaudeSection section)
     {
         var picker = new Windows.Storage.Pickers.FolderPicker();
         picker.FileTypeFilter.Add("*");
@@ -225,12 +236,12 @@ public sealed partial class SettingsWindow
         if (reason is not null)
         {
             _claudeAccountsNotice = ClaudeAccountsCopy.Reason(reason).Localized();
-            FillClaudeAccounts(store);
+            FillClaudeAccounts(store, section);
             return;
         }
 
         _claudeAccountsNotice = null;
         ClaudeExtraRoots.Save(store, [.. dirs, path]);
-        FillClaudeAccounts(store);
+        FillClaudeAccounts(store, section);
     }
 }

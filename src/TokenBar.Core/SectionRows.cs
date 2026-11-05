@@ -8,9 +8,12 @@ namespace TokenBar.Core;
 public static class SectionRows
 {
     /// <summary>One unique key per value, in order: a value seen again gets a
-    /// <c>NUL + n</c> suffix (NUL cannot appear in a path) (a saved list can hold an exact duplicate, which the
-    /// registry rejects but the page still shows), so each row keeps the same
-    /// key across redraws.</summary>
+    /// <c>NUL + n</c> suffix, so each row keeps the same key across redraws
+    /// (a saved list can hold an exact duplicate, which the registry rejects
+    /// but the page still shows). Invariant: the values never contain NUL,
+    /// which holds for folder paths (Windows paths cannot) and account keys
+    /// (64 lowercase hex); with such values no suffixed key equals another
+    /// value or key.</summary>
     public static IReadOnlyList<string> Keys(IEnumerable<string> values)
     {
         var seen = new Dictionary<string, int>(StringComparer.Ordinal);

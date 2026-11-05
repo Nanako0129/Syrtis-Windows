@@ -89,8 +89,13 @@ public sealed class AntigravityAutoCapture
     public const string SettingsUnavailable = "settings_unavailable";
 
     /// <summary>The code recorded when Remove could not take the key out of
-    /// the core's registry; the credential is then not deleted (review F3).
-    /// It shows the existing delete-failure sentence.</summary>
+    /// the core's registry, so the account list was not updated and nothing
+    /// was deleted (review F3). A real Credential Manager delete failure
+    /// records <see cref="KeychainDeleteFailed"/> instead.</summary>
+    public const string AccountListUpdateFailed = "account_list_update_failed";
+
+    /// <summary>The code recorded when the Credential Manager delete itself
+    /// failed (core code <c>keychain_delete_failed</c>).</summary>
     public const string KeychainDeleteFailed = "keychain_delete_failed";
 
     /// <summary>The live instance for this process; set once at launch.</summary>
@@ -600,8 +605,8 @@ public sealed class AntigravityAutoCapture
     /// <para>
     /// When that install does not reach the core (the setter failed, review
     /// F3), the key is still registered there, so nothing is deleted: the row
-    /// goes back where it was and <see cref="KeychainDeleteFailed"/> is
-    /// recorded, as for a failed delete. The same when the drop's own save
+    /// goes back where it was and <see cref="AccountListUpdateFailed"/> is
+    /// recorded. The same when the drop's own save
     /// failed (review G1): nothing is deleted, the row goes back, and
     /// <see cref="SettingsUnavailable"/> shows.
     /// </para></summary>
@@ -642,7 +647,7 @@ public sealed class AntigravityAutoCapture
             // Review G1: the drop's own save may have failed; then the list
             // and removed-key change cannot outlast this session, so the
             // credential is kept and the row goes back too.
-            string? code = !dropped ? KeychainDeleteFailed : !_store.Persists ? SettingsUnavailable : null;
+            string? code = !dropped ? AccountListUpdateFailed : !_store.Persists ? SettingsUnavailable : null;
             if (code is not null)
             {
                 _log($"antigravity remove: {code}; nothing deleted");

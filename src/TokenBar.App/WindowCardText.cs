@@ -544,9 +544,15 @@ public static class WindowCardText
             return other.Account.AccountKey;
         }
 
-        // Nothing is live: the primary's blocked card, unless it has no
-        // windows to show and another account does (its own error, as before
-        // the liveness rule).
+        // Nothing is live: show an error card anyway (its own error, as before
+        // the liveness rule). The stored choice if it has windows, else the
+        // primary if it has, else the first other account that has.
+        if (storedAccountKey is not null
+            && cards.Any(a => a.Account.AccountKey == stored && a.Windows.Count > 0))
+        {
+            return stored;
+        }
+
         return cards.Any(a => a.Account.AccountKey is null && a.Windows.Count > 0)
             ? null
             : cards.FirstOrDefault(a => a.Account.AccountKey is not null && a.Windows.Count > 0)?.Account.AccountKey;

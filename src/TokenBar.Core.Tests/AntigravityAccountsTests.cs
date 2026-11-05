@@ -131,12 +131,14 @@ public class AntigravityAccountsTests
             HistoryScope: new AccountScopeStatus(Error: "noTrustedEvidence"),
             AgyLoginMarker: marker);
 
-    /// <summary>The production shape of a failed primary: a fresh error card
-    /// carries neither the agy source nor a login marker; the core's re-sent
-    /// last-good card (<paramref name="lastGood"/>) keeps the marker it was
-    /// fetched under (<paramref name="marker"/>, null = none).</summary>
+    /// <summary>A failed primary. Production shape (the defaults): a fresh
+    /// error card carries no agy source, no login marker and a
+    /// <c>noTrustedEvidence</c> scope (<paramref name="scope"/> null). The
+    /// core's re-sent last-good card (<paramref name="lastGood"/>) may carry
+    /// the marker it was fetched under (<paramref name="marker"/>) and the
+    /// scope it was fetched with.</summary>
     private static AgentUsageSnapshot ErroredPrimary(
-        bool lastGood = false, string? marker = null, string? scope = "scope-a") => new(
+        bool lastGood = false, string? marker = null, string? scope = null) => new(
         "antigravity", "oauth", "2026-10-04T00:00:00Z",
         lastGood ? [Window("antigravity.weekly", 60)] : [],
         Identity: lastGood ? new AgentIdentity(Plan: "Free") : null, // remote_identity(plan): no email
@@ -329,7 +331,7 @@ public class AntigravityAccountsTests
     public void AnErroredPrimaryCarryingAgysMarkerIsReplacedByAgysVerifiedCapturedAccount()
     {
         var captured = Captured() with { Identity = new AgentIdentity("a@example.com", "Google AI Pro") };
-        var payload = Payload(ErroredPrimary(lastGood: true, marker: "M1"), captured, Captured(KeyB));
+        var payload = Payload(ErroredPrimary(lastGood: true, marker: "M1", scope: "scope-a"), captured, Captured(KeyB));
 
         var agents = AntigravityDedup.Apply(payload, KeyA, "M1").Agents;
 
@@ -382,7 +384,7 @@ public class AntigravityAccountsTests
     public void AnErroredPrimaryStaysWhenAgysAccountIsNotVerifiedOrCannotStandIn(string failing)
     {
         var payload = Payload(
-            ErroredPrimary(lastGood: true, marker: "M1"),
+            ErroredPrimary(lastGood: true, marker: "M1", scope: "scope-a"),
             Captured(
                 failing == "noCapturedSnapshot" ? KeyB : KeyA,
                 error: failing == "capturedError" ? "refresh_rejected" : null,
@@ -609,12 +611,14 @@ public class AntigravityAccountsTests
                 if (reboundInTime)
                 {
                     captureGate.Set();
-                    SpinWait.SpinUntil(() => capture.Current == (KeyA, "M2"), TimeSpan.FromSeconds(10));
+                    Assert.True(
+                        SpinWait.SpinUntil(() => capture.Current == (KeyA, "M2"), TimeSpan.FromSeconds(10)),
+                        "re-capture did not rebind in time");
                 }
 
                 // A re-sent last-good card carrying the new login's marker
                 // is the one errored card the stand-in may replace.
-                return Payload(ErroredPrimary(lastGood: true, marker: "M2"), Captured());
+                return Payload(ErroredPrimary(lastGood: true, marker: "M2", scope: "scope-a"), Captured());
             },
             null,
             capture,
@@ -1190,7 +1194,7 @@ public class AntigravityAccountsTests
     /// <summary>Review F3: the core did not take the list without the key, so
     /// the key is still registered and an in-flight refresh could write the
     /// credential back. Nothing is deleted, the row stays where it was, and the
-    /// existing delete-failure sentence is shown.</summary>
+    /// account-list sentence (not the Credential Manager one) is shown.</summary>
     [Fact]
     public async Task ARemoveWhoseRegistryInstallFailsDeletesNothing()
     {
@@ -1205,7 +1209,7 @@ public class AntigravityAccountsTests
         // The drop install failed; the restore install answered true.
         Assert.Equal(2, io.Calls.Count(c => c == "install"));
         Assert.Equal([KeyA, KeyB], AntigravityAccounts.Load(store).Select(a => a.Key));
-        Assert.Equal(AntigravityAutoCapture.KeychainDeleteFailed, capture.LastErrorCode);
+        Assert.Equal(AntigravityAutoCapture.AccountListUpdateFailed, capture.LastErrorCode);
     }
 
     /// <summary>Review F1: while this session's settings cannot be saved

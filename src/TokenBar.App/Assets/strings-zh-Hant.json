@@ -572,6 +572,7 @@
   "Couldn't save to Windows Credential Manager.": "無法存進 Windows 認證管理員。",
   "Couldn't delete the copy from Windows Credential Manager.": "無法從 Windows 認證管理員刪除副本。",
   "Syrtis can't save its Antigravity settings on this PC right now, so Capture, automatic capture and Remove are off until Syrtis restarts.": "Syrtis 目前無法在這台電腦上儲存 Antigravity 設定，在 Syrtis 重新啟動前，擷取、自動擷取與移除都會停用。",
+  "Syrtis couldn't update its account list, so nothing was removed. Try again.": "Syrtis 無法更新帳號清單，所以沒有移除任何東西。請再試一次。",
   "Copy command": "複製指令",
   "No data": "沒有資料",
   "Checking…": "查詢中…",

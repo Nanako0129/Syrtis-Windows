@@ -115,12 +115,13 @@ internal static class AntigravityAccountsCopy
         "invalid_credential_format" => "The login had an unexpected format. Nothing was saved.",
         "keychain_write_failed" => "Couldn't save to Windows Credential Manager.",
         AntigravityAutoCapture.KeychainDeleteFailed => "Couldn't delete the copy from Windows Credential Manager.",
-        // DRAFT (maintainer approval pending, reviews F1/R4): the app's own
-        // code, shown while this session's Antigravity settings cannot be
+        // The app's own code, shown while this session's Antigravity settings cannot be
         // saved: the move or the load failed at launch, or a save failed
         // later (AntigravityAutoCapture.SettingsUnavailable).
         AntigravityAutoCapture.SettingsUnavailable =>
             "Syrtis can't save its Antigravity settings on this PC right now, so Capture, automatic capture and Remove are off until Syrtis restarts.",
+        AntigravityAutoCapture.AccountListUpdateFailed =>
+            "Syrtis couldn't update its account list, so nothing was removed. Try again.",
         _ => Generic,
     };
 
@@ -134,7 +135,7 @@ internal static class AntigravityAccountsCopy
         "oauth_client_not_found", "oauth_client_rejected", "refresh_rejected",
         "refresh_unreachable", "account_mismatch", "invalid_credential_format",
         "keychain_write_failed", AntigravityAutoCapture.KeychainDeleteFailed,
-        AntigravityAutoCapture.SettingsUnavailable,
+        AntigravityAutoCapture.SettingsUnavailable, AntigravityAutoCapture.AccountListUpdateFailed,
     ];
 
     internal static IEnumerable<string> All() =>

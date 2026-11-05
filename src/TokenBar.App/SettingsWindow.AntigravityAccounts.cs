@@ -12,94 +12,103 @@ namespace TokenBar.App;
 // AntigravityAutoCapture.Shared; this only draws its state and the stored list.
 public sealed partial class SettingsWindow
 {
-    private StackPanel? _antigravityBody;
     private bool _antigravitySubscribed;
-    private readonly List<AntigravityAccountRow> _antigravityRows = [];
-    private Button? _agyCapture;
-    private TextBlock? _agyError;
-    private ToggleSwitch? _agyToggle;
-    private TextBlock? _agyPaused;
-    private bool _agySyncingToggle;
-    private bool _agyToggling;
+    private AgySection? _agy;
+
+    /// <summary>Everything one page build owns: the body, its rows, the fixed
+    /// controls and the switch's flags. Rebuild() makes a new body (every
+    /// Present and some store keys) while an older build's switch handler may
+    /// still be awaiting its confirmation flyout; each handler captures its own
+    /// section and touches only that, so a stale one is inert and the window's
+    /// Fill uses <see cref="_agy"/>. Controls exist only when the capture
+    /// controller does.</summary>
+    private sealed class AgySection
+    {
+        public StackPanel Body { get; } = new() { Spacing = 6 };
+        public List<AntigravityAccountRow> Rows { get; } = [];
+        public Button? Capture { get; set; }
+        public TextBlock? Error { get; set; }
+        public ToggleSwitch? Toggle { get; set; }
+        public TextBlock? Paused { get; set; }
+        public bool SyncingToggle { get; set; }
+        public bool Toggling { get; set; }
+    }
 
     /// <summary>One captured account's row, kept across redraws (MA-43).</summary>
     private sealed record AntigravityAccountRow(string Key, TextBlock Label, Button Remove, Grid Grid);
 
     private StackPanel BuildAntigravityAccounts(SettingsStore store)
     {
-        // Rebuild() makes a new body each time, so nothing kept from the old
-        // one may be reused: its controls are parented to the old body.
-        _antigravityBody = new StackPanel { Spacing = 6 };
-        _antigravityRows.Clear();
-        _agyCapture = null;
-        _agyError = null;
-        _agyToggle = null;
-        _agyPaused = null;
-        _agyToggling = false;
-        _agySyncingToggle = false;
-        if (!_antigravitySubscribed && AntigravityAutoCapture.Shared is { } capture)
+        var section = _agy = new AgySection();
+        if (AntigravityAutoCapture.Shared is { } capture)
         {
-            // The window is hidden, never closed, so one subscription lives as
-            // long as the app.
-            _antigravitySubscribed = true;
-            capture.StateChanged += () => DispatcherQueue.TryEnqueue(() => FillAntigravityAccounts(store));
+            BuildAntigravityControls(store, section, capture);
+            if (!_antigravitySubscribed)
+            {
+                // The window is hidden, never closed, so one subscription lives
+                // as long as the app.
+                _antigravitySubscribed = true;
+                capture.StateChanged += () => DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (_agy is { } current)
+                    {
+                        FillAntigravityAccounts(store, current);
+                    }
+                });
+            }
         }
 
-        FillAntigravityAccounts(store);
-        return _antigravityBody;
+        FillAntigravityAccounts(store, section);
+        return section.Body;
     }
 
     // The fixed controls (Capture, the error line, the switch, the paused line)
-    // are built once and updated in place; a row exists while its account does.
-    // A focused control that is about to be removed or disabled hands focus to
-    // the switch first (MA-43: a rebuild dropped keyboard focus, so Tab+Space on
-    // the switch lost it at once).
-    private void FillAntigravityAccounts(SettingsStore store)
+    // are built once per page build and updated in place; a row exists while
+    // its account does. A focused control that is about to be removed or
+    // disabled hands focus to the switch first (MA-43: a rebuild dropped
+    // keyboard focus, so Tab+Space on the switch lost it at once).
+    private void FillAntigravityAccounts(SettingsStore store, AgySection section)
     {
-        if (_antigravityBody is not { } body || AntigravityAutoCapture.Shared is not { } capture)
+        if (section.Toggle is not { } toggle || AntigravityAutoCapture.Shared is not { } capture)
         {
             return;
         }
 
-        if (_agyToggle is null)
-        {
-            BuildAntigravityControls(store, body, capture);
-        }
-
-        var toggle = _agyToggle!;
+        var body = section.Body;
+        var rows = section.Rows;
         var busy = capture.Busy;
         var accounts = AntigravityAccounts.Load(store);
         var keys = SectionRows.Keys(accounts.Select(a => a.Key));
 
-        var focused = _antigravityRows.FirstOrDefault(r => r.Remove.FocusState != FocusState.Unfocused);
-        var (move, to) = SectionRows.FocusHandoff([.. _antigravityRows.Select(r => r.Key)], keys, focused?.Key);
+        var focused = rows.FirstOrDefault(r => r.Remove.FocusState != FocusState.Unfocused);
+        var (move, to) = SectionRows.FocusHandoff([.. rows.Select(r => r.Key)], keys, focused?.Key);
         if (move && focused is not null)
         {
-            Control target = to is not null && !busy ? _antigravityRows.First(r => r.Key == to).Remove : toggle;
+            Control target = to is not null && !busy ? rows.First(r => r.Key == to).Remove : toggle;
             MoveFocusBeforeHiding(focused.Remove, false, target);
         }
 
         if (busy)
         {
             // A disabled button cannot keep focus.
-            foreach (var r in _antigravityRows.Where(r => r.Remove.FocusState != FocusState.Unfocused))
+            foreach (var r in rows.Where(r => r.Remove.FocusState != FocusState.Unfocused))
             {
                 MoveFocusBeforeHiding(r.Remove, false, toggle);
             }
 
-            MoveFocusBeforeHiding(_agyCapture!, false, toggle);
+            MoveFocusBeforeHiding(section.Capture!, false, toggle);
         }
 
-        foreach (var gone in _antigravityRows.Where(r => !keys.Contains(r.Key)).ToList())
+        foreach (var gone in rows.Where(r => !keys.Contains(r.Key)).ToList())
         {
             body.Children.Remove(gone.Grid);
-            _antigravityRows.Remove(gone);
+            rows.Remove(gone);
         }
 
         for (var i = 0; i < accounts.Count; i++)
         {
             var account = accounts[i];
-            var row = _antigravityRows.FirstOrDefault(r => r.Key == keys[i]) ?? NewAntigravityRow(capture, keys[i], account);
+            var row = rows.FirstOrDefault(r => r.Key == keys[i]) ?? NewAntigravityRow(section, capture, keys[i], account);
             row.Label.Text = account.Label;
             row.Remove.IsEnabled = !busy;
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
@@ -111,27 +120,28 @@ public sealed partial class SettingsWindow
             }
         }
 
-        _agyCapture!.Content = (busy ? AntigravityAccountsCopy.Capturing : AntigravityAccountsCopy.Capture).Localized();
-        _agyCapture.IsEnabled = !busy;
+        section.Capture!.Content = (busy ? AntigravityAccountsCopy.Capturing : AntigravityAccountsCopy.Capture).Localized();
+        section.Capture.IsEnabled = !busy;
 
         var code = capture.LastErrorCode;
-        _agyError!.Text = code is null ? "" : AntigravityAccountsCopy.Message(code).Localized();
-        _agyError.Visibility = code is null ? Visibility.Collapsed : Visibility.Visible;
+        section.Error!.Text = code is null ? "" : AntigravityAccountsCopy.Message(code).Localized();
+        section.Error.Visibility = code is null ? Visibility.Collapsed : Visibility.Visible;
 
         var enabled = capture.IsEnabled;
         // Not while the switch's own change is in flight (the confirmation
         // flyout is open with the switch already on): its handler redraws after.
-        if (!_agyToggling && toggle.IsOn != enabled)
+        if (!section.Toggling && toggle.IsOn != enabled)
         {
-            _agySyncingToggle = true;
+            section.SyncingToggle = true;
             toggle.IsOn = enabled;
-            _agySyncingToggle = false;
+            section.SyncingToggle = false;
         }
 
-        _agyPaused!.Visibility = enabled && capture.Paused ? Visibility.Visible : Visibility.Collapsed;
+        section.Paused!.Visibility = enabled && capture.Paused ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private AntigravityAccountRow NewAntigravityRow(AntigravityAutoCapture capture, string rowKey, AntigravityAccount account)
+    private static AntigravityAccountRow NewAntigravityRow(
+        AgySection section, AntigravityAutoCapture capture, string rowKey, AntigravityAccount account)
     {
         var row = new Grid { ColumnSpacing = 6 };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -152,35 +162,36 @@ public sealed partial class SettingsWindow
         Grid.SetColumn(remove, 1);
         row.Children.Add(remove);
         var made = new AntigravityAccountRow(rowKey, label, remove, row);
-        _antigravityRows.Add(made);
+        section.Rows.Add(made);
         return made;
     }
 
-    private void BuildAntigravityControls(SettingsStore store, StackPanel body, AntigravityAutoCapture capture)
+    private void BuildAntigravityControls(SettingsStore store, AgySection section, AntigravityAutoCapture capture)
     {
-        _agyCapture = new Button
+        var body = section.Body;
+        section.Capture = new Button
         {
             FontSize = 12,
             Padding = new Thickness(8, 3, 8, 4),
         };
-        _agyCapture.Click += async (_, _) => await capture.ManualCapture();
-        body.Children.Add(_agyCapture);
+        section.Capture.Click += async (_, _) => await capture.ManualCapture();
+        body.Children.Add(section.Capture);
 
-        _agyError = WarningLine("");
-        _agyError.Visibility = Visibility.Collapsed;
-        body.Children.Add(_agyError);
+        section.Error = WarningLine("");
+        section.Error.Visibility = Visibility.Collapsed;
+        body.Children.Add(section.Error);
 
         var toggle = new ToggleSwitch { IsOn = capture.IsEnabled, OnContent = null, OffContent = null };
-        _agyToggle = toggle;
+        section.Toggle = toggle;
         var reverting = false;
         toggle.Toggled += async (_, _) =>
         {
-            if (reverting || _agySyncingToggle)
+            if (reverting || section.SyncingToggle)
             {
                 return;
             }
 
-            _agyToggling = true;
+            section.Toggling = true;
             try
             {
                 if (toggle.IsOn)
@@ -199,18 +210,18 @@ public sealed partial class SettingsWindow
             }
             finally
             {
-                _agyToggling = false;
+                section.Toggling = false;
             }
 
-            FillAntigravityAccounts(store);
+            FillAntigravityAccounts(store, section);
         };
         // The visible label is a sibling TextBlock; give the switch the same name.
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(toggle, AntigravityAccountsCopy.Toggle.Localized());
         body.Children.Add(ToggleRow(AntigravityAccountsCopy.Toggle.Localized(), toggle));
 
-        _agyPaused = WarningLine(AntigravityAccountsCopy.Paused.Localized());
-        _agyPaused.Visibility = Visibility.Collapsed;
-        body.Children.Add(_agyPaused);
+        section.Paused = WarningLine(AntigravityAccountsCopy.Paused.Localized());
+        section.Paused.Visibility = Visibility.Collapsed;
+        body.Children.Add(section.Paused);
     }
 
     private static TextBlock WarningLine(string text)
