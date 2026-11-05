@@ -53,11 +53,12 @@ const QUOTA_SUMMARY_METHOD: &str = "retrieveUserQuotaSummary";
 /// codexbar caps the same call at 2 s; 10 s here is a chosen bound, not a
 /// measurement.
 const QUOTA_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-/// Cloud Code answers quota calls with 403 SUBSCRIPTION_REQUIRED or a legacy
-/// model list unless the User-Agent is in the `antigravity/hub/` family
-/// (codexbar dbdd465b4). Sent on every Code Assist method (loadCodeAssist,
-/// fetchAvailableModels, retrieveUserQuota, retrieveUserQuotaSummary), never
-/// on the oauth2 token refresh. The maintainer accepted the fingerprint risk
+/// codexbar dbdd465b4 reports that Cloud Code answers quota calls with 403
+/// SUBSCRIPTION_REQUIRED or a legacy model list unless the User-Agent is in
+/// the `antigravity/hub/` family (not measured on Windows). Sent on every
+/// Code Assist method (loadCodeAssist, fetchAvailableModels,
+/// retrieveUserQuota, retrieveUserQuotaSummary), never on the oauth2 token
+/// refresh. The maintainer accepted the fingerprint risk
 /// for the Mac on 2026-11-04 and this Windows suffix on 2026-11-05 (WIN-P9 U2).
 ///
 /// The version also decides which quota groups the summary carries. Measured
@@ -1662,12 +1663,7 @@ async fn fetch_oauth_primary(now: DateTime<Utc>) -> PrimaryAttempt<RemoteContext
         Ok(context) => context,
         Err(failure) => return PrimaryAttempt::FinalFailure(failure),
     };
-    // The grouped allowances agy's `/usage` prints first, as the captured
-    // route does; any summary miss falls through to the catalog unchanged.
-    if let Some(windows) = fetch_quota_summary(&context, now).await {
-        return PrimaryAttempt::Success(context.finish(windows));
-    }
-    match fetch_available_models(&context, now).await {
+    match primary_quota(&context, now).await {
         PrimaryQuotaAttempt::Success(windows) => PrimaryAttempt::Success(context.finish(windows)),
         PrimaryQuotaAttempt::Forbidden => PrimaryAttempt::Forbidden(context),
         PrimaryQuotaAttempt::SchemaContradiction(failure) => {
@@ -1676,6 +1672,18 @@ async fn fetch_oauth_primary(now: DateTime<Utc>) -> PrimaryAttempt<RemoteContext
         PrimaryQuotaAttempt::Transient => PrimaryAttempt::Transient(context),
         PrimaryQuotaAttempt::Terminal(failure) => PrimaryAttempt::FinalFailure(failure),
     }
+}
+
+/// The primary's quota windows for an already-built context: the grouped
+/// allowances agy's `/usage` prints first, as the captured route does; any
+/// summary miss falls through to the catalog unchanged. Split out of
+/// `fetch_oauth_primary` so a loopback test drives it without a Gemini home
+/// and without `finish` resolving the real history scope.
+async fn primary_quota(context: &RemoteContext, now: DateTime<Utc>) -> PrimaryQuotaAttempt {
+    if let Some(windows) = fetch_quota_summary(context, now).await {
+        return PrimaryQuotaAttempt::Success(windows);
+    }
+    fetch_available_models(context, now).await
 }
 
 async fn fetch_oauth_secondary(
@@ -2141,11 +2149,12 @@ async fn code_assist_post(
 }
 
 /// Where a Code Assist method is served. Only `retrieveUserQuotaSummary`
-/// reads the daily host: the stable host answers it with stale Gemini
-/// allowances (codexbar 1c14f5abd), and the agy binary carries the same
-/// literal. Every other method stays on the stable host. Both hosts are
-/// compile-time constants; nothing at runtime can redirect them (only a test
-/// build's `google_url` can, for the loopback redirect tests).
+/// reads the daily host: codexbar 1c14f5abd reports that the stable host
+/// answers it with stale Gemini allowances, and on macOS the daily host
+/// returned the Gemini groups (measured 2026-11-04/05). Unverified on Windows
+/// until the 188 device check. Every other method stays on the stable host.
+/// Both hosts are compile-time constants; nothing at runtime can redirect
+/// them (only a test build's `google_url` can, for the loopback tests).
 fn code_assist_url(method: &str) -> String {
     let base = if method == QUOTA_SUMMARY_METHOD {
         CODE_ASSIST_DAILY_BASE
@@ -3264,7 +3273,8 @@ where
 /// Windows agy route (`parse_agy_usage`), so a captured card reads like the
 /// primary's. `None` on any failure or an empty answer: the caller falls back
 /// to the catalog. Read from the daily host only (`code_assist_url`); there is
-/// no stable-host retry, which would serve stale Gemini values.
+/// no stable-host retry, which per codexbar 1c14f5abd would serve stale Gemini
+/// values (not measured here).
 async fn fetch_quota_summary(
     context: &RemoteContext,
     now: DateTime<Utc>,
@@ -7866,6 +7876,32 @@ mod captured_account_tests {
         assert!(local_weekly_windows("not json", now).is_empty());
     }
 
+    /// S1 (WIN-P9): the local server's weekly rows share the bucket rules of
+    /// the Code Assist parser (`quota_summary_windows`), so since this slice a
+    /// `disabled` bucket and an id outside `[A-Za-z0-9._-]{1,64}` are dropped
+    /// there too. Intentional: the id becomes a card id and a history key.
+    #[test]
+    fn local_quota_summary_drops_disabled_buckets_and_unsafe_ids() {
+        let now = DateTime::parse_from_rfc3339("2026-10-29T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let body = json!({ "response": { "groups": [
+            { "displayName": "Gemini Models", "buckets": [
+                { "bucketId": "gemini-weekly", "displayName": "Weekly Limit Remaining",
+                  "window": "weekly", "remainingFraction": 0.9, "resetTime": "2026-11-04T09:32:38Z" },
+                { "bucketId": "off-weekly", "displayName": "Weekly Limit Remaining", "disabled": true,
+                  "window": "weekly", "remainingFraction": 0.5, "resetTime": "2026-11-04T09:32:38Z" },
+                { "bucketId": "a/b-weekly", "displayName": "Weekly Limit Remaining",
+                  "window": "weekly", "remainingFraction": 0.5, "resetTime": "2026-11-04T09:32:38Z" }
+            ]}
+        ]}});
+        let keys: Vec<_> = local_weekly_windows(&body.to_string(), now)
+            .iter()
+            .map(|w| w.pace_window_key_for_test().map(str::to_string))
+            .collect();
+        assert_eq!(keys, [Some("agy.gemini-weekly.v1".to_string())]);
+    }
+
     /// The three groups and five buckets `agy /usage` printed on the
     /// maintainer's Mac on 2026-11-04, in the summary API's field names
     /// (ported from the Mac test; the Windows device check is separate).
@@ -8110,70 +8146,119 @@ mod captured_account_tests {
         }
     }
 
-    // ── redirect policy, one loopback test per call site ──
+    // ── loopback servers for the route and redirect tests ──
 
-    /// A loopback listener answering every connection with `reply`. It
-    /// records each full request it read (head and `content-length` body)
-    /// before replying, so the record is complete when the client's call
-    /// returns. Local only; the thread ends with the test process.
-    fn serve_loopback(
-        reply: Vec<u8>,
-    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
-        use std::io::{Read as _, Write as _};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let origin = format!("http://{}", listener.local_addr().unwrap());
-        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let log = seen.clone();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let mut request = Vec::new();
-                let mut buffer = [0u8; 4096];
-                let complete = |request: &[u8]| {
-                    let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
-                        return false;
-                    };
-                    let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
-                    let length = head
-                        .lines()
-                        .find_map(|line| line.strip_prefix("content-length:"))
-                        .and_then(|value| value.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    request.len() >= end + 4 + length
-                };
-                while !complete(request.as_slice()) && request.len() < 65_536 {
-                    match stream.read(&mut buffer) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => request.extend_from_slice(&buffer[..n]),
-                    }
-                }
-                log.lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&request).into_owned());
-                let _ = stream.write_all(&reply);
-            }
-        });
-        (origin, seen)
+    /// A loopback HTTP listener. Each connection is answered with
+    /// `reply(request)` after the full request (head and `content-length`
+    /// body) is recorded, so the record is complete when the client's call
+    /// returns. It keeps accepting until dropped, so a redirect target can
+    /// still record a followed redirect; drop stops the accept loop and joins
+    /// the thread, so neither the thread nor the socket outlives the test.
+    struct Loopback {
+        origin: String,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
     }
 
-    /// An origin that 307s every request to a second listener answering
-    /// `200 {}`, so a followed redirect would succeed and be recorded there.
-    fn redirect_trap() -> (
-        String,
-        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    ) {
-        let (elsewhere, elsewhere_seen) = serve_loopback(
-            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
-                .to_vec(),
-        );
-        let (origin, seen) = serve_loopback(
+    impl Loopback {
+        fn serve(reply: impl Fn(&str) -> Vec<u8> + Send + 'static) -> Self {
+            use std::io::{Read as _, Write as _};
+            use std::sync::atomic::Ordering;
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (log, stopped) = (seen.clone(), stop.clone());
+            let thread = std::thread::spawn(move || {
+                while !stopped.load(Ordering::SeqCst) {
+                    let mut stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
+                    // An accepted socket may inherit the listener's
+                    // non-blocking mode (platform-dependent); reads block.
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                    let mut request = Vec::new();
+                    let mut buffer = [0u8; 4096];
+                    let complete = |request: &[u8]| {
+                        let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            return false;
+                        };
+                        let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let length = head
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        request.len() >= end + 4 + length
+                    };
+                    while !complete(request.as_slice()) && request.len() < 65_536 {
+                        match stream.read(&mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => request.extend_from_slice(&buffer[..n]),
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&request).into_owned();
+                    let answer = reply(request.as_str());
+                    log.lock().unwrap().push(request);
+                    let _ = stream.write_all(&answer);
+                }
+            });
+            Self {
+                origin,
+                seen,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for Loopback {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn http_reply(status: &str, body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// The request line's path, e.g. `/v1internal:loadCodeAssist`.
+    fn request_path(request: &str) -> &str {
+        request.split(' ').nth(1).unwrap_or_default()
+    }
+
+    /// `(origin, elsewhere)`: the origin 307s every request to `elsewhere`,
+    /// which answers `200 {}`, so a followed redirect would succeed and be
+    /// recorded there.
+    fn redirect_trap() -> (Loopback, Loopback) {
+        let elsewhere = Loopback::serve(|_| http_reply("200 OK", "{}"));
+        let location = format!("{}/stolen", elsewhere.origin);
+        let origin = Loopback::serve(move |_| {
             format!(
-                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {elsewhere}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             )
-            .into_bytes(),
-        );
-        (origin, seen, elsewhere_seen)
+            .into_bytes()
+        });
+        (origin, elsewhere)
     }
 
     /// Points this thread's Google URLs (`google_url`) at a loopback origin
@@ -8194,18 +8279,101 @@ mod captured_account_tests {
     }
 
     fn sends_hub_user_agent(request: &str) -> bool {
-        request
-            .to_ascii_lowercase()
-            .contains(&format!("user-agent: {}", CODE_ASSIST_USER_AGENT.to_ascii_lowercase()))
+        request.to_ascii_lowercase().contains(&format!(
+            "user-agent: {}",
+            CODE_ASSIST_USER_AGENT.to_ascii_lowercase()
+        ))
     }
+
+    // ── primary route: summary first, catalog as the fallback ──
+
+    const SUMMARY_PATH: &str = "/v1internal:retrieveUserQuotaSummary";
+    const CATALOG_PATH: &str = "/v1internal:fetchAvailableModels";
+
+    fn catalog_body() -> String {
+        json!({ "models": {
+            "gemini-3-pro": { "displayName": "Gemini 3 Pro", "quotaInfo": { "remainingFraction": 0.5 } }
+        }})
+        .to_string()
+    }
+
+    fn loopback_context(tag: &str) -> RemoteContext {
+        RemoteContext {
+            client: antigravity_http_client(CAPTURED_CLIENT_UNAVAILABLE).unwrap(),
+            access_token: "token".to_string(),
+            project: Some("project".to_string()),
+            plan: None,
+            account_scope: test_account_scope(tag),
+            cache_binding: None,
+        }
+    }
+
+    fn quota_card_ids(attempt: PrimaryQuotaAttempt) -> Vec<String> {
+        let PrimaryQuotaAttempt::Success(windows) = attempt else {
+            panic!("the primary quota attempt did not succeed");
+        };
+        windows
+            .iter()
+            .map(|w| w.pace_window_key_for_test().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// The summary answers: its `agy.<bucket>.v1` cards are the primary's,
+    /// and the catalog is never asked.
+    #[tokio::test]
+    async fn primary_reads_the_summary_first_and_skips_the_catalog() {
+        let server = Loopback::serve(|request| match request_path(request) {
+            SUMMARY_PATH => http_reply("200 OK", &three_group_summary().to_string()),
+            CATALOG_PATH => http_reply("200 OK", &catalog_body()),
+            _ => http_reply("404 Not Found", "{}"),
+        });
+        let _route = LoopbackRoute::set(&server.origin);
+        let attempt = primary_quota(&loopback_context("qsum-primary-summary"), summary_now()).await;
+        assert_eq!(quota_card_ids(attempt), THREE_GROUP_IDS);
+        let paths: Vec<String> = server
+            .requests()
+            .iter()
+            .map(|request| request_path(request).to_string())
+            .collect();
+        assert_eq!(paths, [SUMMARY_PATH], "the catalog must not be called");
+    }
+
+    /// The summary misses (a 5xx, or an error `code`): the catalog path runs
+    /// unchanged and its `model.<id>.v1` cards are the primary's.
+    #[tokio::test]
+    async fn primary_falls_back_to_the_catalog_when_the_summary_misses() {
+        let error_code = json!({ "code": 7, "groups": three_group_summary()["groups"].clone() });
+        for summary in [
+            http_reply("500 Internal Server Error", "{}"),
+            http_reply("200 OK", &error_code.to_string()),
+        ] {
+            let server = Loopback::serve(move |request| match request_path(request) {
+                SUMMARY_PATH => summary.clone(),
+                CATALOG_PATH => http_reply("200 OK", &catalog_body()),
+                _ => http_reply("404 Not Found", "{}"),
+            });
+            let _route = LoopbackRoute::set(&server.origin);
+            let attempt =
+                primary_quota(&loopback_context("qsum-primary-fallback"), summary_now()).await;
+            assert_eq!(quota_card_ids(attempt), ["model.gemini-3-pro.v1"]);
+            let paths: Vec<String> = server
+                .requests()
+                .iter()
+                .map(|request| request_path(request).to_string())
+                .collect();
+            assert_eq!(paths, [SUMMARY_PATH, CATALOG_PATH]);
+        }
+    }
+
+    // ── redirect policy, one loopback test per call site ──
 
     /// The primary's Code Assist client (`load_remote_context`): a 307 must not
     /// carry the bearer or body to its `Location`, and the request on the wire
     /// carries the hub User-Agent.
     #[tokio::test]
     async fn primary_bearer_request_is_never_redirected() {
-        let (origin, seen, elsewhere_seen) = redirect_trap();
-        let _route = LoopbackRoute::set(&origin);
+        let (origin, elsewhere) = redirect_trap();
+        let _route = LoopbackRoute::set(&origin.origin);
         let result = load_remote_context(
             "SENTINEL-BEARER".to_string(),
             test_account_scope("qsum-redirect-primary"),
@@ -8216,7 +8384,7 @@ mod captured_account_tests {
             matches!(result, Err(ProviderFetchFailure::Terminal { .. })),
             "a 3xx must end as a terminal non-2xx"
         );
-        let seen = seen.lock().unwrap();
+        let seen = origin.requests();
         assert_eq!(seen.len(), 1);
         assert!(
             seen[0].starts_with("POST /v1internal:loadCodeAssist "),
@@ -8226,8 +8394,11 @@ mod captured_account_tests {
         // Control: the bearer did reach the origin, so the empty record below
         // is about the redirect, not a request that was never sent.
         assert!(seen[0].contains("SENTINEL-BEARER"));
-        assert!(sends_hub_user_agent(&seen[0]), "the hub User-Agent was not sent");
-        assert!(elsewhere_seen.lock().unwrap().is_empty(), "the redirect was followed");
+        assert!(
+            sends_hub_user_agent(&seen[0]),
+            "the hub User-Agent was not sent"
+        );
+        assert!(elsewhere.requests().is_empty(), "the redirect was followed");
     }
 
     /// The primary's oauth2 refresh (`post_token_refresh`): a 307 must not
@@ -8235,8 +8406,8 @@ mod captured_account_tests {
     /// and the refresh carries no hub User-Agent.
     #[tokio::test]
     async fn primary_refresh_post_is_never_redirected_and_sends_no_hub_user_agent() {
-        let (origin, seen, elsewhere_seen) = redirect_trap();
-        let _route = LoopbackRoute::set(&origin);
+        let (origin, elsewhere) = redirect_trap();
+        let _route = LoopbackRoute::set(&origin.origin);
         let result = post_token_refresh(
             &("client-id".to_string(), "client-secret".to_string()),
             "SENTINEL-REFRESH",
@@ -8247,7 +8418,7 @@ mod captured_account_tests {
             matches!(result, Err(ProviderFetchFailure::Terminal { .. })),
             "a 3xx must end as a terminal non-2xx"
         );
-        let seen = seen.lock().unwrap();
+        let seen = origin.requests();
         assert_eq!(seen.len(), 1);
         assert!(
             seen[0].starts_with("POST /token "),
@@ -8260,7 +8431,7 @@ mod captured_account_tests {
             !seen[0].to_ascii_lowercase().contains("antigravity/hub"),
             "the refresh carried the Code Assist User-Agent"
         );
-        assert!(elsewhere_seen.lock().unwrap().is_empty(), "the redirect was followed");
+        assert!(elsewhere.requests().is_empty(), "the redirect was followed");
     }
 
     /// A captured account's token and Code Assist requests
@@ -8268,8 +8439,8 @@ mod captured_account_tests {
     /// request carries the hub User-Agent.
     #[tokio::test]
     async fn captured_requests_are_never_redirected() {
-        let (origin, seen, elsewhere_seen) = redirect_trap();
-        let _route = LoopbackRoute::set(&origin);
+        let (origin, elsewhere) = redirect_trap();
+        let _route = LoopbackRoute::set(&origin.origin);
         let io = SystemCapturedIo;
         let client = OAuthClient {
             id: "client-id".to_string(),
@@ -8292,7 +8463,7 @@ mod captured_account_tests {
             matches!(result, Err(ProviderFetchFailure::Terminal { .. })),
             "a 3xx must end as a terminal non-2xx"
         );
-        let seen = seen.lock().unwrap();
+        let seen = origin.requests();
         assert_eq!(seen.len(), 2);
         assert!(seen[0].starts_with("POST /token "));
         assert!(seen[0].contains("SENTINEL-REFRESH"));
@@ -8302,8 +8473,11 @@ mod captured_account_tests {
         );
         assert!(seen[1].starts_with("POST /v1internal:loadCodeAssist "));
         assert!(seen[1].contains("SENTINEL-BEARER"));
-        assert!(sends_hub_user_agent(&seen[1]), "the hub User-Agent was not sent");
-        assert!(elsewhere_seen.lock().unwrap().is_empty(), "the redirect was followed");
+        assert!(
+            sends_hub_user_agent(&seen[1]),
+            "the hub User-Agent was not sent"
+        );
+        assert!(elsewhere.requests().is_empty(), "the redirect was followed");
     }
 }
 
