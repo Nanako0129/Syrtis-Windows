@@ -200,14 +200,9 @@ impl GrokBotCredentials {
                 team_id,
                 ..
             } => {
-                // macOS's `jwt_payload` requires exactly three non-empty
-                // segments; the Windows one is laxer, so check here rather
-                // than change it for its other callers.
-                let segments: Vec<&str> = access_token.split('.').collect();
-                if segments.len() != 3 || segments.iter().any(|segment| segment.is_empty()) {
-                    return None;
-                }
-                let claims = crate::agent_usage::jwt_payload(access_token)?;
+                // The shared Cursor JWT check (three non-empty segments, as
+                // macOS's `jwt_payload` requires; the Windows one is laxer).
+                let claims = crate::cursor_desktop::jwt_claims(access_token)?;
                 let subject = claims.get("sub")?.as_str()?.trim();
                 if subject.is_empty() {
                     return None;
@@ -1064,9 +1059,28 @@ pub(crate) mod tests {
                 ("glass.lastSignedInAuthId", &format!("glass-{USER_ID}")),
             ],
         );
-        let loaded = load_credentials_from(&path).unwrap();
+        let loaded = load_credentials_from(&path);
         std::fs::remove_dir_all(&dir).ok();
-        loaded.is_some()
+        loaded.unwrap().is_some()
+    }
+
+    /// Plan S3a: each part of `cursor_desktop::jwt_claims` refuses a token on
+    /// its own (every other part passes), so a laxer shared check fails here
+    /// and not only in the usage sync's tests.
+    #[test]
+    fn the_cursor_fallback_refuses_each_part_of_the_jwt_check_alone() {
+        let jwt = ide_jwt("tok-123");
+        let (header, payload) = jwt.rsplit_once('.').unwrap().0.split_once('.').unwrap();
+        let encode = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+        for (tag, token) in [
+            ("charset", format!("{jwt}=")),
+            ("segments", format!("{jwt}.x")),
+            ("empty", format!("{header}.{payload}.")),
+            ("number", format!("{header}.{}.tok-123", encode("1"))),
+            ("array", format!("{header}.{}.tok-123", encode("[]"))),
+        ] {
+            assert!(!fallback_loads(tag, &token), "{tag}");
+        }
     }
 
     /// Plan S3a (macOS T1): a sealed token (Cursor 3.27+) is "no Cursor

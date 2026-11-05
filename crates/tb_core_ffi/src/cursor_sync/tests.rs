@@ -4258,8 +4258,12 @@ fn a_commit_cleans_the_profiles_other_candidate_dir() {
 
 /// Plan S3a: `token_user` keeps its accept/reject cases and reasons now that
 /// the token check is the shared `cursor_desktop::jwt_claims` (Grok Bot's
-/// fallback uses the same check). Each rejected case is refused by one part
-/// of that check alone; the valid token is the control.
+/// fallback uses the same check). The charset, segment-count and
+/// empty-segment cases each fail one part of that check while passing the
+/// others; the non-JSON and non-object payloads fail only the decode; the
+/// sealed token fails both the charset and the segment count; the `sub` and
+/// stored-id cases pass the shared check and are refused after it. The valid
+/// token is the control.
 #[test]
 fn token_user_accepts_and_rejects_as_before_through_the_shared_check() {
     let login = |token: String, glass: Option<&str>| CursorLogin {
@@ -4295,6 +4299,15 @@ fn token_user_accepts_and_rejects_as_before_through_the_shared_check() {
         unreadable,
         "payload"
     );
+    // A JSON payload that is not an object: refused as before (it has no
+    // `sub`), now already by the shared check.
+    for value in ["1", "[]"] {
+        assert_eq!(
+            user(format!("{}.{}.{SIGNATURE}", parts[0], encode(value))),
+            unreadable,
+            "{value}"
+        );
+    }
     // A sealed token is refused as unreadable (S3b adds the sealed path).
     let sealed = format!(
         "cursor-safe-storage:v1:{}",
