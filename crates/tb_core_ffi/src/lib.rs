@@ -1405,9 +1405,10 @@ pub unsafe extern "C" fn tb_antigravity_account_presence(key: *const c_char) -> 
         } else {
             unsafe { CStr::from_ptr(key) }.to_str().ok()
         };
-        let presence = key.map_or(agent_antigravity::ItemPresence::Absent, |key| {
-            agent_antigravity::captured_item_presence(key)
-        });
+        let presence = key.map_or(
+            agent_antigravity::ItemPresence::Absent,
+            agent_antigravity::captured_item_presence,
+        );
         envelope(Ok(serde_json::json!({ "presence": presence.code() })))
     })
 }

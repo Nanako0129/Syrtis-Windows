@@ -1647,14 +1647,14 @@ fn foreign_kind(handle: HANDLE) -> Result<(), ForeignRefusal> {
     foreign_kind_with(handle, false)
 }
 
-/// `IO_REPARSE_TAG_CLOUD` and its sixteen variants `IO_REPARSE_TAG_CLOUD_1`
-/// to `_F` (0x9000_101A to 0x9000_F01A), which differ only in the bits of
-/// `IO_REPARSE_TAG_CLOUD_MASK` (winnt.h).
+/// `IO_REPARSE_TAG_CLOUD` and its fifteen variants `IO_REPARSE_TAG_CLOUD_1`
+/// to `_F` (0x9000_101A to 0x9000_F01A), which differ from it only in the
+/// bits of `IO_REPARSE_TAG_CLOUD_MASK` (winnt.h).
 const IO_REPARSE_TAG_CLOUD: u32 = 0x9000_001A;
 const IO_REPARSE_TAG_CLOUD_MASK: u32 = 0x0000_F000;
 
 fn is_cloud_file_tag(tag: u32) -> bool {
-    tag & !IO_REPARSE_TAG_CLOUD_MASK == IO_REPARSE_TAG_CLOUD
+    (tag & !IO_REPARSE_TAG_CLOUD_MASK) == IO_REPARSE_TAG_CLOUD
 }
 
 /// The volume serial number and 128-bit file id of the handle's file, with no
