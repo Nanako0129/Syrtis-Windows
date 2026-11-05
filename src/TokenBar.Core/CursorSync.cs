@@ -563,9 +563,11 @@ public sealed class CursorSyncController
     /// and the sync reruns, so the new settings get a fresh result.
     /// A second exception to single-flight is <see cref="ConsentChanged"/>: an
     /// Allow pressed while a round runs, when that round ends refused for want
-    /// of the "cursor" consent or throws, applies that round's result (its writes are
-    /// real, so <see cref="DataChanged"/> still fires on <c>changed</c>) and
-    /// then runs one user round, which also serves a remembered Sync Now.</summary>
+    /// of the "cursor" consent, applies that round's result (its writes are real,
+    /// so <see cref="DataChanged"/> still fires on <c>changed</c>); when it
+    /// throws there is no result: the state is "error" with a null reason, no
+    /// refresh happens and <see cref="DataChanged"/> does not fire. Either way
+    /// it then runs one user round, which also serves a remembered Sync Now.</summary>
     public async Task RunSync(bool userInitiated)
     {
         if (_io is not { } io || !CursorSync.ShouldSync(_store))

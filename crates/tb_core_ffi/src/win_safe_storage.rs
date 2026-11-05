@@ -162,7 +162,8 @@ impl Drop for KeyHandle {
 fn aes_gcm_key(key: &[u8]) -> Result<KeyHandle, &'static str> {
     let mut handle = KeyHandle(null_mut());
     // SAFETY: the AES-GCM pseudo-handle needs no open/close; a null key object
-    // lets CNG allocate it, released by `BCryptDestroyKey` in `KeyHandle`.
+    // lets CNG allocate it, released by `BCryptDestroyKey` in `KeyHandle`. CNG
+    // keeps its own copy of the key in that object, which we do not wipe (C8).
     let status = unsafe {
         BCryptGenerateSymmetricKey(
             BCRYPT_AES_GCM_ALG_HANDLE,

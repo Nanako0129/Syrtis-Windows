@@ -754,8 +754,10 @@ fn load_credentials_from(db_path: &Path) -> Result<Option<CursorCredentials>, St
     // treated as no Cursor login. That includes a sealed token (Cursor 3.27+,
     // `cursor-safe-storage:v1:…`, whose `:` fails the charset): it is never
     // decrypted here and its envelope is never sent (macOS T1, plan S3a).
-    // Not zeroed (C8, listed in `cursor_sync`): `login` on the two early
-    // returns below, and the `CursorCredentials` copy.
+    // Not zeroed (C8; `cursor_sync`'s residual list is not exhaustive):
+    // `login` on the two early returns below, and the token, which moves
+    // into `CursorCredentials` as the same `login.access_token` buffer and
+    // lives through the whole fetch.
     if crate::cursor_desktop::jwt_claims(&login.access_token).is_none() {
         return Ok(None);
     }
@@ -1107,7 +1109,9 @@ pub(crate) mod tests {
     /// `load_credentials` calls): with the "cursor" grant installed, Grok Bot
     /// signed out and a real sealed token (the shared fixture, a v10 blob for
     /// a known key), the result is Ok(None) and the loader spy records 0 key
-    /// loads and 0 decrypts. Measured: the result and the spy's counts.
+    /// loads and 0 decrypts. C1 holds structurally (`load_credentials_from`
+    /// takes no key loader and the JWT check rejects the sealed prefix); the
+    /// spy count pins only that the injected loader is not called on this entry.
     /// Mutations: agent_grokbot.rs `load_credentials_from_sources`
     /// `    load_credentials_from(cursor_path)`
     /// -> `    load_key(&cursor_path.with_file_name("Local State"))?;\n    load_credentials_from(cursor_path)`

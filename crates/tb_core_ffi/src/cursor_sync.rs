@@ -31,12 +31,13 @@
 //!   2 bytes included, which the version check cannot see) and any other
 //!   failure is `token_sealed_unreadable` (win_safe_storage's text never
 //!   passed through). `query_login`/`read_login` never decrypt (C1).
-//! - C8, exactly what is zeroed: the unwrapped key's final heap copy (the
+//! - C8, what is zeroed: the unwrapped key's final heap copy (the
 //!   `Box<SafeStorageKey>`, on drop), the DPAPI output in `load_key`, the
 //!   decrypt output buffer, the access-token row's String in `query_login`,
 //!   the login's token String (`WipedLogin`, every exit of `run`), and the
-//!   cookie value String (`WipedString`, built at final size). Not zeroed:
-//!   the key's intermediate copies on the way into that Box (the
+//!   cookie value String (`WipedString`, built at final size). Other copies
+//!   of the token, the cookie and the key are NOT wiped, and this list of
+//!   residuals is not exhaustive. Examples: the key's intermediate copies on the way into that Box (the
 //!   `try_into` array in `key_from_bytes`, the by-value returns from
 //!   `key_from_bytes` and `load_key`, and the move in `Ok(Box::new(key))`);
 //!   rows `query_login` already read when a later row fails to read (the
@@ -44,7 +45,11 @@
 //!   rusqlite's internal buffers, serde_json's unquoting scratch, the decoded
 //!   JWT payload, the `HeaderValue` and whatever reqwest copies; and on the
 //!   Grok route (`agent_grokbot::load_credentials_from`), the login dropped
-//!   on its non-JWT and no-user-id returns and its `CursorCredentials` copy.
+//!   on its non-JWT and no-user-id returns and the `CursorCredentials` move
+//!   of the same token buffer; the Grok route's scope JSON value and String
+//!   (`agent_grokbot.rs`), its cookie String and `HeaderValue`; the Grok
+//!   desktop route's decrypted token String and bearer header; and the CNG
+//!   key object `BCryptGenerateSymmetricKey` builds in `win_safe_storage`.
 //! - The endpoint is a constant; only tests inject one, by parameter (S-4).
 //! - Redirects are never followed and production is https-only; any 3xx
 //!   (cursor.com sends an expired session to WorkOS) means `expired`.

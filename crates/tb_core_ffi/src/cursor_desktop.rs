@@ -248,7 +248,8 @@ fn query_login(conn: &rusqlite::Connection) -> rusqlite::Result<Option<CursorLog
             // The row's own String (the quoted form) is wiped once the
             // unquoted copy exists; SQLite's and rusqlite's internal buffers
             // are not ours to wipe, and rows the `collect` above already read
-            // are dropped unwiped if a later row fails to read (C8).
+            // are dropped unwiped if a later row fails to read (C8; other residual
+            // copies exist, see the non-exhaustive list in `cursor_sync`).
             "cursorAuth/accessToken" => {
                 token = normalized;
                 wipe_str(value);
@@ -334,8 +335,8 @@ pub(crate) fn stored_token(token: &str) -> StoredToken {
 
 /// Overwrite a string's bytes with zeros (NUL is valid UTF-8, so the String
 /// stays valid) in a way the optimizer cannot drop as a dead store. Used for
-/// the token Strings named zeroed in `cursor_sync`'s C8 list; that list also
-/// names the token copies it does not reach.
+/// the token Strings named zeroed in `cursor_sync`'s C8 list; other copies are
+/// not wiped, and that list of residuals is not exhaustive.
 pub(crate) fn wipe_str(text: &mut String) {
     #[cfg(test)]
     let before = text.clone();
