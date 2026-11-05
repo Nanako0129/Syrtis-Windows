@@ -23,6 +23,10 @@ internal static class ClaudeAccountsCopy
 
     internal const string Remove = "Remove";
 
+    /// <summary>The Remove button's accessible name: which folder it removes.
+    /// Same string as the Antigravity section's, already translated.</summary>
+    internal const string RemoveNamed = "Remove {0}";
+
     internal const string Missing =
         "Folder not found. Kept in case the drive is disconnected or the path needs fixing.";
 
@@ -74,6 +78,6 @@ internal static class ClaudeAccountsCopy
     ];
 
     internal static IEnumerable<string> All() =>
-        [Summary, Add, Remove, Missing, .. Info,
+        [Summary, Add, Remove, RemoveNamed, Missing, .. Info,
             .. ReasonCodes.Select(Reason)];
 }
