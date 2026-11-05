@@ -35,7 +35,9 @@ pub(crate) fn snapshot() -> (Vec<String>, u64) {
 /// Accept only an absolute drive path (`C:\...` or `C:/...`). Verbatim
 /// (`\\?\`), UNC, device (`\\.\`), drive-relative (`C:x`) and rooted (`\x`)
 /// paths are refused; a mapped network drive is still a drive letter and is
-/// accepted (documented limitation). Trailing separators are stripped; nothing
+/// accepted here, so its usage is scanned, but the credential read refuses
+/// any directory not on a fixed drive (`agent_usage`,
+/// `open_claude_config_dir_credentials`). Trailing separators are stripped; nothing
 /// else is edited — no trimming, no case folding — so the registered string is
 /// the identity.
 ///

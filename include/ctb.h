@@ -164,7 +164,9 @@ char *tb_set_extra_scan_paths(const char *json);
 // Replace the registry of extra Claude config directories (CLAUDE_CONFIG_DIR
 // accounts) with a JSON array of absolute drive paths; [] clears it. Each
 // directory becomes its own Claude card (accountKey = the directory) on the
-// next tb_agent_usage, read only from <dir>\.credentials.json. Success data:
+// next tb_agent_usage, read only from <dir>\.credentials.json, and only when
+// the directory is on a fixed drive (a mapped drive is still accepted here and
+// scanned; its card shows a fixed "not on a local fixed drive" error). Success data:
 // {"registeredCount":N,"rejected":[{"index":i,"reason":code}]}. Errors and
 // reasons are fixed codes: empty, unsupportedPath, rootDirectory,
 // invalidComponent, homeDirectory (the home folder itself), defaultConfigDir
