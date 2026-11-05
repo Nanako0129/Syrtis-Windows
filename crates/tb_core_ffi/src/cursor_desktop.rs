@@ -318,6 +318,9 @@ pub(crate) fn stored_token(token: &str) -> StoredToken {
         return StoredToken::Refused("token_sealed_unsupported");
     }
     match base64::engine::general_purpose::STANDARD.decode(encoded) {
+        // Too short to carry a version: a decode failure, not an unknown
+        // version (T10).
+        Ok(blob) if blob.len() < 3 => StoredToken::Refused("token_sealed_unreadable"),
         Ok(blob) => StoredToken::Sealed(blob),
         Err(_) => StoredToken::Refused("token_sealed_unreadable"),
     }
@@ -421,6 +424,29 @@ mod tests {
         assert_eq!(
             stored_token("cursor-safe-storage:v1:!!!!"),
             StoredToken::Refused("token_sealed_unreadable")
+        );
+        // A `v1` payload decoding to fewer than 3 bytes (no room for a
+        // version) is unreadable, not unsupported (T10); 3 bytes is the
+        // boundary that classifies as sealed.
+        #[cfg(target_os = "windows")]
+        for short in [&b""[..], b"v", b"v1"] {
+            let token = format!(
+                "cursor-safe-storage:v1:{}",
+                base64::engine::general_purpose::STANDARD.encode(short)
+            );
+            assert_eq!(
+                stored_token(&token),
+                StoredToken::Refused("token_sealed_unreadable"),
+                "{short:?}"
+            );
+        }
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            stored_token(&format!(
+                "cursor-safe-storage:v1:{}",
+                base64::engine::general_purpose::STANDARD.encode(b"v11")
+            )),
+            StoredToken::Sealed(b"v11".to_vec())
         );
     }
 

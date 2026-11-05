@@ -132,13 +132,16 @@ public sealed partial class SettingsWindow
         {
             try
             {
+                // Raw English sources: ConfirmFlyout localizes each once.
                 if (await ConfirmFlyout(_csKeychainAllow, CursorSync.Copy.Title,
-                        CursorSync.Copy.KeychainDisclosure,
-                        CursorSync.Copy.KeychainAllow.LocalizedKey(GrokBotConsent.Copy.AllowEnglish),
+                        CursorSync.Copy.KeychainDisclosure, CursorSync.Copy.KeychainAllow,
                         CursorSync.Copy.Cancel))
                 {
                     AppSettings.KeychainConsent.Install(KeychainConsentComposer.CursorId, true);
-                    await cursor.RunSync(userInitiated: true);
+                    UpdateCursorSync(store); // Withdraw shows from the stored answer now
+                    // Never dropped: a round already running is discarded and
+                    // rerun under the new answer (CursorSyncController.ConsentChanged).
+                    await cursor.ConsentChanged();
                 }
             }
             catch (Exception ex)
@@ -160,7 +163,10 @@ public sealed partial class SettingsWindow
             try
             {
                 AppSettings.KeychainConsent.Install(KeychainConsentComposer.CursorId, false);
-                _ = cursor.RunSync(userInitiated: true);
+                UpdateCursorSync(store); // Withdraw hides from the stored answer now
+                // Never dropped (ConsentChanged): the rerun reports
+                // keychain_consent, which brings back the consent line.
+                _ = cursor.ConsentChanged();
             }
             catch (Exception ex)
             {

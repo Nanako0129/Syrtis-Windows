@@ -52,8 +52,7 @@ public class KeychainConsentComposerTests : IDisposable
         Assert.True(store.GetNullableBool(KeychainConsentComposer.CursorStorageKey));
         Assert.False(store.GetNullableBool(KeychainConsentComposer.GrokBotStorageKey));
 
-        // Cursor granted again, then Cursor Withdraw: grok stays off (it was),
-        // but a Grok yes would be kept — prove with grok on.
+        // Grok on again (cursor still on), then Cursor Withdraw: grok stays.
         composer.Install(KeychainConsentComposer.GrokBotId, true);
         composer.Install(KeychainConsentComposer.CursorId, true);
         composer.Install(KeychainConsentComposer.CursorId, false);
@@ -123,10 +122,45 @@ public class KeychainConsentComposerTests : IDisposable
         Composer(store).InstallComposedIfAnyGranted();
         Assert.Equal(["""{"grok-bot":true,"cursor":true}"""], _calls);
 
+        // A store in its own empty directory (Store() would reload the file
+        // the first half just wrote).
         _calls.Clear();
-        var empty = Store();
+        var empty = new SettingsStore(Path.Combine(_dir, "empty", "settings.json"));
+        Assert.Null(empty.GetNullableBool(KeychainConsentComposer.GrokBotStorageKey));
+        Assert.Null(empty.GetNullableBool(KeychainConsentComposer.CursorStorageKey));
         Composer(empty).InstallComposedIfAnyGranted();
         Assert.Empty(_calls);
+    }
+
+    // C3: an answer that changes nothing installed makes no core call. Here
+    // only cursor is installed and Grok Bot's "Not now" composes the same
+    // {"cursor":true}.
+    // Mutation: KeychainConsentComposer.cs `if (changed)` -> `if (true)`
+    // (re-send every answer) -> one setter call.
+    [Fact]
+    public void ANoForOneIdWhileOnlyTheOtherIsInstalledMakesNoCoreCall()
+    {
+        var store = Store();
+        var composer = Composer(store);
+        composer.Install(KeychainConsentComposer.CursorId, true);
+        Assert.Equal(["""{"cursor":true}"""], _calls);
+        _calls.Clear();
+        Assert.False(composer.Install(KeychainConsentComposer.GrokBotId, false));
+        Assert.Empty(_calls);
+        Assert.False(store.GetNullableBool(KeychainConsentComposer.GrokBotStorageKey));
+    }
+
+    // The launch install runs twice (before Cursor sync, then as the fetch
+    // hook); the second is a no-op once the first succeeded.
+    [Fact]
+    public void ASecondLaunchInstallMakesNoCoreCall()
+    {
+        var store = Store();
+        store.SetBool(KeychainConsentComposer.CursorStorageKey, true);
+        var composer = Composer(store);
+        composer.InstallComposedIfAnyGranted();
+        composer.InstallComposedIfAnyGranted();
+        Assert.Equal(["""{"cursor":true}"""], _calls);
     }
 
     // A launch reapply failure must not throw (it would take down launch).

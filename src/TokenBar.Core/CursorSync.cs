@@ -162,14 +162,17 @@ public static class CursorSync
         /// encrypted sign-in and does not stop reading an unencrypted
         /// one).</summary>
         public const string KeychainDisclosure =
-            "Cursor 3.27 and later can store its sign-in encrypted. To read it, Syrtis unlocks the key Cursor keeps in its \"Local State\" file on this PC; Windows does not ask separately, so this is the only time you are asked. That key can decrypt everything Cursor stores encrypted, but Syrtis uses it only to read your Cursor sign-in, keeps it in memory for that read alone, and never saves or logs it. The sign-in is sent only to Cursor's usage service (cursor.com). Turning on Cursor sync does not grant this. Withdraw stops Syrtis reading Cursor's encrypted sign-in; if Cursor stores its sign-in unencrypted, Syrtis still reads that and Withdraw does not change it.";
+            "Cursor 3.27 and later can store its sign-in encrypted. To read it, Syrtis unlocks the key Cursor keeps in its \"Local State\" file on this PC. Windows does not ask, so this confirmation is the only check. That key can decrypt everything Cursor stores encrypted, but Syrtis uses it only to read your Cursor sign-in, keeps it in memory for that read alone, and never saves or logs it. The sign-in is sent only to Cursor's usage service (cursor.com). Turning on Cursor sync does not grant this. Withdraw stops Syrtis reading Cursor's encrypted sign-in; if Cursor stores its sign-in unencrypted, Syrtis still reads that and Withdraw does not change it.";
 
         /// <summary>The Withdraw control shown once the grant is stored.</summary>
         public const string KeychainWithdraw = "Withdraw";
 
-        /// <summary>The semantic Allow key the Grok Bot consent already uses
-        /// ("允許"), reused so both consents share one action string.</summary>
-        public const string KeychainAllow = GrokBotConsent.Copy.Allow;
+        /// <summary>The confirmation's Allow button: an English source string
+        /// (localized once, by the flyout). Not the semantic
+        /// <c>consent.action.allow</c> key, which renders as the key itself
+        /// in English through <c>Localized()</c>, and not bare "Allow", the
+        /// status badge ("待授權").</summary>
+        public const string KeychainAllow = "Allow access";
 
         /// <summary>Second consent paragraph once added profiles exist
         /// (<see cref="ConsentParagraphs"/>), macOS #535 wording. W2 shows it;
@@ -271,6 +274,9 @@ public sealed class CursorSyncController
     private Task _configPush = Task.CompletedTask;
     private CancellationTokenSource? _loop;
     private int _generation;
+    // Bumped by ConsentChanged: a round that started under an older Cursor
+    // consent answer is discarded and rerun as a user round.
+    private int _consentEpoch;
     private bool _rerunPending;
     private bool _syncing;
     // The running pass is a user press, not the schedule.
@@ -588,6 +594,7 @@ public sealed class CursorSyncController
             while (true)
             {
                 int started;
+                int startedConsent;
                 Task push;
                 lock (_gate)
                 {
@@ -595,6 +602,7 @@ public sealed class CursorSyncController
                     // Read the generation BEFORE waiting: a settings change
                     // during the wait makes this pass stale.
                     started = _generation;
+                    startedConsent = _consentEpoch;
                     push = _configPush;
                 }
 
@@ -638,9 +646,13 @@ public sealed class CursorSyncController
 
                 var refresh = false;
                 bool again;
+                bool consentChanged;
                 lock (_gate)
                 {
-                    if (started != _generation || !CursorSync.ShouldSync(_store))
+                    // Allow / Withdraw while this ran: the result was read
+                    // under the old answer (ConsentChanged).
+                    consentChanged = startedConsent != _consentEpoch;
+                    if (started != _generation || consentChanged || !CursorSync.ShouldSync(_store))
                     {
                         // A reconfigure (turning sync off, say) happened while
                         // this ran: the result describes a configuration that
@@ -668,6 +680,13 @@ public sealed class CursorSyncController
                     }
 
                     again = _rerunPending && CursorSync.ShouldSync(_store);
+                    if (again && consentChanged)
+                    {
+                        // The Allow / Withdraw press is served as a user round.
+                        user = true;
+                        _runningUser = true;
+                    }
+
                     if (!again)
                     {
                         // The pending press is served only once nothing else
@@ -724,6 +743,26 @@ public sealed class CursorSyncController
     }
 
     // ---- Actions behind the controls ---------------------------------------
+
+    /// <summary>The Cursor encrypted-sign-in answer changed (Allow or Withdraw
+    /// in Settings; the caller has already installed it through
+    /// <see cref="KeychainConsentComposer"/>). A round already running read
+    /// the old answer: its result is discarded and one user round runs right
+    /// after it, so the press is never dropped (a plain Sync Now during a user
+    /// round is). With no round running, one user round starts now.</summary>
+    public Task ConsentChanged()
+    {
+        lock (_gate)
+        {
+            _consentEpoch++;
+            if (_syncing)
+            {
+                return Task.CompletedTask;
+            }
+        }
+
+        return RunSync(userInitiated: true);
+    }
 
     /// <summary>The Settings switch turned off: stores the preference off.
     /// Only <see cref="TurnOn"/> (consent first) stores it on.</summary>

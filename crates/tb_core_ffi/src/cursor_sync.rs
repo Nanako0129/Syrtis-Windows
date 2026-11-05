@@ -1571,10 +1571,50 @@ fn open_sealed(blob: &[u8], target: &Target<'_>, slot: &Slot) -> Result<String, 
     let mut plaintext = key.decrypt(blob).map_err(|_| refuse("token_sealed_unreadable"))?;
     drop(key); // SafeStorageKey wipes the key on drop (C8).
     let token = std::str::from_utf8(&plaintext).ok().map(str::to_owned);
-    // C8: the decrypt output is wiped whether it was valid UTF-8 or not; the
-    // owned copy that becomes the cookie is the one unavoidable residual.
+    // C8: the decrypt output is wiped whether it was valid UTF-8 or not. The
+    // owned copy returned here goes straight into the login, which `run`
+    // holds in a `WipedLogin` from then on, so it is overwritten on every
+    // later exit (non-JWT, account_mismatch, expired, key_unavailable,
+    // duplicate, or once the cookie is built).
     crate::win_safe_storage::wipe(&mut plaintext);
     token.ok_or(refuse("token_sealed_unreadable"))
+}
+
+/// Overwrite a string's bytes with zeros (NUL is valid UTF-8, so the String
+/// stays valid) in a way the optimizer cannot drop as a dead store.
+fn wipe_str(text: &mut String) {
+    // SAFETY: only zero bytes are written, which keep the buffer valid UTF-8.
+    for byte in unsafe { text.as_bytes_mut() } {
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(Ordering::SeqCst);
+    #[cfg(test)]
+    WIPED_LENGTHS.with(|wiped| {
+        wiped
+            .borrow_mut()
+            .push((text.len(), text.bytes().all(|b| b == 0)))
+    });
+}
+
+/// The login while `run` holds it: the access token (plaintext as stored, or
+/// the unsealed one) is wiped when this drops, on every path (C8).
+struct WipedLogin(CursorLogin);
+
+impl Drop for WipedLogin {
+    fn drop(&mut self) {
+        wipe_str(&mut self.0.access_token);
+    }
+}
+
+/// A string holding the token (the cookie value before it becomes a
+/// `HeaderValue`), wiped when it drops. The `HeaderValue` bytes themselves
+/// belong to reqwest and are not wiped (residual, as macOS).
+struct WipedString(String);
+
+impl Drop for WipedString {
+    fn drop(&mut self) {
+        wipe_str(&mut self.0);
+    }
 }
 
 #[cfg(not(windows))]
@@ -1812,7 +1852,9 @@ async fn run(
             return Outcome::refused(Stop::error(reason))
         }
     }
-    let (user, exp) = match token_user(&login) {
+    // From here every exit wipes the token (C8).
+    let login = WipedLogin(login);
+    let (user, exp) = match token_user(&login.0) {
         Ok(found) => found,
         Err(stop) => return Outcome::refused(stop),
     };
@@ -1853,12 +1895,15 @@ async fn run(
         };
     }
     #[cfg_attr(not(test), allow(unused_mut))]
-    let mut value = format!("WorkosCursorSessionToken={user}%3A%3A{}", login.access_token);
+    let mut value = WipedString(format!(
+        "WorkosCursorSessionToken={user}%3A%3A{}",
+        login.0.access_token
+    ));
     #[cfg(test)]
     if BAD_COOKIE_FOR_TEST.with(std::cell::Cell::get) {
-        value.push('\n');
+        value.0.push('\n');
     }
-    let Ok(mut cookie) = reqwest::header::HeaderValue::from_str(&value) else {
+    let Ok(mut cookie) = reqwest::header::HeaderValue::from_str(&value.0) else {
         return Outcome::refused(Stop::error("token_unreadable"));
     };
     cookie.set_sensitive(true);
@@ -2193,6 +2238,10 @@ thread_local! {
     /// only inside `open_sealed`, after this fires (C2 mutation test).
     static AFTER_LOGIN_HOOK: std::cell::Cell<Option<*const (dyn Fn() + 'static)>> =
         const { std::cell::Cell::new(None) };
+    /// C8 observation: every `wipe_str` on this thread records the wiped
+    /// length and whether every byte is zero afterwards (no content kept).
+    static WIPED_LENGTHS: std::cell::RefCell<Vec<(usize, bool)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]

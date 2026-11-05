@@ -49,12 +49,13 @@ public sealed class KeychainConsentComposer(SettingsStore store, Action<string> 
     /// the other id from the store (the changing id's new answer is the
     /// argument). Core first, then the store, so the stored answer never claims
     /// a state the core is not in: a throwing setter leaves both unchanged.
-    /// <para>The core is told on every answer (idempotent, macOS parity),
-    /// except a denial that composes to the empty payload while nothing is
-    /// installed — the core is already empty, so that makes no call (C3).
-    /// Returns whether the installed payload CHANGED (not merely whether a call
-    /// was made): a re-sent identical payload returns false, so the Grok Bot
-    /// card signals <see cref="QuotaEpoch"/> only on a real change.</para></summary>
+    /// <para>The core is called only when the composed payload differs from
+    /// what this process installed (<see cref="_lastInstalled"/>; nothing
+    /// installed counts as the empty registry). An answer that changes nothing
+    /// — a repeat, or a "no" for one id while only the other is installed —
+    /// makes no core call (C3). Returns whether the core was called, i.e.
+    /// whether the installed payload changed (the Grok Bot card signals
+    /// <see cref="QuotaEpoch"/> on it).</para></summary>
     public bool Install(string changingId, bool newAnswer)
     {
         lock (_gate)
@@ -65,12 +66,9 @@ public sealed class KeychainConsentComposer(SettingsStore store, Action<string> 
             var cursor = changingId == CursorId ? newAnswer : otherAnswer;
             var payload = Compose(grok, cursor);
 
-            // Skip only the empty-and-nothing-installed no-op; otherwise re-send
-            // even an unchanged payload (the core is idempotent).
-            var changed = false;
-            if (payload != EmptyPayload || _lastInstalled is not null)
+            var changed = payload != (_lastInstalled ?? EmptyPayload);
+            if (changed)
             {
-                changed = payload != (_lastInstalled ?? EmptyPayload);
                 setConsent(payload); // throws -> store not written below
                 _lastInstalled = payload;
             }
@@ -87,7 +85,9 @@ public sealed class KeychainConsentComposer(SettingsStore store, Action<string> 
     /// and never throws — a failure must not take down launch; the grant is
     /// then simply not installed and the surface asks again. Does not signal
     /// <see cref="QuotaEpoch"/>: it runs before the first payload is built, so a
-    /// signal would only discard it.</summary>
+    /// signal would only discard it. Called twice at launch (before Cursor
+    /// sync, then as the fetch hook); the second call is a no-op once the first
+    /// succeeded.</summary>
     public void InstallComposedIfAnyGranted()
     {
         lock (_gate)
@@ -102,6 +102,11 @@ public sealed class KeychainConsentComposer(SettingsStore store, Action<string> 
             try
             {
                 var payload = Compose(grok, cursor);
+                if (payload == _lastInstalled)
+                {
+                    return;
+                }
+
                 setConsent(payload);
                 _lastInstalled = payload;
             }

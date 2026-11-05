@@ -1156,6 +1156,62 @@ public class CursorSyncTests
         Assert.False(CursorSync.NeedsKeychainAllow("ok", "keychain_consent"));
     }
 
+    /// <summary>S3b: Allow / Withdraw while a user round runs is never
+    /// dropped. The running round read the old answer, so its result is
+    /// discarded and one user round follows it; with no round running,
+    /// <see cref="CursorSyncController.ConsentChanged"/> starts one.
+    /// Mutation: in <c>RunSync</c>,
+    /// <c>if (started != _generation || consentChanged || !CursorSync.ShouldSync(_store))</c>
+    /// -> <c>if (started != _generation || !CursorSync.ShouldSync(_store))</c>
+    /// -> one user round, and the stale <c>keychain_consent</c> result stays.</summary>
+    [Fact]
+    public async Task AConsentChangeDuringAUserRoundRerunsAsAUserRound()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore();
+        using var gate = new ManualResetEventSlim(false);
+        core.SyncGate = gate;
+        var rounds = 0;
+        core.Result = () => Interlocked.Increment(ref rounds) == 1
+            ? new CursorSyncStatus("error", 0, null, false, [], Reason: "keychain_consent")
+            : Status("ok", 1);
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var running = controller.RunSync(userInitiated: true);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        var consent = controller.ConsentChanged();
+        Assert.True(consent.IsCompleted, "queued behind the running round");
+        gate.Set();
+        await running;
+        Assert.Equal(2, core.UserSyncs);
+        Assert.Equal("ok", controller.State);
+        Assert.Null(controller.Reason);
+
+        // No round running: the change starts one user round itself.
+        await controller.ConsentChanged();
+        Assert.Equal(3, core.UserSyncs);
+    }
+
+    /// <summary>Control for the test above: a plain Sync Now pressed during a
+    /// user round is dropped (the reason the consent controls do not use
+    /// it).</summary>
+    [Fact]
+    public async Task APlainSyncNowDuringAUserRoundIsDropped()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        var core = new FakeCore();
+        using var gate = new ManualResetEventSlim(false);
+        core.SyncGate = gate;
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var running = controller.RunSync(userInitiated: true);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        await controller.RunSync(userInitiated: true);
+        gate.Set();
+        await running;
+        Assert.Equal(1, core.UserSyncs);
+    }
+
     /// <summary>#547: the controller keeps the round's reason for the status
     /// line, and a round that threw has none.</summary>
     [Fact]
@@ -1216,10 +1272,10 @@ public class CursorSyncTests
         ["Cursor stores its sign-in encrypted. Syrtis needs your permission to read it."] =
             "Cursor 把登入資訊加密儲存，Syrtis 需要你的授權才能讀取。",
         ["Allow reading Cursor's encrypted sign-in…"] = "允許讀取 Cursor 的加密登入…",
-        ["Cursor 3.27 and later can store its sign-in encrypted. To read it, Syrtis unlocks the key Cursor keeps in its \"Local State\" file on this PC; Windows does not ask separately, so this is the only time you are asked. That key can decrypt everything Cursor stores encrypted, but Syrtis uses it only to read your Cursor sign-in, keeps it in memory for that read alone, and never saves or logs it. The sign-in is sent only to Cursor's usage service (cursor.com). Turning on Cursor sync does not grant this. Withdraw stops Syrtis reading Cursor's encrypted sign-in; if Cursor stores its sign-in unencrypted, Syrtis still reads that and Withdraw does not change it."] =
-            "Cursor 3.27 以後的版本可能會把登入資訊加密儲存。要讀取它，Syrtis 會解開 Cursor 存在這台電腦「Local State」檔案裡的金鑰；Windows 不會另外詢問，所以這是唯一一次向你徵詢。那把金鑰能解開 Cursor 所有加密儲存的資料，但 Syrtis 只用它來讀取你的 Cursor 登入，而且只在那次讀取時留在記憶體中，不會儲存或記錄。登入資訊只會送到 Cursor 的用量服務（cursor.com）。開啟 Cursor 同步並不代表授權這件事。撤回後，Syrtis 就不再讀取 Cursor 的加密登入；如果 Cursor 以未加密的方式儲存登入，Syrtis 仍會讀取，撤回不會改變這一點。",
+        ["Cursor 3.27 and later can store its sign-in encrypted. To read it, Syrtis unlocks the key Cursor keeps in its \"Local State\" file on this PC. Windows does not ask, so this confirmation is the only check. That key can decrypt everything Cursor stores encrypted, but Syrtis uses it only to read your Cursor sign-in, keeps it in memory for that read alone, and never saves or logs it. The sign-in is sent only to Cursor's usage service (cursor.com). Turning on Cursor sync does not grant this. Withdraw stops Syrtis reading Cursor's encrypted sign-in; if Cursor stores its sign-in unencrypted, Syrtis still reads that and Withdraw does not change it."] =
+            "Cursor 3.27 以後的版本可能會把登入資訊加密儲存。要讀取它，Syrtis 會解開 Cursor 存在這台電腦「Local State」檔案裡的金鑰。Windows 不會詢問，所以這個確認是唯一的把關。那把金鑰能解開 Cursor 所有加密儲存的資料，但 Syrtis 只用它來讀取你的 Cursor 登入，而且只在那次讀取時留在記憶體中，不會儲存或記錄。登入資訊只會送到 Cursor 的用量服務（cursor.com）。開啟 Cursor 同步並不代表授權這件事。撤回後，Syrtis 就不再讀取 Cursor 的加密登入；如果 Cursor 以未加密的方式儲存登入，Syrtis 仍會讀取，撤回不會改變這一點。",
         ["Withdraw"] = "撤回",
-        ["consent.action.allow"] = "允許",
+        ["Allow access"] = "允許存取",
     };
 
     private static Dictionary<string, string> Catalog(string tag) =>

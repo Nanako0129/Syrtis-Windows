@@ -4501,10 +4501,10 @@ fn a_sealed_token_without_consent_refuses_and_loads_no_key() {
     assert!(seen.lock().unwrap().is_empty(), "nothing was sent");
 }
 
-/// Acceptance 1: every malformed sealed token yields a fixed reason and no
-/// fixture fragment appears in the reason. v11/v20 are unsupported; a wrong
-/// key and a truncated blob are unreadable; bad base64 and a v2 envelope are
-/// refused at classification.
+/// Acceptance 1: every malformed sealed token yields its fixed reason. v11/v20
+/// are unsupported; a wrong key and a truncated blob are unreadable; bad
+/// base64 and a v2 envelope are refused at classification. (The no-leak check
+/// is `sealed_rounds_leak_no_fixture_into_status_or_reasons`.)
 /// Mutation: `open_sealed` drop the version gate
 /// (`if !blob.starts_with(b"v10") { … }` removed) makes v11/v20 reach the
 /// decrypt and report `token_sealed_unreadable`, not `token_sealed_unsupported`.
@@ -4519,8 +4519,8 @@ fn malformed_sealed_tokens_map_to_fixed_reasons_without_leaking() {
         (outcome.stop.state, outcome.stop.reason)
     };
 
-    // v11 / v20: unsupported, after consent, no decrypt success. The key is
-    // loaded (version gate is before consent? no — before load), so use a spy.
+    // v11 / v20: unsupported. The version gate precedes the consent check
+    // and the key load, so the spy must see no load.
     for payload in [seal::SEALED_V11_B64, seal::SEALED_V20_B64] {
         let spy = LoaderSpy::new();
         let (state, reason) =
@@ -4553,12 +4553,128 @@ fn malformed_sealed_tokens_map_to_fixed_reasons_without_leaking() {
         let (_, reason) = run_case(token, &|| true, &unexpected_seal_key);
         assert_eq!(reason, Some(code), "{token}");
     }
+}
 
-    // No reason code carries any fixture fragment.
-    for code in ["token_sealed_unsupported", "token_sealed_unreadable", "keychain_consent"] {
-        assert!(!seal::SEAL_JWT.contains(code));
-        assert!(!seal::SEALED_V10_B64.contains(code));
+/// Every form of the fixture secret a leak could take: the plaintext JWT and
+/// each of its segments, base64 of it, the sealed payload, and the key bytes
+/// (hex, base64, and Rust's `{:?}` array form).
+fn fixture_secret_forms() -> Vec<String> {
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    let mut forms = vec![
+        seal::SEAL_JWT.to_string(),
+        STANDARD.encode(seal::SEAL_JWT),
+        URL_SAFE_NO_PAD.encode(seal::SEAL_JWT),
+        seal::SEALED_V10_B64.to_string(),
+        seal::SEALED_V10_B64[..24].to_string(),
+        seal::SEAL_KEY.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        seal::SEAL_KEY.iter().map(|b| format!("{b:02X}")).collect::<String>(),
+        STANDARD.encode(seal::SEAL_KEY),
+        format!("{:?}", &seal::SEAL_KEY[..4]).trim_end_matches(']').to_string(),
+    ];
+    forms.extend(seal::SEAL_JWT.split('.').map(str::to_string));
+    forms
+}
+
+/// Acceptance 1 ("no fixture fragment in any reason, status JSON or log"):
+/// full sync rounds through `sync_with` — the success case and every failure
+/// case — produce a status JSON (headline and per-profile reasons) that holds
+/// none of the fixture's secret forms. `cursor_sync` writes no log lines, so
+/// the status JSON and the reasons are its whole output channel.
+/// Mutation: cursor_sync.rs `run`
+/// `Ok(token) => login.access_token = token,`
+/// -> `Ok(token) => return Outcome::refused(Stop::error(Box::leak(token.into_boxed_str()))),`
+/// puts the plaintext into the status `reason`.
+#[test]
+fn sealed_rounds_leak_no_fixture_into_status_or_reasons() {
+    let _guard = lock();
+    let good = |_: &Path| -> Result<Box<dyn SealKey>, ()> {
+        Ok(Box::new(crate::win_safe_storage::test_support::key_from_raw(seal::SEAL_KEY)))
+    };
+    let wrong = |_: &Path| -> Result<Box<dyn SealKey>, ()> {
+        Ok(Box::new(crate::win_safe_storage::test_support::key_from_raw([0x00; 32])))
+    };
+    let cases: [(&str, String, &LoadSealKey<'_>, &str); 5] = [
+        ("success", seal::sealed_token(seal::SEALED_V10_B64), &good, "ok"),
+        ("wrong key", seal::sealed_token(seal::SEALED_V10_B64), &wrong, "error"),
+        ("truncated", seal::sealed_token(seal::SEALED_TRUNCATED_B64), &good, "error"),
+        ("bad base64", "cursor-safe-storage:v1:!!!!".to_string(), &good, "error"),
+        ("v2 prefix", "cursor-safe-storage:v2:AAAA".to_string(), &good, "error"),
+    ];
+    let forms = fixture_secret_forms();
+    for (name, token, loader, state) in cases {
+        let tmp = TempDir::new();
+        let db = nested_signed_in_db(tmp.path(), &token);
+        let dir = tmp.path().join("sync");
+        let (url, _seen) = serve(vec![json_ok(&page(1, &["a"]))]);
+        let target = Target {
+            consent: &allow_consent,
+            load_seal_key: loader,
+            ..target(&db, &url)
+        };
+        let registry = registry(true, &dir);
+        let source = || registry.read().unwrap().clone();
+        let status = sync_with(true, &target, &source, Some(limits())).0;
+        assert_eq!(status["state"], state, "{name}: {status}");
+        let text = status.to_string();
+        for form in &forms {
+            assert!(!text.contains(form.as_str()), "{name}: status carries {form:?}");
+        }
     }
+}
+
+/// C6 for the default profile: its key comes from `<user-data-dir>\Local
+/// State`, the `…\Cursor` three levels above `User\globalStorage\state.vscdb`.
+/// Mutation: cursor_sync.rs `local_state_path`
+/// `            .and_then(Path::parent)\n            .and_then(Path::parent)?`
+/// -> `            .and_then(Path::parent)?` (two parents: `…\Cursor\User`).
+#[test]
+fn the_default_profile_reads_the_user_data_dir_local_state() {
+    let tmp = TempDir::new();
+    let base = tmp.path();
+    let db = nested_signed_in_db(base, &seal::sealed_token(seal::SEALED_V10_B64));
+    let dir = base.join("sync");
+    let spy = LoaderSpy::new();
+    let (url, _seen) = serve(vec![json_ok(&page(1, &["a"]))]);
+    let outcome = run_sealed(&db, &dir, &url, &|| true, &spy.loader(), None);
+    assert_eq!(outcome.stop.state, State::Ok, "{:?}", outcome.stop.reason);
+    assert_eq!(
+        *spy.paths.lock().unwrap(),
+        vec![base.join("Cursor").join("Local State")]
+    );
+}
+
+/// C8: once unsealed, the token is wiped on a failure path after
+/// `open_sealed` (here `account_mismatch`: the stored glass id names another
+/// user), not left to an ordinary String drop. Observed through the test-only
+/// record `wipe_str` keeps: a wipe of the token's exact length, all zero after.
+/// Mutation: cursor_sync.rs `impl Drop for WipedLogin`
+/// `wipe_str(&mut self.0.access_token);` -> `let _ = &self.0.access_token;`
+#[test]
+fn an_unsealed_token_is_wiped_on_a_failure_after_open() {
+    let tmp = TempDir::new();
+    let gs = tmp.path().join("Cursor").join("User").join("globalStorage");
+    std::fs::create_dir_all(&gs).unwrap();
+    let sealed = seal::sealed_token(seal::SEALED_V10_B64);
+    let db = state_db(
+        &gs,
+        &[
+            ("cursorAuth/accessToken", &format!("\"{sealed}\"")),
+            ("glass.lastSignedInAuthId", &format!("glass-{OTHER_USER}")),
+        ],
+    );
+    let dir = tmp.path().join("sync");
+    let spy = LoaderSpy::new();
+    let (url, seen) = serve(vec![json_ok(&page(1, &["a"]))]);
+    WIPED_LENGTHS.with(|wiped| wiped.borrow_mut().clear());
+    let outcome = run_sealed(&db, &dir, &url, &|| true, &spy.loader(), None);
+    assert_eq!(outcome.stop.reason, Some("account_mismatch"));
+    assert_eq!(spy.calls(), 1, "the token was unsealed before the refusal");
+    assert!(seen.lock().unwrap().is_empty());
+    let wiped = WIPED_LENGTHS.with(|wiped| wiped.borrow().clone());
+    assert!(
+        wiped.contains(&(seal::SEAL_JWT.len(), true)),
+        "the unsealed token was not wiped: {wiped:?}"
+    );
 }
 
 /// Acceptance 1 (C2): consent withdrawn between the login read and the key

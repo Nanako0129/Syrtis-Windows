@@ -65,8 +65,10 @@ public sealed class GrokBotConsent
     /// the next launch. The composer serializes it under one lock, tells the
     /// core first (a throwing setter persists nothing and reaches the caller)
     /// then the store, keeps the other id's answer, and makes no core call for
-    /// a no that changes nothing. <see cref="QuotaEpoch.Signal"/> fires only
-    /// when the installed payload changed, so both quota pollers refetch.</summary>
+    /// an answer that changes nothing installed (a repeat, or a "no" while
+    /// nothing of Grok Bot's is installed). <see cref="QuotaEpoch.Signal"/>
+    /// fires only when the installed payload changed, so both quota pollers
+    /// refetch.</summary>
     public void Answer(bool granted)
     {
         if (_composer.Install(KeychainConsentComposer.GrokBotId, granted))

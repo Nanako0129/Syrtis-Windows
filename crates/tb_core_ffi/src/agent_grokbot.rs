@@ -1100,17 +1100,22 @@ pub(crate) mod tests {
         assert!(!fallback_loads("nonjwt", "tok-123"));
     }
 
-    /// Plan S3b (C1): decryption lives only in `cursor_sync`, never in the
-    /// shared reader the Grok fallback uses. Even with the "cursor" grant
-    /// installed, a sealed Cursor token is still "no Cursor login" here: the
-    /// fallback reads the stored token (`read_login`, which never decrypts)
-    /// and `jwt_claims` rejects the `cursor-safe-storage:` form, so no key is
-    /// ever loaded on this path.
-    /// Mutation: `load_credentials_from` decrypt a sealed token before the
-    /// `jwt_claims` check (e.g. call a key loader on a `cursor-safe-storage:`
-    /// value) — this test then loads a cookie and fails.
+    /// A real Cursor-sealed v10 token for a known key, generated off-crate by
+    /// `gen_cursor_seal_fixture.py` (Python `cryptography`; the same constant
+    /// as `cursor_sync::tests::seal::SEALED_V10_B64`, copied because those
+    /// tests are Windows-only and these run on every host).
+    const SEALED_V10_B64: &str = "djEwEBESExQVFhcYGRob8y7LMdbbURFTHfSpPmcsynvhlGKbC2JZQpeUYfF7FxHg8691IiNZby8jRSyfn6mEHjZ4GN8uqEuqMJ++cpZsz/aq9Wo5wZTO7dtzbn8osksl8kdVuz1t6WxA6b4t+eh2Ch5eUWit9b7T2vZrX8uKiowSTT0WTMYmqNrtgBwwLRFMrjReMmF0eHJs/s/8k263WIcFipqHnrZYhK6tFfyL";
+
+    /// Plan S3b (C1): with the "cursor" grant installed and Grok Bot signed
+    /// out, the Grok route given a real sealed Cursor token returns Ok(None),
+    /// and the key loader the route carries is called 0 times (0 decrypts).
+    /// Measured: the result and the spy's counts; nothing else.
+    /// Mutation: agent_grokbot.rs `load_credentials_from_sources`
+    /// `    load_credentials_from(cursor_path)`
+    /// -> `    load_key(&cursor_path.with_file_name("Local State"))?;\n    load_credentials_from(cursor_path)`
+    /// (the Cursor path reaches the key loader) makes the spy count 1.
     #[test]
-    fn the_cursor_fallback_ignores_a_sealed_token_even_when_cursor_is_granted() {
+    fn the_grok_route_loads_no_key_for_a_sealed_cursor_token_even_when_cursor_is_granted() {
         let _guard = crate::keychain_consent::TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -1118,16 +1123,24 @@ pub(crate) mod tests {
         crate::keychain_consent::set_from_json(r#"{"cursor":true}"#).unwrap();
         assert!(crate::keychain_consent::allowed("cursor"));
 
-        let sealed = format!(
-            "cursor-safe-storage:v1:{}",
-            base64::engine::general_purpose::STANDARD.encode(b"v10 sealed blob")
+        let sealed = format!("cursor-safe-storage:v1:{SEALED_V10_B64}");
+        let (dir, cursor_path) = temp_state_db(
+            "sealed-granted",
+            &[
+                ("cursorAuth/accessToken", &format!("\"{sealed}\"")),
+                ("glass.lastSignedInAuthId", &format!("glass-{USER_ID}")),
+            ],
         );
-        assert!(
-            !fallback_loads("sealed-granted", &format!("\"{sealed}\"")),
-            "the Grok fallback never decrypts, grant or no grant"
-        );
-
+        // Grok Bot signed out: no desktop secrets file.
+        let desktop_path = dir.join("sand-secrets.json");
+        let spy = Spy::default();
+        let loaded =
+            load_credentials_from_sources(&desktop_path, &cursor_path, &|| true, &spy.loader());
+        std::fs::remove_dir_all(&dir).ok();
         crate::keychain_consent::reset_for_test();
+
+        assert!(matches!(loaded, Ok(None)), "the sealed token is no Cursor login");
+        assert_eq!(spy.counts(), (0, 0), "no key load and no decrypt on the Grok path");
     }
 
     /// Control for the two above: the JWT twin loads, unchanged.
