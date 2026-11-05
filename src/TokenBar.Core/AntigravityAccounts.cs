@@ -117,16 +117,18 @@ public static class AntigravityAccounts
     /// <summary>The one path every list change goes through: re-read the
     /// store, apply <paramref name="change"/>, save and install, under one
     /// lock, so two changes cannot interleave and none starts from a stale
-    /// copy (a capture that finished after a remove).</summary>
-    public static void Mutate(
+    /// copy (a capture that finished after a remove). Returns
+    /// <paramref name="install"/>'s answer: whether the core now holds the
+    /// saved list (Remove deletes nothing when it does not, review F3).</summary>
+    public static bool Mutate(
         SettingsStore store,
-        Action install,
+        Func<bool> install,
         Func<IReadOnlyList<AntigravityAccount>, IReadOnlyList<AntigravityAccount>> change)
     {
         lock (MutateGate)
         {
             Save(store, change(Load(store)));
-            install();
+            return install();
         }
     }
 
@@ -161,13 +163,18 @@ public sealed class AntigravityAccountsInstaller(
     /// <summary>Install after a list change (<see cref="AntigravityAccounts.Mutate"/>:
     /// a user action, or a capture that can land during an in-flight fetch),
     /// raising <see cref="AntigravityAccounts.Changed"/> when the core took a
-    /// new list, so the pollers (and an in-flight shared fetch) follow.</summary>
-    public void Install()
+    /// new list, so the pollers (and an in-flight shared fetch) follow.
+    /// Returns whether the core now holds the stored list: true when it took
+    /// it or already had it, false when the setter failed.</summary>
+    public bool Install()
     {
-        if (TryInstall())
+        var (installed, changed) = TryInstall();
+        if (changed)
         {
             AntigravityAccounts.RaiseChanged();
         }
+
+        return installed;
     }
 
     /// <summary>Install from the shared fetch itself, before its
@@ -177,7 +184,8 @@ public sealed class AntigravityAccountsInstaller(
     /// a stored account, and after every retried failed install).</summary>
     public void InstallForFetch() => TryInstall();
 
-    private bool TryInstall()
+    /// <summary>(the core holds the stored list, it took a new one).</summary>
+    private (bool Installed, bool Changed) TryInstall()
     {
         lock (_gate)
         {
@@ -185,7 +193,7 @@ public sealed class AntigravityAccountsInstaller(
             if (next == (_installed ?? AntigravityAccounts.EmptyPayload))
             {
                 _installed = next;
-                return false;
+                return (true, false);
             }
 
             try
@@ -196,11 +204,11 @@ public sealed class AntigravityAccountsInstaller(
             {
                 // Type only: nothing from the payload (an email) is logged.
                 log($"antigravityAccounts install failed: {ex.GetType().Name}");
-                return false;
+                return (false, false);
             }
 
             _installed = next;
-            return true;
+            return (true, true);
         }
     }
 }

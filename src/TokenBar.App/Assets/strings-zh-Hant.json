@@ -571,6 +571,7 @@
   "The login had an unexpected format. Nothing was saved.": "登入的格式不如預期，沒有儲存任何東西。",
   "Couldn't save to Windows Credential Manager.": "無法存進 Windows 認證管理員。",
   "Couldn't delete the copy from Windows Credential Manager.": "無法從 Windows 認證管理員刪除副本。",
+  "Syrtis couldn't prepare its Antigravity settings on this PC, so Capture and automatic capture are off until Syrtis restarts.": "Syrtis 無法在這台電腦上準備 Antigravity 設定，在 Syrtis 重新啟動前，擷取與自動擷取都會停用。",
   "Copy command": "複製指令",
   "No data": "沒有資料",
   "Checking…": "查詢中…",

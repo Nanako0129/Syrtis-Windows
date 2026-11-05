@@ -205,7 +205,7 @@ public class AntigravityLocalSettingsTests
             AutoCapture: _ => { calls.Enqueue("auto"); return new AntigravityAutoCaptureResult("captured", KeyB, "b@example.com"); },
             Capture: () => { calls.Enqueue("capture"); return new AntigravityAccount(KeyB, "b@example.com"); },
             Remove: _ => calls.Enqueue("remove"),
-            Install: () => calls.Enqueue("install"));
+            Install: () => { calls.Enqueue("install"); return true; });
         var capture = new AntigravityAutoCapture(io, local);
 
         AntigravityFetch.Run(
@@ -219,21 +219,58 @@ public class AntigravityLocalSettingsTests
         Assert.Null(capture.Current.Key);
     }
 
-    /// <summary>A local file that exists without the marker (SettingsStore
-    /// set a corrupt one aside) never falls back to the roaming values.</summary>
-    [Fact]
-    public void AnUnreadableLocalStoreStartsEmptyInsteadOfRereadingRoaming()
+    /// <summary>Review F2: a local file without the done marker (a corrupt
+    /// one SettingsStore sets aside, <c>null</c>, <c>{}</c>) has not been
+    /// moved to: the move runs, gated by the probe as always.</summary>
+    [Theory]
+    [InlineData("{ not json")]
+    [InlineData("null")]
+    [InlineData("{}")]
+    public void ALocalFileWithoutTheMarkerStillGetsTheMove(string contents)
     {
         var paths = new Paths();
-        var roaming = Roaming(paths, KeyA);
+        var roaming = Roaming(paths, KeyA, KeyB);
+        var before = Bytes(paths.Roaming);
         Directory.CreateDirectory(Path.GetDirectoryName(paths.Local)!);
-        File.WriteAllText(paths.Local, "{ not json");
+        File.WriteAllText(paths.Local, contents);
 
         var local = AntigravityLocalSettings.Open(paths.Local, roaming, OnlyAHere, NoLog);
 
-        Assert.Empty(AntigravityAccounts.Load(local));
-        Assert.False(local.GetBool(AntigravityAutoCapture.EnabledKey, false));
-        Assert.True(new SettingsStore(paths.Local).GetBool(AntigravityLocalSettings.MigratedKey, false));
+        Assert.Equal([KeyA], AntigravityAccounts.Load(local).Select(a => a.Key));
+        Assert.True(local.GetBool(AntigravityAutoCapture.EnabledKey, false));
+        var reread = new SettingsStore(paths.Local);
+        Assert.True(reread.GetBool(AntigravityLocalSettings.MigratedKey, false));
+        Assert.Equal([KeyA], AntigravityAccounts.Load(reread).Select(a => a.Key));
+        Assert.Equal(before, Bytes(paths.Roaming));
+    }
+
+    /// <summary>Review F1 through the real path: after a failed move the
+    /// session store does not save, so Capture makes no core call and nothing
+    /// is written anywhere.</summary>
+    [Fact]
+    public async Task AfterAFailedMoveCaptureMakesNoCoreCallAndWritesNothing()
+    {
+        var paths = new Paths();
+        var roaming = Roaming(paths, KeyA);
+        var before = Bytes(paths.Roaming);
+        var session = AntigravityLocalSettings.Open(paths.Local, roaming, _ => "failed", NoLog);
+        Assert.False(session.Persists);
+        var calls = new ConcurrentQueue<string>();
+        var io = new AntigravityAutoCapture.Io(
+            Marker: () => { calls.Enqueue("marker"); return "133000000000000001"; },
+            AutoCapture: _ => { calls.Enqueue("auto"); return new AntigravityAutoCaptureResult("captured", KeyA, "a@example.com"); },
+            Capture: () => { calls.Enqueue("capture"); return new AntigravityAccount(KeyA, "a@example.com"); },
+            Remove: _ => calls.Enqueue("remove"),
+            Install: () => { calls.Enqueue("install"); return true; });
+        var capture = new AntigravityAutoCapture(io, session);
+
+        await capture.ManualCapture();
+
+        Assert.Empty(calls);
+        Assert.Empty(AntigravityAccounts.Load(session));
+        Assert.Equal(AntigravityAutoCapture.SettingsUnavailable, capture.LastErrorCode);
+        Assert.False(File.Exists(paths.Local));
+        Assert.Equal(before, Bytes(paths.Roaming));
     }
 
     /// <summary>The move's single save: every key lands in one file write

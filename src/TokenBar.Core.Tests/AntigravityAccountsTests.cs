@@ -33,6 +33,9 @@ public class AntigravityAccountsTests
             () => new AntigravityAutoCaptureResult("captured", KeyA, "a@example.com");
         public Exception? RemoveError;
         public Exception? InstallError;
+        /// <summary>The core refuses the list (the production installer
+        /// logs and answers false; it never throws).</summary>
+        public bool InstallFails;
         public ManualResetEventSlim? AutoGate;
         public readonly TaskCompletionSource AutoStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public ManualResetEventSlim? MarkerGate;
@@ -96,6 +99,8 @@ public class AntigravityAccountsTests
                 {
                     throw error;
                 }
+
+                return !InstallFails;
             });
     }
 
@@ -191,14 +196,14 @@ public class AntigravityAccountsTests
             },
             _ => { });
 
-        installer.Install();
+        Assert.True(installer.Install(), "an unchanged empty list is held");
         Assert.Equal(0, sets);
 
         AntigravityAccounts.Save(store, [new AntigravityAccount(KeyA, "a@example.com")]);
-        installer.Install();
+        Assert.False(installer.Install(), "a failed setter must report it (review F3)");
         fail = false;
-        installer.Install();
-        installer.Install();
+        Assert.True(installer.Install());
+        Assert.True(installer.Install(), "unchanged after a success is held");
         Assert.Equal(2, sets);
     }
 
@@ -1128,7 +1133,11 @@ public class AntigravityAccountsTests
         var events = new ConcurrentQueue<string>();
         var io = new FakeIo().Io with
         {
-            Install = () => events.Enqueue("install:" + string.Join(",", AntigravityAccounts.Load(store).Select(a => a.Key))),
+            Install = () =>
+            {
+                events.Enqueue("install:" + string.Join(",", AntigravityAccounts.Load(store).Select(a => a.Key)));
+                return true;
+            },
             Remove = key => events.Enqueue("remove:" + key),
         };
 
@@ -1136,6 +1145,59 @@ public class AntigravityAccountsTests
 
         Assert.Equal(["install:" + KeyB, "remove:" + KeyA], events);
         Assert.Equal([KeyB], AntigravityAccounts.Load(store).Select(a => a.Key));
+    }
+
+    /// <summary>Review F3: the core did not take the list without the key, so
+    /// the key is still registered and an in-flight refresh could write the
+    /// credential back. Nothing is deleted, the row stays where it was, and the
+    /// existing delete-failure sentence is shown.</summary>
+    [Fact]
+    public async Task ARemoveWhoseRegistryInstallFailsDeletesNothing()
+    {
+        var store = TempStore();
+        AntigravityAccounts.Save(store, [new(KeyA, "a@example.com"), new(KeyB, "b@example.com")]);
+        var io = new FakeIo { InstallFails = true };
+        var capture = new AntigravityAutoCapture(io.Io, store);
+
+        await capture.Remove(KeyA);
+
+        Assert.DoesNotContain("remove", io.Calls);
+        Assert.Equal([KeyA, KeyB], AntigravityAccounts.Load(store).Select(a => a.Key));
+        Assert.Equal(AntigravityAutoCapture.KeychainDeleteFailed, capture.LastErrorCode);
+    }
+
+    /// <summary>Review F1: while this session's settings cannot be saved
+    /// (here an in-memory store; the failed-move path is in
+    /// AntigravityLocalSettingsTests), Capture and turning automatic capture
+    /// on are refused before any native call or confirmation.</summary>
+    [Fact]
+    public async Task WhileTheSettingsCannotBeSavedCaptureAndTurningOnAreRefused()
+    {
+        var store = SettingsStore.InMemory();
+        var io = new FakeIo();
+        var capture = new AntigravityAutoCapture(io.Io, store);
+        Assert.Equal(AntigravityAutoCapture.SettingsUnavailable, capture.LastErrorCode);
+        var confirms = 0;
+
+        await capture.ManualCapture();
+        Assert.False(await capture.TurnOn(() =>
+        {
+            confirms++;
+            return Task.FromResult(true);
+        }));
+        await capture.SetEnabled(true);
+
+        Assert.Empty(io.Calls);
+        Assert.Equal(0, confirms);
+        Assert.False(capture.IsEnabled);
+        Assert.Empty(AntigravityAccounts.Load(store));
+        Assert.Null(capture.Current.Key);
+        Assert.Equal(AntigravityAutoCapture.SettingsUnavailable, capture.LastErrorCode);
+
+        // Control: the same Capture on a store that saves reaches the core.
+        var control = new FakeIo();
+        await new AntigravityAutoCapture(control.Io, TempStore()).ManualCapture();
+        Assert.Contains("capture", control.Calls);
     }
 
     [Fact]

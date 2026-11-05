@@ -54,7 +54,7 @@ public sealed class AntigravityAutoCapture
         Func<IReadOnlyList<string>, AntigravityAutoCaptureResult> AutoCapture,
         Func<AntigravityAccount> Capture,
         Action<string> Remove,
-        Action Install);
+        Func<bool> Install);
 
     public const string EnabledKey = "tokenbar.antigravity.autoCapture";
 
@@ -69,6 +69,19 @@ public sealed class AntigravityAutoCapture
     /// <summary>The error code recorded for a failure that carried no core
     /// code (it maps to the generic sentence).</summary>
     public const string UnexpectedError = "unexpected";
+
+    /// <summary>The code recorded while this session's Antigravity settings
+    /// cannot be saved (<see cref="SettingsStore.Persists"/> false: the move
+    /// out of the roaming settings failed, or the local file could not be
+    /// read). Capture and turning automatic capture on are refused then: a
+    /// captured credential would have no list row after exit, so no card and
+    /// no Remove (review F1).</summary>
+    public const string SettingsUnavailable = "settings_unavailable";
+
+    /// <summary>The code recorded when Remove could not take the key out of
+    /// the core's registry; the credential is then not deleted (review F3).
+    /// It shows the existing delete-failure sentence.</summary>
+    public const string KeychainDeleteFailed = "keychain_delete_failed";
 
     /// <summary>The live instance for this process; set once at launch.</summary>
     public static AntigravityAutoCapture? Shared { get; set; }
@@ -105,22 +118,41 @@ public sealed class AntigravityAutoCapture
         _store = store;
         _log = log ?? (_ => { });
         _markerTimeout = markerTimeout ?? MarkerTimeout;
+        if (ParseBinding(store.GetString(CurrentKey)) is { } binding)
+        {
+            _currentKey = binding.Key;
+            _currentMarker = binding.Marker;
+        }
+
+        if (!store.Persists)
+        {
+            _errorCode = SettingsUnavailable;
+        }
+    }
+
+    /// <summary>A stored <see cref="CurrentKey"/> value: its key and marker,
+    /// both non-empty; null when absent or unreadable (then there is no
+    /// binding, exactly as if none was stored).</summary>
+    internal static (string Key, string Marker)? ParseBinding(string? raw)
+    {
+        if (string.IsNullOrEmpty(raw))
+        {
+            return null;
+        }
+
         try
         {
-            if (store.GetString(CurrentKey) is { Length: > 0 } raw
-                && JsonSerializer.Deserialize<Dictionary<string, string>>(raw) is { } stored
+            return JsonSerializer.Deserialize<Dictionary<string, string>>(raw) is { } stored
                 && stored.TryGetValue("key", out var key)
                 && stored.TryGetValue("marker", out var marker)
                 && !string.IsNullOrEmpty(key)
-                && !string.IsNullOrEmpty(marker))
-            {
-                _currentKey = key;
-                _currentMarker = marker;
-            }
+                && !string.IsNullOrEmpty(marker)
+                    ? (key, marker)
+                    : null;
         }
         catch (JsonException)
         {
-            // Unreadable: no binding, exactly as if none was stored.
+            return null;
         }
     }
 
@@ -389,6 +421,11 @@ public sealed class AntigravityAutoCapture
     /// Settings turns it on only through <see cref="TurnOn"/>.</summary>
     public async Task SetEnabled(bool on)
     {
+        if (on && RefusedForSettings())
+        {
+            return;
+        }
+
         lock (_gate)
         {
             // Under the gate, so the in-lock toggle checks (Poll's commit
@@ -414,6 +451,12 @@ public sealed class AntigravityAutoCapture
     /// was turned on.</summary>
     public async Task<bool> TurnOn(Func<Task<bool>> confirm)
     {
+        // Before the confirmation: there is nothing to confirm.
+        if (RefusedForSettings())
+        {
+            return false;
+        }
+
         if (!await confirm())
         {
             return false;
@@ -428,6 +471,9 @@ public sealed class AntigravityAutoCapture
     /// capture once more when it is on.</summary>
     public async Task ManualCapture()
     {
+        // Review F1: a capture now would leave a credential with no list row
+        // after exit (no card, no Remove), so it is refused, before any call.
+        var refused = !_store.Persists;
         lock (_gate)
         {
             if (_busy)
@@ -435,8 +481,21 @@ public sealed class AntigravityAutoCapture
                 return;
             }
 
-            _busy = true;
-            _errorCode = null;
+            if (refused)
+            {
+                _errorCode = SettingsUnavailable;
+            }
+            else
+            {
+                _busy = true;
+                _errorCode = null;
+            }
+        }
+
+        if (refused)
+        {
+            Notify(false);
+            return;
         }
 
         var changed = false;
@@ -532,21 +591,31 @@ public sealed class AntigravityAutoCapture
             Notify(false);
             var position = -1;
             AntigravityAccount? row = null;
-            AntigravityAccounts.Mutate(_store, _io.Install, accounts =>
+            var dropped = AntigravityAccounts.Mutate(_store, _io.Install, accounts =>
             {
                 position = accounts.ToList().FindIndex(a => a.Key == key);
                 row = position >= 0 ? accounts[position] : null;
                 return [.. accounts.Where(a => a.Key != key)];
             });
-            string? code = null;
-            try
+            // The core did not take the shorter list: the key is still
+            // registered, so a refresh in flight could write the item back.
+            // Nothing is deleted; the row goes back below (review F3).
+            string? code = dropped ? null : KeychainDeleteFailed;
+            if (code is not null)
             {
-                await Task.Run(() => _io.Remove(key)).ConfigureAwait(false);
+                _log("antigravity remove: registry install failed; nothing deleted");
             }
-            catch (Exception ex)
+            else
             {
-                code = CodeOf(ex);
-                _log($"antigravity remove failed: {ex.GetType().Name}");
+                try
+                {
+                    await Task.Run(() => _io.Remove(key)).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    code = CodeOf(ex);
+                    _log($"antigravity remove failed: {ex.GetType().Name}");
+                }
             }
 
             // An invalid key has no Credential Manager entry and no card (the
@@ -596,6 +665,24 @@ public sealed class AntigravityAutoCapture
 
         Notify(changed);
         await PollIfOwed().ConfigureAwait(false);
+    }
+
+    /// <summary>True, with <see cref="SettingsUnavailable"/> recorded and
+    /// Settings told, when this session's settings cannot be saved.</summary>
+    private bool RefusedForSettings()
+    {
+        if (_store.Persists)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            _errorCode = SettingsUnavailable;
+        }
+
+        Notify(false);
+        return true;
     }
 
     private bool SetCurrentLocked(string key, string? marker)

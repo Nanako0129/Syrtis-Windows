@@ -24,7 +24,14 @@ namespace TokenBar.Core;
 /// A probe that fails or runs past <see cref="ProbeTimeout"/> stops the move:
 /// nothing is written, this session gets an empty in-memory store (no
 /// account, toggle off, no roaming value), and the next launch tries again
-/// (security review S15).
+/// (security review S15). While the store does not persist,
+/// <see cref="AntigravityAutoCapture"/> refuses Capture and turning automatic
+/// capture on (review F1).
+/// </para>
+/// <para>
+/// A local file without the marker (a corrupt one SettingsStore set aside,
+/// <c>null</c>, <c>{}</c>) has not been moved to, whatever else it holds: the
+/// move runs (review F2). The probe still gates every account.
 /// </para>
 /// </summary>
 public static class AntigravityLocalSettings
@@ -62,7 +69,6 @@ public static class AntigravityLocalSettings
         Action<string> log,
         TimeSpan? probeTimeout = null)
     {
-        var existed = File.Exists(path);
         var local = new SettingsStore(path, log);
         if (local.GetBool(MigratedKey, false))
         {
@@ -74,17 +80,6 @@ public static class AntigravityLocalSettings
             // The file is there but could not be read: this store is empty and
             // never writes, so nothing is lost and the next launch reads it.
             log("antigravity local settings unreadable; Antigravity accounts are empty this session");
-            return local;
-        }
-
-        if (existed)
-        {
-            // There was a file without the marker: SettingsStore quarantined
-            // it as corrupt (every save of ours carries the marker). Once a
-            // move has happened the roaming keys are never read again, so
-            // start empty here.
-            log("antigravity local settings were unreadable and set aside; starting empty");
-            local.SetMany(new Dictionary<string, JsonElement> { [MigratedKey] = JsonSerializer.SerializeToElement(true) });
             return local;
         }
 
@@ -158,33 +153,12 @@ public static class AntigravityLocalSettings
         }
 
         if (roaming.GetString(AntigravityAutoCapture.CurrentKey) is { } binding
-            && BindingKey(binding) is { } key
+            && AntigravityAutoCapture.ParseBinding(binding) is { Key: var key }
             && here.Any(a => a.Key == key))
         {
             values[AntigravityAutoCapture.CurrentKey] = JsonSerializer.SerializeToElement(binding);
         }
 
         return values;
-    }
-
-    /// <summary>The key of a stored <c>{"key","marker"}</c> binding, read as
-    /// <see cref="AntigravityAutoCapture"/> reads it; null when it would not
-    /// load.</summary>
-    private static string? BindingKey(string raw)
-    {
-        try
-        {
-            return JsonSerializer.Deserialize<Dictionary<string, string>>(raw) is { } stored
-                && stored.TryGetValue("key", out var key)
-                && stored.TryGetValue("marker", out var marker)
-                && !string.IsNullOrEmpty(key)
-                && !string.IsNullOrEmpty(marker)
-                    ? key
-                    : null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
     }
 }

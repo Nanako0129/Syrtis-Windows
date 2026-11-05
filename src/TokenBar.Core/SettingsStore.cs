@@ -52,6 +52,11 @@ public sealed class SettingsStore
     /// store holds nothing from it and never writes it (see <see cref="Save"/>).</summary>
     public bool LoadFailed => _loadFailed;
 
+    /// <summary>Whether a set can reach a file: false for
+    /// <see cref="InMemory"/> and after a failed load. A write that fails at
+    /// disk time still counts as persisting (the next save heals it).</summary>
+    public bool Persists => !_inMemory && !_loadFailed;
+
     private static Dictionary<string, JsonElement> Load(string path, out bool loadFailed)
     {
         loadFailed = false;

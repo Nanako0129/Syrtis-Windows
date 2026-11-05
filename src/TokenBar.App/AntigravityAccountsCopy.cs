@@ -113,18 +113,24 @@ internal static class AntigravityAccountsCopy
         "invalid_credential_format" => "The login had an unexpected format. Nothing was saved.",
         "keychain_write_failed" => "Couldn't save to Windows Credential Manager.",
         "keychain_delete_failed" => "Couldn't delete the copy from Windows Credential Manager.",
+        // DRAFT (maintainer approval pending, review F1): the app's own code,
+        // shown while this session's Antigravity settings cannot be saved
+        // (AntigravityAutoCapture.SettingsUnavailable).
+        "settings_unavailable" =>
+            "Syrtis couldn't prepare its Antigravity settings on this PC, so Capture and automatic capture are off until Syrtis restarts.",
         _ => Generic,
     };
 
     /// <summary>Every error code ctb.h lists for <c>tb_antigravity_capture</c>
     /// and <c>tb_antigravity_remove</c> (<c>invalid_key</c> is never shown:
-    /// Remove treats it as removed).</summary>
+    /// Remove treats it as removed), plus the app's own
+    /// <c>settings_unavailable</c>.</summary>
     internal static readonly string[] Codes =
     [
         "agy_not_signed_in", "agy_login_unreadable", "agy_login_missing_identity",
         "oauth_client_not_found", "oauth_client_rejected", "refresh_rejected",
         "refresh_unreachable", "account_mismatch", "invalid_credential_format",
-        "keychain_write_failed", "keychain_delete_failed",
+        "keychain_write_failed", "keychain_delete_failed", "settings_unavailable",
     ];
 
     internal static IEnumerable<string> All() =>
