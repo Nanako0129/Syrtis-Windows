@@ -3091,15 +3091,25 @@ fn jwt_claims(token: &str) -> Option<Value> {
 
 struct AgyLogin {
     refresh_token: String,
-    sub: String,
-    aud: String,
+    /// The stored `id_token`'s identity; `None` for agy 1.4.x, whose login
+    /// names its account only by `id_token_email`.
+    stored_id: Option<StoredId>,
     email: Option<String>,
 }
 
-/// agy's Windows credential blob: raw UTF-8 JSON
-/// `{token:{refresh_token,…}, id_token, …}`, no prefix and no base64
-/// (measured on a real device by a structure-only probe). macOS's
-/// `go-keyring-base64:` form is not accepted here.
+struct StoredId {
+    sub: String,
+    aud: String,
+}
+
+/// agy's Windows credential blob: raw UTF-8 JSON, no prefix and no base64
+/// (measured on a real device by a structure-only probe). Either
+/// `{token:{refresh_token,…}, id_token, …}` (older agy), or
+/// `{token:{refresh_token,…}, id_token_email, auth_method}` with no
+/// `id_token` key (agy 1.4.x, measured on 1.4.8). Only an ABSENT `id_token`
+/// takes the second format; a present but malformed one is
+/// `AgyLoginMissingIdentity`. macOS's `go-keyring-base64:` form is not
+/// accepted here.
 fn parse_agy_login(blob: &[u8]) -> Result<AgyLogin, CaptureError> {
     let login: Value =
         serde_json::from_slice(blob).map_err(|_| CaptureError::AgyLoginUnreadable)?;
@@ -3108,6 +3118,15 @@ fn parse_agy_login(blob: &[u8]) -> Result<AgyLogin, CaptureError> {
         .and_then(|token| non_empty_str(token, "refresh_token"))
         .ok_or(CaptureError::AgyLoginUnreadable)?
         .to_string();
+    if login.get("id_token").is_none() {
+        let email =
+            non_empty_str(&login, "id_token_email").ok_or(CaptureError::AgyLoginMissingIdentity)?;
+        return Ok(AgyLogin {
+            refresh_token,
+            stored_id: None,
+            email: Some(email.to_string()),
+        });
+    }
     let claims = non_empty_str(&login, "id_token")
         .and_then(jwt_claims)
         .ok_or(CaptureError::AgyLoginMissingIdentity)?;
@@ -3115,8 +3134,10 @@ fn parse_agy_login(blob: &[u8]) -> Result<AgyLogin, CaptureError> {
     let aud = non_empty_str(&claims, "aud").ok_or(CaptureError::AgyLoginMissingIdentity)?;
     Ok(AgyLogin {
         refresh_token,
-        sub: sub.to_string(),
-        aud: aud.to_string(),
+        stored_id: Some(StoredId {
+            sub: sub.to_string(),
+            aud: aud.to_string(),
+        }),
         email: non_empty_str(&claims, "email").map(str::to_string),
     })
 }
@@ -3132,6 +3153,7 @@ where
 {
     let mut clients: Vec<OAuthClient> = Vec::new();
     for data in artifacts {
+        // An artifact without the id is skipped before its secrets are scanned.
         if !scan_client_ids(&data).iter().any(|id| id == client_id) {
             continue;
         }
@@ -3148,8 +3170,39 @@ where
     clients
 }
 
-/// Every file a captured account's client may be scanned from: the IDE's
-/// binaries plus `agy.exe`, found by path lookup only (never started).
+/// Every (id, secret) pair found inside the same artifact, in scan order,
+/// without duplicates: the candidates when the issuing client is unknown
+/// (agy 1.4.x stores no `id_token`, so no `aud`). macOS F3 (agy 1.4.12)
+/// measured nine, and the issuing one was the fifth.
+fn artifact_clients<I>(artifacts: I) -> Vec<OAuthClient>
+where
+    I: IntoIterator<Item = Vec<u8>>,
+{
+    let mut clients: Vec<OAuthClient> = Vec::new();
+    for data in artifacts {
+        let secrets = scan_client_secrets(&data);
+        for id in scan_client_ids(&data) {
+            for secret in &secrets {
+                let client = OAuthClient {
+                    id: id.clone(),
+                    secret: secret.clone(),
+                };
+                if !clients.contains(&client) {
+                    clients.push(client);
+                }
+            }
+        }
+    }
+    clients
+}
+
+/// Every file a captured account's client may be scanned from: `agy.exe`
+/// first, then the IDE's binaries in their usual order, found by path lookup
+/// only (never started). agy.exe is first by choice, so agy 1.4.x's
+/// candidate search (no `aud`, `artifact_clients` in this order) tries its
+/// clients first. The effect is unmeasured on Windows (no refresh probe), and
+/// macOS F3 found the issuing pair in the IDE's `language_server` (the 5th of
+/// 9 candidates), so this order may not reduce wrong-client requests.
 #[cfg(any(windows, test))]
 fn windows_captured_artifact_candidates(
     local_app_data: Option<&std::ffi::OsStr>,
@@ -3157,8 +3210,10 @@ fn windows_captured_artifact_candidates(
     path: Option<&std::ffi::OsStr>,
     is_file: impl Fn(&Path) -> bool,
 ) -> Vec<PathBuf> {
-    let mut paths = windows_client_artifact_candidates(local_app_data, program_files);
-    paths.extend(agy_executable_from(local_app_data, path, is_file));
+    let mut paths: Vec<PathBuf> = agy_executable_from(local_app_data, path, is_file)
+        .into_iter()
+        .collect();
+    paths.extend(windows_client_artifact_candidates(local_app_data, program_files));
     paths
 }
 
@@ -3183,21 +3238,40 @@ enum TokenRejection {
     /// `invalid_client` / `unauthorized_client`: this secret is not the
     /// issuing client's; capture tries the next candidate.
     WrongClient,
-    Other,
+    /// `invalid_grant`. With a known client the token itself was refused;
+    /// with an unknown one it may only mean another client (RFC 6749 5.2).
+    InvalidGrant,
+    /// A JSON object with any other OAuth `error` code (e.g. `deleted_client`,
+    /// `invalid_request`).
+    OtherOAuthError,
+    /// A 2xx JSON object without an `access_token`.
+    NoAccessToken,
+    /// Not an OAuth answer: a body that is not a JSON object (a proxy or
+    /// captive-portal page), or a non-2xx object without an `error` code.
+    NotOAuth,
 }
 
 /// Only the OAuth `error` code is read from a rejection; `error_description`
 /// is never looked at, so it cannot reach a card or the FFI.
 fn token_response(status: u16, body: &str) -> Result<Value, TokenRejection> {
-    let json: Option<Value> = serde_json::from_str(body).ok();
+    let Some(json) = serde_json::from_str::<Value>(body)
+        .ok()
+        .filter(Value::is_object)
+    else {
+        return Err(TokenRejection::NotOAuth);
+    };
     if (200..=299).contains(&status) {
-        return json
-            .filter(|json| non_empty_str(json, "access_token").is_some())
-            .ok_or(TokenRejection::Other);
+        return if non_empty_str(&json, "access_token").is_some() {
+            Ok(json)
+        } else {
+            Err(TokenRejection::NoAccessToken)
+        };
     }
-    match json.as_ref().and_then(|json| non_empty_str(json, "error")) {
+    match non_empty_str(&json, "error") {
         Some("invalid_client" | "unauthorized_client") => Err(TokenRejection::WrongClient),
-        _ => Err(TokenRejection::Other),
+        Some("invalid_grant") => Err(TokenRejection::InvalidGrant),
+        Some(_) => Err(TokenRejection::OtherOAuthError),
+        None => Err(TokenRejection::NotOAuth),
     }
 }
 
@@ -3231,6 +3305,8 @@ pub(crate) trait CapturedIo {
         Result<AccountScope, AccountScopeError>,
         Result<HistoryScope, AccountScopeError>,
     );
+    /// The captured-account registry right now (`captured_accounts()`).
+    fn registered_accounts(&self) -> Vec<CapturedAccount>;
     async fn quota(
         &self,
         access_token: String,
@@ -3844,6 +3920,10 @@ impl CapturedIo for SystemCapturedIo {
         )
     }
 
+    fn registered_accounts(&self) -> Vec<CapturedAccount> {
+        captured_accounts()
+    }
+
     /// loadCodeAssist, then retrieveUserQuotaSummary, then fetchAvailableModels
     /// with retrieveUserQuota as the fallback, with the same precedence as the
     /// primary remote route (`fetch_with` with no local route).
@@ -4046,8 +4126,14 @@ impl CaptureError {
 }
 
 /// Copy agy's current login into a Syrtis-owned credential and return its key
-/// and label. Nothing is written unless the token refreshed with its own
-/// issuing client and any `id_token` in that response names the same `sub`.
+/// and label. Nothing is written unless the token refreshed at Google and the
+/// response's `id_token` passes `verified_identity`: agy's credential is local
+/// and untrusted, so Google's answer is what names the account. The key is
+/// `captured_key` of Google's `sub` and the label Google's `email`, else the
+/// local email, else the fallback. A response whose `id_token` names another
+/// account or client is `AccountMismatch`; one with no usable `id_token`
+/// (absent, not a JWT, no `sub`) says nothing about the account, so it is
+/// `InvalidCredentialFormat`, and nothing is written either way.
 async fn capture_with<I: CapturedIo>(io: &I) -> Result<CapturedAccount, CaptureError> {
     let CredOutcome::Ok(agy_blob) = io.credential(agy_read_call()) else {
         return Err(CaptureError::AgyNotSignedIn);
@@ -4056,55 +4142,132 @@ async fn capture_with<I: CapturedIo>(io: &I) -> Result<CapturedAccount, CaptureE
     drop(agy_blob);
 
     let (client, json) = refresh_with_issuing_client(io, &login).await?;
-
-    // The stored id_token is local and untrusted; Google's answer is not.
-    if let Some(id_token) = json.get("id_token") {
-        if response_sub(Some(id_token)).as_deref() != Some(login.sub.as_str()) {
-            return Err(CaptureError::AccountMismatch);
-        }
-    }
-
-    let key = captured_key(&login.sub);
+    let (claims, sub) = response_claims(&json)?;
+    let google_email = verified_identity(&claims, &sub, &login, &client)?;
+    let key = captured_key(&sub);
     write_captured(io, &key, &login, client, &json)?;
     Ok(CapturedAccount {
         key,
-        label: login
-            .email
-            .unwrap_or_else(|| CAPTURED_FALLBACK_LABEL.to_string()),
+        label: captured_label(google_email, &login),
     })
 }
 
-/// One refresh of `login`'s token with the client named by its `aud`,
-/// trying that client's candidate secrets; `invalid_client` /
-/// `unauthorized_client` falls through to the next, any other answer stops.
+/// Refresh `login`'s token at Google until a client succeeds.
+/// - a stored `id_token` (`aud` known): the secrets found next to the client
+///   named by `aud`, in turn; `invalid_client` / `unauthorized_client` goes on
+///   to the next secret, any other answer stops with `RefreshRejected`
+///   (unchanged); when every secret answers so, the result is
+///   `OAuthClientRejected`.
+/// - agy 1.4.x (`aud` unknown): every (id, secret) pair in the artifacts, in
+///   turn. Only an answer whose body is a JSON object carrying an OAuth
+///   `error` code (any code: `invalid_client`, `unauthorized_client`,
+///   `invalid_grant`, `deleted_client`, `invalid_request`, ...) goes on to
+///   the next candidate. Any other answer stops the search: a 2xx without
+///   `access_token` is `InvalidCredentialFormat` (even if it carries an
+///   `error` field); a body that is not a JSON
+///   object, or a non-2xx object without an `error` code (a proxy or
+///   captive-portal page), is `RefreshUnreachable`. Without a success the
+///   result is `RefreshRejected` when some candidate said `invalid_grant`,
+///   else `OAuthClientRejected`.
+///
+/// Both stop at the first success and on any transport failure
+/// (`RefreshUnreachable`); an HTTP 429 or 5xx answer, even with a JSON OAuth
+/// `error` body, is a transport failure (`token_post` errs before reading
+/// the body). The client that succeeded is returned, and is the
+/// one stored.
 async fn refresh_with_issuing_client<I: CapturedIo>(
     io: &I,
     login: &AgyLogin,
 ) -> Result<(OAuthClient, Value), CaptureError> {
-    let clients = clients_for_aud(&login.aud, io.client_artifacts().await);
+    let artifacts = io.client_artifacts().await;
+    let clients = match &login.stored_id {
+        Some(stored) => clients_for_aud(&stored.aud, artifacts),
+        None => artifact_clients(artifacts),
+    };
     if clients.is_empty() {
         return Err(CaptureError::OAuthClientNotFound);
     }
+    let mut grant_rejected = false;
     for client in clients {
         let (status, body) = io
             .token_post(&client, &login.refresh_token, None)
             .await
             .map_err(|_| CaptureError::RefreshUnreachable)?;
-        match token_response(status, &body) {
-            Ok(json) => return Ok((client, json)),
-            Err(TokenRejection::WrongClient) => continue,
-            Err(TokenRejection::Other) => return Err(CaptureError::RefreshRejected),
+        match (token_response(status, &body), &login.stored_id) {
+            (Ok(json), _) => return Ok((client, json)),
+            (Err(TokenRejection::WrongClient), _) => continue,
+            (Err(_), Some(_)) => return Err(CaptureError::RefreshRejected),
+            (Err(TokenRejection::InvalidGrant), None) => grant_rejected = true,
+            (Err(TokenRejection::OtherOAuthError), None) => continue,
+            (Err(TokenRejection::NoAccessToken), None) => {
+                return Err(CaptureError::InvalidCredentialFormat)
+            }
+            (Err(TokenRejection::NotOAuth), None) => return Err(CaptureError::RefreshUnreachable),
         }
     }
-    Err(CaptureError::OAuthClientRejected)
+    Err(if grant_rejected {
+        CaptureError::RefreshRejected
+    } else {
+        CaptureError::OAuthClientRejected
+    })
 }
 
-/// The `sub` of a token response's `id_token`, when it is a decodable JWT.
-fn response_sub(id_token: Option<&Value>) -> Option<String> {
-    id_token
+/// A captured account's label: Google's email, else the local one, else the
+/// fallback.
+fn captured_label(google_email: Option<String>, login: &AgyLogin) -> String {
+    google_email
+        .or_else(|| login.email.clone())
+        .unwrap_or_else(|| CAPTURED_FALLBACK_LABEL.to_string())
+}
+
+/// Check the response's `id_token` (`claims` and its `sub`, from
+/// `response_claims`) against `login` and the client that refreshed it, and
+/// return Google's email. Unsigned claims are acceptable here: the response
+/// came over TLS straight from `GOOGLE_TOKEN_URL` with redirects off (macOS
+/// security review F5).
+/// - `aud` other than `client.id`: `AccountMismatch`;
+/// - a stored `id_token`: `sub` other than its `sub`: `AccountMismatch`;
+/// - agy 1.4.x: Google's `email` not equal, ASCII case-insensitively, to
+///   `id_token_email`, or missing: `AccountMismatch`. The email is only a
+///   consistency check; the key is always Google's `sub` (Google reuses no
+///   `sub`, while an email can move between accounts).
+///
+/// The Windows response shape is inferred from the macOS F3 run (agy 1.4.12);
+/// every mismatch fails closed.
+fn verified_identity(
+    claims: &Value,
+    sub: &str,
+    login: &AgyLogin,
+    client: &OAuthClient,
+) -> Result<Option<String>, CaptureError> {
+    if non_empty_str(claims, "aud") != Some(client.id.as_str()) {
+        return Err(CaptureError::AccountMismatch);
+    }
+    let email = non_empty_str(claims, "email");
+    let same_account = match &login.stored_id {
+        Some(stored) => sub == stored.sub,
+        None => email
+            .zip(login.email.as_deref())
+            .is_some_and(|(google, local)| google.eq_ignore_ascii_case(local)),
+    };
+    if !same_account {
+        return Err(CaptureError::AccountMismatch);
+    }
+    Ok(email.map(str::to_string))
+}
+
+/// The claims of the response's `id_token` and their non-empty `sub`; no
+/// decodable `id_token` or no `sub` is `InvalidCredentialFormat`.
+fn response_claims(json: &Value) -> Result<(Value, String), CaptureError> {
+    let claims = json
+        .get("id_token")
         .and_then(Value::as_str)
         .and_then(jwt_claims)
-        .and_then(|claims| non_empty_str(&claims, "sub").map(str::to_string))
+        .ok_or(CaptureError::InvalidCredentialFormat)?;
+    let sub = non_empty_str(&claims, "sub")
+        .ok_or(CaptureError::InvalidCredentialFormat)?
+        .to_string();
+    Ok((claims, sub))
 }
 
 /// Write `{refresh_token, client}` to `key`'s credential. The refresh token is
@@ -4135,10 +4298,13 @@ fn write_captured<I: CapturedIo>(
 pub(crate) enum AutoCaptured {
     /// The login was verified at Google and written to its own credential.
     Captured(CapturedAccount),
-    /// Its own credential already holds this refresh token: no scan, no
+    /// A captured credential already holds this refresh token: no scan, no
     /// request, no write.
     Unchanged(CapturedAccount),
-    /// The user removed this account; nothing was requested or written.
+    /// The user removed this account; nothing was written. With a stored
+    /// `id_token`'s `sub` nothing was requested either; agy 1.4.x's login
+    /// names its account only in Google's answer, so the token was first
+    /// refreshed with each candidate client until one succeeded.
     SkippedRemoved,
 }
 
@@ -4148,11 +4314,18 @@ pub(crate) enum AutoCaptured {
 /// 1. agy's credential: found continues, not found is `NotSignedIn`, any
 ///    other read failure is `Paused`, which stops further automatic attempts
 ///    until the user acts;
-/// 2. a key in `removed_keys` is skipped before any request;
-/// 3. a refresh token its own credential already holds is `Unchanged`, with
-///    no client scan, no request and no write;
-/// 4. the refresh response MUST carry an `id_token` whose `sub` equals the
-///    stored one, else `AccountMismatch` and no write.
+/// 2. with a stored `id_token`: a key (from its `sub`) in `removed_keys` is
+///    skipped before any request;
+/// 3. a refresh token that a captured credential already holds is
+///    `Unchanged`, with no client scan, no request and no write. With a
+///    stored `id_token` that is its own key's credential; agy 1.4.x, whose
+///    key is unknown before a request, reads the credential of every
+///    registered account not in `removed_keys`;
+/// 4. agy 1.4.x only: a key from Google's `sub` in `removed_keys` is
+///    `SkippedRemoved` after the refresh (each candidate client until one
+///    succeeds) and before the aud/email checks and the write. Removed means
+///    no write;
+/// 5. the refresh response must pass `verified_identity`, else no write.
 async fn auto_capture_with<I: CapturedIo>(
     io: &I,
     removed_keys: &[String],
@@ -4165,47 +4338,63 @@ async fn auto_capture_with<I: CapturedIo>(
     let login = parse_agy_login(&agy_blob)?;
     drop(agy_blob);
 
-    let key = captured_key(&login.sub);
-    if removed_keys.contains(&key) {
-        return Ok(AutoCaptured::SkippedRemoved);
-    }
-
-    let stored_label = login.email.clone();
-    let own = read_item_call(&key).ok_or(CaptureError::InvalidCredentialFormat)?;
-    let unchanged = match io.credential(own) {
-        CredOutcome::Ok(blob) => {
-            decode_stored(&blob).is_some_and(|stored| stored.refresh_token == login.refresh_token)
+    let held_by: Vec<String> = match &login.stored_id {
+        Some(stored) => {
+            let key = captured_key(&stored.sub);
+            if removed_keys.contains(&key) {
+                return Ok(AutoCaptured::SkippedRemoved);
+            }
+            vec![key]
         }
-        CredOutcome::NotFound | CredOutcome::Failed => false,
+        None => io
+            .registered_accounts()
+            .into_iter()
+            .map(|account| account.key)
+            .filter(|key| !removed_keys.contains(key))
+            .collect(),
     };
-    if unchanged {
-        return Ok(AutoCaptured::Unchanged(CapturedAccount {
-            key,
-            label: stored_label.unwrap_or_else(|| CAPTURED_FALLBACK_LABEL.to_string()),
-        }));
+    for key in held_by {
+        if holds_refresh_token(io, &key, &login.refresh_token) {
+            return Ok(AutoCaptured::Unchanged(CapturedAccount {
+                key,
+                label: login
+                    .email
+                    .clone()
+                    .unwrap_or_else(|| CAPTURED_FALLBACK_LABEL.to_string()),
+            }));
+        }
     }
 
     let (client, json) = refresh_with_issuing_client(io, &login).await?;
-    let claims = json
-        .get("id_token")
-        .and_then(Value::as_str)
-        .and_then(jwt_claims);
-    if claims
-        .as_ref()
-        .and_then(|claims| non_empty_str(claims, "sub"))
-        != Some(login.sub.as_str())
-    {
-        return Err(CaptureError::AccountMismatch);
+    let (claims, sub) = response_claims(&json)?;
+    let key = captured_key(&sub);
+    // agy 1.4.x only: removed is decided on Google's `sub` alone, before the
+    // aud and email checks. Skipping writes nothing, so an unverified claim
+    // may only cause a skip, and a removed account is never reported as a
+    // mismatch. The old format was checked before the request (above) and
+    // keeps its AccountMismatch for another account's answer.
+    if login.stored_id.is_none() && removed_keys.contains(&key) {
+        return Ok(AutoCaptured::SkippedRemoved);
     }
-    let label = claims
-        .as_ref()
-        .and_then(|claims| non_empty_str(claims, "email"))
-        .map(str::to_string)
-        .or(stored_label)
-        .unwrap_or_else(|| CAPTURED_FALLBACK_LABEL.to_string());
-
+    let google_email = verified_identity(&claims, &sub, &login, &client)?;
     write_captured(io, &key, &login, client, &json)?;
-    Ok(AutoCaptured::Captured(CapturedAccount { key, label }))
+    Ok(AutoCaptured::Captured(CapturedAccount {
+        key,
+        label: captured_label(google_email, &login),
+    }))
+}
+
+/// Whether `key`'s captured credential reads back with this refresh token.
+fn holds_refresh_token<I: CapturedIo>(io: &I, key: &str, refresh_token: &str) -> bool {
+    let Some(call) = read_item_call(key) else {
+        return false;
+    };
+    match io.credential(call) {
+        CredOutcome::Ok(blob) => {
+            decode_stored(&blob).is_some_and(|stored| stored.refresh_token == refresh_token)
+        }
+        CredOutcome::NotFound | CredOutcome::Failed => false,
+    }
 }
 
 /// The one place agy's `LastWritten` becomes a login marker: the FILETIME as a
@@ -6606,6 +6795,8 @@ pub(crate) mod captured_test_support {
         /// When set, `quota` fails terminally with this display text.
         pub quota_terminal: Option<&'static str>,
         pub scope: TestRefreshScope,
+        /// What `registered_accounts` lists.
+        pub registered_accounts: Vec<CapturedAccount>,
     }
 
     impl FakeIo {
@@ -6625,6 +6816,7 @@ pub(crate) mod captured_test_support {
                 quota_calls: Cell::new(0),
                 quota_terminal: None,
                 scope: TestRefreshScope::new("antigravity", tag),
+                registered_accounts: Vec::new(),
             }
         }
 
@@ -6769,6 +6961,10 @@ pub(crate) mod captured_test_support {
             )
         }
 
+        fn registered_accounts(&self) -> Vec<CapturedAccount> {
+            self.registered_accounts.clone()
+        }
+
         async fn quota(
             &self,
             _access_token: String,
@@ -6844,8 +7040,12 @@ mod captured_account_tests {
         ))
         .unwrap_or_else(|_| panic!("parse"));
         assert_eq!(login.refresh_token, "1//rt-a");
-        assert_eq!(login.sub, "sub-a");
-        assert_eq!(login.aud, AUD);
+        let stored = login
+            .stored_id
+            .as_ref()
+            .expect("the old format's stored id_token");
+        assert_eq!(stored.sub, "sub-a");
+        assert_eq!(stored.aud, AUD);
         assert_eq!(login.email.as_deref(), Some("a@example.com"));
 
         // macOS's go-keyring form is not a Windows blob.
@@ -6923,7 +7123,7 @@ mod captured_account_tests {
             if client.id == AUD && client.secret == issuing {
                 Ok(token_ok(
                     "ya29.a",
-                    json!({ "id_token": jwt(json!({ "sub": "sub-a" })) }),
+                    json!({ "id_token": jwt(json!({ "sub": "sub-a", "aud": AUD })) }),
                 ))
             } else {
                 Ok((401, r#"{"error":"invalid_client"}"#.to_string()))
@@ -6975,7 +7175,7 @@ mod captured_account_tests {
         let second = secret('b');
         io.token = Box::new(move |client, _| {
             if client.secret == second {
-                Ok(token_ok("ya29.a", json!({})))
+                Ok(google_answer("sub-a", AUD, None))
             } else {
                 Ok((401, r#"{"error":"unauthorized_client"}"#.to_string()))
             }
@@ -6996,7 +7196,7 @@ mod captured_account_tests {
         let second = secret('b');
         io.token = Box::new(move |client, _| {
             if client.secret == second {
-                Ok(token_ok("ya29.a", json!({})))
+                Ok(google_answer("sub-a", AUD, None))
             } else {
                 Ok((401, r#"{"error":"invalid_client"}"#.to_string()))
             }
@@ -7023,8 +7223,8 @@ mod captured_account_tests {
         assert!(io.writes().is_empty());
     }
 
-    /// Acceptance 8: `agy.exe` is a candidate (path lookup only), and the
-    /// `aud` match finds a client that only agy.exe carries.
+    /// Acceptance 8: `agy.exe` is a candidate (path lookup only) and the first
+    /// one, and the `aud` match finds a client that only agy.exe carries.
     #[tokio::test]
     async fn the_aud_client_is_found_in_agy_exe_among_the_artifacts() {
         let root = std::env::temp_dir().join("captured-artifacts-fixture");
@@ -7041,6 +7241,7 @@ mod captured_account_tests {
         assert_eq!(
             candidates,
             [
+                agy.clone(),
                 local
                     .join("Programs")
                     .join("Antigravity")
@@ -7048,34 +7249,65 @@ mod captured_account_tests {
                 program_files
                     .join("Antigravity")
                     .join("resources/bin/language_server.exe"),
-                agy.clone(),
-            ]
+            ],
+            "agy.exe first, then the IDE binaries in their usual order"
         );
 
-        // The IDE binary carries another client only; agy.exe carries aud's.
+        // The artifacts in production order (agy.exe, then the IDE). The IDE
+        // binary carries another client only; agy.exe carries aud's.
+        let artifacts = vec![
+            format!("agy.exe\0{AUD}\0{}\0", secret('g')).into_bytes(),
+            format!("ide\0{OTHER}\0{}\0", secret('o')).into_bytes(),
+        ];
         let mut io = FakeIo::new("capture-agy-exe");
         io.agy_item = Some(agy_item(
             "1//rt-a",
             Some(claims("sub-a", AUD, "a@example.com")),
         ));
-        io.artifacts = vec![
-            format!("ide\0{OTHER}\0{}\0", secret('o')).into_bytes(),
-            format!("agy.exe\0{AUD}\0{}\0", secret('g')).into_bytes(),
-        ];
+        io.artifacts = artifacts.clone();
+        io.token = Box::new(|client, _| Ok(google_answer("sub-a", &client.id, None)));
         let account = capture_with(&io).await.unwrap();
         assert_eq!(
             *io.token_calls.borrow(),
             vec![(AUD.to_string(), secret('g'), "1//rt-a".to_string())]
         );
         assert_eq!(decode_value(&io.items.borrow()[&account.key]).1, AUD);
+
+        // agy 1.4.x (no aud): the first request uses agy.exe's client, and the
+        // search stops there when it succeeds.
+        let mut io = FakeIo::new("capture-agy-exe-agy14");
+        io.agy_item = Some(agy14_item("1//rt-n", LOCAL_EMAIL));
+        io.artifacts = artifacts;
+        io.token = Box::new(|client, _| {
+            Ok(if client.id == AUD {
+                google_answer("g-sub", AUD, Some(LOCAL_EMAIL))
+            } else {
+                oauth_error(401, "unauthorized_client")
+            })
+        });
+        let account = capture_with(&io).await.unwrap();
+        assert_eq!(
+            io.token_calls.borrow().first(),
+            Some(&(AUD.to_string(), secret('g'), "1//rt-n".to_string())),
+            "the first token_post uses agy.exe's client"
+        );
+        assert_eq!(io.token_calls.borrow().len(), 1);
+        assert_eq!(account.key, captured_key("g-sub"));
     }
 
     #[tokio::test]
     async fn capture_rejects_a_refresh_for_another_account() {
-        for id_token in [
-            Value::String(jwt(json!({ "sub": "sub-b" }))),
-            Value::String("not-a-jwt".to_string()),
-            Value::Null,
+        for (id_token, expected) in [
+            (
+                Value::String(jwt(json!({ "sub": "sub-b", "aud": AUD }))),
+                CaptureError::AccountMismatch,
+            ),
+            // No usable answer about the account is not "another account".
+            (
+                Value::String("not-a-jwt".to_string()),
+                CaptureError::InvalidCredentialFormat,
+            ),
+            (Value::Null, CaptureError::InvalidCredentialFormat),
         ] {
             let mut io = FakeIo::new("capture-mismatch");
             io.agy_item = Some(agy_item(
@@ -7087,10 +7319,7 @@ mod captured_account_tests {
             io.token = Box::new(move |_, _| {
                 Ok(token_ok("ya29.a", json!({ "id_token": id_token.clone() })))
             });
-            assert_eq!(
-                capture_with(&io).await.err(),
-                Some(CaptureError::AccountMismatch)
-            );
+            assert_eq!(capture_with(&io).await.err(), Some(expected));
             assert!(io.writes().is_empty());
             assert!(io.items.borrow().is_empty());
         }
@@ -7380,12 +7609,13 @@ mod captured_account_tests {
     /// reaches the FFI JSON.
     #[tokio::test]
     async fn capture_failures_carry_no_secret_or_identity() {
-        const SENTINELS: [&str; 5] = [
+        const SENTINELS: [&str; 6] = [
             "SENTINELTOKEN",
             "SENTINELSUB",
             "SENTINELMAIL",
             "SENTINELDESC",
             "SENTINELOTHERSUB",
+            "GOCSPX-",
         ];
         let login = || {
             agy_item(
@@ -7446,14 +7676,63 @@ mod captured_account_tests {
         io.token = Box::new(|_, _| {
             Ok(token_ok(
                 "ya29.SENTINELTOKEN",
-                json!({ "id_token": jwt(json!({ "sub": "SENTINELOTHERSUB" })) }),
+                json!({ "id_token": jwt(json!({ "sub": "SENTINELOTHERSUB", "aud": AUD })) }),
             ))
         });
         cases.push(io);
         let mut io = FakeIo::new("sentinel-write");
         io.agy_item = Some(login());
         io.artifacts = artifacts_where_positional_pick_differs();
+        io.token = Box::new(|_, _| {
+            Ok(token_ok(
+                "ya29.SENTINELTOKEN",
+                json!({ "id_token": jwt(json!({ "sub": "SENTINELSUB", "aud": AUD })) }),
+            ))
+        });
         io.write_fails = true;
+        cases.push(io);
+
+        // agy 1.4.x's format: `id_token_email` instead of an id_token.
+        let login14 = || agy14_item("1//SENTINELTOKEN", "SENTINELMAIL@example.com");
+        let mut io = FakeIo::new("sentinel14-identity");
+        io.agy_item = Some(agy14_item("1//SENTINELTOKEN", ""));
+        cases.push(io);
+        let mut io = FakeIo::new("sentinel14-client");
+        io.agy_item = Some(login14());
+        cases.push(io);
+        for (tag, error) in [
+            ("sentinel14-rejected", "invalid_grant"),
+            ("sentinel14-wrong-client", "invalid_client"),
+        ] {
+            let mut io = FakeIo::new(tag);
+            io.agy_item = Some(login14());
+            io.artifacts = agy14_artifacts();
+            io.token = Box::new(move |_, _| {
+                Ok((
+                    400,
+                    json!({ "error": error, "error_description": "SENTINELDESC 1//SENTINELTOKEN" })
+                        .to_string(),
+                ))
+            });
+            cases.push(io);
+        }
+        for (tag, google_email, write_fails) in [
+            ("sentinel14-mismatch", "SENTINELOTHERSUB@example.com", false),
+            ("sentinel14-write", "sentinelmail@EXAMPLE.com", true),
+        ] {
+            let mut io = FakeIo::new(tag);
+            io.agy_item = Some(login14());
+            io.artifacts = agy14_artifacts();
+            io.token = Box::new(move |client, _| {
+                Ok(google_answer("SENTINELSUB", &client.id, Some(google_email)))
+            });
+            io.write_fails = write_fails;
+            cases.push(io);
+        }
+        let mut io = FakeIo::new("sentinel14-no-id-token");
+        io.agy_item = Some(login14());
+        io.artifacts = agy14_artifacts();
+        io.token = Box::new(|_, _| Ok(token_ok("ya29.SENTINELTOKEN", json!({}))));
         cases.push(io);
 
         let mut codes = Vec::new();
@@ -7481,6 +7760,13 @@ mod captured_account_tests {
                 "refresh_unreachable",
                 "account_mismatch",
                 "keychain_write_failed",
+                "agy_login_missing_identity",
+                "oauth_client_not_found",
+                "refresh_rejected",
+                "oauth_client_rejected",
+                "account_mismatch",
+                "keychain_write_failed",
+                "invalid_credential_format",
             ]
         );
 
@@ -7489,6 +7775,12 @@ mod captured_account_tests {
         let mut io = FakeIo::new("sentinel-auto-mismatch");
         io.agy_item = Some(login());
         io.artifacts = artifacts_where_positional_pick_differs();
+        io.token = Box::new(|_, _| {
+            Ok(token_ok(
+                "ya29.SENTINELTOKEN",
+                json!({ "id_token": jwt(json!({ "sub": "SENTINELOTHERSUB", "aud": AUD })) }),
+            ))
+        });
         let error = auto_capture_with(&io, &[]).await.unwrap_err();
         assert_eq!(error.code(), "account_mismatch");
         for sentinel in SENTINELS {
@@ -7566,7 +7858,7 @@ mod captured_account_tests {
         io.token = Box::new(|_, _| {
             Ok(token_ok(
                 "ya29.a",
-                json!({ "id_token": jwt(json!({ "sub": "sub-a", "email": "fresh@example.com" })) }),
+                json!({ "id_token": jwt(json!({ "sub": "sub-a", "aud": AUD, "email": "fresh@example.com" })) }),
             ))
         });
         io
@@ -7654,33 +7946,44 @@ mod captured_account_tests {
         assert_eq!(decode_value(&io.items.borrow()[&key]).0, "1//rt-a");
     }
 
-    /// Acceptance 1: the automatic path requires Google's `id_token` with the
-    /// same `sub`; missing or different writes nothing. The manual path still
-    /// accepts a response without one (macOS parity).
+    /// Acceptance 1 and WIN-P9 S2 G1: both paths require Google's
+    /// `id_token`. Another account's is `AccountMismatch`; no usable one says
+    /// nothing about the account (`InvalidCredentialFormat`). Nothing is
+    /// written either way. Before S2 the manual path wrote without one.
     #[tokio::test]
     async fn auto_capture_requires_googles_id_token_for_the_same_sub() {
-        for (tag, extra) in [
-            ("auto-no-id-token", json!({})),
+        for (tag, extra, expected) in [
+            (
+                "auto-no-id-token",
+                json!({}),
+                CaptureError::InvalidCredentialFormat,
+            ),
             (
                 "auto-other-sub",
-                json!({ "id_token": jwt(json!({ "sub": "sub-b" })) }),
+                json!({ "id_token": jwt(json!({ "sub": "sub-b", "aud": AUD })) }),
+                CaptureError::AccountMismatch,
             ),
-            ("auto-bad-id-token", json!({ "id_token": "not-a-jwt" })),
+            (
+                "auto-bad-id-token",
+                json!({ "id_token": "not-a-jwt" }),
+                CaptureError::InvalidCredentialFormat,
+            ),
         ] {
             let mut io = auto_io(tag);
             let extra = extra.clone();
             io.token = Box::new(move |_, _| Ok(token_ok("ya29.a", extra.clone())));
-            assert_eq!(
-                auto_capture_with(&io, &[]).await,
-                Err(CaptureError::AccountMismatch),
-                "{tag}"
-            );
+            assert_eq!(auto_capture_with(&io, &[]).await, Err(expected), "{tag}");
             assert!(io.writes().is_empty(), "{tag}");
             assert!(io.items.borrow().is_empty(), "{tag}");
         }
         let mut io = auto_io("manual-no-id-token");
         io.token = Box::new(|_, _| Ok(token_ok("ya29.a", json!({}))));
-        assert!(capture_with(&io).await.is_ok());
+        assert_eq!(
+            capture_with(&io).await.err(),
+            Some(CaptureError::InvalidCredentialFormat)
+        );
+        assert!(io.writes().is_empty());
+        assert!(io.items.borrow().is_empty());
     }
 
     /// Acceptance 2: agy not found is `not_signed_in`, any other read failure
@@ -7717,6 +8020,690 @@ mod captured_account_tests {
                 capture_with(&io).await.err(),
                 Some(CaptureError::AgyNotSignedIn)
             );
+        }
+    }
+
+    // ── agy 1.4.x login format: no stored id_token (WIN-P9 S2, AGY14-M port) ──
+
+    const LOCAL_EMAIL: &str = "fresh@example.com";
+    /// Google's spelling of the same address: the comparison ignores ASCII case.
+    const GOOGLE_EMAIL: &str = "Fresh@Example.COM";
+
+    /// agy 1.4.x's Windows credential (agy 1.4.8, measured 2026-11-05 on a
+    /// Windows device by a structure-only probe): raw UTF-8 JSON with
+    /// `token`, `auth_method` and `id_token_email`, and no `id_token` key.
+    fn agy14_login(refresh_token: &str, id_token_email: &str) -> Value {
+        json!({
+            "token": {
+                "access_token": "ya29.stored",
+                "token_type": "Bearer",
+                "refresh_token": refresh_token,
+                "expiry": "2026-11-05T00:00:00Z",
+                "expires_in": 3599,
+            },
+            "auth_method": "oauth2.0",
+            "id_token_email": id_token_email,
+        })
+    }
+
+    fn agy14_item(refresh_token: &str, id_token_email: &str) -> Vec<u8> {
+        agy14_login(refresh_token, id_token_email)
+            .to_string()
+            .into_bytes()
+    }
+
+    /// Two candidate clients, OTHER first, then AUD, sharing one secret.
+    fn agy14_artifacts() -> Vec<Vec<u8>> {
+        vec![format!("ls\0{OTHER}\0{AUD}\0{}\0", secret('a')).into_bytes()]
+    }
+
+    fn google_answer(sub: &str, aud: &str, email: Option<&str>) -> (u16, String) {
+        let mut claims = json!({ "sub": sub, "aud": aud });
+        if let Some(email) = email {
+            claims["email"] = json!(email);
+        }
+        token_ok("ya29.a", json!({ "id_token": jwt(claims) }))
+    }
+
+    fn oauth_error(status: u16, code: &str) -> (u16, String) {
+        (status, json!({ "error": code }).to_string())
+    }
+
+    /// The macOS F3 shape: the first candidate is not the issuing client
+    /// (`unauthorized_client`), the second (AUD) succeeds and Google's
+    /// `id_token` names `g-sub`, `aud` = AUD and the email in another case.
+    fn agy14_io(tag: &str) -> FakeIo {
+        let mut io = FakeIo::new(tag);
+        io.agy_item = Some(agy14_item("1//rt-n", LOCAL_EMAIL));
+        io.artifacts = agy14_artifacts();
+        io.token = Box::new(|client, _| {
+            Ok(if client.id == AUD {
+                google_answer("g-sub", AUD, Some(GOOGLE_EMAIL))
+            } else {
+                oauth_error(401, "unauthorized_client")
+            })
+        });
+        io
+    }
+
+    /// Test list 1, 12a: keyed by Google's `sub`, labelled with Google's
+    /// email, the succeeding client stored. Google's email differs from
+    /// `id_token_email` only in case, so a case-sensitive compare fails here.
+    #[tokio::test]
+    async fn agy14_capture_keys_by_googles_sub_and_labels_with_googles_email() {
+        let io = agy14_io("agy14-capture");
+        assert_eq!(
+            capture_with(&io).await,
+            Ok(CapturedAccount {
+                key: captured_key("g-sub"),
+                label: GOOGLE_EMAIL.to_string(),
+            }),
+            "Google's email must match id_token_email ASCII case-insensitively"
+        );
+        assert_eq!(io.writes().len(), 1);
+        let items = io.items.borrow();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            decode_value(&items[&captured_key("g-sub")]),
+            ("1//rt-n".to_string(), AUD.to_string(), secret('a')),
+            "the client that succeeded is stored, with agy's refresh token"
+        );
+    }
+
+    /// Test list 2: Google's email other than `id_token_email`, or missing,
+    /// is `AccountMismatch` with no write. Control: the matching email writes
+    /// once.
+    #[tokio::test]
+    async fn agy14_capture_rejects_another_or_missing_google_email() {
+        for (google_email, expected) in [
+            (
+                Some("other@example.com"),
+                Err(CaptureError::AccountMismatch),
+            ),
+            (None, Err(CaptureError::AccountMismatch)),
+            (
+                Some(LOCAL_EMAIL),
+                Ok(CapturedAccount {
+                    key: captured_key("g-sub"),
+                    label: LOCAL_EMAIL.to_string(),
+                }),
+            ),
+        ] {
+            let mut io = agy14_io("agy14-email");
+            io.token =
+                Box::new(move |client, _| Ok(google_answer("g-sub", &client.id, google_email)));
+            let writes_expected = usize::from(expected.is_ok());
+            assert_eq!(capture_with(&io).await, expected, "{google_email:?}");
+            assert_eq!(io.writes().len(), writes_expected, "{google_email:?}");
+            assert_eq!(io.items.borrow().len(), writes_expected, "{google_email:?}");
+        }
+    }
+
+    /// Test list 3: a response with no usable `id_token` (absent, not a JWT,
+    /// no or empty `sub`) is `InvalidCredentialFormat` with no write.
+    /// Control: a complete one writes once.
+    #[tokio::test]
+    async fn agy14_capture_requires_a_usable_id_token() {
+        let full = jwt(json!({ "sub": "g-sub", "aud": AUD, "email": LOCAL_EMAIL }));
+        for (tag, extra, expected_err) in [
+            (
+                "absent",
+                json!({}),
+                Some(CaptureError::InvalidCredentialFormat),
+            ),
+            (
+                "not-a-jwt",
+                json!({ "id_token": "not-a-jwt" }),
+                Some(CaptureError::InvalidCredentialFormat),
+            ),
+            (
+                "no-sub",
+                json!({ "id_token": jwt(json!({ "aud": AUD, "email": LOCAL_EMAIL })) }),
+                Some(CaptureError::InvalidCredentialFormat),
+            ),
+            (
+                "empty-sub",
+                json!({ "id_token": jwt(json!({ "sub": "", "aud": AUD, "email": LOCAL_EMAIL })) }),
+                Some(CaptureError::InvalidCredentialFormat),
+            ),
+            ("control", json!({ "id_token": full }), None),
+        ] {
+            let mut io = agy14_io(&format!("agy14-id-token-{tag}"));
+            io.token = Box::new(move |client, _| {
+                Ok(if client.id == AUD {
+                    token_ok("ya29.a", extra.clone())
+                } else {
+                    oauth_error(401, "invalid_client")
+                })
+            });
+            let outcome = capture_with(&io).await;
+            assert_eq!(outcome.as_ref().err().copied(), expected_err, "{tag}");
+            let writes = usize::from(expected_err.is_none());
+            assert_eq!(io.writes().len(), writes, "{tag}");
+            assert_eq!(io.items.borrow().len(), writes, "{tag}");
+        }
+    }
+
+    /// Test list 4, 12b and WIN-P9 S2 G1: on BOTH capture paths (manual and
+    /// automatic) and BOTH login formats, Google's `aud` other than the
+    /// client that refreshed (or none) is `AccountMismatch`, and a response
+    /// with no usable `id_token` is `InvalidCredentialFormat`, each with zero
+    /// writes. On the old format another `sub` than the stored one is
+    /// `AccountMismatch`; on agy 1.4.x (no stored `sub`) the key is Google's
+    /// `sub`. Control: a complete answer writes once under
+    /// `captured_key(Google's sub)`.
+    #[tokio::test]
+    async fn response_checks_hold_on_both_capture_paths_and_formats() {
+        let answer = |sub: &str, aud: Option<&str>| {
+            let mut claims = json!({ "sub": sub, "email": LOCAL_EMAIL });
+            if let Some(aud) = aud {
+                claims["aud"] = json!(aud);
+            }
+            json!({ "id_token": jwt(claims) })
+        };
+        for (format, item) in [
+            ("agy14", agy14_item("1//rt-n", LOCAL_EMAIL)),
+            (
+                "old",
+                agy_item("1//rt-n", Some(claims("g-sub", AUD, LOCAL_EMAIL))),
+            ),
+        ] {
+            let other_sub = if format == "old" {
+                Err(CaptureError::AccountMismatch)
+            } else {
+                Ok(captured_key("other-sub"))
+            };
+            for (case, extra, expected) in [
+                (
+                    "aud-other",
+                    answer("g-sub", Some(OTHER)),
+                    Err(CaptureError::AccountMismatch),
+                ),
+                (
+                    "aud-missing",
+                    answer("g-sub", None),
+                    Err(CaptureError::AccountMismatch),
+                ),
+                (
+                    "no-id-token",
+                    json!({}),
+                    Err(CaptureError::InvalidCredentialFormat),
+                ),
+                (
+                    "not-a-jwt",
+                    json!({ "id_token": "not-a-jwt" }),
+                    Err(CaptureError::InvalidCredentialFormat),
+                ),
+                ("other-sub", answer("other-sub", Some(AUD)), other_sub),
+                ("control", answer("g-sub", Some(AUD)), Ok(captured_key("g-sub"))),
+            ] {
+                for auto in [false, true] {
+                    let tag = format!("{format} {case} auto={auto}");
+                    let mut io = FakeIo::new("response-checks");
+                    io.agy_item = Some(item.clone());
+                    io.artifacts = agy14_artifacts();
+                    let extra = extra.clone();
+                    io.token = Box::new(move |client, _| {
+                        Ok(if client.id == AUD {
+                            token_ok("ya29.a", extra.clone())
+                        } else {
+                            oauth_error(401, "invalid_client")
+                        })
+                    });
+                    let outcome = if auto {
+                        auto_capture_with(&io, &[]).await.map(|outcome| match outcome {
+                            AutoCaptured::Captured(account) => account.key,
+                            other => panic!("{tag}: {other:?}"),
+                        })
+                    } else {
+                        capture_with(&io).await.map(|account| account.key)
+                    };
+                    assert_eq!(outcome, expected, "{tag}");
+                    let writes = usize::from(expected.is_ok());
+                    assert_eq!(io.writes().len(), writes, "{tag}");
+                    assert_eq!(io.items.borrow().len(), writes, "{tag}");
+                    assert!(!io.token_calls.borrow().is_empty(), "{tag}: a refresh ran");
+                }
+            }
+        }
+    }
+
+    /// Test list 5 and 6: the first candidate refuses (macOS F3 measured
+    /// `unauthorized_client`, then `invalid_client`; RFC 6749 also allows
+    /// `invalid_grant` for a client mismatch; any other refusal, such as a
+    /// 401 `deleted_client`, goes on too). The search goes on in scan order
+    /// and the second client is stored.
+    #[tokio::test]
+    async fn agy14_capture_tries_every_candidate_in_order() {
+        for (status, first) in [
+            (401, "unauthorized_client"),
+            (401, "invalid_client"),
+            (400, "invalid_grant"),
+            (401, "deleted_client"),
+        ] {
+            let mut io = agy14_io(&format!("agy14-search-{first}"));
+            io.token = Box::new(move |client, _| {
+                Ok(if client.id == AUD {
+                    google_answer("g-sub", AUD, Some(LOCAL_EMAIL))
+                } else {
+                    oauth_error(status, first)
+                })
+            });
+            let account = capture_with(&io).await;
+            assert_eq!(
+                account.as_ref().map(|account| account.key.clone()),
+                Ok(captured_key("g-sub")),
+                "{first}"
+            );
+            assert_eq!(
+                *io.token_calls.borrow(),
+                vec![
+                    (OTHER.to_string(), secret('a'), "1//rt-n".to_string()),
+                    (AUD.to_string(), secret('a'), "1//rt-n".to_string()),
+                ],
+                "{first}"
+            );
+            assert_eq!(
+                decode_value(&io.items.borrow()[&captured_key("g-sub")]).1,
+                AUD,
+                "{first}: the second client is stored"
+            );
+        }
+    }
+
+    /// Test list 7: no candidate succeeds. `RefreshRejected` only when one
+    /// said `invalid_grant`; otherwise `OAuthClientRejected`. Another code
+    /// does not end the search. Nothing is written.
+    #[tokio::test]
+    async fn agy14_capture_without_a_successful_candidate_writes_nothing() {
+        for (tag, answers, expected, calls) in [
+            (
+                "wrong-clients",
+                ["unauthorized_client", "invalid_client"],
+                CaptureError::OAuthClientRejected,
+                2,
+            ),
+            (
+                "grant-then-client",
+                ["invalid_grant", "invalid_client"],
+                CaptureError::RefreshRejected,
+                2,
+            ),
+            (
+                "client-then-grant",
+                ["invalid_client", "invalid_grant"],
+                CaptureError::RefreshRejected,
+                2,
+            ),
+            (
+                "other-continues",
+                ["deleted_client", "invalid_client"],
+                CaptureError::OAuthClientRejected,
+                2,
+            ),
+            (
+                "other-then-grant",
+                ["invalid_request", "invalid_grant"],
+                CaptureError::RefreshRejected,
+                2,
+            ),
+        ] {
+            let mut io = agy14_io(&format!("agy14-none-{tag}"));
+            io.token = Box::new(move |client, _| {
+                Ok(oauth_error(400, answers[usize::from(client.id == AUD)]))
+            });
+            assert_eq!(capture_with(&io).await.err(), Some(expected), "{tag}");
+            assert_eq!(io.token_calls.borrow().len(), calls, "{tag}");
+            assert!(io.writes().is_empty(), "{tag}");
+            assert!(io.items.borrow().is_empty(), "{tag}");
+        }
+    }
+
+    /// Test list 8 (macOS security review F1): agy 1.4.x's login names its
+    /// account only in Google's answer, so a removed account is skipped after
+    /// the candidate search (each client in turn until one succeeds: two
+    /// requests with this fixture) and before the write. The removed check
+    /// comes before the aud and email checks, so a removed account whose
+    /// Google email differs is still `SkippedRemoved`, never a mismatch.
+    /// Controls: not removed, the differing email is `AccountMismatch` and
+    /// the matching one is written.
+    #[tokio::test]
+    async fn agy14_auto_capture_skips_a_removed_key_after_the_candidate_search() {
+        let key = captured_key("g-sub");
+        for (tag, google_email, removed, expected) in [
+            (
+                "removed-other-email",
+                "someone-else@example.com",
+                true,
+                Ok(AutoCaptured::SkippedRemoved),
+            ),
+            (
+                "removed-same-email",
+                LOCAL_EMAIL,
+                true,
+                Ok(AutoCaptured::SkippedRemoved),
+            ),
+            (
+                "kept-other-email",
+                "someone-else@example.com",
+                false,
+                Err(CaptureError::AccountMismatch),
+            ),
+            (
+                "kept-same-email",
+                LOCAL_EMAIL,
+                false,
+                Ok(AutoCaptured::Captured(CapturedAccount {
+                    key: key.clone(),
+                    label: LOCAL_EMAIL.to_string(),
+                })),
+            ),
+        ] {
+            let mut io = agy14_io(&format!("agy14-auto-{tag}"));
+            io.token = Box::new(move |client, _| {
+                Ok(if client.id == AUD {
+                    google_answer("g-sub", AUD, Some(google_email))
+                } else {
+                    oauth_error(401, "unauthorized_client")
+                })
+            });
+            let removed_keys = if removed {
+                vec![key.clone()]
+            } else {
+                vec![captured_key("sub-other")]
+            };
+            assert_eq!(auto_capture_with(&io, &removed_keys).await, expected, "{tag}");
+            assert_eq!(
+                io.token_calls.borrow().len(),
+                2,
+                "{tag}: each candidate until one succeeds"
+            );
+            let writes = usize::from(matches!(expected, Ok(AutoCaptured::Captured(_))));
+            assert_eq!(io.writes().len(), writes, "{tag}");
+            assert_eq!(io.items.borrow().len(), writes, "{tag}");
+        }
+    }
+
+    /// Review round 3, item 1: only a JSON object carrying an OAuth `error`
+    /// code moves the agy 1.4.x search to the next candidate. A proxy or
+    /// captive-portal page (not a JSON object, or a non-2xx object without
+    /// `error`) stops it as `RefreshUnreachable`, and a 2xx without
+    /// `access_token` stops it as `InvalidCredentialFormat`; neither sends
+    /// agy's refresh token to a further client. Control: a JSON
+    /// `deleted_client` goes on and the second candidate is captured.
+    #[tokio::test]
+    async fn agy14_search_stops_on_an_answer_that_is_not_oauth() {
+        for (tag, status, body, expected) in [
+            (
+                "proxy-403-html",
+                403,
+                "<html><body>Access denied by proxy</body></html>",
+                Err(CaptureError::RefreshUnreachable),
+            ),
+            (
+                "portal-200-html",
+                200,
+                "<html>Sign in to the network</html>",
+                Err(CaptureError::RefreshUnreachable),
+            ),
+            ("200-array", 200, "[]", Err(CaptureError::RefreshUnreachable)),
+            (
+                "400-object-without-error",
+                400,
+                r#"{"message":"blocked"}"#,
+                Err(CaptureError::RefreshUnreachable),
+            ),
+            (
+                "200-without-access-token",
+                200,
+                r#"{"token_type":"Bearer"}"#,
+                Err(CaptureError::InvalidCredentialFormat),
+            ),
+            (
+                "deleted-client",
+                401,
+                r#"{"error":"deleted_client"}"#,
+                Ok(captured_key("g-sub")),
+            ),
+        ] {
+            for auto in [false, true] {
+                let tag = format!("{tag} auto={auto}");
+                let mut io = agy14_io("agy14-not-oauth");
+                io.token = Box::new(move |client, _| {
+                    Ok(if client.id == AUD {
+                        google_answer("g-sub", AUD, Some(LOCAL_EMAIL))
+                    } else {
+                        (status, body.to_string())
+                    })
+                });
+                let outcome = if auto {
+                    auto_capture_with(&io, &[]).await.map(|outcome| match outcome {
+                        AutoCaptured::Captured(account) => account.key,
+                        other => panic!("{tag}: {other:?}"),
+                    })
+                } else {
+                    capture_with(&io).await.map(|account| account.key)
+                };
+                assert_eq!(outcome, expected, "{tag}");
+                let calls = if expected.is_ok() { 2 } else { 1 };
+                assert_eq!(io.token_calls.borrow().len(), calls, "{tag}");
+                assert_eq!(
+                    io.token_calls.borrow()[0].0,
+                    OTHER,
+                    "{tag}: the first candidate answered"
+                );
+                let writes = usize::from(expected.is_ok());
+                assert_eq!(io.writes().len(), writes, "{tag}");
+                assert_eq!(io.items.borrow().len(), writes, "{tag}");
+            }
+        }
+    }
+
+    /// A transport failure on the first agy 1.4.x candidate stops the search
+    /// as `RefreshUnreachable`: no further token request, no write, on both
+    /// capture paths.
+    #[tokio::test]
+    async fn agy14_search_stops_on_a_transport_failure() {
+        for auto in [false, true] {
+            let mut io = agy14_io("agy14-transport");
+            io.token = Box::new(|client, _| {
+                if client.id == AUD {
+                    Ok(google_answer("g-sub", AUD, Some(LOCAL_EMAIL)))
+                } else {
+                    Err(ProviderFetchFailure::transient(
+                        "unreachable",
+                        None,
+                        SafeTransportDiagnostic::server_error(503),
+                    ))
+                }
+            });
+            let error = if auto {
+                auto_capture_with(&io, &[]).await.err()
+            } else {
+                capture_with(&io).await.err()
+            };
+            assert_eq!(error, Some(CaptureError::RefreshUnreachable), "auto={auto}");
+            assert_eq!(io.token_calls.borrow().len(), 1, "auto={auto}");
+            assert_eq!(io.token_calls.borrow()[0].0, OTHER, "auto={auto}");
+            assert!(io.writes().is_empty(), "auto={auto}");
+            assert!(io.items.borrow().is_empty(), "auto={auto}");
+        }
+    }
+
+    /// Review round 3, item 2: the removed check on Google's `sub` is for agy
+    /// 1.4.x only. An old-format login (stored `sub-a`, not removed) whose
+    /// refresh answer names another account, one the user removed, stays
+    /// `AccountMismatch` and writes nothing. Control: the same answer for a
+    /// 1.4.x login is `SkippedRemoved`.
+    #[tokio::test]
+    async fn the_response_sub_removed_check_is_for_agy14_only() {
+        let removed = captured_key("g-removed");
+        for (format, item, expected) in [
+            (
+                "old",
+                agy_item("1//rt-n", Some(claims("sub-a", AUD, LOCAL_EMAIL))),
+                Err(CaptureError::AccountMismatch),
+            ),
+            (
+                "agy14",
+                agy14_item("1//rt-n", LOCAL_EMAIL),
+                Ok(AutoCaptured::SkippedRemoved),
+            ),
+        ] {
+            let mut io = agy14_io(&format!("removed-sub-{format}"));
+            io.agy_item = Some(item);
+            io.token = Box::new(|client, _| {
+                Ok(if client.id == AUD {
+                    google_answer("g-removed", AUD, Some(LOCAL_EMAIL))
+                } else {
+                    oauth_error(401, "unauthorized_client")
+                })
+            });
+            assert_eq!(
+                auto_capture_with(&io, std::slice::from_ref(&removed)).await,
+                expected,
+                "{format}"
+            );
+            assert!(!io.token_calls.borrow().is_empty(), "{format}: a refresh ran");
+            assert!(io.writes().is_empty(), "{format}");
+            assert!(io.items.borrow().is_empty(), "{format}");
+        }
+    }
+
+    /// Test list 9: a registered account's credential already holding agy's
+    /// refresh token is `Unchanged` with no scan and no request, found
+    /// without knowing the key in advance. Controls: a different stored token
+    /// refreshes and writes; a matching credential whose key the user removed
+    /// is not answered from, so the refresh happens and the removal still
+    /// holds.
+    #[tokio::test]
+    async fn agy14_auto_capture_finds_a_stored_token_among_registered_accounts() {
+        let key = captured_key("g-sub");
+        let other = captured_key("sub-other");
+        let register = |io: &mut FakeIo, token: &str| {
+            io.registered_accounts = vec![
+                CapturedAccount {
+                    key: other.clone(),
+                    label: "other@example.com".to_string(),
+                },
+                CapturedAccount {
+                    key: key.clone(),
+                    label: GOOGLE_EMAIL.to_string(),
+                },
+            ];
+            let mut items = io.items.borrow_mut();
+            items.insert(
+                other.clone(),
+                stored_value("1//rt-other", AUD, &secret('a')),
+            );
+            items.insert(key.clone(), stored_value(token, AUD, &secret('a')));
+        };
+
+        let mut io = agy14_io("agy14-auto-unchanged");
+        register(&mut io, "1//rt-n");
+        assert_eq!(
+            auto_capture_with(&io, &[]).await,
+            Ok(AutoCaptured::Unchanged(CapturedAccount {
+                key: key.clone(),
+                label: LOCAL_EMAIL.to_string(),
+            }))
+        );
+        assert_eq!(io.token_calls.borrow().len(), 0, "no request");
+        assert_eq!(io.artifact_calls.get(), 0, "no client scan");
+        assert!(io.writes().is_empty(), "no write");
+        assert_eq!(
+            io.reads_of_captured_items(),
+            2,
+            "both registered credentials read"
+        );
+
+        let mut io = agy14_io("agy14-auto-unchanged-control");
+        register(&mut io, "1//rt-old");
+        assert!(matches!(
+            auto_capture_with(&io, &[]).await,
+            Ok(AutoCaptured::Captured(_))
+        ));
+        assert_eq!(
+            io.token_calls.borrow().len(),
+            2,
+            "a different token refreshes"
+        );
+        assert_eq!(io.writes().len(), 1);
+        assert_eq!(decode_value(&io.items.borrow()[&key]).0, "1//rt-n");
+
+        let mut io = agy14_io("agy14-auto-unchanged-removed");
+        register(&mut io, "1//rt-n");
+        assert_eq!(
+            auto_capture_with(&io, std::slice::from_ref(&key)).await,
+            Ok(AutoCaptured::SkippedRemoved)
+        );
+        assert_eq!(
+            io.reads_of_captured_items(),
+            1,
+            "the removed key is not read"
+        );
+        assert!(io.writes().is_empty());
+    }
+
+    /// Test list 10: only an ABSENT `id_token` takes the new path. Both
+    /// fields: the old path (stored `aud`'s client only, stored `sub`'s key,
+    /// the stored id_token's email). A present but malformed `id_token`, or
+    /// neither field (or an empty `id_token_email`), is
+    /// `AgyLoginMissingIdentity` before any scan or request.
+    #[tokio::test]
+    async fn agy14_only_an_absent_id_token_takes_the_new_path() {
+        let mut both = agy14_login("1//rt-n", "zzz@example.com");
+        both["id_token"] = json!(jwt(claims("sub-a", AUD, "a@example.com")));
+        let mut io = agy14_io("agy14-both");
+        io.agy_item = Some(both.to_string().into_bytes());
+        io.token = Box::new(|client, _| Ok(google_answer("sub-a", &client.id, None)));
+        assert_eq!(
+            capture_with(&io).await,
+            Ok(CapturedAccount {
+                key: captured_key("sub-a"),
+                label: "a@example.com".to_string(),
+            })
+        );
+        assert_eq!(
+            *io.token_calls.borrow(),
+            vec![(AUD.to_string(), secret('a'), "1//rt-n".to_string())],
+            "only the stored aud's client"
+        );
+
+        let mut malformed: Vec<(&str, Value)> = Vec::new();
+        for (tag, id_token) in [
+            ("not-a-jwt", json!("not-a-jwt")),
+            ("empty", json!("")),
+            ("null", Value::Null),
+            ("no-sub", json!(jwt(json!({ "aud": AUD })))),
+        ] {
+            let mut login = agy14_login("1//rt-n", LOCAL_EMAIL);
+            login["id_token"] = id_token;
+            malformed.push((tag, login));
+        }
+        let mut neither = agy14_login("1//rt-n", LOCAL_EMAIL);
+        neither.as_object_mut().unwrap().remove("id_token_email");
+        malformed.push(("neither", neither));
+        malformed.push(("empty-email", agy14_login("1//rt-n", "  ")));
+
+        for (tag, login) in malformed {
+            for auto in [false, true] {
+                let mut io = agy14_io(&format!("agy14-malformed-{tag}"));
+                io.agy_item = Some(login.to_string().into_bytes());
+                let error = if auto {
+                    auto_capture_with(&io, &[]).await.err()
+                } else {
+                    capture_with(&io).await.err()
+                };
+                assert_eq!(
+                    error,
+                    Some(CaptureError::AgyLoginMissingIdentity),
+                    "{tag} auto={auto}"
+                );
+                assert_eq!(io.token_calls.borrow().len(), 0, "{tag} auto={auto}");
+                assert_eq!(io.artifact_calls.get(), 0, "{tag} auto={auto}");
+                assert!(io.writes().is_empty(), "{tag} auto={auto}");
+            }
         }
     }
 

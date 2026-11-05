@@ -24,8 +24,11 @@ public static class AntigravityAccounts
     public const string Key = "tokenbar.antigravity.accounts";
 
     /// <summary>Keys (hashes only) removed while automatic capture was on, as
-    /// a JSON array string. Automatic capture skips them before any request;
-    /// only a manual Capture of that account takes a key off.</summary>
+    /// a JSON array string. Automatic capture never stores them: it skips
+    /// them before any request when agy's login carries an id_token; for
+    /// agy 1.4.x's login (no id_token), after the token was refreshed with
+    /// each candidate client until one succeeded, and before the write. Only
+    /// a manual Capture of that account takes a key off.</summary>
     public const string RemovedKeysKey = "tokenbar.antigravity.removedKeys";
 
     public const string EmptyPayload = "[]";

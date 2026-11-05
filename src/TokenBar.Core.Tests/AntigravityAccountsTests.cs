@@ -1052,6 +1052,35 @@ public class AntigravityAccountsTests
         Assert.Equal(recorded, capture.LastErrorCode);
     }
 
+    /// <summary>WIN-P9 S2 G3: a failed automatic attempt logs only the fixed
+    /// core code, never the exception's message or type. The messages carry
+    /// a fixture secret; a known code is logged as itself, anything else as
+    /// <see cref="AntigravityAutoCapture.UnexpectedError"/>.</summary>
+    [Theory]
+    [InlineData("account_mismatch", false, "account_mismatch")]
+    [InlineData("refresh_rejected 1//SENTINEL-REFRESH GOCSPX-SENTINEL", false, AntigravityAutoCapture.UnexpectedError)]
+    [InlineData("1//SENTINEL-REFRESH GOCSPX-SENTINEL", true, AntigravityAutoCapture.UnexpectedError)]
+    public async Task AFailedAutoCaptureLogsOnlyTheCode(string message, bool otherType, string code)
+    {
+        var store = TempStore();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        var io = new FakeIo
+        {
+            AutoResult = () => throw (otherType ? new InvalidOperationException(message) : (Exception)new TbCoreException(message)),
+        };
+        var lines = new ConcurrentQueue<string>();
+        var capture = new AntigravityAutoCapture(io.Io, store, lines.Enqueue);
+
+        await capture.Poll();
+
+        Assert.Contains("auto", io.Calls);
+        Assert.Equal(
+            new[] { $"antigravity auto-capture failed: {code}" },
+            lines.Where(line => line.StartsWith("antigravity auto-capture failed", StringComparison.Ordinal)));
+        Assert.DoesNotContain(lines, line => line.Contains("SENTINEL", StringComparison.Ordinal));
+        Assert.DoesNotContain(lines, line => line.Contains("Exception", StringComparison.Ordinal));
+    }
+
     // ---- 8. remove ------------------------------------------------------------
 
     [Theory]

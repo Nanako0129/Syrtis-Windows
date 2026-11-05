@@ -1247,9 +1247,28 @@ pub unsafe extern "C" fn tb_set_antigravity_binding(json: *const c_char) -> *mut
 /// Copy agy's current Google login into a Syrtis-owned Credential Manager
 /// generic credential (target `com.nyanako.tokenbar.antigravity-account:<key>`,
 /// persist local machine). Reads agy's `gemini:antigravity` credential once and
-/// never writes it, starts no process, and proves the token with one refresh
-/// at Google using the client named by its `aud`. Success data is
-/// `{"key":"<64 hex>","label":"<email or fallback>"}`. The error text is
+/// never writes it, starts no process, and proves the token with a refresh at
+/// Google. With a stored `id_token`, the client named by its `aud` is used,
+/// the secrets found next to that client id tried until one is accepted; any
+/// other refusal, a non-OAuth answer included, is `refresh_rejected` (every
+/// secret answering invalid_client or unauthorized_client is
+/// `oauth_client_rejected`). For agy
+/// 1.4.x's credential (no `id_token`, only `id_token_email`), the clients
+/// found in agy's files (agy.exe's first) are tried in turn until one
+/// succeeds; only an OAuth error answer (a JSON object with an `error` code)
+/// moves on, while a 2xx without `access_token` stops with
+/// `invalid_credential_format` (even if it carries an `error` field) and a non-OAuth answer (non-JSON, a JSON
+/// non-object, or a non-2xx object without `error`) with
+/// `refresh_unreachable`. Both stop on a transport failure
+/// (`refresh_unreachable`), which includes HTTP 429 and 5xx answers even with
+/// an OAuth `error` body. It writes only when that response carries an
+/// `id_token` whose `aud` is the client used and that names agy's account:
+/// agy's stored `sub`, or, for agy 1.4.x, an `email` equal to
+/// `id_token_email` ignoring ASCII case (`account_mismatch` otherwise,
+/// `invalid_credential_format` when there is no usable `id_token`). The key
+/// is derived from Google's `sub`. Success data is
+/// `{"key":"<64 hex>","label":"<email or fallback>"}`, the label being
+/// Google's email, else agy's local one. The error text is
 /// exactly one fixed code: `agy_not_signed_in`, `agy_login_unreadable`,
 /// `agy_login_missing_identity`, `oauth_client_not_found`,
 /// `oauth_client_rejected`, `refresh_rejected`, `refresh_unreachable`,
@@ -1287,12 +1306,19 @@ pub extern "C" fn tb_antigravity_login_marker() -> *mut c_char {
 /// One automatic capture of agy's current login, run by the app once per
 /// login-marker change while automatic capture is on. `removed_keys_json` is
 /// a JSON array of the keys the user removed (`["<64 hex>", ...]`); an account
-/// whose key is listed is skipped before any request. Success data is
+/// whose key is listed is never written: with agy's stored `id_token` it is
+/// skipped before any request, while agy 1.4.x's credential (no `id_token`)
+/// names its account only in Google's answer, so it is skipped after the
+/// token was refreshed with each candidate client until one succeeded, and
+/// before the write. Success data is
 /// `{"status":"captured"|"unchanged","key":"<64 hex>","label":"..."}` or
-/// `{"status":"skipped_removed"}`. `unchanged` means Syrtis's own credential
-/// already holds this refresh token: nothing was scanned, requested or
-/// written. `captured` requires Google's refresh response to carry an
-/// `id_token` with the stored `sub`. The error is one fixed code: the
+/// `{"status":"skipped_removed"}`. `unchanged` means a Syrtis credential
+/// already holds this refresh token (its own key's, or, for agy 1.4.x, any
+/// registered account's not in the removed keys): nothing was scanned,
+/// requested or written. `captured` requires Google's refresh response to
+/// pass the checks of `tb_antigravity_capture` (`account_mismatch` for
+/// another account or client, `invalid_credential_format` when there is no
+/// usable `id_token`). The error is one fixed code: the
 /// `tb_antigravity_capture` codes (except `agy_not_signed_in`), plus
 /// `not_signed_in` (agy has no credential), `paused` (agy's credential read
 /// failed any other way) and `invalid_removed_keys`. Blocking (network): call

@@ -216,8 +216,22 @@ char *tb_set_antigravity_binding(const char *json);
 // Copy agy's current Google login (Credential Manager gemini:antigravity,
 // read only) into a Syrtis generic credential
 // com.nyanako.tokenbar.antigravity-account:<key> (persist local machine),
-// after one refresh at Google with the client named by its aud. Starts no
-// process. Success data: {"key","label"}. Errors are fixed codes
+// after a refresh at Google: with a stored id_token, the client named by its
+// aud, the secrets found next to that client id tried until one is accepted;
+// for agy 1.4.x's login (no id_token, only id_token_email), the candidate
+// clients from agy's files tried in turn until one succeeds. Both stop on a
+// transport failure (refresh_unreachable), which includes HTTP 429 and 5xx
+// answers even with an OAuth error body. The agy 1.4.x search goes on only
+// after an OAuth error answer; it stops on a 2xx without access_token, even
+// one carrying an error field (invalid_credential_format), or an answer that
+// is not an OAuth one (refresh_unreachable). On the stored-id_token path a
+// non-OAuth answer is reported as refresh_rejected (unchanged), and every
+// secret answering invalid_client or unauthorized_client as
+// oauth_client_rejected. Google's answer must carry an id_token naming the
+// client used and agy's account (account_mismatch otherwise); a response
+// without a usable id_token fails with invalid_credential_format. The key
+// comes from Google's sub. Starts no process. Success data: {"key","label"}.
+// Errors are fixed codes
 // (agy_not_signed_in, agy_login_unreadable, agy_login_missing_identity,
 // oauth_client_not_found, oauth_client_rejected, refresh_rejected,
 // refresh_unreachable, account_mismatch, invalid_credential_format,
@@ -229,7 +243,11 @@ char *tb_antigravity_capture(void);
 char *tb_antigravity_login_marker(void);
 
 // One automatic capture. removed_keys_json is ["<64 hex>",...]; a listed
-// account is skipped before any request. Success data:
+// account is never stored: with agy's stored id_token it is skipped before
+// any request; agy 1.4.x's login (no id_token) names its account only in
+// Google's answer, so it is refreshed with each candidate client until one
+// succeeds and skipped before the write.
+// Success data:
 // {"status":"captured"|"unchanged","key","label"} or
 // {"status":"skipped_removed"}. Errors: the capture codes (except
 // agy_not_signed_in), not_signed_in, paused, invalid_removed_keys.

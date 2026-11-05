@@ -208,7 +208,21 @@ public static class TbCore
         Unwrap<JsonElement>(NativeMethods.tb_set_antigravity_binding(json));
 
     /// <summary>Copy agy's current Google login into Syrtis's own Credential
-    /// Manager entry (one refresh at Google first). Blocking, network. Throws
+    /// Manager entry, after a refresh at Google: with a stored id_token, the
+    /// client named by its aud, the secrets found next to that client id
+    /// tried until one is accepted; for agy 1.4.x's login (no id_token), the
+    /// candidate clients tried in turn until one succeeds. Both stop on a
+    /// transport failure (<c>refresh_unreachable</c>), which includes HTTP 429
+    /// and 5xx answers even with an OAuth error body. The agy 1.4.x search
+    /// goes on only after an OAuth error answer; it stops on a 2xx without
+    /// access_token, even one carrying an error field
+    /// (<c>invalid_credential_format</c>), or an answer that is not
+    /// an OAuth one (<c>refresh_unreachable</c>). On the stored-id_token path a
+    /// non-OAuth answer is reported as <c>refresh_rejected</c> (unchanged), and
+    /// every secret answering invalid_client or unauthorized_client as
+    /// <c>oauth_client_rejected</c>. A
+    /// response without a usable id_token fails with
+    /// <c>invalid_credential_format</c>. Blocking, network. Throws
     /// <see cref="TbCoreException"/> carrying a fixed code (ctb.h). Does not
     /// register the account.</summary>
     public static AntigravityAccount AntigravityCapture() =>
@@ -220,7 +234,10 @@ public static class TbCore
         Unwrap<AntigravityMarker>(NativeMethods.tb_antigravity_login_marker()).Marker;
 
     /// <summary>One automatic capture; <paramref name="removedKeys"/> are
-    /// skipped before any request. Blocking, network.</summary>
+    /// never stored: skipped before any request when agy's login carries an
+    /// id_token; for agy 1.4.x's login (no id_token), after the token was
+    /// refreshed with each candidate client until one succeeded, and before
+    /// the write. Blocking, network.</summary>
     public static AntigravityAutoCaptureResult AntigravityAutoCapture(IReadOnlyList<string> removedKeys) =>
         Unwrap<AntigravityAutoCaptureResult>(NativeMethods.tb_antigravity_auto_capture(
             JsonSerializer.Serialize(removedKeys, JsonOpts)));
