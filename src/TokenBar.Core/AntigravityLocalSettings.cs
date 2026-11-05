@@ -97,6 +97,17 @@ public static class AntigravityLocalSettings
             return local;
         }
 
+        if (roaming.LoadFailed)
+        {
+            // The roaming file exists but could not be read (SettingsStore
+            // only sets LoadFailed then; a missing file is a normal "nothing
+            // to move"). Moving now would write the marker over empty values
+            // and skip the move for good, so this ends like a failed probe:
+            // nothing written, empty in-memory session, retry next launch.
+            log("antigravity settings move: roaming settings unreadable; retrying at next launch");
+            return SettingsStore.InMemory(log);
+        }
+
         if (existed)
         {
             log("antigravity local settings had no move marker; moving again without the automatic-capture toggle");

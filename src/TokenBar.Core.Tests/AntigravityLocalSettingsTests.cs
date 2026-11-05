@@ -436,6 +436,56 @@ public class AntigravityLocalSettingsTests
         Assert.Equal(moved, Bytes(paths.Local));
     }
 
+    /// <summary>PR #274 review: the roaming file exists but cannot be loaded
+    /// at launch (the test holds it open with <c>FileShare.None</c>, in this
+    /// process, while the roaming store is built). The move must not write
+    /// its marker over empty values: no local file, an empty in-memory
+    /// session with automatic capture off, roaming untouched, and the next
+    /// launch, with the roaming file readable, moves A.</summary>
+    [Fact]
+    public void ARoamingFileThatCannotBeLoadedMovesNothingAndRetriesNextLaunch()
+    {
+        var paths = new Paths();
+        Roaming(paths, KeyA);
+        var before = Bytes(paths.Roaming);
+        SettingsStore roaming;
+        using (new FileStream(paths.Roaming, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            roaming = new SettingsStore(paths.Roaming);
+        }
+
+        Assert.True(roaming.LoadFailed, "fixture: the locked roaming file did not load");
+
+        var session = AntigravityLocalSettings.Open(paths.Local, roaming, OnlyAHere, NoLog);
+
+        Assert.False(session.Persists);
+        Assert.False(File.Exists(paths.Local), "the marker was written over an unread roaming file");
+        Assert.Empty(AntigravityAccounts.Load(session));
+        Assert.False(session.GetBool(AntigravityAutoCapture.EnabledKey, false));
+        Assert.Equal(before, Bytes(paths.Roaming));
+
+        var next = AntigravityLocalSettings.Open(paths.Local, new SettingsStore(paths.Roaming), OnlyAHere, NoLog);
+        Assert.Equal([KeyA], AntigravityAccounts.Load(next).Select(a => a.Key));
+        Assert.True(next.GetBool(AntigravityAutoCapture.EnabledKey, false));
+    }
+
+    /// <summary>Control for the test above: a roaming file that does not
+    /// exist is not a failed load; the move writes its marker (nothing to
+    /// move).</summary>
+    [Fact]
+    public void AMissingRoamingFileIsNothingToMove()
+    {
+        var paths = new Paths();
+        var roaming = new SettingsStore(paths.Roaming);
+        Assert.False(roaming.LoadFailed);
+
+        var local = AntigravityLocalSettings.Open(paths.Local, roaming, OnlyAHere, NoLog);
+
+        Assert.True(local.Persists);
+        Assert.Empty(AntigravityAccounts.Load(local));
+        Assert.True(new SettingsStore(paths.Local).GetBool(AntigravityLocalSettings.MigratedKey, false));
+    }
+
     /// <summary>Review G6: when the temp file was written but the replacing
     /// move fails (the test makes the store's path a folder), the temp copy
     /// is deleted, so the values are not left on disk under another name.</summary>
