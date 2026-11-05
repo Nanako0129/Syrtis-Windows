@@ -1118,7 +1118,7 @@ public sealed partial class SettingsWindow : Window
             panel.Children.Add(InfoSection(
                 AntigravityAccountsCopy.Header, AntigravityAccountsCopy.Summary,
                 () => AntigravityAccountsCopy.InfoRows(AntigravityAutoCapture.Shared?.IsEnabled),
-                BuildAntigravityAccounts(store)));
+                BuildAntigravityAccounts(AppSettings.Antigravity)));
         }
 
         if (CursorSyncController.Shared is { } cursor)

@@ -21,6 +21,7 @@ public sealed class SettingsStore
     private readonly object _gate = new();
     private readonly Dictionary<string, JsonElement> _values;
     private readonly bool _loadFailed;
+    private readonly bool _inMemory;
 
     /// <summary>Fires after a key's value actually changes (set to the same
     /// value is a no-op, mirroring the signature-gated observers the macOS
@@ -33,6 +34,23 @@ public sealed class SettingsStore
         _log = log;
         _values = Load(path, out _loadFailed);
     }
+
+    private SettingsStore(Action<string>? log)
+    {
+        _path = "";
+        _log = log;
+        _values = [];
+        _inMemory = true;
+    }
+
+    /// <summary>An empty store that never touches a file: what this session
+    /// uses when a store it needs could not be prepared (the Antigravity
+    /// settings move, slice W item 13). Its values last until exit.</summary>
+    public static SettingsStore InMemory(Action<string>? log = null) => new(log);
+
+    /// <summary>The file existed but could not be read at startup, so this
+    /// store holds nothing from it and never writes it (see <see cref="Save"/>).</summary>
+    public bool LoadFailed => _loadFailed;
 
     private static Dictionary<string, JsonElement> Load(string path, out bool loadFailed)
     {
@@ -164,6 +182,40 @@ public sealed class SettingsStore
     public void SetDouble(string key, double value) =>
         Set(key, JsonSerializer.SerializeToElement(value));
 
+    /// <summary>Set several keys in ONE save (one temp file and one replacing
+    /// move), so a reader of the file sees all of them or none. Keys whose
+    /// value is unchanged are skipped; <see cref="Changed"/> fires per changed
+    /// key after the save.</summary>
+    public void SetMany(IReadOnlyDictionary<string, JsonElement> values)
+    {
+        List<string> changed = [];
+        lock (_gate)
+        {
+            foreach (var (key, value) in values)
+            {
+                if (_values.TryGetValue(key, out var old)
+                    && old.ValueKind == value.ValueKind
+                    && old.GetRawText() == value.GetRawText())
+                {
+                    continue;
+                }
+
+                _values[key] = value;
+                changed.Add(key);
+            }
+
+            if (changed.Count > 0)
+            {
+                Save();
+            }
+        }
+
+        foreach (var key in changed)
+        {
+            Changed?.Invoke(key);
+        }
+    }
+
     /// <summary>UserDefaults removeObject parity: reverts the key to
     /// whatever fallback its readers pass (e.g. the year filter's "all").</summary>
     public void Remove(string key)
@@ -201,6 +253,11 @@ public sealed class SettingsStore
 
     private void Save()
     {
+        if (_inMemory)
+        {
+            return;
+        }
+
         if (_loadFailed)
         {
             // The existing store couldn't be read at startup; writing now would

@@ -13,3 +13,5 @@ public sealed record AntigravityAutoCaptureResult(string Status, string? Key = n
 public sealed record AntigravityMarker(string Marker);
 
 public sealed record AntigravityRemoved(bool Removed);
+
+public sealed record AntigravityPresence(string Presence);

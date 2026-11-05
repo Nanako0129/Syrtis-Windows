@@ -3589,6 +3589,43 @@ mod credential_manager {
         }
     }
 
+    /// Existence probe (S17): `CredReadW` has no metadata-only mode, so the
+    /// OS allocation holds the blob; it is zeroed in place, never copied, and
+    /// only `Persist` is looked at before `CredFree`.
+    pub(super) fn presence(target: &str) -> super::ItemPresence {
+        use super::ItemPresence;
+        let target = wide(target);
+        let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
+        // SAFETY: as `read`: `target` is NUL-terminated and outlives the call;
+        // on success the one allocation is only touched here and freed once.
+        unsafe {
+            if CredReadW(target.as_ptr(), super::CRED_TYPE_GENERIC, 0, &mut credential) == 0 {
+                return if GetLastError() == ERROR_NOT_FOUND {
+                    ItemPresence::Absent
+                } else {
+                    ItemPresence::Failed
+                };
+            }
+            if credential.is_null() {
+                return ItemPresence::Failed;
+            }
+            let size = (*credential).CredentialBlobSize as usize;
+            let blob = (*credential).CredentialBlob;
+            if !blob.is_null() {
+                for offset in 0..size {
+                    std::ptr::write_volatile(blob.add(offset), 0);
+                }
+            }
+            let persist = (*credential).Persist;
+            CredFree(credential.cast::<core::ffi::c_void>());
+            if persist == super::CRED_PERSIST_LOCAL_MACHINE {
+                ItemPresence::Present
+            } else {
+                ItemPresence::Absent
+            }
+        }
+    }
+
     /// Copies the blob out, then zeroes the OS allocation before `CredFree`.
     /// No pointer into the `CREDENTIALW` leaves this function.
     fn read(target: &str, cred_type: u32) -> CredOutcome {
@@ -4515,6 +4552,57 @@ pub(crate) fn login_marker() -> Option<String> {
 
 pub(crate) fn remove(key: &str) -> Result<(), CaptureError> {
     remove_with(&SystemCapturedIo, &CAPTURED_TOKENS, key)
+}
+
+/// Whether a captured account's credential exists on this PC: the one-time
+/// move of Antigravity settings out of the roaming profile (slice W item 13,
+/// security review S15/S17) keeps an account only when this answers
+/// `Present`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ItemPresence {
+    /// A `CRED_PERSIST_LOCAL_MACHINE` credential under the account's target.
+    Present,
+    /// No credential, an invalid key (no target can be built for it), or a
+    /// credential with any other persistence (not one Syrtis wrote here).
+    Absent,
+    /// The read failed other than "not found": the caller must not decide.
+    Failed,
+}
+
+impl ItemPresence {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Present => "present",
+            Self::Absent => "absent",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Existence only (S17): the target comes from `captured_target` (64 hex or
+/// nothing), and the probe never copies the blob.
+pub(crate) fn captured_item_presence(key: &str) -> ItemPresence {
+    captured_item_presence_with(key, system_item_presence)
+}
+
+fn captured_item_presence_with(
+    key: &str,
+    probe: impl FnOnce(&str) -> ItemPresence,
+) -> ItemPresence {
+    match captured_target(key) {
+        Some(target) => probe(&target),
+        None => ItemPresence::Absent,
+    }
+}
+
+#[cfg(windows)]
+fn system_item_presence(target: &str) -> ItemPresence {
+    credential_manager::presence(target)
+}
+
+#[cfg(not(windows))]
+fn system_item_presence(_target: &str) -> ItemPresence {
+    ItemPresence::Failed
 }
 
 pub(crate) async fn fetch_captured(
@@ -7542,6 +7630,25 @@ mod captured_account_tests {
             items[&key_b], stored_b,
             "the other account's credential is untouched"
         );
+    }
+
+    /// Item 13 (S17): the migration probe names only a validated captured
+    /// target, and an invalid key is absent without any call.
+    #[test]
+    fn the_presence_probe_names_only_the_captured_target() {
+        let key = captured_key("sub-a");
+        let seen = std::cell::RefCell::new(Vec::<String>::new());
+        let answer = captured_item_presence_with(&key, |target| {
+            seen.borrow_mut().push(target.to_string());
+            ItemPresence::Present
+        });
+        assert_eq!(answer, ItemPresence::Present);
+        assert_eq!(*seen.borrow(), [format!("{PREFIX}{key}")]);
+        for bad in ["", "gemini:antigravity", "ZZ", &key[..63]] {
+            let answer = captured_item_presence_with(bad, |_| panic!("probed {bad:?}"));
+            assert_eq!(answer, ItemPresence::Absent);
+        }
+        assert_eq!(ItemPresence::Failed.code(), "failed");
     }
 
     /// S10 / slice W item 16b: a Remove (registry drop, then delete) while

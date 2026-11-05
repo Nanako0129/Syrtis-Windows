@@ -261,6 +261,13 @@ char *tb_antigravity_auto_capture(const char *removed_keys_json);
 // {"removed":true}; errors invalid_key, keychain_delete_failed.
 char *tb_antigravity_remove(const char *key);
 
+// Whether a captured account's credential exists on this PC (one-time move of
+// Antigravity settings out of the roaming profile). Existence only: the blob
+// is never copied; only a persist-local-machine credential counts. Success
+// data: {"presence":"present"|"absent"|"failed"}; an invalid or NULL key is
+// absent without a Credential Manager call. Blocking.
+char *tb_antigravity_account_presence(const char *key);
+
 // Configure Cursor desktop sync. `json` is {"enabled":bool,
 // "cliTakeoverConfirmed":bool,"profiles":[{"id":"<UPPERCASE UUID>",
 // "root":"X:\\..."}]} (profiles optional: added --user-data-dir folders);
