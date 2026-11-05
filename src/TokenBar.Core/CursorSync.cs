@@ -274,9 +274,10 @@ public sealed class CursorSyncController
     private Task _configPush = Task.CompletedTask;
     private CancellationTokenSource? _loop;
     private int _generation;
-    // Bumped by ConsentChanged: a round that started under an older Cursor
-    // consent answer is discarded and rerun as a user round.
+    // Bumped by ConsentChanged, with the answer it reported: an Allow during a
+    // round the core refused for want of consent reruns it as a user round.
     private int _consentEpoch;
+    private bool _consentGranted;
     private bool _rerunPending;
     private bool _syncing;
     // The running pass is a user press, not the schedule.
@@ -558,7 +559,12 @@ public sealed class CursorSyncController
     /// reconfigure during that wait makes it wait again, and if sync was
     /// turned off meanwhile it returns without calling the core. A
     /// reconfigure while the core runs makes the result stale; it is discarded
-    /// and the sync reruns, so the new settings get a fresh result.</summary>
+    /// and the sync reruns, so the new settings get a fresh result.
+    /// A second exception to single-flight is <see cref="ConsentChanged"/>: an
+    /// Allow pressed while a round runs, when that round ends refused for want
+    /// of the "cursor" consent, applies that round's result (its writes are
+    /// real, so <see cref="DataChanged"/> still fires on <c>changed</c>) and
+    /// then runs one user round, which also serves a remembered Sync Now.</summary>
     public async Task RunSync(bool userInitiated)
     {
         if (_io is not { } io || !CursorSync.ShouldSync(_store))
@@ -646,13 +652,19 @@ public sealed class CursorSyncController
 
                 var refresh = false;
                 bool again;
-                bool consentChanged;
+                bool consentRerun;
                 lock (_gate)
                 {
-                    // Allow / Withdraw while this ran: the result was read
-                    // under the old answer (ConsentChanged).
-                    consentChanged = startedConsent != _consentEpoch;
-                    if (started != _generation || consentChanged || !CursorSync.ShouldSync(_store))
+                    // Allow pressed while this ran, and this round was refused
+                    // for want of that consent (keychain_consent): it depended
+                    // on the old answer, so it reruns. A plaintext round never
+                    // read consent, and a Withdraw needs no rerun (a round that
+                    // had not yet opened the sealed sign-in already reports
+                    // keychain_consent; one that had, read it under the yes
+                    // then in force and reports true data).
+                    consentRerun = startedConsent != _consentEpoch && _consentGranted
+                        && AskedForConsent(result);
+                    if (started != _generation || !CursorSync.ShouldSync(_store))
                     {
                         // A reconfigure (turning sync off, say) happened while
                         // this ran: the result describes a configuration that
@@ -675,16 +687,23 @@ public sealed class CursorSyncController
                         // headline (one profile can write while another
                         // fails) and not on the event count (another profile
                         // can write the same count). An identical rewrite is
-                        // not `changed` in the core.
+                        // not `changed` in the core. A round rerun for consent
+                        // is still applied: what it wrote is real.
                         refresh = result.Changed;
+                        if (consentRerun)
+                        {
+                            _rerunPending = true;
+                        }
                     }
 
                     again = _rerunPending && CursorSync.ShouldSync(_store);
-                    if (again && consentChanged)
+                    if (again && consentRerun)
                     {
-                        // The Allow / Withdraw press is served as a user round.
+                        // The Allow press is served as a user round, and that
+                        // round also serves a Sync Now remembered meanwhile.
                         user = true;
                         _runningUser = true;
+                        _userPending = false;
                     }
 
                     if (!again)
@@ -744,17 +763,20 @@ public sealed class CursorSyncController
 
     // ---- Actions behind the controls ---------------------------------------
 
-    /// <summary>The Cursor encrypted-sign-in answer changed (Allow or Withdraw
-    /// in Settings; the caller has already installed it through
-    /// <see cref="KeychainConsentComposer"/>). A round already running read
-    /// the old answer: its result is discarded and one user round runs right
-    /// after it, so the press is never dropped (a plain Sync Now during a user
-    /// round is). With no round running, one user round starts now.</summary>
-    public Task ConsentChanged()
+    /// <summary>The Cursor encrypted-sign-in answer changed to
+    /// <paramref name="granted"/> (Allow or Withdraw in Settings; the caller has
+    /// already installed it through <see cref="KeychainConsentComposer"/>).
+    /// With no round running, one user round starts now. While a round runs:
+    /// an Allow whose round ends refused for want of consent
+    /// (<c>keychain_consent</c>) is served by one user round right after it
+    /// (an exception to single-flight; a plain Sync Now during a user round is
+    /// dropped); otherwise nothing more runs (see <see cref="RunSync"/>).</summary>
+    public Task ConsentChanged(bool granted)
     {
         lock (_gate)
         {
             _consentEpoch++;
+            _consentGranted = granted;
             if (_syncing)
             {
                 return Task.CompletedTask;
@@ -763,6 +785,13 @@ public sealed class CursorSyncController
 
         return RunSync(userInitiated: true);
     }
+
+    /// <summary>The round, headline or any profile, was refused because the
+    /// "cursor" consent was missing.</summary>
+    private static bool AskedForConsent(CursorSyncStatus? result) =>
+        result is not null
+        && (result.Reason == CursorSync.Copy.KeychainConsentCode
+            || result.Profiles?.Any(p => p.Reason == CursorSync.Copy.KeychainConsentCode) == true);
 
     /// <summary>The Settings switch turned off: stores the preference off.
     /// Only <see cref="TurnOn"/> (consent first) stores it on.</summary>

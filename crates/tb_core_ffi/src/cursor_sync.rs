@@ -25,11 +25,17 @@
 //! - A Cursor 3.27+ sealed sign-in (`cursor-safe-storage:v1:…`, S3b) is
 //!   decrypted only here, only after the "cursor" consent check read
 //!   immediately before `Local State` is opened (C2), with the key from the
-//!   user-data-dir the database belongs to (C6); no key is cached (U3). The
-//!   decrypt plaintext and the key are wiped on every path (C8); a non-v10
-//!   blob is `token_sealed_unsupported`, any other failure
-//!   `token_sealed_unreadable` (win_safe_storage's text never passed through).
+//!   user-data-dir the database belongs to (C6); no key is cached (U3). A
+//!   non-v10 blob is `token_sealed_unsupported`, a blob shorter than a v10
+//!   blob can be and any other failure `token_sealed_unreadable`
+//!   (win_safe_storage's text never passed through).
 //!   `query_login`/`read_login` never decrypt (C1).
+//! - C8, exactly what is zeroed: the unwrapped key (on drop), the decrypt
+//!   output buffer, the access-token row's String in `query_login`, the
+//!   login's token String (`WipedLogin`, every exit of `run`), and the cookie
+//!   value String (`WipedString`, built at final size). Not zeroed: SQLite's
+//!   and rusqlite's internal buffers, serde_json's unquoting scratch, the
+//!   decoded JWT payload, the `HeaderValue` and whatever reqwest copies.
 //! - The endpoint is a constant; only tests inject one, by parameter (S-4).
 //! - Redirects are never followed and production is https-only; any 3xx
 //!   (cursor.com sends an expired session to WorkOS) means `expired`.
@@ -1549,17 +1555,27 @@ fn local_state_path(target: &Target<'_>, slot: &Slot) -> Option<PathBuf> {
     Some(user_data_dir.join("Local State"))
 }
 
+/// The shortest possible v10 blob: `"v10"` || nonce(12) || tag(16), with an
+/// empty ciphertext.
+#[cfg(windows)]
+const V10_MIN_LEN: usize = 3 + 12 + 16;
+
 /// Open one profile's sealed token (S3b item 1). Order: the decoded blob's
-/// version gate (non-`v10` is `token_sealed_unsupported`, no I/O); the consent
-/// check, immediately before `Local State` is opened (C2); the key load (the
-/// only `Local State`/DPAPI read); the AES-GCM decrypt; the plaintext wiped on
-/// every path, UTF-8 failure included (C8). Windows only; `stored_token` never
-/// yields `Sealed` elsewhere.
+/// shape, in one place and with no I/O — a 3-byte-or-longer blob that is not
+/// `v10` is `token_sealed_unsupported`; anything shorter than a v10 blob can
+/// be (fewer than 3 bytes included) is `token_sealed_unreadable` (T10); then
+/// the consent check, immediately before `Local State` is opened (C2); the key
+/// load (the only `Local State`/DPAPI read); the AES-GCM decrypt; the decrypt
+/// output wiped on every path, UTF-8 failure included (C8). Windows only;
+/// `stored_token` never yields `Sealed` elsewhere.
 #[cfg(windows)]
 fn open_sealed(blob: &[u8], target: &Target<'_>, slot: &Slot) -> Result<String, Stop> {
     let refuse = Stop::error;
-    if !blob.starts_with(b"v10") {
+    if blob.len() >= 3 && !blob.starts_with(b"v10") {
         return Err(refuse("token_sealed_unsupported"));
+    }
+    if blob.len() < V10_MIN_LEN {
+        return Err(refuse("token_sealed_unreadable"));
     }
     // C2: read consent here, not at round start; a withdrawal before this
     // point stops the read, and `Local State` is not opened.
@@ -1570,51 +1586,48 @@ fn open_sealed(blob: &[u8], target: &Target<'_>, slot: &Slot) -> Result<String, 
     let key = (target.load_seal_key)(&local_state).map_err(|_| refuse("token_sealed_unreadable"))?;
     let mut plaintext = key.decrypt(blob).map_err(|_| refuse("token_sealed_unreadable"))?;
     drop(key); // SafeStorageKey wipes the key on drop (C8).
+    // One exact-size copy (`to_owned` allocates the string's length); the
+    // decrypt output is wiped whether it was valid UTF-8 or not (C8). The
+    // copy goes straight into the login, which `run` holds in a `WipedLogin`.
     let token = std::str::from_utf8(&plaintext).ok().map(str::to_owned);
-    // C8: the decrypt output is wiped whether it was valid UTF-8 or not. The
-    // owned copy returned here goes straight into the login, which `run`
-    // holds in a `WipedLogin` from then on, so it is overwritten on every
-    // later exit (non-JWT, account_mismatch, expired, key_unavailable,
-    // duplicate, or once the cookie is built).
     crate::win_safe_storage::wipe(&mut plaintext);
     token.ok_or(refuse("token_sealed_unreadable"))
 }
 
-/// Overwrite a string's bytes with zeros (NUL is valid UTF-8, so the String
-/// stays valid) in a way the optimizer cannot drop as a dead store.
-fn wipe_str(text: &mut String) {
-    // SAFETY: only zero bytes are written, which keep the buffer valid UTF-8.
-    for byte in unsafe { text.as_bytes_mut() } {
-        unsafe { std::ptr::write_volatile(byte, 0) };
-    }
-    std::sync::atomic::compiler_fence(Ordering::SeqCst);
-    #[cfg(test)]
-    WIPED_LENGTHS.with(|wiped| {
-        wiped
-            .borrow_mut()
-            .push((text.len(), text.bytes().all(|b| b == 0)))
-    });
-}
-
-/// The login while `run` holds it: the access token (plaintext as stored, or
-/// the unsealed one) is wiped when this drops, on every path (C8).
+/// The login while `run` holds it: the access token String (plaintext as
+/// stored, or the unsealed one) is wiped when this drops, so on every exit
+/// of `run` after the token is classified (C8).
 struct WipedLogin(CursorLogin);
 
 impl Drop for WipedLogin {
     fn drop(&mut self) {
-        wipe_str(&mut self.0.access_token);
+        cursor_desktop::wipe_str(&mut self.0.access_token);
     }
 }
 
-/// A string holding the token (the cookie value before it becomes a
-/// `HeaderValue`), wiped when it drops. The `HeaderValue` bytes themselves
-/// belong to reqwest and are not wiped (residual, as macOS).
+/// The cookie value String (it embeds the token), built at its final size so
+/// it never reallocates (a reallocation would leave the old buffer
+/// unwiped), and wiped when it drops.
 struct WipedString(String);
 
 impl Drop for WipedString {
     fn drop(&mut self) {
-        wipe_str(&mut self.0);
+        cursor_desktop::wipe_str(&mut self.0);
     }
+}
+
+/// `WorkosCursorSessionToken=<user>%3A%3A<token>` in one allocation of
+/// exactly its length plus one spare byte (the test-only bad-cookie fault
+/// appends a `\n`).
+fn cookie_value(user: &str, token: &str) -> WipedString {
+    const PREFIX: &str = "WorkosCursorSessionToken=";
+    const SEPARATOR: &str = "%3A%3A";
+    let mut value = String::with_capacity(PREFIX.len() + user.len() + SEPARATOR.len() + token.len() + 1);
+    value.push_str(PREFIX);
+    value.push_str(user);
+    value.push_str(SEPARATOR);
+    value.push_str(token);
+    WipedString(value)
 }
 
 #[cfg(not(windows))]
@@ -1895,10 +1908,7 @@ async fn run(
         };
     }
     #[cfg_attr(not(test), allow(unused_mut))]
-    let mut value = WipedString(format!(
-        "WorkosCursorSessionToken={user}%3A%3A{}",
-        login.0.access_token
-    ));
+    let mut value = cookie_value(&user, &login.0.access_token);
     #[cfg(test)]
     if BAD_COOKIE_FOR_TEST.with(std::cell::Cell::get) {
         value.0.push('\n');
@@ -2238,10 +2248,6 @@ thread_local! {
     /// only inside `open_sealed`, after this fires (C2 mutation test).
     static AFTER_LOGIN_HOOK: std::cell::Cell<Option<*const (dyn Fn() + 'static)>> =
         const { std::cell::Cell::new(None) };
-    /// C8 observation: every `wipe_str` on this thread records the wiped
-    /// length and whether every byte is zero afterwards (no content kept).
-    static WIPED_LENGTHS: std::cell::RefCell<Vec<(usize, bool)>> =
-        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]

@@ -4341,29 +4341,13 @@ fn token_user_accepts_and_rejects_as_before_through_the_shared_check() {
 
 // --- sealed Cursor sign-in (S3b) ------------------------------------------
 //
-// Fixture ciphertext generated independently of the crate by
-// `gen_cursor_seal_fixture.py` (Python `cryptography`, AES-256-GCM, no AAD) on
-// the Mac, which has no DPAPI. The key is fed straight into the loader seam
-// (`key_from_raw`, no DPAPI, no Local State); the real CNG `AesGcm` still
-// decrypts, so this whole module is Windows only. The plaintext is a static
-// three-segment JWT twin (far-future `exp`, `sub` = USER).
-mod seal {
-    pub(crate) const SEAL_KEY: [u8; 32] = [
-        0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce,
-        0xcf, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd,
-        0xde, 0xdf,
-    ];
-    pub(crate) const SEAL_JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhdXRoMHx1c2VyX0NBTkFSWXVzZXIwMTIzNDU2Nzg5QUIiLCJ0eXBlIjoic2Vzc2lvbiIsImV4cCI6NDEwMjQ0NDgwMH0.CANARYsignatureXYZ";
-    pub(crate) const SEALED_V10_B64: &str = "djEwEBESExQVFhcYGRob8y7LMdbbURFTHfSpPmcsynvhlGKbC2JZQpeUYfF7FxHg8691IiNZby8jRSyfn6mEHjZ4GN8uqEuqMJ++cpZsz/aq9Wo5wZTO7dtzbn8osksl8kdVuz1t6WxA6b4t+eh2Ch5eUWit9b7T2vZrX8uKiowSTT0WTMYmqNrtgBwwLRFMrjReMmF0eHJs/s/8k263WIcFipqHnrZYhK6tFfyL";
-    pub(crate) const SEALED_V11_B64: &str = "djExEBESExQVFhcYGRob8y7LMdbbURFTHfSpPmcsynvhlGKbC2JZQpeUYfF7FxHg8691IiNZby8jRSyfn6mEHjZ4GN8uqEuqMJ++cpZsz/aq9Wo5wZTO7dtzbn8osksl8kdVuz1t6WxA6b4t+eh2Ch5eUWit9b7T2vZrX8uKiowSTT0WTMYmqNrtgBwwLRFMrjReMmF0eHJs/s/8k263WIcFipqHnrZYhK6tFfyL";
-    pub(crate) const SEALED_V20_B64: &str = "djIwEBESExQVFhcYGRob8y7LMdbbURFTHfSpPmcsynvhlGKbC2JZQpeUYfF7FxHg8691IiNZby8jRSyfn6mEHjZ4GN8uqEuqMJ++cpZsz/aq9Wo5wZTO7dtzbn8osksl8kdVuz1t6WxA6b4t+eh2Ch5eUWit9b7T2vZrX8uKiowSTT0WTMYmqNrtgBwwLRFMrjReMmF0eHJs/s/8k263WIcFipqHnrZYhK6tFfyL";
-    pub(crate) const SEALED_TRUNCATED_B64: &str = "djEwEBESExQVFhcYGRob8y7LMdbbURFTHfSpPmcsynvhlGKbC2JZQpeUYfF7FxHg8691IiNZby8jRSyfn6mEHjZ4GN8uqEuqMJ++cpZsz/aq9Wo5wZTO7dtzbn8osksl8kdVuz1t6WxA6b4t+eh2Ch5eUWit9b7T2vZrX8uKiowSTT0WTMYmqNrtgBwwLRFMrjReMmF0eHJs/s/8k263WIcFipqHng==";
-
-    /// The full stored `cursorAuth/accessToken` value for one base64 payload.
-    pub(crate) fn sealed_token(payload_b64: &str) -> String {
-        format!("cursor-safe-storage:v1:{payload_b64}")
-    }
-}
+// The fixture (`cursor_desktop::seal_fixture`, shared with agent_grokbot's
+// test) was generated independently of the crate by
+// `gen_cursor_seal_fixture.py` (Python `cryptography`, AES-256-GCM, no AAD)
+// on the Mac, which has no DPAPI. The key is fed straight into the loader
+// seam (`key_from_raw`, no DPAPI, no Local State); the real CNG `AesGcm`
+// still decrypts, so this whole module is Windows only.
+use crate::cursor_desktop::seal_fixture as seal;
 
 /// A key loader that records every `Local State` path it is asked for and
 /// counts its calls, returning the fixture key straight from raw bytes.
@@ -4643,12 +4627,15 @@ fn the_default_profile_reads_the_user_data_dir_local_state() {
     );
 }
 
-/// C8: once unsealed, the token is wiped on a failure path after
+/// C8: once unsealed, the token String is wiped on a failure path after
 /// `open_sealed` (here `account_mismatch`: the stored glass id names another
-/// user), not left to an ordinary String drop. Observed through the test-only
-/// record `wipe_str` keeps: a wipe of the token's exact length, all zero after.
+/// user). Measured through the test-only `cursor_desktop::WIPED` record: some
+/// buffer that held exactly the unsealed JWT immediately before `wipe_str`
+/// was all zero immediately after. It does not measure memory after the
+/// String is freed, nor other copies (the rows read from SQLite are covered
+/// by `query_login_wipes_the_token_row_string`).
 /// Mutation: cursor_sync.rs `impl Drop for WipedLogin`
-/// `wipe_str(&mut self.0.access_token);` -> `let _ = &self.0.access_token;`
+/// `        cursor_desktop::wipe_str(&mut self.0.access_token);` -> `        let _ = &self.0.access_token;`
 #[test]
 fn an_unsealed_token_is_wiped_on_a_failure_after_open() {
     let tmp = TempDir::new();
@@ -4665,16 +4652,75 @@ fn an_unsealed_token_is_wiped_on_a_failure_after_open() {
     let dir = tmp.path().join("sync");
     let spy = LoaderSpy::new();
     let (url, seen) = serve(vec![json_ok(&page(1, &["a"]))]);
-    WIPED_LENGTHS.with(|wiped| wiped.borrow_mut().clear());
+    cursor_desktop::WIPED.with(|wiped| wiped.borrow_mut().clear());
     let outcome = run_sealed(&db, &dir, &url, &|| true, &spy.loader(), None);
     assert_eq!(outcome.stop.reason, Some("account_mismatch"));
     assert_eq!(spy.calls(), 1, "the token was unsealed before the refusal");
     assert!(seen.lock().unwrap().is_empty());
-    let wiped = WIPED_LENGTHS.with(|wiped| wiped.borrow().clone());
+    let wiped = cursor_desktop::WIPED.with(|wiped| wiped.borrow().clone());
     assert!(
-        wiped.contains(&(seal::SEAL_JWT.len(), true)),
-        "the unsealed token was not wiped: {wiped:?}"
+        wiped.contains(&(seal::SEAL_JWT.to_string(), true)),
+        "no buffer holding the unsealed token was zeroed ({} wipes)",
+        wiped.len()
     );
+}
+
+/// C8, the cookie value: on a successful round the String that held
+/// `WorkosCursorSessionToken=<user>%3A%3A<token>` is zeroed when dropped.
+/// Mutation: cursor_sync.rs `impl Drop for WipedString`
+/// `        cursor_desktop::wipe_str(&mut self.0);` -> `        let _ = &self.0;`
+#[test]
+fn the_cookie_value_is_wiped_after_the_header_is_built() {
+    let tmp = TempDir::new();
+    let db = nested_signed_in_db(tmp.path(), &seal::sealed_token(seal::SEALED_V10_B64));
+    let dir = tmp.path().join("sync");
+    let spy = LoaderSpy::new();
+    let (url, _seen) = serve(vec![json_ok(&page(1, &["a"]))]);
+    cursor_desktop::WIPED.with(|wiped| wiped.borrow_mut().clear());
+    let outcome = run_sealed(&db, &dir, &url, &|| true, &spy.loader(), None);
+    assert_eq!(outcome.stop.state, State::Ok, "{:?}", outcome.stop.reason);
+    let cookie = format!("WorkosCursorSessionToken={USER}%3A%3A{}", seal::SEAL_JWT);
+    let wiped = cursor_desktop::WIPED.with(|wiped| wiped.borrow().clone());
+    assert!(wiped.contains(&(cookie, true)), "the cookie value was not zeroed");
+    assert!(wiped.contains(&(seal::SEAL_JWT.to_string(), true)), "the token was not zeroed");
+}
+
+/// T10 / item 6: a decoded blob too short to be v10 (`"v10"` || nonce(12) ||
+/// tag(16) = 31 bytes) is `token_sealed_unreadable`, decided before consent,
+/// `Local State` or DPAPI: consent here is denied (a later check would say
+/// `keychain_consent`) and the loader is never called. Covers 0..=30 bytes,
+/// v10-prefixed from 3 bytes on; 31 bytes passes this gate (and then fails
+/// AES-GCM, `token_sealed_unreadable` from the decrypt, loader called once).
+/// Mutation: cursor_sync.rs `open_sealed`
+/// `    if blob.len() < V10_MIN_LEN {\n        return Err(refuse("token_sealed_unreadable"));\n    }` -> *(delete)*
+/// -> short v10 blobs reach the consent check (`keychain_consent`).
+#[test]
+fn blobs_shorter_than_v10_are_unreadable_before_consent() {
+    use base64::engine::general_purpose::STANDARD;
+    let (url, seen) = serve(vec![]);
+    for len in 0..=30usize {
+        let mut blob = b"v10".to_vec();
+        blob.resize(len.max(3), 0x41);
+        blob.truncate(len);
+        let tmp = TempDir::new();
+        let db = nested_signed_in_db(tmp.path(), &seal::sealed_token(&STANDARD.encode(&blob)));
+        let dir = tmp.path().join("sync");
+        let spy = LoaderSpy::new();
+        let outcome = run_sealed(&db, &dir, &url, &|| false, &spy.loader(), None);
+        assert_eq!(outcome.stop.reason, Some("token_sealed_unreadable"), "len {len}");
+        assert_eq!(spy.calls(), 0, "len {len}");
+    }
+    // Boundary: 31 bytes passes the length gate (consent granted here, so
+    // the loader runs, and the all-'A' tag fails AES-GCM).
+    let mut blob = b"v10".to_vec();
+    blob.resize(31, 0x41);
+    let tmp = TempDir::new();
+    let db = nested_signed_in_db(tmp.path(), &seal::sealed_token(&STANDARD.encode(&blob)));
+    let spy = LoaderSpy::new();
+    let outcome = run_sealed(&db, &tmp.path().join("sync"), &url, &|| true, &spy.loader(), None);
+    assert_eq!(outcome.stop.reason, Some("token_sealed_unreadable"));
+    assert_eq!(spy.calls(), 1);
+    assert!(seen.lock().unwrap().is_empty());
 }
 
 /// Acceptance 1 (C2): consent withdrawn between the login read and the key

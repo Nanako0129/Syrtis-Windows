@@ -235,17 +235,23 @@ fn query_login(conn: &rusqlite::Connection) -> rusqlite::Result<Option<CursorLog
         "SELECT key, value FROM ItemTable WHERE key IN \
          ('cursorAuth/accessToken','glass.lastSignedInAuthId','cursorAuth/cachedScopedProfile')",
     )?;
-    let rows: Vec<(String, String)> = stmt
+    let mut rows: Vec<(String, String)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<_, _>>()?;
 
     let mut token: Option<String> = None;
     let mut identity: Option<String> = None;
     let mut profile: Option<String> = None;
-    for (key, value) in &rows {
+    for (key, value) in &mut rows {
         let normalized = normalized_stored_string(value);
         match key.as_str() {
-            "cursorAuth/accessToken" => token = normalized,
+            // The row's own String (the quoted form) is wiped once the
+            // unquoted copy exists; SQLite's and rusqlite's internal buffers
+            // are not ours to wipe (C8).
+            "cursorAuth/accessToken" => {
+                token = normalized;
+                wipe_str(value);
+            }
             "glass.lastSignedInAuthId" => identity = normalized,
             "cursorAuth/cachedScopedProfile" => profile = normalized,
             _ => {}
@@ -317,12 +323,66 @@ pub(crate) fn stored_token(token: &str) -> StoredToken {
     if cfg!(not(target_os = "windows")) {
         return StoredToken::Refused("token_sealed_unsupported");
     }
+    // Length and version of the decoded blob are judged in one place,
+    // `cursor_sync::open_sealed`, before consent or any key read.
     match base64::engine::general_purpose::STANDARD.decode(encoded) {
-        // Too short to carry a version: a decode failure, not an unknown
-        // version (T10).
-        Ok(blob) if blob.len() < 3 => StoredToken::Refused("token_sealed_unreadable"),
         Ok(blob) => StoredToken::Sealed(blob),
         Err(_) => StoredToken::Refused("token_sealed_unreadable"),
+    }
+}
+
+/// Overwrite a string's bytes with zeros (NUL is valid UTF-8, so the String
+/// stays valid) in a way the optimizer cannot drop as a dead store. Used for
+/// every String this crate holds a Cursor access token in (C8).
+pub(crate) fn wipe_str(text: &mut String) {
+    #[cfg(test)]
+    let before = text.clone();
+    // SAFETY: only zero bytes are written, which keep the buffer valid UTF-8.
+    for byte in unsafe { text.as_bytes_mut() } {
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    #[cfg(test)]
+    WIPED.with(|wiped| {
+        wiped
+            .borrow_mut()
+            .push((before, text.bytes().all(|b| b == 0)))
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    /// C8 test seam: every `wipe_str` on this thread records the buffer's
+    /// content just before it was overwritten and whether every byte of that
+    /// same buffer is zero afterwards. Test builds only (fixture tokens).
+    pub(crate) static WIPED: std::cell::RefCell<Vec<(String, bool)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Cursor-sealed fixture shared by the `cursor_sync` and `agent_grokbot`
+/// tests: generated independently of this crate by
+/// `gen_cursor_seal_fixture.py` (Python `cryptography` 50.0.2, AES-256-GCM,
+/// no AAD): `"v10" || nonce12 || ct || tag16` sealing a static three-segment
+/// JWT (`sub` = `auth0|user_CANARYuser0123456789AB`, `exp` 2100-01-01) under
+/// `SEAL_KEY`. No DPAPI involved; tests feed `SEAL_KEY` through the key seam.
+#[cfg(test)]
+// Only `agent_grokbot`'s host-agnostic test uses it off Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) mod seal_fixture {
+    pub(crate) const SEAL_KEY: [u8; 32] = [
+        0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce,
+        0xcf, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd,
+        0xde, 0xdf,
+    ];
+    pub(crate) const SEAL_JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhdXRoMHx1c2VyX0NBTkFSWXVzZXIwMTIzNDU2Nzg5QUIiLCJ0eXBlIjoic2Vzc2lvbiIsImV4cCI6NDEwMjQ0NDgwMH0.CANARYsignatureXYZ";
+    pub(crate) const SEALED_V10_B64: &str = "djEwEBESExQVFhcYGRob8y7LMdbbURFTHfSpPmcsynvhlGKbC2JZQpeUYfF7FxHg8691IiNZby8jRSyfn6mEHjZ4GN8uqEuqMJ++cpZsz/aq9Wo5wZTO7dtzbn8osksl8kdVuz1t6WxA6b4t+eh2Ch5eUWit9b7T2vZrX8uKiowSTT0WTMYmqNrtgBwwLRFMrjReMmF0eHJs/s/8k263WIcFipqHnrZYhK6tFfyL";
+    pub(crate) const SEALED_V11_B64: &str = "djExEBESExQVFhcYGRob8y7LMdbbURFTHfSpPmcsynvhlGKbC2JZQpeUYfF7FxHg8691IiNZby8jRSyfn6mEHjZ4GN8uqEuqMJ++cpZsz/aq9Wo5wZTO7dtzbn8osksl8kdVuz1t6WxA6b4t+eh2Ch5eUWit9b7T2vZrX8uKiowSTT0WTMYmqNrtgBwwLRFMrjReMmF0eHJs/s/8k263WIcFipqHnrZYhK6tFfyL";
+    pub(crate) const SEALED_V20_B64: &str = "djIwEBESExQVFhcYGRob8y7LMdbbURFTHfSpPmcsynvhlGKbC2JZQpeUYfF7FxHg8691IiNZby8jRSyfn6mEHjZ4GN8uqEuqMJ++cpZsz/aq9Wo5wZTO7dtzbn8osksl8kdVuz1t6WxA6b4t+eh2Ch5eUWit9b7T2vZrX8uKiowSTT0WTMYmqNrtgBwwLRFMrjReMmF0eHJs/s/8k263WIcFipqHnrZYhK6tFfyL";
+    pub(crate) const SEALED_TRUNCATED_B64: &str = "djEwEBESExQVFhcYGRob8y7LMdbbURFTHfSpPmcsynvhlGKbC2JZQpeUYfF7FxHg8691IiNZby8jRSyfn6mEHjZ4GN8uqEuqMJ++cpZsz/aq9Wo5wZTO7dtzbn8osksl8kdVuz1t6WxA6b4t+eh2Ch5eUWit9b7T2vZrX8uKiowSTT0WTMYmqNrtgBwwLRFMrjReMmF0eHJs/s/8k263WIcFipqHng==";
+
+    /// The full stored `cursorAuth/accessToken` value for one base64 payload.
+    pub(crate) fn sealed_token(payload_b64: &str) -> String {
+        format!("cursor-safe-storage:v1:{payload_b64}")
     }
 }
 
@@ -425,29 +485,45 @@ mod tests {
             stored_token("cursor-safe-storage:v1:!!!!"),
             StoredToken::Refused("token_sealed_unreadable")
         );
-        // A `v1` payload decoding to fewer than 3 bytes (no room for a
-        // version) is unreadable, not unsupported (T10); 3 bytes is the
-        // boundary that classifies as sealed.
+        // Classification passes any decodable blob through, short ones too:
+        // length and version are judged once, in `cursor_sync::open_sealed`.
         #[cfg(target_os = "windows")]
-        for short in [&b""[..], b"v", b"v1"] {
+        for blob in [&b""[..], b"v1", b"v11"] {
             let token = format!(
                 "cursor-safe-storage:v1:{}",
-                base64::engine::general_purpose::STANDARD.encode(short)
+                base64::engine::general_purpose::STANDARD.encode(blob)
             );
-            assert_eq!(
-                stored_token(&token),
-                StoredToken::Refused("token_sealed_unreadable"),
-                "{short:?}"
-            );
+            assert_eq!(stored_token(&token), StoredToken::Sealed(blob.to_vec()), "{blob:?}");
         }
-        #[cfg(target_os = "windows")]
-        assert_eq!(
-            stored_token(&format!(
-                "cursor-safe-storage:v1:{}",
-                base64::engine::general_purpose::STANDARD.encode(b"v11")
-            )),
-            StoredToken::Sealed(b"v11".to_vec())
+    }
+
+    /// C8: `query_login` wipes the access-token row's own String once the
+    /// unquoted copy is taken. Measured through the test-only `WIPED` record:
+    /// the buffer that held the quoted token is all zero afterwards.
+    /// Mutation: cursor_desktop.rs `query_login`
+    /// `                wipe_str(value);` -> *(delete the line)*.
+    #[test]
+    fn query_login_wipes_the_token_row_string() {
+        let root = temp_root("wipe");
+        let path = root.join("state.vscdb");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO ItemTable (key, value) VALUES ('cursorAuth/accessToken', '\"tok.en.ROWCANARY\"')",
+            [],
+        )
+        .unwrap();
+        WIPED.with(|wiped| wiped.borrow_mut().clear());
+        let login = query_login(&conn).unwrap().unwrap();
+        assert_eq!(login.access_token, "tok.en.ROWCANARY");
+        let wiped = WIPED.with(|wiped| wiped.borrow().clone());
+        assert!(
+            wiped.contains(&("\"tok.en.ROWCANARY\"".to_string(), true)),
+            "{wiped:?}"
         );
+        drop((login, conn));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     fn empty_db(dir: &Path) -> PathBuf {

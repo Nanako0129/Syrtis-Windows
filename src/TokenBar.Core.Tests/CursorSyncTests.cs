@@ -1156,54 +1156,151 @@ public class CursorSyncTests
         Assert.False(CursorSync.NeedsKeychainAllow("ok", "keychain_consent"));
     }
 
-    /// <summary>S3b: Allow / Withdraw while a user round runs is never
-    /// dropped. The running round read the old answer, so its result is
-    /// discarded and one user round follows it; with no round running,
-    /// <see cref="CursorSyncController.ConsentChanged"/> starts one.
-    /// Mutation: in <c>RunSync</c>,
-    /// <c>if (started != _generation || consentChanged || !CursorSync.ShouldSync(_store))</c>
-    /// -> <c>if (started != _generation || !CursorSync.ShouldSync(_store))</c>
-    /// -> one user round, and the stale <c>keychain_consent</c> result stays.</summary>
-    [Fact]
-    public async Task AConsentChangeDuringAUserRoundRerunsAsAUserRound()
+    private static CursorSyncStatus NeedsConsent(bool changed = false) =>
+        new("error", 0, null, changed, [], Reason: "keychain_consent");
+
+    /// <summary>A controller whose first sync blocks on the returned gate and
+    /// answers <paramref name="results"/> in order (the last one repeats).</summary>
+    private static (FakeCore Core, CursorSyncController Controller, ManualResetEventSlim Gate) Gated(
+        params CursorSyncStatus[] results)
     {
         var store = TempStore();
         store.SetBool(CursorSync.NoticeKey, true);
         var core = new FakeCore();
-        using var gate = new ManualResetEventSlim(false);
+        var gate = new ManualResetEventSlim(false);
         core.SyncGate = gate;
-        var rounds = 0;
-        core.Result = () => Interlocked.Increment(ref rounds) == 1
-            ? new CursorSyncStatus("error", 0, null, false, [], Reason: "keychain_consent")
-            : Status("ok", 1);
-        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var next = -1;
+        core.Result = () => results[Math.Min(Interlocked.Increment(ref next), results.Length - 1)];
+        return (core, new CursorSyncController(core.Io, store, User, interval: Never), gate);
+    }
+
+    /// <summary>S3b: an Allow pressed while a user round runs, when that round
+    /// ends refused for want of consent (<c>keychain_consent</c>), is served by
+    /// one user round right after it; with no round running,
+    /// <see cref="CursorSyncController.ConsentChanged"/> starts one.
+    /// Mutation: CursorSync.cs <c>RunSync</c>
+    /// <c>                        if (consentRerun)\n                        {\n                            _rerunPending = true;\n                        }</c>
+    /// -> (delete) -> one round; the keychain_consent line stays.</summary>
+    [Fact]
+    public async Task AnAllowDuringARoundRefusedForConsentRerunsAsAUserRound()
+    {
+        var (core, controller, gate) = Gated(NeedsConsent(), Status("ok", 1));
+        using var gateLease = gate;
         var running = controller.RunSync(userInitiated: true);
         Assert.True(await core.SyncStarted.WaitAsync(Wait));
-        var consent = controller.ConsentChanged();
-        Assert.True(consent.IsCompleted, "queued behind the running round");
+        Assert.True(controller.ConsentChanged(granted: true).IsCompleted, "queued behind the running round");
         gate.Set();
         await running;
         Assert.Equal(2, core.UserSyncs);
         Assert.Equal("ok", controller.State);
         Assert.Null(controller.Reason);
 
-        // No round running: the change starts one user round itself.
-        await controller.ConsentChanged();
+        await controller.ConsentChanged(granted: true);
         Assert.Equal(3, core.UserSyncs);
     }
 
-    /// <summary>Control for the test above: a plain Sync Now pressed during a
-    /// user round is dropped (the reason the consent controls do not use
-    /// it).</summary>
+    /// <summary>Round-3 item 1: the round an Allow reruns is still applied, so
+    /// what it wrote reaches the dashboard: <c>DataChanged</c> fires on its
+    /// <c>changed</c>.
+    /// Mutation: CursorSync.cs <c>RunSync</c>
+    /// <c>if (started != _generation || !CursorSync.ShouldSync(_store))</c>
+    /// -> <c>if (started != _generation || consentRerun || !CursorSync.ShouldSync(_store))</c>
+    /// (discard it) -> no DataChanged.</summary>
+    [Fact]
+    public async Task ARoundRerunForConsentStillRaisesDataChanged()
+    {
+        var (core, controller, gate) = Gated(NeedsConsent(changed: true), Status("ok", 1, changed: false));
+        using var gateLease = gate;
+        var data = 0;
+        controller.DataChanged += () => Interlocked.Increment(ref data);
+        var running = controller.RunSync(userInitiated: true);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        _ = controller.ConsentChanged(granted: true);
+        gate.Set();
+        await running;
+        Assert.Equal(2, core.UserSyncs);
+        Assert.Equal(1, data);
+    }
+
+    /// <summary>Round-3 item 2: a SCHEDULED round interrupted by an Allow is
+    /// rerun as a user round (<c>io.Sync(true)</c>).
+    /// Mutation: CursorSync.cs <c>RunSync</c> delete the block
+    /// <c>if (again &amp;&amp; consentRerun) { user = true; _runningUser = true; _userPending = false; }</c>
+    /// -> the rerun is <c>sync:auto</c>.</summary>
+    [Fact]
+    public async Task AnAllowDuringAScheduledRoundRerunsAsAUserRound()
+    {
+        var (core, controller, gate) = Gated(NeedsConsent(), Status("ok", 1));
+        using var gateLease = gate;
+        var running = controller.RunSync(userInitiated: false);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        _ = controller.ConsentChanged(granted: true);
+        gate.Set();
+        await running;
+        Assert.Equal(["sync:auto", "sync:user"], core.Log.ToArray());
+    }
+
+    /// <summary>Round-3 item 3: scheduled round + Sync Now + Allow -> exactly
+    /// one extra round, a user one: the promoted round serves the remembered
+    /// press.
+    /// Mutation: CursorSync.cs <c>RunSync</c>, in the promotion block,
+    /// <c>                        _userPending = false;</c> -> (delete) -> two user rounds.</summary>
+    [Fact]
+    public async Task APromotedConsentRoundServesARememberedSyncNow()
+    {
+        var (core, controller, gate) = Gated(NeedsConsent(), Status("ok", 1));
+        using var gateLease = gate;
+        var running = controller.RunSync(userInitiated: false);
+        Assert.True(await core.SyncStarted.WaitAsync(Wait));
+        await controller.RunSync(userInitiated: true); // remembered, returns at once
+        _ = controller.ConsentChanged(granted: true);
+        gate.Set();
+        await running;
+        Assert.Equal(["sync:auto", "sync:user"], core.Log.ToArray());
+    }
+
+    /// <summary>Round-3 item 4: a consent press reruns only a round that
+    /// depended on the old answer. An Allow during a round that synced (a
+    /// plaintext sign-in never reads consent), and a Withdraw during a round
+    /// refused for consent, both leave one round.
+    /// Mutations: CursorSync.cs
+    /// <c>consentRerun = startedConsent != _consentEpoch &amp;&amp; _consentGranted\n                        &amp;&amp; AskedForConsent(result);</c>
+    /// -> <c>consentRerun = startedConsent != _consentEpoch &amp;&amp; _consentGranted;</c> (first half fails), or
+    /// -> <c>consentRerun = startedConsent != _consentEpoch\n                        &amp;&amp; AskedForConsent(result);</c> (second half fails).</summary>
+    [Fact]
+    public async Task AConsentPressDuringAnIndependentRoundDoesNotRerun()
+    {
+        var (core, controller, gate) = Gated(Status("ok", 1));
+        using (gate)
+        {
+            var running = controller.RunSync(userInitiated: true);
+            Assert.True(await core.SyncStarted.WaitAsync(Wait));
+            _ = controller.ConsentChanged(granted: true);
+            gate.Set();
+            await running;
+            Assert.Equal(1, core.UserSyncs);
+        }
+
+        var (refused, refusedController, refusedGate) = Gated(NeedsConsent());
+        using (refusedGate)
+        {
+            var running = refusedController.RunSync(userInitiated: true);
+            Assert.True(await refused.SyncStarted.WaitAsync(Wait));
+            _ = refusedController.ConsentChanged(granted: false);
+            refusedGate.Set();
+            await running;
+            Assert.Equal(1, refused.UserSyncs);
+            Assert.Equal("keychain_consent", refusedController.Reason);
+        }
+    }
+
+    /// <summary>Control: a plain Sync Now pressed during a user round is
+    /// dropped (why the consent controls use <c>ConsentChanged</c>).</summary>
     [Fact]
     public async Task APlainSyncNowDuringAUserRoundIsDropped()
     {
-        var store = TempStore();
-        store.SetBool(CursorSync.NoticeKey, true);
-        var core = new FakeCore();
-        using var gate = new ManualResetEventSlim(false);
-        core.SyncGate = gate;
-        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        var (core, controller, gate) = Gated(Status("ok", 1));
+        using var gateLease = gate;
         var running = controller.RunSync(userInitiated: true);
         Assert.True(await core.SyncStarted.WaitAsync(Wait));
         await controller.RunSync(userInitiated: true);

@@ -139,9 +139,10 @@ public sealed partial class SettingsWindow
                 {
                     AppSettings.KeychainConsent.Install(KeychainConsentComposer.CursorId, true);
                     UpdateCursorSync(store); // Withdraw shows from the stored answer now
-                    // Never dropped: a round already running is discarded and
-                    // rerun under the new answer (CursorSyncController.ConsentChanged).
-                    await cursor.ConsentChanged();
+                    // Never dropped: with no round running one user round starts;
+                    // a running round that ends refused for want of consent is
+                    // followed by one user round (CursorSyncController.ConsentChanged).
+                    await cursor.ConsentChanged(granted: true);
                 }
             }
             catch (Exception ex)
@@ -150,8 +151,15 @@ public sealed partial class SettingsWindow
             }
         };
 
-        // Withdraw: store the "cursor" denial (composed payload) and refresh,
-        // so the consent prompt returns and no sealed sign-in is read.
+        // Withdraw: store the "cursor" denial (composed payload; the core stops
+        // opening a sealed sign-in from its next read) and, with no round
+        // running, start one. What the section then shows depends on the token:
+        // a sealed sign-in -> the consent line with Allow; a plaintext one ->
+        // no consent line, it is still read (Withdraw covers only the encrypted
+        // sign-in). A round already running is not rerun: if it had not yet
+        // opened the sealed sign-in it already reports keychain_consent; if it
+        // had, it read under the yes then in force, and the consent line shows
+        // from the next round.
         _csKeychainWithdraw = new Button
         {
             Content = CursorSync.Copy.KeychainWithdraw.Localized(),
@@ -164,9 +172,7 @@ public sealed partial class SettingsWindow
             {
                 AppSettings.KeychainConsent.Install(KeychainConsentComposer.CursorId, false);
                 UpdateCursorSync(store); // Withdraw hides from the stored answer now
-                // Never dropped (ConsentChanged): the rerun reports
-                // keychain_consent, which brings back the consent line.
-                _ = cursor.ConsentChanged();
+                _ = cursor.ConsentChanged(granted: false);
             }
             catch (Exception ex)
             {
