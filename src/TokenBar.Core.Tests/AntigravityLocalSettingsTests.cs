@@ -359,7 +359,8 @@ public class AntigravityLocalSettingsTests
 
         Assert.False(store.Persists);
         Assert.Equal(AntigravityAutoCapture.SettingsUnavailable, capture.LastErrorCode);
-        Assert.True(Volatile.Read(ref raised) > 0, "Settings was not told");
+        // Posted off the writing thread (review G3), so wait for it.
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref raised) > 0, TimeSpan.FromSeconds(5)), "Settings was not told");
         Assert.False(capture.IsEnabled);
         Assert.Null(await capture.PrepareForFetch());
         await capture.Poll();
@@ -428,6 +429,22 @@ public class AntigravityLocalSettingsTests
         Assert.Empty(calls);
         Assert.Equal(AntigravityAutoCapture.SettingsUnavailable, capture.LastErrorCode);
         Assert.Equal(moved, Bytes(paths.Local));
+    }
+
+    /// <summary>Review G6: when the temp file was written but the replacing
+    /// move fails (the test makes the store's path a folder), the temp copy
+    /// is deleted, so the values are not left on disk under another name.</summary>
+    [Fact]
+    public void AFailedMoveLeavesNoTempCopy()
+    {
+        var paths = new Paths();
+        Directory.CreateDirectory(paths.Local);
+        var store = new SettingsStore(paths.Local);
+
+        store.SetString(AntigravityAccounts.Key, "[]");
+
+        Assert.False(store.Persists);
+        Assert.False(File.Exists(paths.Local + ".tmp"), "the temp copy was left behind");
     }
 
     /// <summary>The move's single save: every key lands in one file write

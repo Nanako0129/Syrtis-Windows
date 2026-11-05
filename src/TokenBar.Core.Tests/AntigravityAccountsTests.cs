@@ -1210,6 +1210,64 @@ public class AntigravityAccountsTests
         Assert.Contains("capture", control.Calls);
     }
 
+    /// <summary>A store in its own folder, and a way to make every later save
+    /// fail: the folder is replaced by a file of the same name, so the next
+    /// save cannot create it (review G4).</summary>
+    private static (SettingsStore Store, Action BreakSaves) BreakableStore()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "tokenbar-tests", Guid.NewGuid().ToString("N"));
+        var store = new SettingsStore(Path.Combine(dir, "settings.json"));
+        return (store, () =>
+        {
+            Directory.Delete(dir, recursive: true);
+            File.WriteAllText(dir, "a file where the folder was");
+        });
+    }
+
+    /// <summary>Review G4/G1: Remove passed its entry check, then the drop's
+    /// own save failed. The credential is not deleted, the row goes back, and
+    /// the settings code shows.</summary>
+    [Fact]
+    public async Task ARemoveWhoseDropSaveFailsDeletesNothing()
+    {
+        var (store, breakSaves) = BreakableStore();
+        AntigravityAccounts.Save(store, [new(KeyA, "a@example.com"), new(KeyB, "b@example.com")]);
+        var io = new FakeIo();
+        var capture = new AntigravityAutoCapture(io.Io, store);
+        Assert.True(store.Persists, "fixture: the entry check passes");
+        breakSaves();
+
+        await capture.Remove(KeyA);
+
+        Assert.False(store.Persists, "fixture: the drop's save failed");
+        Assert.DoesNotContain("remove", io.Calls);
+        Assert.Equal([KeyA, KeyB], AntigravityAccounts.Load(store).Select(a => a.Key));
+        Assert.Equal(AntigravityAutoCapture.SettingsUnavailable, capture.LastErrorCode);
+    }
+
+    /// <summary>Review G4/G1: an automatic attempt passed its commit point,
+    /// then clearing the stored binding (its first store write) failed. No
+    /// capture starts.</summary>
+    [Fact]
+    public async Task APollWhoseBindingWriteFailsStartsNoCapture()
+    {
+        var (store, breakSaves) = BreakableStore();
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+        store.SetString(AntigravityAutoCapture.CurrentKey, JsonSerializer.Serialize(
+            new Dictionary<string, string> { ["key"] = KeyA, ["marker"] = "M0" }));
+        var io = new FakeIo();
+        var capture = new AntigravityAutoCapture(io.Io, store);
+        Assert.True(capture.IsEnabled, "fixture: the commit point passes");
+        breakSaves();
+
+        await capture.Poll();
+
+        Assert.False(store.Persists, "fixture: the binding write failed");
+        Assert.Contains("marker", io.Calls);
+        Assert.DoesNotContain("auto", io.Calls);
+        Assert.False(capture.Busy);
+    }
+
     [Fact]
     public async Task AFailedRemovePutsTheRowBackWhereItWas()
     {

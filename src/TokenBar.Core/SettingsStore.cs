@@ -295,6 +295,7 @@ public sealed class SettingsStore
             return;
         }
 
+        var tmp = _path + ".tmp";
         try
         {
             var dir = Path.GetDirectoryName(_path);
@@ -303,7 +304,6 @@ public sealed class SettingsStore
                 Directory.CreateDirectory(dir);
             }
 
-            var tmp = _path + ".tmp";
             File.WriteAllText(tmp, JsonSerializer.Serialize(
                 new SortedDictionary<string, JsonElement>(_values), WriteOptions));
             File.Move(tmp, _path, overwrite: true);
@@ -317,6 +317,17 @@ public sealed class SettingsStore
             {
                 _saveFailed = true;
                 _persistsLostPending = 1;
+            }
+
+            // Review G6: a failed move must not leave the values it was moving
+            // on disk under another name. Best effort.
+            try
+            {
+                File.Delete(tmp);
+            }
+            catch (Exception)
+            {
+                // Nothing more to do: the folder itself may be unreachable.
             }
 
             _log?.Invoke($"settings save failed: {ex.Message}");

@@ -70,15 +70,17 @@ public sealed class AntigravityAutoCapture
     /// code (it maps to the generic sentence).</summary>
     public const string UnexpectedError = "unexpected";
 
-    /// <summary>The code recorded while this session's Antigravity settings
-    /// cannot be saved (<see cref="SettingsStore.Persists"/> false: the move
-    /// out of the roaming settings failed, the local file could not be read,
-    /// or a save failed). Then Capture, automatic capture (it counts as off:
-    /// <see cref="IsEnabled"/>), turning it on, and Remove are all refused: a
-    /// captured credential would have no list row after exit, and a Remove
-    /// would delete a credential whose row and removed key cannot be saved
-    /// (reviews F1, R1, R3). Recorded at construction, and when a save fails
-    /// mid-session (R4), so Settings shows it without a click.</summary>
+    /// <summary><see cref="LastErrorCode"/> whenever this session's
+    /// Antigravity settings do not persist (<see cref="SettingsStore.Persists"/>
+    /// false: the move out of the roaming settings failed, the local file could
+    /// not be read, or a save failed). While it shows, an operation that STARTS
+    /// is refused: Capture, turning automatic capture on, Remove, and every
+    /// automatic attempt (<see cref="IsEnabled"/> is false). Remove and an
+    /// automatic attempt also check again after their own store write and stop
+    /// before the irreversible call (review G1). Not covered: a save that first
+    /// fails AFTER the Credential Manager call (the list write following a
+    /// capture, the removed-key write following a delete); that row or removed
+    /// key then lasts only until exit.</summary>
     public const string SettingsUnavailable = "settings_unavailable";
 
     /// <summary>The code recorded when Remove could not take the key out of
@@ -127,20 +129,10 @@ public sealed class AntigravityAutoCapture
             _currentMarker = binding.Marker;
         }
 
-        if (!store.Persists)
-        {
-            _errorCode = SettingsUnavailable;
-        }
-
-        store.PersistsLost += () =>
-        {
-            lock (_gate)
-            {
-                _errorCode = SettingsUnavailable;
-            }
-
-            Notify(false);
-        };
+        // Only a redraw: the code is derived (LastErrorCode). Posted, not run
+        // inline: the failing save can run on a thread that holds _gate
+        // (review G3).
+        store.PersistsLost += () => _ = Task.Run(() => Notify(false));
     }
 
     /// <summary>A stored <see cref="CurrentKey"/> value: its key and marker,
@@ -169,8 +161,11 @@ public sealed class AntigravityAutoCapture
         }
     }
 
-    /// <summary>The toggle, and off whatever it says while the settings
-    /// cannot be saved (review R1): every automatic capture commits on this.</summary>
+    /// <summary>The toggle, read as off while the settings do not persist
+    /// (review R1). Poll's commit point checks it before an attempt (Poll
+    /// then checks <see cref="SettingsStore.Persists"/> once more after its
+    /// binding write, G1), and the fetch checks it before
+    /// <see cref="PrepareForFetch"/>.</summary>
     public bool IsEnabled => _store.Persists && _store.GetBool(EnabledKey, false);
 
     public bool Busy { get { lock (_gate) { return _busy; } } }
@@ -178,8 +173,10 @@ public sealed class AntigravityAutoCapture
     public bool Paused { get { lock (_gate) { return _paused; } } }
 
     /// <summary>The fixed code of the last manual Capture or Remove that
-    /// failed; shown only through the sentence map, never raw.</summary>
-    public string? LastErrorCode { get { lock (_gate) { return _errorCode; } } }
+    /// failed, or <see cref="SettingsUnavailable"/> whenever the settings do
+    /// not persist (derived, review G2); shown only through the sentence map,
+    /// never raw.</summary>
+    public string? LastErrorCode { get { lock (_gate) { return _store.Persists ? _errorCode : SettingsUnavailable; } } }
 
     public string? LastAttemptedMarker { get { lock (_gate) { return _lastAttemptedMarker; } } }
 
@@ -257,11 +254,23 @@ public sealed class AntigravityAutoCapture
                 // marker.
                 changed = ClearCurrentLocked();
                 _lastAttemptedMarker = marker;
+                // Review G1: that binding write may have been the save that
+                // failed; then no attempt starts (its row could not be saved).
+                if (!_store.Persists)
+                {
+                    _busy = false;
+                    marker = null;
+                }
             }
         }
 
         if (marker is null)
         {
+            if (changed)
+            {
+                Notify(true);
+            }
+
             await PollIfOwed().ConfigureAwait(false);
             return;
         }
@@ -587,7 +596,9 @@ public sealed class AntigravityAutoCapture
     /// When that install does not reach the core (the setter failed, review
     /// F3), the key is still registered there, so nothing is deleted: the row
     /// goes back where it was and <see cref="KeychainDeleteFailed"/> is
-    /// recorded, as for a failed delete.
+    /// recorded, as for a failed delete. The same when the drop's own save
+    /// failed (review G1): nothing is deleted, the row goes back, and
+    /// <see cref="SettingsUnavailable"/> shows.
     /// </para></summary>
     public async Task Remove(string key)
     {
@@ -623,10 +634,13 @@ public sealed class AntigravityAutoCapture
             // The core did not take the shorter list: the key is still
             // registered, so a refresh in flight could write the item back.
             // Nothing is deleted; the row goes back below (review F3).
-            string? code = dropped ? null : KeychainDeleteFailed;
+            // Review G1: the drop's own save may have failed; then the list
+            // and removed-key change cannot outlast this session, so the
+            // credential is kept and the row goes back too.
+            string? code = !dropped ? KeychainDeleteFailed : !_store.Persists ? SettingsUnavailable : null;
             if (code is not null)
             {
-                _log("antigravity remove: registry install failed; nothing deleted");
+                _log($"antigravity remove: {code}; nothing deleted");
             }
             else
             {
@@ -690,18 +704,13 @@ public sealed class AntigravityAutoCapture
         await PollIfOwed().ConfigureAwait(false);
     }
 
-    /// <summary>True, with <see cref="SettingsUnavailable"/> recorded and
-    /// Settings told, when this session's settings cannot be saved.</summary>
+    /// <summary>True, with Settings told to redraw (the code is derived),
+    /// when this session's settings do not persist.</summary>
     private bool RefusedForSettings()
     {
         if (_store.Persists)
         {
             return false;
-        }
-
-        lock (_gate)
-        {
-            _errorCode = SettingsUnavailable;
         }
 
         Notify(false);
