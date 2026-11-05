@@ -366,8 +366,13 @@ public class AntigravityLocalSettingsTests
         await capture.Poll();
         await capture.SetEnabled(true);
         Assert.False(await capture.TurnOn(() => Task.FromResult(true)));
+        var installsBefore = calls.Count(c => c == "install");
         await capture.Remove(KeyA);
 
+        // Refused at entry (R3): the core's registry is not touched either,
+        // so no key is unregistered even briefly (the later re-check after the
+        // drop's own save would also stop the delete, but only after an install).
+        Assert.Equal(installsBefore, calls.Count(c => c == "install"));
         Assert.DoesNotContain("auto", calls);
         Assert.DoesNotContain("capture", calls);
         Assert.DoesNotContain("remove", calls);
