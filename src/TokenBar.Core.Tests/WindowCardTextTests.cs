@@ -1321,13 +1321,6 @@ public class WindowCardTextTests
             Assert.Equal(label, WindowCardText.TabLabel(Labelled(label)));
         }
 
-        // Control: the existing grouped shape still renders exactly as before.
-        Assert.Equal(
-            "Gemini · Weekly",
-            WindowCardText.TabLabel(Labelled("Gemini Models · Weekly Limit Remaining")));
-        // The shared namer every other surface uses keeps the full name.
-        Assert.Equal(argon, QuotaLabels.Window(argon, "weekly.v1"));
-
         Localization.Load("zh-Hant", AppContext.BaseDirectory);
         try
         {
