@@ -3198,11 +3198,11 @@ where
 
 /// Every file a captured account's client may be scanned from: `agy.exe`
 /// first, then the IDE's binaries in their usual order, found by path lookup
-/// only (never started). agy.exe comes first on the inference that agy's own
-/// login was issued by agy's own client, so agy 1.4.x's candidate search (no
-/// `aud`, `artifact_clients` in this order) would send the refresh token to
-/// fewer wrong clients. Unmeasured: Windows has no refresh probe (macOS F3
-/// found the issuing pair in the IDE's `language_server`).
+/// only (never started). agy.exe is first by choice, so agy 1.4.x's
+/// candidate search (no `aud`, `artifact_clients` in this order) tries its
+/// clients first. The effect is unmeasured on Windows (no refresh probe), and
+/// macOS F3 found the issuing pair in the IDE's `language_server` (the 5th of
+/// 9 candidates), so this order may not reduce wrong-client requests.
 #[cfg(any(windows, test))]
 fn windows_captured_artifact_candidates(
     local_app_data: Option<&std::ffi::OsStr>,
@@ -4320,7 +4320,7 @@ pub(crate) enum AutoCaptured {
 /// 4. agy 1.4.x only: a key from Google's `sub` in `removed_keys` is
 ///    `SkippedRemoved` after the refresh (each candidate client until one
 ///    succeeds) and before the aud/email checks and the write. Removed means
-///    no write, and with a stored `id_token` also no request (step 2);
+///    no write;
 /// 5. the refresh response must pass `verified_identity`, else no write.
 async fn auto_capture_with<I: CapturedIo>(
     io: &I,
@@ -8492,6 +8492,37 @@ mod captured_account_tests {
                 assert_eq!(io.writes().len(), writes, "{tag}");
                 assert_eq!(io.items.borrow().len(), writes, "{tag}");
             }
+        }
+    }
+
+    /// A transport failure on the first agy 1.4.x candidate stops the search
+    /// as `RefreshUnreachable`: no further token request, no write, on both
+    /// capture paths.
+    #[tokio::test]
+    async fn agy14_search_stops_on_a_transport_failure() {
+        for auto in [false, true] {
+            let mut io = agy14_io("agy14-transport");
+            io.token = Box::new(|client, _| {
+                if client.id == AUD {
+                    Ok(google_answer("g-sub", AUD, Some(LOCAL_EMAIL)))
+                } else {
+                    Err(ProviderFetchFailure::transient(
+                        "unreachable",
+                        None,
+                        SafeTransportDiagnostic::server_error(503),
+                    ))
+                }
+            });
+            let error = if auto {
+                auto_capture_with(&io, &[]).await.err()
+            } else {
+                capture_with(&io).await.err()
+            };
+            assert_eq!(error, Some(CaptureError::RefreshUnreachable), "auto={auto}");
+            assert_eq!(io.token_calls.borrow().len(), 1, "auto={auto}");
+            assert_eq!(io.token_calls.borrow()[0].0, OTHER, "auto={auto}");
+            assert!(io.writes().is_empty(), "auto={auto}");
+            assert!(io.items.borrow().is_empty(), "auto={auto}");
         }
     }
 

@@ -1248,12 +1248,17 @@ pub unsafe extern "C" fn tb_set_antigravity_binding(json: *const c_char) -> *mut
 /// generic credential (target `com.nyanako.tokenbar.antigravity-account:<key>`,
 /// persist local machine). Reads agy's `gemini:antigravity` credential once and
 /// never writes it, starts no process, and proves the token with a refresh at
-/// Google, using the client named by its stored `id_token`'s `aud`, or, for
-/// agy 1.4.x's credential (no `id_token`, only `id_token_email`), trying the
-/// clients found in agy's files (agy.exe's first) in turn until one succeeds;
-/// the search stops on a transport failure or an answer that is not an OAuth
-/// one (a 2xx without `access_token` is `invalid_credential_format`, a
-/// non-JSON page `refresh_unreachable`). It writes only when that response carries an
+/// Google. With a stored `id_token`, the client named by its `aud` is used,
+/// the secrets found next to that client id tried until one is accepted; any
+/// other refusal, a non-OAuth answer included, is `refresh_rejected`. For agy
+/// 1.4.x's credential (no `id_token`, only `id_token_email`), the clients
+/// found in agy's files (agy.exe's first) are tried in turn until one
+/// succeeds; only an OAuth error answer (a JSON object with an `error` code)
+/// moves on, while a 2xx without `access_token` stops with
+/// `invalid_credential_format` and a non-OAuth answer (non-JSON, a JSON
+/// non-object, or a non-2xx object without `error`) with
+/// `refresh_unreachable`. Both stop on a transport failure
+/// (`refresh_unreachable`). It writes only when that response carries an
 /// `id_token` whose `aud` is the client used and that names agy's account:
 /// agy's stored `sub`, or, for agy 1.4.x, an `email` equal to
 /// `id_token_email` ignoring ASCII case (`account_mismatch` otherwise,
