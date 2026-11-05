@@ -10,10 +10,11 @@ public static class SectionRows
     /// <summary>One unique key per value, in order: a value seen again gets a
     /// <c>NUL + n</c> suffix, so each row keeps the same key across redraws
     /// (a saved list can hold an exact duplicate, which the registry rejects
-    /// but the page still shows). Invariant: the values never contain NUL,
-    /// which holds for folder paths (Windows paths cannot) and account keys
-    /// (64 lowercase hex); with such values no suffixed key equals another
-    /// value or key.</summary>
+    /// but the page still shows). Assumed, not validated on load: the values
+    /// never contain NUL. Real folder paths cannot, and account keys are
+    /// written as 64 lowercase hex, but a hand-edited settings file is not
+    /// checked; with NUL-free values no suffixed key equals another value or
+    /// key.</summary>
     public static IReadOnlyList<string> Keys(IEnumerable<string> values)
     {
         var seen = new Dictionary<string, int>(StringComparer.Ordinal);

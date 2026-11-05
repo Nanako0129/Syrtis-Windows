@@ -511,16 +511,18 @@ public static class WindowCardText
         return tabs;
     }
 
-    /// <summary>Which account's card the per-client window card shows: the
-    /// primary when it is live; otherwise the first non-primary card of the
-    /// client (payload order) that is; otherwise the primary (or, with nothing live and the primary windowless, the first errored account with windows, so its own error shows). A card is live
-    /// when it has windows to draw AND no error: the core re-sends last-good
-    /// windows beside an error, and selecting such a card would stick on the
-    /// blocked card (macOS filters <c>error == nil</c>). Returns the account
-    /// key (null = primary), for <see cref="Tabs"/>.
-    /// <paramref name="storedAccountKey"/> (null/"" = primary, as stored) wins
-    /// when that account is in the payload and live; otherwise the rule above
-    /// applies. The stored value is never touched here, so the selection
+    /// <summary>Which account's card the per-client window card shows, first
+    /// match wins: the stored account (<paramref name="storedAccountKey"/>,
+    /// null/"" = primary, as stored) when it is in the payload and live; the
+    /// primary when it is live; the first non-primary card of the client
+    /// (payload order) that is live. With nothing live, an error card is shown
+    /// with its own error: the stored account if it has windows, else the
+    /// primary if it has windows, else the first other account with windows.
+    /// A card is live when it has windows to draw AND no error: the core
+    /// re-sends last-good windows beside an error, and selecting such a card
+    /// would stick on the blocked card (macOS filters <c>error == nil</c>).
+    /// Returns the account key (null = primary), for <see cref="Tabs"/>.
+    /// The stored value is never touched here, so the selection
     /// returns when the account recovers; the pills
     /// (<see cref="AccountPills"/>) keep listing an errored account.</summary>
     public static string? WindowCardAccount(

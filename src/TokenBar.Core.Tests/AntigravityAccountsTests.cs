@@ -356,7 +356,9 @@ public class AntigravityAccountsTests
     [InlineData(true, "M0")]
     public void AnErroredPrimaryWithoutMatchingMarkerEvidenceStaysBesideTheCapturedCard(bool lastGood, string? marker)
     {
-        var payload = Payload(ErroredPrimary(lastGood, marker), Captured());
+        // A last-good card keeps the scope it was fetched with (the captured
+        // card's), so only the marker is under test in those rows.
+        var payload = Payload(ErroredPrimary(lastGood, marker, lastGood ? "scope-a" : null), Captured());
 
         Assert.Same(payload, AntigravityDedup.Apply(payload, KeyA, "M1"));
     }
