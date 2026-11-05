@@ -4156,20 +4156,24 @@ async fn capture_with<I: CapturedIo>(io: &I) -> Result<CapturedAccount, CaptureE
 /// - a stored `id_token` (`aud` known): the secrets found next to the client
 ///   named by `aud`, in turn; `invalid_client` / `unauthorized_client` goes on
 ///   to the next secret, any other answer stops with `RefreshRejected`
-///   (unchanged).
+///   (unchanged); when every secret answers so, the result is
+///   `OAuthClientRejected`.
 /// - agy 1.4.x (`aud` unknown): every (id, secret) pair in the artifacts, in
 ///   turn. Only an answer whose body is a JSON object carrying an OAuth
 ///   `error` code (any code: `invalid_client`, `unauthorized_client`,
 ///   `invalid_grant`, `deleted_client`, `invalid_request`, ...) goes on to
 ///   the next candidate. Any other answer stops the search: a 2xx without
-///   `access_token` is `InvalidCredentialFormat`; a body that is not a JSON
+///   `access_token` is `InvalidCredentialFormat` (even if it carries an
+///   `error` field); a body that is not a JSON
 ///   object, or a non-2xx object without an `error` code (a proxy or
 ///   captive-portal page), is `RefreshUnreachable`. Without a success the
 ///   result is `RefreshRejected` when some candidate said `invalid_grant`,
 ///   else `OAuthClientRejected`.
 ///
 /// Both stop at the first success and on any transport failure
-/// (`RefreshUnreachable`). The client that succeeded is returned, and is the
+/// (`RefreshUnreachable`); an HTTP 429 or 5xx answer, even with a JSON OAuth
+/// `error` body, is a transport failure (`token_post` errs before reading
+/// the body). The client that succeeded is returned, and is the
 /// one stored.
 async fn refresh_with_issuing_client<I: CapturedIo>(
     io: &I,
