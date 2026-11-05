@@ -17314,7 +17314,7 @@ mod grokbot_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    const SENTINEL_TOKEN: &str = "grokbot-sentinel-session-9b21e4";
+    const SENTINEL_TOKEN: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJncm9rYm90LXNlbnRpbmVsIn0.grokbot-sentinel-session-9b21e4";
     const USER_ID: &str = "user_FixtureAbc1234567890xyz";
     const PROFILE_PRIVATE: &str = "profile-private-canary";
     const USAGE_OK: &str = r#"{

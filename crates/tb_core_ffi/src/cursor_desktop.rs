@@ -276,6 +276,27 @@ pub(crate) fn normalized_stored_string(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
+/// The claims of a token that looks like a Cursor session JWT: only
+/// `[A-Za-z0-9._-]` (it goes into a cookie), exactly three non-empty
+/// segments, and a decodable payload. The check the usage sync's `token_user`
+/// and Grok Bot's fallback share (macOS `cursor_desktop::jwt_claims`). The
+/// segment check is here because the Windows `agent_usage::jwt_payload` is
+/// laxer than macOS's (see `agent_grokbot::history_owner`). A sealed token
+/// (`cursor-safe-storage:…`) fails the charset on its `:`.
+pub(crate) fn jwt_claims(token: &str) -> Option<Value> {
+    if !token
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        return None;
+    }
+    let segments: Vec<&str> = token.split('.').collect();
+    if segments.len() != 3 || segments.iter().any(|segment| segment.is_empty()) {
+        return None;
+    }
+    crate::agent_usage::jwt_payload(token)
+}
+
 /// Cursor user ids look like `user_...` (20+ alphanumerics). Scan for the
 /// first qualifying occurrence rather than depending on the surrounding JSON
 /// shape.

@@ -165,7 +165,7 @@ public sealed partial class SettingsWindow
         Show(_csCleanupWarning!, CursorSync.CleanupFailedVisible(on, cursor.CleanupFailed));
 
         var state = cursor.State;
-        var line = on ? CursorSync.StatusLine(state, cursor.LastSuccessMs) : null;
+        var line = on ? CursorSync.StatusLine(state, cursor.LastSuccessMs, reason: cursor.Reason) : null;
         var warning = line is not null && CursorSync.StatusIsWarning(state);
         _csStatusHint!.Text = line ?? "";
         _csStatusWarning!.Text = line ?? "";

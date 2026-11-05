@@ -1480,20 +1480,7 @@ fn now_secs() -> f64 {
 /// Refuses (S-1) when a stored glass/profile id exists and differs.
 fn token_user(login: &CursorLogin) -> Result<(String, f64), Stop> {
     let unreadable = Stop::error("token_unreadable");
-    if !login
-        .access_token
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-    {
-        return Err(unreadable);
-    }
-    // macOS's `jwt_payload` requires exactly three non-empty segments; the
-    // Windows one is laxer (see `agent_grokbot::history_owner`).
-    let segments: Vec<&str> = login.access_token.split('.').collect();
-    if segments.len() != 3 || segments.iter().any(|segment| segment.is_empty()) {
-        return Err(unreadable);
-    }
-    let claims = crate::agent_usage::jwt_payload(&login.access_token).ok_or(unreadable)?;
+    let claims = cursor_desktop::jwt_claims(&login.access_token).ok_or(unreadable)?;
     let sub = claims
         .get("sub")
         .and_then(serde_json::Value::as_str)

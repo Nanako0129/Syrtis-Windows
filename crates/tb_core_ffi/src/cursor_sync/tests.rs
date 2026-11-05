@@ -4255,3 +4255,60 @@ fn a_commit_cleans_the_profiles_other_candidate_dir() {
     let registered = newest_per_account(&registry.read().unwrap());
     assert_eq!(registered, [expected_file(&sibling)]);
 }
+
+/// Plan S3a: `token_user` keeps its accept/reject cases and reasons now that
+/// the token check is the shared `cursor_desktop::jwt_claims` (Grok Bot's
+/// fallback uses the same check). Each rejected case is refused by one part
+/// of that check alone; the valid token is the control.
+#[test]
+fn token_user_accepts_and_rejects_as_before_through_the_shared_check() {
+    let login = |token: String, glass: Option<&str>| CursorLogin {
+        access_token: token,
+        glass_user_id: glass.map(str::to_string),
+        profile_user_id: None,
+    };
+    let user = |token: String| token_user(&login(token, None)).map(|(user, _)| user);
+    let token = valid_token();
+    let parts: Vec<&str> = token.split('.').collect();
+    let encode = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+    let unreadable = Err(Stop::error("token_unreadable"));
+
+    // Control: the session JWT is accepted, with the stored id matching too.
+    assert_eq!(user(token.clone()), Ok(USER.to_string()));
+    assert_eq!(
+        token_user(&login(token.clone(), Some(USER))).map(|(user, _)| user),
+        Ok(USER.to_string())
+    );
+    // Charset only: a decodable three-segment JWT with `=` in its signature.
+    assert_eq!(user(format!("{token}=")), unreadable, "charset");
+    // Segment count only: a fourth segment (the payload still decodes).
+    assert_eq!(user(format!("{token}.extra")), unreadable, "four segments");
+    // Empty segment only: no signature (the payload still decodes).
+    assert_eq!(
+        user(format!("{}.{}.", parts[0], parts[1])),
+        unreadable,
+        "empty segment"
+    );
+    // Payload that is not JSON.
+    assert_eq!(
+        user(format!("{}.{}.{SIGNATURE}", parts[0], encode("not json"))),
+        unreadable,
+        "payload"
+    );
+    // A sealed token is refused as unreadable (S3b adds the sealed path).
+    let sealed = format!(
+        "cursor-safe-storage:v1:{}",
+        base64::engine::general_purpose::STANDARD.encode(b"v10 sealed blob")
+    );
+    assert_eq!(user(sealed), unreadable, "sealed");
+    // A `sub` with no user part, and a stored id that differs.
+    assert_eq!(
+        user(jwt("auth0|", Some(now_secs() + 3600.0))),
+        unreadable,
+        "sub"
+    );
+    assert_eq!(
+        token_user(&login(token, Some(OTHER_USER))).map(|(user, _)| user),
+        Err(Stop::error("account_mismatch"))
+    );
+}

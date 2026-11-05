@@ -119,6 +119,10 @@ public static class CursorSync
         public const string NotSignedIn = "Sign in to the Cursor app to sync your usage.";
         public const string Offline = "Can't reach Cursor. Syrtis will try again.";
         public const string Error = "Cursor usage couldn't be synced. Syrtis will try again later.";
+        /// <summary><see cref="Error"/> plus the core's fixed reason code, so a
+        /// screenshot can be diagnosed (#547; macOS <c>errorWithReason</c>, whose
+        /// <c>%@</c> is {0} here).</summary>
+        public const string ErrorWithReason = "Cursor usage couldn't be synced ({0}). Syrtis will try again later.";
         public const string CliPresent = "Showing Cursor usage from tokscale CLI.";
         public const string SyncNow = "Sync Now";
         public const string Syncing = "Syncing…";
@@ -148,7 +152,7 @@ public static class CursorSync
         public static readonly string[] All =
         [
             Title, Toggle, Privacy, Continue, Cancel, TurnOff, LastSynced, Partial, Expired, NotSignedIn,
-            Offline, Error, CliPresent, SyncNow, Syncing, CliQuestion, UseSyrtis, KeepCli, CleanupFailed,
+            Offline, Error, ErrorWithReason, CliPresent, SyncNow, Syncing, CliQuestion, UseSyrtis, KeepCli, CleanupFailed,
             ConfigRejected, ProfilesPrivacy,
         ];
     }
@@ -161,8 +165,12 @@ public static class CursorSync
 
     /// <summary>The status line for a core state; null where there is nothing
     /// to say (<c>disabled</c>, not yet synced, or <c>ok</c> with no recorded
-    /// time). The relative time is this app's own (<see cref="Format.RelativeTime"/>).</summary>
-    public static string? StatusLine(string? state, long? lastSuccessMs, DateTimeOffset? now = null) =>
+    /// time). The relative time is this app's own (<see cref="Format.RelativeTime"/>).
+    /// For <c>error</c>, <paramref name="reason"/> is shown only if it looks
+    /// like one of the core's fixed codes (<c>^[a-z_]{1,40}$</c>), so the line
+    /// never carries free text (macOS <c>statusLine</c>, #547).</summary>
+    public static string? StatusLine(
+        string? state, long? lastSuccessMs, DateTimeOffset? now = null, string? reason = null) =>
         state switch
         {
             "ok" when lastSuccessMs is { } ms =>
@@ -171,6 +179,9 @@ public static class CursorSync
             "expired" => Copy.Expired.Localized(),
             "notSignedIn" => Copy.NotSignedIn.Localized(),
             "offline" => Copy.Offline.Localized(),
+            // A char test, not a Regex: .NET's `$` also matches before a final "\n".
+            "error" when reason is { Length: >= 1 and <= 40 } && reason.All(c => c is '_' or >= 'a' and <= 'z') =>
+                Copy.ErrorWithReason.Localized(reason),
             "error" => Copy.Error.Localized(),
             "cliPresent" => Copy.CliPresent.Localized(),
             ConfigRejectedState => Copy.ConfigRejected.Localized(),
@@ -222,6 +233,9 @@ public sealed class CursorSyncController
     // A press arrived during a scheduled pass; one user sync follows it.
     private bool _userPending;
     private string? _state;
+    // The core's fixed reason code for the last round, written with every
+    // "error" state (null when the round threw); StatusLine checks its shape.
+    private string? _reason;
     private long? _lastSuccessMs;
     private bool _cleanupFailed;
     // While on: the last accepted on push could not clean a profile it no
@@ -258,6 +272,9 @@ public sealed class CursorSyncController
     }
 
     public string? State { get { lock (_gate) { return _state; } } }
+
+    /// <summary>The last round's <see cref="CursorSyncStatus.Reason"/> (#547).</summary>
+    public string? Reason { get { lock (_gate) { return _reason; } } }
 
     public long? LastSuccessMs { get { lock (_gate) { return _lastSuccessMs; } } }
 
@@ -588,10 +605,12 @@ public sealed class CursorSyncController
                     else if (result is null)
                     {
                         _state = "error";
+                        _reason = null;
                     }
                     else
                     {
                         _state = result.State;
+                        _reason = result.Reason;
                         _lastSuccessMs = result.LastSuccessMs;
                         _roundProfileCleanupFailed = result.CleanupFailedProfiles is { Count: > 0 };
                         // A round that changed a file already invalidated

@@ -754,6 +754,14 @@ fn load_credentials_from(db_path: &Path) -> Result<Option<CursorCredentials>, St
     let Some(login) = crate::cursor_desktop::read_login(db_path)? else {
         return Ok(None);
     };
+    // Only a token that looks like the session JWT the usage sync accepts
+    // (`cursor_desktop::jwt_claims`) is sent as a cookie; anything else is
+    // treated as no Cursor login. That includes a sealed token (Cursor 3.27+,
+    // `cursor-safe-storage:v1:…`, whose `:` fails the charset): it is never
+    // decrypted here and its envelope is never sent (macOS T1, plan S3a).
+    if crate::cursor_desktop::jwt_claims(&login.access_token).is_none() {
+        return Ok(None);
+    }
     let Some(user_id) = login.stored_user_id().map(str::to_string) else {
         return Ok(None);
     };
@@ -1022,11 +1030,69 @@ pub(crate) mod tests {
         (dir, path)
     }
 
+    /// A plaintext Cursor login token in the session-JWT shape the fallback
+    /// requires (`cursor_desktop::jwt_claims`); `tag` is its signature.
+    fn ide_jwt(tag: &str) -> String {
+        let encode = |v: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v);
+        format!(
+            "{}.{}.{tag}",
+            encode(r#"{"alg":"HS256"}"#),
+            encode(&format!(r#"{{"sub":"auth0|{USER_ID}"}}"#))
+        )
+    }
+
+    /// `ide_jwt("ide-token")`, as a `&'static str` for the row fixtures.
+    fn ide_token() -> &'static str {
+        static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        TOKEN.get_or_init(|| ide_jwt("ide-token"))
+    }
+
     fn signed_in_rows() -> [(&'static str, &'static str); 2] {
         [
-            ("cursorAuth/accessToken", "ide-token"),
+            ("cursorAuth/accessToken", ide_token()),
             ("glass.lastSignedInAuthId", USER_ID),
         ]
+    }
+
+    /// Whether the Cursor fallback loads credentials from a signed-in
+    /// database whose access token row is `token`.
+    fn fallback_loads(tag: &str, token: &str) -> bool {
+        let (dir, path) = temp_state_db(
+            tag,
+            &[
+                ("cursorAuth/accessToken", token),
+                ("glass.lastSignedInAuthId", &format!("glass-{USER_ID}")),
+            ],
+        );
+        let loaded = load_credentials_from(&path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        loaded.is_some()
+    }
+
+    /// Plan S3a (macOS T1): a sealed token (Cursor 3.27+) is "no Cursor
+    /// login": never decrypted, and its envelope never becomes a cookie.
+    #[test]
+    fn the_cursor_fallback_ignores_a_sealed_token() {
+        let sealed = format!(
+            "cursor-safe-storage:v1:{}",
+            base64::engine::general_purpose::STANDARD.encode(b"v10 sealed blob")
+        );
+        assert!(!fallback_loads("sealed", &format!("\"{sealed}\"")));
+    }
+
+    /// Plan S3a: a plaintext token that is not a session JWT is never sent.
+    #[test]
+    fn the_cursor_fallback_ignores_a_non_jwt_plaintext_token() {
+        assert!(!fallback_loads("nonjwt", "tok-123"));
+    }
+
+    /// Control for the two above: the JWT twin loads, unchanged.
+    #[test]
+    fn the_cursor_fallback_loads_a_plaintext_session_jwt() {
+        assert!(fallback_loads(
+            "jwt",
+            &format!("\"{}\"", ide_jwt("tok-123"))
+        ));
     }
 
     #[test]
@@ -1042,14 +1108,17 @@ pub(crate) mod tests {
         let (dir, path) = temp_state_db(
             "ok",
             &[
-                ("cursorAuth/accessToken", "\"tok-123\""),
+                (
+                    "cursorAuth/accessToken",
+                    &format!("\"{}\"", ide_jwt("tok-123")),
+                ),
                 ("glass.lastSignedInAuthId", &format!("glass-{USER_ID}")),
             ],
         );
         let creds = load_credentials_from(&path)
             .unwrap()
             .expect("credentials load");
-        assert_eq!(creds.access_token, "tok-123");
+        assert_eq!(creds.access_token, ide_jwt("tok-123"));
         assert_eq!(creds.user_id, USER_ID);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1059,7 +1128,7 @@ pub(crate) mod tests {
         let (dir, path) = temp_state_db(
             "profile",
             &[
-                ("cursorAuth/accessToken", "tok-plain"),
+                ("cursorAuth/accessToken", &ide_jwt("tok-plain")),
                 (
                     "cursorAuth/cachedScopedProfile",
                     &format!("{{\"userId\":\"{USER_ID}\"}}"),
@@ -1075,7 +1144,9 @@ pub(crate) mod tests {
 
     #[test]
     fn token_without_user_id_yields_no_credentials() {
-        let (dir, path) = temp_state_db("noid", &[("cursorAuth/accessToken", "tok-123")]);
+        // A session JWT (its `sub` is not a stored id), so only the missing
+        // stored id refuses it.
+        let (dir, path) = temp_state_db("noid", &[("cursorAuth/accessToken", ide_token())]);
         assert!(load_credentials_from(&path).unwrap().is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1098,7 +1169,7 @@ pub(crate) mod tests {
         write_state_db(
             &default_db,
             &[
-                ("cursorAuth/accessToken", "DEFAULTPROFILETOKEN"),
+                ("cursorAuth/accessToken", &ide_jwt("DEFAULTPROFILETOKEN")),
                 ("glass.lastSignedInAuthId", USER_ID),
             ],
         );
@@ -1108,7 +1179,7 @@ pub(crate) mod tests {
         write_state_db(
             &added_db,
             &[
-                ("cursorAuth/accessToken", "ADDEDPROFILETOKEN"),
+                ("cursorAuth/accessToken", &ide_jwt("ADDEDPROFILETOKEN")),
                 ("glass.lastSignedInAuthId", "user_ADDEDprofile01234567890"),
             ],
         );
@@ -1134,7 +1205,7 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&added);
         match loaded {
             Ok(Some(GrokBotCredentials::Cursor(credentials, path))) => {
-                assert_eq!(credentials.access_token, "DEFAULTPROFILETOKEN");
+                assert_eq!(credentials.access_token, ide_jwt("DEFAULTPROFILETOKEN"));
                 assert_eq!(credentials.user_id, USER_ID);
                 assert_eq!(path, default_db);
             }
@@ -1159,8 +1230,9 @@ pub(crate) mod tests {
         let added = temp_dir("cmp_added_only");
         let added_db = crate::cursor_desktop::profile_db_path(&added);
         std::fs::create_dir_all(added_db.parent().unwrap()).unwrap();
+        let added_token = ide_jwt("ADDEDPROFILETOKEN");
         let rows = [
-            ("cursorAuth/accessToken", "ADDEDPROFILETOKEN"),
+            ("cursorAuth/accessToken", added_token.as_str()),
             ("glass.lastSignedInAuthId", "user_ADDEDprofile01234567890"),
         ];
         write_state_db(&added_db, &rows);
@@ -1359,7 +1431,7 @@ pub(crate) mod tests {
         assert_eq!(request.url().as_str(), GROK_BOT_USAGE_URL);
         assert_eq!(
             request.headers()["cookie"],
-            format!("WorkosCursorSessionToken={USER_ID}%3A%3Aide-token").as_str()
+            format!("WorkosCursorSessionToken={USER_ID}%3A%3A{}", ide_token()).as_str()
         );
         assert!(!request.headers().contains_key("authorization"));
         assert!(!request.headers().contains_key("x-cursor-team-id"));

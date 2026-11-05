@@ -1109,6 +1109,53 @@ public class CursorSyncTests
         Assert.Equal("error", controller.State);
     }
 
+    /// <summary>#547 (macOS <c>statusLine</c>): an error line names the core's
+    /// reason code when it has the core's shape, <c>^[a-z_]{1,40}$</c>; any
+    /// other reason falls back to the generic line, so no free text reaches
+    /// it. Only the error line carries a reason.</summary>
+    [Fact]
+    public void AnErrorLineShowsTheReasonCodeOnlyWhenItHasTheCoreShape()
+    {
+        Assert.Equal(
+            "Cursor usage couldn't be synced (token_unreadable). Syrtis will try again later.",
+            CursorSync.StatusLine("error", null, reason: "token_unreadable"));
+        var forty = new string('a', 40);
+        Assert.Equal(
+            $"Cursor usage couldn't be synced ({forty}). Syrtis will try again later.",
+            CursorSync.StatusLine("error", null, reason: forty));
+        string?[] invalid =
+        [
+            null, "", "Token_unreadable", "token unreadable", "token-unreadable",
+            "token_unreadable\n", "tökén", new string('a', 41),
+        ];
+        foreach (var reason in invalid)
+        {
+            Assert.Equal(CursorSync.Copy.Error, CursorSync.StatusLine("error", null, reason: reason));
+        }
+
+        Assert.Equal(CursorSync.Copy.Offline, CursorSync.StatusLine("offline", null, reason: "token_unreadable"));
+    }
+
+    /// <summary>#547: the controller keeps the round's reason for the status
+    /// line, and a round that threw has none.</summary>
+    [Fact]
+    public async Task TheControllerKeepsTheRoundsReason()
+    {
+        var store = TempStore();
+        store.SetBool(CursorSync.NoticeKey, true);
+        Func<CursorSyncStatus> next = () => Status("error") with { Reason = "token_unreadable" };
+        var core = new FakeCore { Result = () => next() };
+        var controller = new CursorSyncController(core.Io, store, User, interval: Never);
+        await controller.RunSync(userInitiated: true);
+        Assert.Equal("error", controller.State);
+        Assert.Equal("token_unreadable", controller.Reason);
+
+        next = () => throw new TbCoreException("tb_cursor_sync panicked");
+        await controller.RunSync(userInitiated: true);
+        Assert.Equal("error", controller.State);
+        Assert.Null(controller.Reason);
+    }
+
     // ---- copy in the catalogs -----------------------------------------------------
 
     /// <summary>Shared spec §3 with the approved Windows wording (this PC /
@@ -1129,6 +1176,8 @@ public class CursorSyncTests
         ["Sign in to the Cursor app to sync your usage."] = "在 Cursor App 登入後就能同步用量。",
         ["Can't reach Cursor. Syrtis will try again."] = "連不上 Cursor，Syrtis 會再試一次。",
         ["Cursor usage couldn't be synced. Syrtis will try again later."] = "無法同步 Cursor 用量，Syrtis 稍後會再試。",
+        // #547, verbatim from macOS zh-Hant (%@ -> {0}).
+        ["Cursor usage couldn't be synced ({0}). Syrtis will try again later."] = "無法同步 Cursor 用量（{0}），Syrtis 稍後會再試。",
         ["Showing Cursor usage from tokscale CLI."] = "目前顯示的是 tokscale CLI 的 Cursor 用量。",
         ["Sync Now"] = "立即同步",
         ["Syncing…"] = "同步中…",
