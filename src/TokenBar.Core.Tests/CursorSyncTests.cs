@@ -1179,7 +1179,7 @@ public class CursorSyncTests
     /// one user round right after it; with no round running,
     /// <see cref="CursorSyncController.ConsentChanged"/> starts one.
     /// Mutation: CursorSync.cs <c>RunSync</c>
-    /// <c>                        if (consentRerun)\n                        {\n                            _rerunPending = true;\n                        }</c>
+    /// <c>                    if (consentRerun)\n                    {\n                        _rerunPending = true;\n                    }</c>
     /// -> (delete) -> one round; the keychain_consent line stays.</summary>
     [Fact]
     public async Task AnAllowDuringARoundRefusedForConsentRerunsAsAUserRound()
@@ -1259,14 +1259,64 @@ public class CursorSyncTests
         Assert.Equal(["sync:auto", "sync:user"], core.Log.ToArray());
     }
 
+    /// <summary>Round-4 F4: an Allow pressed while a round runs whose
+    /// <c>io.Sync</c> throws (no result, so nothing says the round did not
+    /// depend on the old answer) is served by one user round after it, which
+    /// replaces the generic error. A Withdraw during a throwing round adds no
+    /// round (assumption 6).
+    /// Mutations: CursorSync.cs
+    /// <c>                        &amp;&amp; (result is null || AskedForConsent(result));</c>
+    /// -> <c>                        &amp;&amp; AskedForConsent(result);</c> -> one round, the generic error stays (first half fails);
+    /// <c>consentRerun = startedConsent != _consentEpoch &amp;&amp; _consentGranted</c>
+    /// -> <c>consentRerun = startedConsent != _consentEpoch</c> -> the Withdraw reruns (second half fails).</summary>
+    [Fact]
+    public async Task AnAllowDuringARoundWhoseSyncThrowsRerunsAsAUserRound()
+    {
+        static Func<CursorSyncStatus> ThrowsFirst()
+        {
+            var calls = 0;
+            return () => Interlocked.Increment(ref calls) == 1
+                ? throw new TbCoreException("tb_cursor_sync panicked")
+                : Status("ok", 1);
+        }
+
+        var (core, controller, gate) = Gated(Status("ok", 1));
+        core.Result = ThrowsFirst();
+        using (gate)
+        {
+            var running = controller.RunSync(userInitiated: false);
+            Assert.True(await core.SyncStarted.WaitAsync(Wait));
+            _ = controller.ConsentChanged(granted: true);
+            gate.Set();
+            await running;
+            Assert.Equal(["sync:auto", "sync:user"], core.Log.ToArray());
+            Assert.Equal("ok", controller.State);
+        }
+
+        var (withdrawn, withdrawnController, withdrawnGate) = Gated(Status("ok", 1));
+        withdrawn.Result = ThrowsFirst();
+        using (withdrawnGate)
+        {
+            var running = withdrawnController.RunSync(userInitiated: false);
+            Assert.True(await withdrawn.SyncStarted.WaitAsync(Wait));
+            _ = withdrawnController.ConsentChanged(granted: false);
+            withdrawnGate.Set();
+            await running;
+            Assert.Equal(["sync:auto"], withdrawn.Log.ToArray());
+            Assert.Equal("error", withdrawnController.State);
+            Assert.Null(withdrawnController.Reason);
+        }
+    }
+
     /// <summary>Round-3 item 4: a consent press reruns only a round that
     /// depended on the old answer. An Allow during a round that synced (a
-    /// plaintext sign-in never reads consent), and a Withdraw during a round
-    /// refused for consent, both leave one round.
+    /// plaintext sign-in never reads consent; still one round after the
+    /// round-4 change that reruns a thrown round), and a Withdraw during a
+    /// round refused for consent, both leave one round.
     /// Mutations: CursorSync.cs
-    /// <c>consentRerun = startedConsent != _consentEpoch &amp;&amp; _consentGranted\n                        &amp;&amp; AskedForConsent(result);</c>
+    /// <c>consentRerun = startedConsent != _consentEpoch &amp;&amp; _consentGranted\n                        &amp;&amp; (result is null || AskedForConsent(result));</c>
     /// -> <c>consentRerun = startedConsent != _consentEpoch &amp;&amp; _consentGranted;</c> (first half fails), or
-    /// -> <c>consentRerun = startedConsent != _consentEpoch\n                        &amp;&amp; AskedForConsent(result);</c> (second half fails).</summary>
+    /// -> <c>consentRerun = startedConsent != _consentEpoch\n                        &amp;&amp; (result is null || AskedForConsent(result));</c> (second half fails).</summary>
     [Fact]
     public async Task AConsentPressDuringAnIndependentRoundDoesNotRerun()
     {

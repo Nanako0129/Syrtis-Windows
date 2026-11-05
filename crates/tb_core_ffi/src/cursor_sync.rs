@@ -26,16 +26,25 @@
 //!   decrypted only here, only after the "cursor" consent check read
 //!   immediately before `Local State` is opened (C2), with the key from the
 //!   user-data-dir the database belongs to (C6); no key is cached (U3). A
-//!   non-v10 blob is `token_sealed_unsupported`, a blob shorter than a v10
-//!   blob can be and any other failure `token_sealed_unreadable`
-//!   (win_safe_storage's text never passed through).
-//!   `query_login`/`read_login` never decrypt (C1).
-//! - C8, exactly what is zeroed: the unwrapped key (on drop), the decrypt
-//!   output buffer, the access-token row's String in `query_login`, the
-//!   login's token String (`WipedLogin`, every exit of `run`), and the cookie
-//!   value String (`WipedString`, built at final size). Not zeroed: SQLite's
-//!   and rusqlite's internal buffers, serde_json's unquoting scratch, the
-//!   decoded JWT payload, the `HeaderValue` and whatever reqwest copies.
+//!   blob of 3 or more bytes not starting with `v10` is
+//!   `token_sealed_unsupported`; a blob shorter than a v10 blob can be (1 or
+//!   2 bytes included, which the version check cannot see) and any other
+//!   failure is `token_sealed_unreadable` (win_safe_storage's text never
+//!   passed through). `query_login`/`read_login` never decrypt (C1).
+//! - C8, exactly what is zeroed: the unwrapped key's final heap copy (the
+//!   `Box<SafeStorageKey>`, on drop), the DPAPI output in `load_key`, the
+//!   decrypt output buffer, the access-token row's String in `query_login`,
+//!   the login's token String (`WipedLogin`, every exit of `run`), and the
+//!   cookie value String (`WipedString`, built at final size). Not zeroed:
+//!   the key's intermediate copies on the way into that Box (the
+//!   `try_into` array in `key_from_bytes`, the by-value returns from
+//!   `key_from_bytes` and `load_key`, and the move in `Ok(Box::new(key))`);
+//!   rows `query_login` already read when a later row fails to read (the
+//!   `collect` drops them, the token row's String if it was read first); SQLite's and
+//!   rusqlite's internal buffers, serde_json's unquoting scratch, the decoded
+//!   JWT payload, the `HeaderValue` and whatever reqwest copies; and on the
+//!   Grok route (`agent_grokbot::load_credentials_from`), the login dropped
+//!   on its non-JWT and no-user-id returns and its `CursorCredentials` copy.
 //! - The endpoint is a constant; only tests inject one, by parameter (S-4).
 //! - Redirects are never followed and production is https-only; any 3xx
 //!   (cursor.com sends an expired session to WorkOS) means `expired`.

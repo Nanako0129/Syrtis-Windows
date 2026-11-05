@@ -275,7 +275,8 @@ public sealed class CursorSyncController
     private CancellationTokenSource? _loop;
     private int _generation;
     // Bumped by ConsentChanged, with the answer it reported: an Allow during a
-    // round the core refused for want of consent reruns it as a user round.
+    // round the core refused for want of consent, or that threw, reruns it as
+    // a user round.
     private int _consentEpoch;
     private bool _consentGranted;
     private bool _rerunPending;
@@ -562,7 +563,7 @@ public sealed class CursorSyncController
     /// and the sync reruns, so the new settings get a fresh result.
     /// A second exception to single-flight is <see cref="ConsentChanged"/>: an
     /// Allow pressed while a round runs, when that round ends refused for want
-    /// of the "cursor" consent, applies that round's result (its writes are
+    /// of the "cursor" consent or throws, applies that round's result (its writes are
     /// real, so <see cref="DataChanged"/> still fires on <c>changed</c>) and
     /// then runs one user round, which also serves a remembered Sync Now.</summary>
     public async Task RunSync(bool userInitiated)
@@ -656,14 +657,15 @@ public sealed class CursorSyncController
                 lock (_gate)
                 {
                     // Allow pressed while this ran, and this round was refused
-                    // for want of that consent (keychain_consent): it depended
-                    // on the old answer, so it reruns. A plaintext round never
-                    // read consent, and a Withdraw needs no rerun (a round that
+                    // for want of that consent (keychain_consent) or threw (no
+                    // result says it did not depend on the old answer): it
+                    // reruns. A plaintext round that synced never read
+                    // consent, and a Withdraw needs no rerun (a round that
                     // had not yet opened the sealed sign-in already reports
                     // keychain_consent; one that had, read it under the yes
                     // then in force and reports true data).
                     consentRerun = startedConsent != _consentEpoch && _consentGranted
-                        && AskedForConsent(result);
+                        && (result is null || AskedForConsent(result));
                     if (started != _generation || !CursorSync.ShouldSync(_store))
                     {
                         // A reconfigure (turning sync off, say) happened while
@@ -690,10 +692,11 @@ public sealed class CursorSyncController
                         // not `changed` in the core. A round rerun for consent
                         // is still applied: what it wrote is real.
                         refresh = result.Changed;
-                        if (consentRerun)
-                        {
-                            _rerunPending = true;
-                        }
+                    }
+
+                    if (consentRerun)
+                    {
+                        _rerunPending = true;
                     }
 
                     again = _rerunPending && CursorSync.ShouldSync(_store);
@@ -768,9 +771,12 @@ public sealed class CursorSyncController
     /// already installed it through <see cref="KeychainConsentComposer"/>).
     /// With no round running, one user round starts now. While a round runs:
     /// an Allow whose round ends refused for want of consent
-    /// (<c>keychain_consent</c>) is served by one user round right after it
-    /// (an exception to single-flight; a plain Sync Now during a user round is
-    /// dropped); otherwise nothing more runs (see <see cref="RunSync"/>).</summary>
+    /// (<c>keychain_consent</c>) or throws is served by one user round right
+    /// after it (an exception to single-flight; a plain Sync Now during a user
+    /// round is dropped). Otherwise the press adds no round, and the running
+    /// round ends as it would have without it: a Sync Now remembered during a
+    /// scheduled round still runs one user round after it, and a reconfigure
+    /// during it still reruns it (see <see cref="RunSync"/>).</summary>
     public Task ConsentChanged(bool granted)
     {
         lock (_gate)
