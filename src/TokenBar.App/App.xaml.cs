@@ -66,13 +66,20 @@ public partial class App : Application
         // lanes that do not).
         StartClaudeExtraRoots();
         StartAntigravityAccounts();
+
+        // The core's consent registry is in-memory and empty at launch; the
+        // stored answers (Grok Bot and Cursor) are re-installed as one composed
+        // payload. Synchronously here, BEFORE StartCursorSync, so a stored
+        // Cursor "yes" is in the core before Cursor sync's first round opens a
+        // sealed sign-in (C3/C4 launch order).
+        AppSettings.KeychainConsent.InstallComposedIfAnyGranted();
         StartCursorSync();
 
-        // The core's consent registry is in-memory and empty at launch; a
-        // stored "yes" for reading the Grok Bot sign-in is re-installed before
-        // the first agent-usage fetch, whichever surface starts it.
+        // And still the RunBeforeFirstFetch hook, so a stored "yes" is in the
+        // core before the first agent-usage fetch too, whichever surface starts
+        // it (the hook re-installs the same composed payload; idempotent).
         global::TokenBar.Core.AgentUsageFetchCoordinator.Shared.RunBeforeFirstFetch(
-            AppSettings.GrokBotConsent.ApplyIfGranted);
+            AppSettings.KeychainConsent.InstallComposedIfAnyGranted);
         global::TokenBar.Core.AgentUsageFetchCoordinator.Shared.Log = DevLog.Write;
 
         try

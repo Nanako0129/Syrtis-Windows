@@ -1,10 +1,13 @@
 //! Process-wide registry of the credential reads the user has agreed to.
 //! Written by `tb_set_keychain_consent`, read by `agent_grokbot` before it
-//! touches the Grok Bot desktop login.
+//! touches the Grok Bot desktop login and by `cursor_sync` before it opens
+//! Cursor's `Local State` to unseal an encrypted sign-in.
 //!
 //! Ported from macOS 451b4329 `keychain_consent.rs`; the name is kept so both
-//! platforms share one FFI symbol and one settings key
-//! (`tokenbar.grokBot.keychainConsent`), although Windows has no Keychain.
+//! platforms share one FFI symbol, although Windows has no Keychain. Each
+//! wired id has its own settings key (`tokenbar.grokBot.keychainConsent`,
+//! `tokenbar.cursorSync.keychainConsent`); the C# `KeychainConsentComposer`
+//! owns both answers and sends one `{"grok-bot":…,"cursor":…}` full-replace.
 //!
 //! **On Windows this is the only gate.** macOS shows a Keychain dialog after
 //! the in-app question; Windows' `CryptUnprotectData` succeeds silently for any
@@ -32,7 +35,8 @@ use std::sync::{LazyLock, RwLock};
 
 /// Public client ids wired to this registry. Any other id is refused rather
 /// than stored, so a typo cannot register a grant that nothing reads.
-const CONSENTABLE_CLIENTS: &[&str] = &["grok-bot"];
+/// `cursor` gates `cursor_sync` reading Cursor's encrypted sign-in (U3).
+const CONSENTABLE_CLIENTS: &[&str] = &["grok-bot", "cursor"];
 
 static KEYCHAIN_CONSENT: LazyLock<RwLock<BTreeSet<String>>> =
     LazyLock::new(|| RwLock::new(BTreeSet::new()));
@@ -133,6 +137,25 @@ mod tests {
             !result.to_string().contains("claude"),
             "the input is never echoed"
         );
+        reset_for_test();
+    }
+
+    #[test]
+    fn cursor_is_wired_and_independent_of_grok_bot() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_for_test();
+
+        // A composed payload carrying only "cursor" grants exactly that.
+        let result = set_from_json(r#"{"grok-bot":false,"cursor":true}"#).unwrap();
+        assert_eq!(result["grantedCount"], 1);
+        assert_eq!(result["rejectedCount"], 0);
+        assert!(allowed("cursor"));
+        assert!(!allowed("grok-bot"));
+
+        // Full-replace: a later payload with only grok-bot drops cursor.
+        set_from_json(r#"{"grok-bot":true}"#).unwrap();
+        assert!(allowed("grok-bot"));
+        assert!(!allowed("cursor"));
         reset_for_test();
     }
 

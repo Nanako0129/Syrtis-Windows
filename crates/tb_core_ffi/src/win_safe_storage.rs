@@ -162,7 +162,8 @@ impl Drop for KeyHandle {
 fn aes_gcm_key(key: &[u8]) -> Result<KeyHandle, &'static str> {
     let mut handle = KeyHandle(null_mut());
     // SAFETY: the AES-GCM pseudo-handle needs no open/close; a null key object
-    // lets CNG allocate it, released by `BCryptDestroyKey` in `KeyHandle`.
+    // lets CNG allocate it, released by `BCryptDestroyKey` in `KeyHandle`. CNG
+    // keeps its own copy of the key in that object, which we do not wipe (C8).
     let status = unsafe {
         BCryptGenerateSymmetricKey(
             BCRYPT_AES_GCM_ALG_HANDLE,
@@ -233,6 +234,15 @@ fn size_of_u32<T>() -> u32 {
 pub(crate) mod test_support {
     use super::*;
     use windows_sys::Win32::Security::Cryptography::{BCryptEncrypt, CryptProtectData};
+
+    /// A key built straight from 32 raw bytes, with no DPAPI and no
+    /// `Local State`: the DPAPI-behind-a-seam path for `cursor_sync`'s tests,
+    /// which feed a key generated off-device (the Mac has no DPAPI) and
+    /// decrypt a fixture made independently of this crate. The real
+    /// `AesGcm` (CNG) still runs, so these tests are Windows only.
+    pub(crate) fn key_from_raw(raw: [u8; KEY_LEN]) -> SafeStorageKey {
+        SafeStorageKey(raw)
+    }
 
     /// CryptProtectData(bytes) as the current user.
     pub(crate) fn dpapi_protect(bytes: &[u8]) -> Vec<u8> {

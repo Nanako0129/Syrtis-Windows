@@ -1150,17 +1150,19 @@ unsafe fn validate_claude_config_dir_from_c(
 
 /// Replace the registry of credential reads the user has agreed to (see the
 /// `keychain_consent` module doc). `json` is `{"<public-client-id>": true|false}`,
-/// e.g. `{"grok-bot":true}`; full-replace (`{}` clears every grant). Success
-/// data is `{"grantedCount":N,"rejectedCount":M}`; an id not wired to the
-/// registry is counted as rejected and never stored. Errors are fixed codes
-/// (`nullPayload`, `invalidUtf8`, `invalidJson`); the input is never echoed and
-/// on an error nothing changed.
+/// e.g. `{"grok-bot":true,"cursor":true}`; full-replace (`{}` clears every
+/// grant). Success data is `{"grantedCount":N,"rejectedCount":M}`; an id not
+/// wired to the registry (`grok-bot`, `cursor`) is counted as rejected and
+/// never stored. Errors are fixed codes (`nullPayload`, `invalidUtf8`,
+/// `invalidJson`); the input is never echoed and on an error nothing changed.
 ///
-/// On Windows this is the only gate in front of the Grok Bot desktop login:
-/// DPAPI shows no prompt. Without a grant `tb_agent_usage` publishes the
-/// `grok-bot` card with `source == "keychain-consent"` and neither reads
-/// `Local State` nor unwraps the key. The registry is in-memory and starts
-/// empty every launch; the caller re-applies the stored answer.
+/// On Windows this is the only gate in front of the credential reads DPAPI
+/// would otherwise make silently. Without the `grok-bot` grant `tb_agent_usage`
+/// publishes the Grok Bot card with `source == "keychain-consent"` and never
+/// reads its `Local State`; without the `cursor` grant `cursor_sync` refuses a
+/// sealed Cursor sign-in with `keychain_consent` and never opens Cursor's
+/// `Local State`. The registry is in-memory and starts empty every launch; the
+/// caller re-applies both stored answers (one composed payload).
 ///
 /// # Safety
 /// `json` must be NULL or a valid NUL-terminated string.

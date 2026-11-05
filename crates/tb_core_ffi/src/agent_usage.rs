@@ -17466,7 +17466,7 @@ mod grokbot_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    const SENTINEL_TOKEN: &str = "grokbot-sentinel-session-9b21e4";
+    const SENTINEL_TOKEN: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJncm9rYm90LXNlbnRpbmVsIn0.grokbot-sentinel-session-9b21e4";
     const USER_ID: &str = "user_FixtureAbc1234567890xyz";
     const PROFILE_PRIVATE: &str = "profile-private-canary";
     const USAGE_OK: &str = r#"{
@@ -17717,7 +17717,11 @@ mod grokbot_tests {
         let metadata = harness.scope.metadata_bytes();
         assert!(!metadata.is_empty());
         let metadata = String::from_utf8_lossy(&metadata);
-        for private in [SENTINEL_TOKEN, USER_ID] {
+        for private in SENTINEL_TOKEN
+            .split('.')
+            .skip(1)
+            .chain([SENTINEL_TOKEN, USER_ID])
+        {
             assert!(!metadata.contains(private));
         }
         assert_eq!(harness.enrich_calls(), 1);
@@ -18033,7 +18037,11 @@ mod grokbot_tests {
                 vec!["connect-protocol-version: 1"]
             );
             assert!(header_lines(head, "cookie").is_empty());
-            for never in ["refresh-never-read", "profile-never-read", SENTINEL_TOKEN] {
+            for never in SENTINEL_TOKEN.split('.').skip(1).chain([
+                "refresh-never-read",
+                "profile-never-read",
+                SENTINEL_TOKEN,
+            ]) {
                 assert!(!head.contains(never), "{never} in {head}");
             }
             assert!(cursor.await.unwrap().is_empty(), "Cursor never used");
@@ -18418,7 +18426,11 @@ mod grokbot_tests {
         for _ in 0..4 {
             let snapshot = fetch_grokbot_with(&harness.deps()).await.unwrap();
             let json = serde_json::to_string(&snapshot).unwrap();
-            for secret in [SENTINEL_TOKEN, USER_ID] {
+            for secret in SENTINEL_TOKEN
+                .split('.')
+                .skip(1)
+                .chain([SENTINEL_TOKEN, USER_ID])
+            {
                 assert!(!json.contains(secret), "{secret} in {json}");
             }
             results.push((snapshot.error.clone(), snapshot.windows.len()));

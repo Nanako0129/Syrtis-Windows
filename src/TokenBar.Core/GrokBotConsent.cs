@@ -21,70 +21,60 @@ namespace TokenBar.Core;
 /// "never asked" and "no" both mean "do not read", and only the copy differs.
 /// The value records an ANSWER, never the fact that the card was shown.
 /// </para></summary>
-public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsent)
+public sealed class GrokBotConsent
 {
+    private readonly SettingsStore _store;
+    private readonly KeychainConsentComposer _composer;
+
+    /// <summary>The production wiring: the shared composer owns both answers
+    /// (C3), so the Cursor consent and this one install one composed
+    /// payload.</summary>
+    public GrokBotConsent(SettingsStore store, KeychainConsentComposer composer)
+    {
+        _store = store;
+        _composer = composer;
+    }
+
+    /// <summary>Convenience for tests that exercise the Grok Bot answer in
+    /// isolation: its own composer over <paramref name="setConsent"/>.</summary>
+    public GrokBotConsent(SettingsStore store, Action<string> setConsent)
+        : this(store, new KeychainConsentComposer(store, setConsent))
+    {
+    }
+
     /// <summary>The macOS UserDefaults key, kept for a shared vocabulary (Q6-3);
     /// the UI never says "Keychain" on Windows.</summary>
-    public const string StorageKey = "tokenbar.grokBot.keychainConsent";
+    public const string StorageKey = KeychainConsentComposer.GrokBotStorageKey;
 
     /// <summary>The exact payloads; the core rejects unknown ids, so a typo
-    /// here would be a grant nothing honours.</summary>
+    /// here would be a grant nothing honours. Kept for the FFI smoke test;
+    /// live payloads are composed by <see cref="KeychainConsentComposer"/>.</summary>
     public const string GrantedPayload = """{"grok-bot":true}""";
 
     /// <summary>Full-replace with nothing: how the core spells "revoked".</summary>
     public const string DeniedPayload = "{}";
 
-    private readonly object _gate = new();
-
-    // The payload the core holds from this process; null = nothing installed.
-    private string? _lastInstalled;
-
     /// <summary>The production setter over the FFI.</summary>
-    public static Action<string> NativeSetter { get; } = json => TbCore.SetKeychainConsent(json);
+    public static Action<string> NativeSetter => KeychainConsentComposer.NativeSetter;
 
     /// <summary>The stored answer: null = never asked.</summary>
-    public bool? Stored => store.GetNullableBool(StorageKey);
+    public bool? Stored => _store.GetNullableBool(StorageKey);
 
     /// <summary>Record the user's answer and make it take effect now — both
     /// answers, so a "no" after a "yes" clears the core at once rather than at
-    /// the next launch. Serialized under one lock so the last click wins in
-    /// both the settings file and the core. The core is told first: if the
-    /// call throws, nothing is persisted and the exception reaches the caller,
-    /// so the stored answer never claims a state the core is not in.
-    /// <para>What the core holds is tracked in-process (<c>_lastInstalled</c>,
-    /// macOS <c>lastInstalledPayload</c>), never inferred from
-    /// <see cref="Stored"/>: a denial with nothing installed is a no-op (no
-    /// core call), and <see cref="QuotaEpoch.Signal"/> fires only when the
-    /// setter succeeded and the installed grant changed, so both quota
-    /// pollers refetch with the new grant.</para></summary>
+    /// the next launch. The composer serializes it under one lock, tells the
+    /// core first (a throwing setter persists nothing and reaches the caller)
+    /// then the store, keeps the other id's answer, and makes no core call for
+    /// an answer that changes nothing installed (a repeat, or a "no" while
+    /// nothing of Grok Bot's is installed). <see cref="QuotaEpoch.Signal"/>
+    /// fires only when the installed payload changed, so both quota pollers
+    /// refetch.</summary>
     public void Answer(bool granted)
     {
-        var changed = false;
-        lock (_gate)
-        {
-            var payload = granted ? GrantedPayload : DeniedPayload;
-            if (granted || _lastInstalled is not null)
-            {
-                changed = Install(payload);
-            }
-
-            store.SetBool(StorageKey, granted);
-        }
-
-        if (changed)
+        if (_composer.Install(KeychainConsentComposer.GrokBotId, granted))
         {
             QuotaEpoch.Signal();
         }
-    }
-
-    // Caller holds _gate. Calls the setter; records and reports a change only
-    // when it succeeded.
-    private bool Install(string payload)
-    {
-        var changed = payload != _lastInstalled;
-        setConsent(payload);
-        _lastInstalled = payload;
-        return changed;
     }
 
     /// <summary>Settings' "Use Grok Bot's sign-in" switch turned off (Q6-2),
@@ -105,25 +95,7 @@ public sealed class GrokBotConsent(SettingsStore store, Action<string> setConsen
     /// does not signal: it runs as the coordinator's RunBeforeFirstFetch hook,
     /// before the first fetch, so no payload predates it, and a signal here
     /// would discard that first payload and force a second core run.</summary>
-    public void ApplyIfGranted()
-    {
-        lock (_gate)
-        {
-            if (Stored != true)
-            {
-                return;
-            }
-
-            try
-            {
-                Install(GrantedPayload);
-            }
-            catch (Exception)
-            {
-                // Fail closed: the grant is simply not installed.
-            }
-        }
-    }
+    public void ApplyIfGranted() => _composer.InstallComposedIfAnyGranted();
 
     /// <summary>What the Grok Bot card shows instead of its error line.</summary>
     public enum Card
