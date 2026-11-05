@@ -76,8 +76,8 @@ public class AntigravityLocalSettingsTests
     public void AnAccountWithoutACredentialHereStaysBehindAndTheToggleIsUnanswered()
     {
         var paths = new Paths();
-        var roaming = Roaming(paths, KeyB);
-        roaming = new SettingsStore(paths.Roaming);
+        Roaming(paths, KeyB);
+        var roaming = new SettingsStore(paths.Roaming);
         roaming.SetString(AntigravityAutoCapture.CurrentKey, JsonSerializer.Serialize(
             new Dictionary<string, string> { ["key"] = KeyB, ["marker"] = "133000000000000000" }));
         roaming = new SettingsStore(paths.Roaming);
@@ -110,6 +110,24 @@ public class AntigravityLocalSettingsTests
         Assert.Equal(before, Bytes(paths.Roaming));
     }
 
+    /// <summary>The binding moves only with its own account, even when
+    /// another account moved.</summary>
+    [Fact]
+    public void ABindingToAnAccountLeftBehindDoesNotMove()
+    {
+        var paths = new Paths();
+        Roaming(paths, KeyB, KeyA);
+        var roaming = new SettingsStore(paths.Roaming);
+        roaming.SetString(AntigravityAutoCapture.CurrentKey, JsonSerializer.Serialize(
+            new Dictionary<string, string> { ["key"] = KeyB, ["marker"] = "133000000000000000" }));
+        roaming = new SettingsStore(paths.Roaming);
+
+        var local = AntigravityLocalSettings.Open(paths.Local, roaming, OnlyAHere, NoLog);
+
+        Assert.Equal([KeyA], AntigravityAccounts.Load(local).Select(a => a.Key));
+        Assert.Null(local.GetString(AntigravityAutoCapture.CurrentKey));
+    }
+
     // (4) already moved
     [Fact]
     public void AStoreThatAlreadyMovedIsNeitherOverwrittenNorMergedWithRoaming()
@@ -121,15 +139,17 @@ public class AntigravityLocalSettingsTests
         Assert.Empty(AntigravityAccounts.Load(first));
         var moved = Bytes(paths.Local);
         var probes = 0;
+        var log = new ConcurrentQueue<string>();
 
         var again = AntigravityLocalSettings.Open(paths.Local, new SettingsStore(paths.Roaming), key =>
         {
             Interlocked.Increment(ref probes);
             return OnlyAHere(key);
-        }, NoLog);
+        }, log.Enqueue);
 
         Assert.Empty(AntigravityAccounts.Load(again));
         Assert.Equal(0, probes);
+        Assert.Empty(log);
         Assert.Equal(moved, Bytes(paths.Local));
         Assert.Equal(before, Bytes(paths.Roaming));
     }

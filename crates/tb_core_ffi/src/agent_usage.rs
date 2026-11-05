@@ -9732,6 +9732,49 @@ mod tests {
             "control: the fixture's own fixed drive is read"
         );
         let _ = fs::remove_dir_all(&dir);
+
+        // Decided before the file is looked at: with no login file the answer
+        // is still the drive sentence, not "no login found".
+        let empty = config_dir_fixture("not-fixed-empty", None);
+        let refused = open_claude_config_dir_credentials_with(&empty, &remote).err();
+        let _ = fs::remove_dir_all(&empty);
+        assert!(
+            matches!(
+                refused,
+                Some(ProviderFetchFailure::Terminal { ref display })
+                    if display == CLAUDE_CONFIG_DIR_NOT_FIXED_DRIVE_ERROR
+            ),
+            "the drive check ran after the file was opened"
+        );
+    }
+
+    /// Item 14 (S21), Windows only: a login file another process holds with
+    /// no sharing (a sharing violation at open) is retried, not reported as a
+    /// broken login.
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_config_dir_login_file_is_retried() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let dir = config_dir_fixture(
+            "locked",
+            Some(br#"{"claudeAiOauth":{"accessToken":"a"}}"#),
+        );
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.join(CLAUDE_CONFIG_DIR_CREDENTIALS_FILE))
+            .unwrap();
+        let outcome = open_claude_config_dir_credentials(&dir).err();
+        drop(lock);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            matches!(
+                outcome,
+                Some(ProviderFetchFailure::Transient { ref display, .. })
+                    if display == CLAUDE_CONFIG_DIR_READ_RETRY_ERROR
+            ),
+            "a sharing violation was not a retry"
+        );
     }
 
     /// Slice W item 14 (S20), Windows only: while the credential read holds
