@@ -282,13 +282,13 @@ public static class AntigravityFetch
 /// not to the marker alone: the engine's binding was read before the fetch,
 /// <c>currentKey</c> after it). Otherwise both are shown.
 /// <para>
-/// An errored primary (any route, e.g. agy timed out) is instead replaced by
-/// the captured snapshot carrying <c>currentKey</c>, promoted to the primary
-/// slot (<see cref="PromotedToPrimary"/>), when that snapshot has windows and
-/// no error (macOS 6dbd8cca): it is agy's current account, verified under
-/// agy's current marker by automatic capture, shown with its own data. With no
-/// such key (for example while a re-capture after a credential rewrite is
-/// still running) or a failing captured account, the error card stays.
+/// An errored primary is instead replaced by the captured snapshot carrying
+/// <c>currentKey</c>, promoted to the primary slot
+/// (<see cref="PromotedToPrimary"/>), only when the same marker evidence holds
+/// (the errored card carries <c>currentMarker</c>, which only a re-sent
+/// last-good card can: a fresh error card carries none) and that snapshot has
+/// windows and no error. Otherwise both cards show and the error stays
+/// visible, as on macOS (an unverified replacement hid agy's real error).
 /// </para>
 /// <para>
 /// The primary keeps its own windows and values, and takes the captured
@@ -329,7 +329,11 @@ public static class AntigravityDedup
         var captured = agents[capturedIndex];
         if (primary.Error is not null)
         {
-            if (captured.Error is not null || captured.Windows.Count == 0)
+            // The same evidence the merge needs: the card was fetched under
+            // agy's current login. An error card the core built fresh carries
+            // no marker, so it stays beside the captured card and shows agy's
+            // real error; only a re-sent last-good card keeps its marker.
+            if (primary.AgyLoginMarker != currentMarker || captured.Error is not null || captured.Windows.Count == 0)
             {
                 return payload;
             }

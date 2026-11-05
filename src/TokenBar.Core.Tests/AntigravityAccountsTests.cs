@@ -131,13 +131,16 @@ public class AntigravityAccountsTests
             HistoryScope: new AccountScopeStatus(Error: "noTrustedEvidence"),
             AgyLoginMarker: marker);
 
-    /// <summary>The production shape of a failed primary: an error card
-    /// carries neither the agy source nor a login marker.</summary>
-    private static AgentUsageSnapshot ErroredPrimary(bool lastGood = false) => new(
+    /// <summary>The production shape of a failed primary: a fresh error card
+    /// carries neither the agy source nor a login marker; the core's re-sent
+    /// last-good card (<paramref name="lastGood"/>) keeps the marker it was
+    /// fetched under (<paramref name="marker"/>, null = none).</summary>
+    private static AgentUsageSnapshot ErroredPrimary(bool lastGood = false, string? marker = null) => new(
         "antigravity", "oauth", "2026-10-04T00:00:00Z",
         lastGood ? [Window("antigravity.weekly", 60)] : [],
         Identity: lastGood ? new AgentIdentity(Plan: "Free") : null, // remote_identity(plan): no email
-        Error: "timeout", HistoryScope: new AccountScopeStatus(Error: "noTrustedEvidence"));
+        Error: "timeout", HistoryScope: new AccountScopeStatus(Error: "noTrustedEvidence"),
+        AgyLoginMarker: marker);
 
     private static AgentUsageSnapshot Captured(
         string key = KeyA, string? error = null, bool windows = true) =>
@@ -320,13 +323,11 @@ public class AntigravityAccountsTests
     /// 2026-10-10): agy's verified captured account takes an errored
     /// primary's slot, so the error card, its empty rows and the duplicate
     /// account card are gone.</summary>
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)] // the core's cached last-good card, error attached
-    public void AnErroredPrimaryIsReplacedByAgysVerifiedCapturedAccount(bool lastGood)
+    [Fact]
+    public void AnErroredPrimaryCarryingAgysMarkerIsReplacedByAgysVerifiedCapturedAccount()
     {
         var captured = Captured() with { Identity = new AgentIdentity("a@example.com", "Google AI Pro") };
-        var payload = Payload(ErroredPrimary(lastGood), captured, Captured(KeyB));
+        var payload = Payload(ErroredPrimary(lastGood: true, marker: "M1"), captured, Captured(KeyB));
 
         var agents = AntigravityDedup.Apply(payload, KeyA, "M1").Agents;
 
@@ -342,6 +343,20 @@ public class AntigravityAccountsTests
         Assert.Equal(KeyB, agents[1].AccountKey);
     }
 
+    /// <summary>MA-7: an errored primary with no marker evidence (a fresh
+    /// error card, or a last-good card fetched under another login) is not
+    /// replaced: both cards show and agy's own error stays visible.</summary>
+    [Theory]
+    [InlineData(false, null)]
+    [InlineData(true, null)]
+    [InlineData(true, "M0")]
+    public void AnErroredPrimaryWithoutMatchingMarkerEvidenceStaysBesideTheCapturedCard(bool lastGood, string? marker)
+    {
+        var payload = Payload(ErroredPrimary(lastGood, marker), Captured());
+
+        Assert.Same(payload, AntigravityDedup.Apply(payload, KeyA, "M1"));
+    }
+
     public static TheoryData<string> StandInControls() => new()
     {
         "capturedError", "capturedNoWindows", "noCurrentKey", "noCapturedSnapshot", "markerPresent",
@@ -352,7 +367,7 @@ public class AntigravityAccountsTests
     public void AnErroredPrimaryStaysWhenAgysAccountIsNotVerifiedOrCannotStandIn(string failing)
     {
         var payload = Payload(
-            ErroredPrimary(),
+            ErroredPrimary(lastGood: true, marker: "M1"),
             Captured(
                 failing == "noCapturedSnapshot" ? KeyB : KeyA,
                 error: failing == "capturedError" ? "refresh_rejected" : null,
@@ -546,14 +561,14 @@ public class AntigravityAccountsTests
     }
 
     /// <summary>The poll right after agy rewrote its credential runs agy
-    /// (its binding was cleared), and here agy fails. Whether agy's captured
-    /// account stands in depends only on whether the background re-capture
-    /// rebound it, under the new marker, before the fetch returned: dedup reads
-    /// the binding after the fetch. Rebound in time (the re-capture finished
-    /// during agy's run, up to its 35 s timeout): one card, the captured
-    /// account. Not yet: the error card stays, with the captured card beside
+    /// (its binding was cleared), and here agy fails. The background re-capture
+    /// may rebind the account, under the new marker, before the fetch returns
+    /// (dedup reads the binding after the fetch). Rebound in time (the re-capture finished
+    /// during agy's run, up to its 35 s timeout): the binding is
+    /// current. Not yet: the error card stays, with the captured card beside
     /// it (no account is verified for the new marker; limits-card shared spec
-    /// §2.3).</summary>
+    /// §2.3). Either way the errored card is not replaced (MA-7): it carries no
+    /// marker evidence.</summary>
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -590,17 +605,11 @@ public class AntigravityAccountsTests
         captureGate.Set();
 
         Assert.Equal("{\"key\":null}", bound); // this poll ran agy
-        if (reboundInTime)
-        {
-            var card = Assert.Single(payload.Agents);
-            Assert.Null(card.Error);
-            Assert.Equal(KeyA, card.HistoryAccountKey);
-        }
-        else
-        {
-            Assert.Equal(2, payload.Agents.Count);
-            Assert.Equal("timeout", payload.Agents[0].Error);
-        }
+        // The errored card carries no marker for the new login either way
+        // (MA-7), so it is never replaced: agy's error stays beside the
+        // captured card.
+        Assert.Equal(2, payload.Agents.Count);
+        Assert.Equal("timeout", payload.Agents[0].Error);
     }
 
     [Fact]
