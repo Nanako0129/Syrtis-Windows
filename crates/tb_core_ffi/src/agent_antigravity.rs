@@ -3151,10 +3151,23 @@ fn clients_for_aud<I>(client_id: &str, artifacts: I) -> Vec<OAuthClient>
 where
     I: IntoIterator<Item = Vec<u8>>,
 {
-    artifact_clients(artifacts)
-        .into_iter()
-        .filter(|client| client.id == client_id)
-        .collect()
+    let mut clients: Vec<OAuthClient> = Vec::new();
+    for data in artifacts {
+        // An artifact without the id is skipped before its secrets are scanned.
+        if !scan_client_ids(&data).iter().any(|id| id == client_id) {
+            continue;
+        }
+        for secret in scan_client_secrets(&data) {
+            let client = OAuthClient {
+                id: client_id.to_string(),
+                secret,
+            };
+            if !clients.contains(&client) {
+                clients.push(client);
+            }
+        }
+    }
+    clients
 }
 
 /// Every (id, secret) pair found inside the same artifact, in scan order,
@@ -3183,8 +3196,12 @@ where
     clients
 }
 
-/// Every file a captured account's client may be scanned from: the IDE's
-/// binaries plus `agy.exe`, found by path lookup only (never started).
+/// Every file a captured account's client may be scanned from: `agy.exe`
+/// first, then the IDE's binaries in their usual order, found by path lookup
+/// only (never started). agy.exe comes first because agy's own login was most
+/// likely issued by agy's own client, so agy 1.4.x's candidate search (no
+/// `aud`, `artifact_clients` in this order) sends the refresh token to the
+/// fewest wrong clients.
 #[cfg(any(windows, test))]
 fn windows_captured_artifact_candidates(
     local_app_data: Option<&std::ffi::OsStr>,
@@ -3192,8 +3209,10 @@ fn windows_captured_artifact_candidates(
     path: Option<&std::ffi::OsStr>,
     is_file: impl Fn(&Path) -> bool,
 ) -> Vec<PathBuf> {
-    let mut paths = windows_client_artifact_candidates(local_app_data, program_files);
-    paths.extend(agy_executable_from(local_app_data, path, is_file));
+    let mut paths: Vec<PathBuf> = agy_executable_from(local_app_data, path, is_file)
+        .into_iter()
+        .collect();
+    paths.extend(windows_client_artifact_candidates(local_app_data, program_files));
     paths
 }
 
@@ -4116,18 +4135,20 @@ async fn capture_with<I: CapturedIo>(io: &I) -> Result<CapturedAccount, CaptureE
     })
 }
 
-/// One refresh of `login`'s token at Google.
+/// Refresh `login`'s token at Google until a client succeeds.
 /// - a stored `id_token` (`aud` known): the candidate secrets of the client
 ///   named by `aud`; `invalid_client` / `unauthorized_client` falls through
 ///   to the next, any other answer stops (`invalid_grant` is
 ///   `RefreshRejected`).
-/// - agy 1.4.x (`aud` unknown): every (id, secret) pair in the artifacts;
-///   `invalid_client`, `unauthorized_client` and `invalid_grant` fall
-///   through, any other answer stops. Without a success the result is
-///   `RefreshRejected` when some candidate said `invalid_grant`, else
-///   `OAuthClientRejected`.
+/// - agy 1.4.x (`aud` unknown): every (id, secret) pair in the artifacts,
+///   in turn; any OAuth refusal (`invalid_client`, `unauthorized_client`,
+///   `invalid_grant` or another code such as `deleted_client`) goes on to the
+///   next candidate. Without a success the result is `RefreshRejected` when
+///   some candidate said `invalid_grant`, else `OAuthClientRejected`.
 ///
-/// The client that succeeded is returned, and is the one stored.
+/// Both stop at the first success and on any transport failure
+/// (`RefreshUnreachable`). The client that succeeded is returned, and is the
+/// one stored.
 async fn refresh_with_issuing_client<I: CapturedIo>(
     io: &I,
     login: &AgyLogin,
@@ -4151,7 +4172,7 @@ async fn refresh_with_issuing_client<I: CapturedIo>(
             (Err(TokenRejection::WrongClient), _) => continue,
             (Err(TokenRejection::InvalidGrant), None) => grant_rejected = true,
             (Err(_), Some(_)) => return Err(CaptureError::RefreshRejected),
-            (Err(TokenRejection::Other), None) => break,
+            (Err(TokenRejection::Other), None) => continue,
         }
     }
     Err(if grant_rejected {
@@ -4195,12 +4216,8 @@ fn verified_identity(
     login: &AgyLogin,
     client: &OAuthClient,
 ) -> Result<VerifiedIdentity, CaptureError> {
-    let claims = json
-        .get("id_token")
-        .and_then(Value::as_str)
-        .and_then(jwt_claims)
-        .ok_or(CaptureError::InvalidCredentialFormat)?;
-    let sub = non_empty_str(&claims, "sub").ok_or(CaptureError::InvalidCredentialFormat)?;
+    let (claims, sub) = response_claims(json)?;
+    let sub = sub.as_str();
     if non_empty_str(&claims, "aud") != Some(client.id.as_str()) {
         return Err(CaptureError::AccountMismatch);
     }
@@ -4218,6 +4235,20 @@ fn verified_identity(
         sub: sub.to_string(),
         email: email.map(str::to_string),
     })
+}
+
+/// The claims of the response's `id_token` and their non-empty `sub`; no
+/// decodable `id_token` or no `sub` is `InvalidCredentialFormat`.
+fn response_claims(json: &Value) -> Result<(Value, String), CaptureError> {
+    let claims = json
+        .get("id_token")
+        .and_then(Value::as_str)
+        .and_then(jwt_claims)
+        .ok_or(CaptureError::InvalidCredentialFormat)?;
+    let sub = non_empty_str(&claims, "sub")
+        .ok_or(CaptureError::InvalidCredentialFormat)?
+        .to_string();
+    Ok((claims, sub))
 }
 
 /// Write `{refresh_token, client}` to `key`'s credential. The refresh token is
@@ -4253,7 +4284,8 @@ pub(crate) enum AutoCaptured {
     Unchanged(CapturedAccount),
     /// The user removed this account; nothing was written. With a stored
     /// `id_token`'s `sub` nothing was requested either; agy 1.4.x's login
-    /// names its account only in Google's answer, so one refresh came first.
+    /// names its account only in Google's answer, so the token was first
+    /// refreshed with each candidate client until one succeeded.
     SkippedRemoved,
 }
 
@@ -4270,10 +4302,11 @@ pub(crate) enum AutoCaptured {
 ///    stored `id_token` that is its own key's credential; agy 1.4.x, whose
 ///    key is unknown before a request, reads the credential of every
 ///    registered account not in `removed_keys`;
-/// 4. the refresh response must pass `verified_identity`, else no write;
-/// 5. a key (from Google's `sub`) in `removed_keys` is `SkippedRemoved`
-///    after the refresh and before the write: removed means no write, and
-///    with a stored `id_token` also no request (step 2).
+/// 4. a key from Google's `sub` in `removed_keys` is `SkippedRemoved` after
+///    the refresh (each candidate client until one succeeds) and before the
+///    aud/email checks and the write: removed means no write, and with a
+///    stored `id_token` also no request (step 2);
+/// 5. the refresh response must pass `verified_identity`, else no write.
 async fn auto_capture_with<I: CapturedIo>(
     io: &I,
     removed_keys: &[String],
@@ -4314,11 +4347,15 @@ async fn auto_capture_with<I: CapturedIo>(
     }
 
     let (client, json) = refresh_with_issuing_client(io, &login).await?;
-    let verified = verified_identity(&json, &login, &client)?;
-    let key = captured_key(&verified.sub);
-    if removed_keys.contains(&key) {
+    // Removed is decided on Google's `sub` alone, before the aud and email
+    // checks: skipping writes nothing, so an unverified claim may only cause
+    // a skip, and a removed account is never reported as a mismatch.
+    let (_, response_sub) = response_claims(&json)?;
+    if removed_keys.contains(&captured_key(&response_sub)) {
         return Ok(AutoCaptured::SkippedRemoved);
     }
+    let verified = verified_identity(&json, &login, &client)?;
+    let key = captured_key(&verified.sub);
     write_captured(io, &key, &login, client, &json)?;
     Ok(AutoCaptured::Captured(CapturedAccount {
         key,
@@ -7165,8 +7202,8 @@ mod captured_account_tests {
         assert!(io.writes().is_empty());
     }
 
-    /// Acceptance 8: `agy.exe` is a candidate (path lookup only), and the
-    /// `aud` match finds a client that only agy.exe carries.
+    /// Acceptance 8: `agy.exe` is a candidate (path lookup only) and the first
+    /// one, and the `aud` match finds a client that only agy.exe carries.
     #[tokio::test]
     async fn the_aud_client_is_found_in_agy_exe_among_the_artifacts() {
         let root = std::env::temp_dir().join("captured-artifacts-fixture");
@@ -7183,6 +7220,7 @@ mod captured_account_tests {
         assert_eq!(
             candidates,
             [
+                agy.clone(),
                 local
                     .join("Programs")
                     .join("Antigravity")
@@ -7190,8 +7228,8 @@ mod captured_account_tests {
                 program_files
                     .join("Antigravity")
                     .join("resources/bin/language_server.exe"),
-                agy.clone(),
-            ]
+            ],
+            "agy.exe first, then the IDE binaries in their usual order"
         );
 
         // The IDE binary carries another client only; agy.exe carries aud's.
@@ -8188,17 +8226,23 @@ mod captured_account_tests {
 
     /// Test list 5 and 6: the first candidate refuses (macOS F3 measured
     /// `unauthorized_client`, then `invalid_client`; RFC 6749 also allows
-    /// `invalid_grant` for a client mismatch). The search goes on in scan
-    /// order and the second client is stored.
+    /// `invalid_grant` for a client mismatch; any other refusal, such as a
+    /// 401 `deleted_client`, goes on too). The search goes on in scan order
+    /// and the second client is stored.
     #[tokio::test]
     async fn agy14_capture_tries_every_candidate_in_order() {
-        for first in ["unauthorized_client", "invalid_client", "invalid_grant"] {
+        for (status, first) in [
+            (401, "unauthorized_client"),
+            (401, "invalid_client"),
+            (400, "invalid_grant"),
+            (401, "deleted_client"),
+        ] {
             let mut io = agy14_io(&format!("agy14-search-{first}"));
             io.token = Box::new(move |client, _| {
                 Ok(if client.id == AUD {
                     google_answer("g-sub", AUD, Some(LOCAL_EMAIL))
                 } else {
-                    oauth_error(400, first)
+                    oauth_error(status, first)
                 })
             });
             let account = capture_with(&io).await;
@@ -8224,8 +8268,8 @@ mod captured_account_tests {
     }
 
     /// Test list 7: no candidate succeeds. `RefreshRejected` only when one
-    /// said `invalid_grant`; otherwise `OAuthClientRejected`. Any other
-    /// answer ends the search. Nothing is written.
+    /// said `invalid_grant`; otherwise `OAuthClientRejected`. Another code
+    /// does not end the search. Nothing is written.
     #[tokio::test]
     async fn agy14_capture_without_a_successful_candidate_writes_nothing() {
         for (tag, answers, expected, calls) in [
@@ -8248,10 +8292,16 @@ mod captured_account_tests {
                 2,
             ),
             (
-                "other-stops",
-                ["invalid_request", "invalid_client"],
+                "other-continues",
+                ["deleted_client", "invalid_client"],
                 CaptureError::OAuthClientRejected,
-                1,
+                2,
+            ),
+            (
+                "other-then-grant",
+                ["invalid_request", "invalid_grant"],
+                CaptureError::RefreshRejected,
+                2,
             ),
         ] {
             let mut io = agy14_io(&format!("agy14-none-{tag}"));
@@ -8267,31 +8317,67 @@ mod captured_account_tests {
 
     /// Test list 8 (macOS security review F1): agy 1.4.x's login names its
     /// account only in Google's answer, so a removed account is skipped after
-    /// exactly one refresh and before the write. Control: not removed, it is
-    /// written.
+    /// the candidate search (each client in turn until one succeeds: two
+    /// requests with this fixture) and before the write. The removed check
+    /// comes before the aud and email checks, so a removed account whose
+    /// Google email differs is still `SkippedRemoved`, never a mismatch.
+    /// Controls: not removed, the differing email is `AccountMismatch` and
+    /// the matching one is written.
     #[tokio::test]
-    async fn agy14_auto_capture_skips_a_removed_key_after_the_refresh() {
+    async fn agy14_auto_capture_skips_a_removed_key_after_the_candidate_search() {
         let key = captured_key("g-sub");
-        let mut io = agy14_io("agy14-auto-removed");
-        io.token = Box::new(|client, _| Ok(google_answer("g-sub", &client.id, Some(LOCAL_EMAIL))));
-        assert_eq!(
-            auto_capture_with(&io, std::slice::from_ref(&key)).await,
-            Ok(AutoCaptured::SkippedRemoved)
-        );
-        assert_eq!(io.token_calls.borrow().len(), 1, "exactly one refresh");
-        assert!(io.writes().is_empty(), "removed: no write");
-        assert!(io.items.borrow().is_empty());
-
-        let mut io = agy14_io("agy14-auto-removed-control");
-        io.token = Box::new(|client, _| Ok(google_answer("g-sub", &client.id, Some(LOCAL_EMAIL))));
-        assert_eq!(
-            auto_capture_with(&io, &[captured_key("sub-other")]).await,
-            Ok(AutoCaptured::Captured(CapturedAccount {
-                key: key.clone(),
-                label: LOCAL_EMAIL.to_string(),
-            }))
-        );
-        assert_eq!(io.writes().len(), 1);
+        for (tag, google_email, removed, expected) in [
+            (
+                "removed-other-email",
+                "someone-else@example.com",
+                true,
+                Ok(AutoCaptured::SkippedRemoved),
+            ),
+            (
+                "removed-same-email",
+                LOCAL_EMAIL,
+                true,
+                Ok(AutoCaptured::SkippedRemoved),
+            ),
+            (
+                "kept-other-email",
+                "someone-else@example.com",
+                false,
+                Err(CaptureError::AccountMismatch),
+            ),
+            (
+                "kept-same-email",
+                LOCAL_EMAIL,
+                false,
+                Ok(AutoCaptured::Captured(CapturedAccount {
+                    key: key.clone(),
+                    label: LOCAL_EMAIL.to_string(),
+                })),
+            ),
+        ] {
+            let mut io = agy14_io(&format!("agy14-auto-{tag}"));
+            io.token = Box::new(move |client, _| {
+                Ok(if client.id == AUD {
+                    google_answer("g-sub", AUD, Some(google_email))
+                } else {
+                    oauth_error(401, "unauthorized_client")
+                })
+            });
+            let removed_keys = if removed {
+                vec![key.clone()]
+            } else {
+                vec![captured_key("sub-other")]
+            };
+            assert_eq!(auto_capture_with(&io, &removed_keys).await, expected, "{tag}");
+            assert_eq!(
+                io.token_calls.borrow().len(),
+                2,
+                "{tag}: each candidate until one succeeds"
+            );
+            let writes = usize::from(matches!(expected, Ok(AutoCaptured::Captured(_))));
+            assert_eq!(io.writes().len(), writes, "{tag}");
+            assert_eq!(io.items.borrow().len(), writes, "{tag}");
+        }
     }
 
     /// Test list 9: a registered account's credential already holding agy's

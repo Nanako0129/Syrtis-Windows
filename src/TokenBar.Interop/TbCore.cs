@@ -208,7 +208,11 @@ public static class TbCore
         Unwrap<JsonElement>(NativeMethods.tb_set_antigravity_binding(json));
 
     /// <summary>Copy agy's current Google login into Syrtis's own Credential
-    /// Manager entry (one refresh at Google first). Blocking, network. Throws
+    /// Manager entry, after a refresh at Google: with a stored id_token, one
+    /// refresh with the client named by its aud; for agy 1.4.x's login (no
+    /// id_token), the candidate clients tried in turn until one succeeds. A
+    /// response without a usable id_token fails with
+    /// <c>invalid_credential_format</c>. Blocking, network. Throws
     /// <see cref="TbCoreException"/> carrying a fixed code (ctb.h). Does not
     /// register the account.</summary>
     public static AntigravityAccount AntigravityCapture() =>
@@ -221,8 +225,9 @@ public static class TbCore
 
     /// <summary>One automatic capture; <paramref name="removedKeys"/> are
     /// never stored: skipped before any request when agy's login carries an
-    /// id_token, and after one refresh but before the write for agy 1.4.x's
-    /// login (no id_token). Blocking, network.</summary>
+    /// id_token; for agy 1.4.x's login (no id_token), after the token was
+    /// refreshed with each candidate client until one succeeded, and before
+    /// the write. Blocking, network.</summary>
     public static AntigravityAutoCaptureResult AntigravityAutoCapture(IReadOnlyList<string> removedKeys) =>
         Unwrap<AntigravityAutoCaptureResult>(NativeMethods.tb_antigravity_auto_capture(
             JsonSerializer.Serialize(removedKeys, JsonOpts)));

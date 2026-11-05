@@ -1249,8 +1249,9 @@ pub unsafe extern "C" fn tb_set_antigravity_binding(json: *const c_char) -> *mut
 /// persist local machine). Reads agy's `gemini:antigravity` credential once and
 /// never writes it, starts no process, and proves the token with a refresh at
 /// Google, using the client named by its stored `id_token`'s `aud`, or, for
-/// agy 1.4.x's credential (no `id_token`, only `id_token_email`), trying each
-/// client found in agy's files. It writes only when that response carries an
+/// agy 1.4.x's credential (no `id_token`, only `id_token_email`), trying the
+/// clients found in agy's files (agy.exe's first) in turn until one succeeds.
+/// It writes only when that response carries an
 /// `id_token` whose `aud` is the client used and that names agy's account:
 /// agy's stored `sub`, or, for agy 1.4.x, an `email` equal to
 /// `id_token_email` ignoring ASCII case (`account_mismatch` otherwise,
@@ -1298,7 +1299,8 @@ pub extern "C" fn tb_antigravity_login_marker() -> *mut c_char {
 /// whose key is listed is never written: with agy's stored `id_token` it is
 /// skipped before any request, while agy 1.4.x's credential (no `id_token`)
 /// names its account only in Google's answer, so it is skipped after the
-/// refresh and before the write. Success data is
+/// token was refreshed with each candidate client until one succeeded, and
+/// before the write. Success data is
 /// `{"status":"captured"|"unchanged","key":"<64 hex>","label":"..."}` or
 /// `{"status":"skipped_removed"}`. `unchanged` means a Syrtis credential
 /// already holds this refresh token (its own key's, or, for agy 1.4.x, any

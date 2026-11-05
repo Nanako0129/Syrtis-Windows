@@ -216,8 +216,14 @@ char *tb_set_antigravity_binding(const char *json);
 // Copy agy's current Google login (Credential Manager gemini:antigravity,
 // read only) into a Syrtis generic credential
 // com.nyanako.tokenbar.antigravity-account:<key> (persist local machine),
-// after one refresh at Google with the client named by its aud. Starts no
-// process. Success data: {"key","label"}. Errors are fixed codes
+// after a refresh at Google: with a stored id_token, one refresh with the
+// client named by its aud; for agy 1.4.x's login (no id_token, only
+// id_token_email), the candidate clients from agy's files tried in turn
+// until one succeeds. Google's answer must carry an id_token naming the
+// client used and agy's account (account_mismatch otherwise); a response
+// without a usable id_token fails with invalid_credential_format. The key
+// comes from Google's sub. Starts no process. Success data: {"key","label"}.
+// Errors are fixed codes
 // (agy_not_signed_in, agy_login_unreadable, agy_login_missing_identity,
 // oauth_client_not_found, oauth_client_rejected, refresh_rejected,
 // refresh_unreachable, account_mismatch, invalid_credential_format,
@@ -231,7 +237,8 @@ char *tb_antigravity_login_marker(void);
 // One automatic capture. removed_keys_json is ["<64 hex>",...]; a listed
 // account is never stored: with agy's stored id_token it is skipped before
 // any request; agy 1.4.x's login (no id_token) names its account only in
-// Google's answer, so it is refreshed once and skipped before the write.
+// Google's answer, so it is refreshed with each candidate client until one
+// succeeds and skipped before the write.
 // Success data:
 // {"status":"captured"|"unchanged","key","label"} or
 // {"status":"skipped_removed"}. Errors: the capture codes (except
