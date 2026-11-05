@@ -278,12 +278,16 @@ pub(crate) fn normalized_stored_string(value: &str) -> Option<String> {
 
 /// The claims of a token that looks like a Cursor session JWT: only
 /// `[A-Za-z0-9._-]` (it goes into a cookie), exactly three non-empty
-/// segments, and a payload that decodes to a JSON object. The one check the
-/// usage sync's `token_user`, Grok Bot's Cursor fallback and Grok Bot's
-/// desktop `history_owner` share (macOS `cursor_desktop::jwt_claims`). The
-/// segment check is here because the Windows `agent_usage::jwt_payload` is
-/// laxer than macOS's. A sealed token (`cursor-safe-storage:…`) fails the
-/// charset on its `:`.
+/// segments, and a payload that decodes to a JSON object. On Windows this one
+/// check is shared by the usage sync's `token_user`, Grok Bot's Cursor
+/// fallback and Grok Bot's desktop `history_owner`. A sealed token
+/// (`cursor-safe-storage:…`) fails the charset on its `:`.
+///
+/// Not the same as macOS, which checks less. macOS `jwt_claims` is the
+/// charset plus macOS `jwt_payload`, which itself requires three non-empty
+/// segments, and has no object filter. macOS `history_owner` calls
+/// `jwt_payload` only: no charset, no object filter. The segment check is
+/// written here because the Windows `agent_usage::jwt_payload` has none.
 pub(crate) fn jwt_claims(token: &str) -> Option<Value> {
     if !token
         .bytes()
