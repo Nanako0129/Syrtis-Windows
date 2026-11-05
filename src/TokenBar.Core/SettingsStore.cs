@@ -23,6 +23,16 @@ public sealed class SettingsStore
     private readonly bool _loadFailed;
     private readonly bool _inMemory;
     private volatile bool _saveFailed;
+    private int _persistsLostPending;
+
+    /// <summary>The name a corrupt file is moved to at load (see
+    /// <see cref="Quarantine"/>), so a caller can tell that a file existed.</summary>
+    public const string QuarantineSuffix = ".corrupt";
+
+    /// <summary>Raised once, on the writing thread and outside this store's
+    /// lock, when <see cref="Persists"/> turns false because a save failed
+    /// (review R4). Handlers must not block.</summary>
+    public event Action? PersistsLost;
 
     /// <summary>Fires after a key's value actually changes (set to the same
     /// value is a no-op, mirroring the signature-gated observers the macOS
@@ -94,7 +104,7 @@ public sealed class SettingsStore
     {
         try
         {
-            var corrupt = path + ".corrupt";
+            var corrupt = path + QuarantineSuffix;
             File.Delete(corrupt); // no-op if absent; File.Move won't overwrite
             File.Move(path, corrupt);
         }
@@ -218,6 +228,7 @@ public sealed class SettingsStore
             }
         }
 
+        RaiseIfPersistsLost();
         foreach (var key in changed)
         {
             Changed?.Invoke(key);
@@ -238,6 +249,7 @@ public sealed class SettingsStore
             Save();
         }
 
+        RaiseIfPersistsLost();
         Changed?.Invoke(key);
     }
 
@@ -256,7 +268,16 @@ public sealed class SettingsStore
             Save();
         }
 
+        RaiseIfPersistsLost();
         Changed?.Invoke(key);
+    }
+
+    private void RaiseIfPersistsLost()
+    {
+        if (Interlocked.Exchange(ref _persistsLostPending, 0) == 1)
+        {
+            PersistsLost?.Invoke();
+        }
     }
 
     private void Save()
@@ -292,7 +313,12 @@ public sealed class SettingsStore
             // Disk trouble (AV scan or a sync tool holding the file) must
             // not crash the caller: memory keeps the new value and the next
             // successful save heals the file. Persists stays false from here.
-            _saveFailed = true;
+            if (!_saveFailed)
+            {
+                _saveFailed = true;
+                _persistsLostPending = 1;
+            }
+
             _log?.Invoke($"settings save failed: {ex.Message}");
         }
     }

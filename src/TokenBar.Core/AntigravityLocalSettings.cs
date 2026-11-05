@@ -36,7 +36,13 @@ namespace TokenBar.Core;
 /// re-move never carries the roaming toggle (review D1): the user may have
 /// turned automatic capture off on this PC since the first move, and the
 /// roaming value is stale, so the toggle stays off and unanswered. Only a
-/// first move (no local file at all) carries it.
+/// first move (no local file, and no quarantined one, has ever been there:
+/// review R2) carries it.
+/// </para>
+/// <para>
+/// A move whose save fails ends like a failed probe (review R1): this session
+/// gets an empty in-memory store, no roaming value is used, and the next
+/// launch tries again.
 /// </para>
 /// </summary>
 public static class AntigravityLocalSettings
@@ -74,7 +80,9 @@ public static class AntigravityLocalSettings
         Action<string> log,
         TimeSpan? probeTimeout = null)
     {
-        var existed = File.Exists(path);
+        // A corrupt file is moved to <path>.corrupt by the SettingsStore
+        // constructor; it still proves a local file existed (review R2).
+        var existed = File.Exists(path) || File.Exists(path + SettingsStore.QuarantineSuffix);
         var local = new SettingsStore(path, log);
         if (local.GetBool(MigratedKey, false))
         {
@@ -101,15 +109,21 @@ public static class AntigravityLocalSettings
         }
 
         local.SetMany(moved);
+        if (!local.Persists)
+        {
+            log("antigravity settings move: the local store could not be saved; retrying at next launch");
+            return SettingsStore.InMemory(log);
+        }
+
         return local;
     }
 
     /// <summary>Every value the move writes, the marker included; null when a
     /// probe failed, threw or timed out. <paramref name="carryToggle"/> is
     /// false for a re-move (review D1): the toggle is then never written.</summary>
-    public static Dictionary<string, JsonElement>? Migrate(
+    private static Dictionary<string, JsonElement>? Migrate(
         SettingsStore roaming, Func<string, string> presence, Action<string> log, TimeSpan timeout,
-        bool carryToggle = true)
+        bool carryToggle)
     {
         // Read exactly as today's readers read them: an unreadable value is
         // what they already treat it as (no accounts, no removed key, no

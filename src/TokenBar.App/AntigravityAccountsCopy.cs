@@ -115,11 +115,12 @@ internal static class AntigravityAccountsCopy
         "invalid_credential_format" => "The login had an unexpected format. Nothing was saved.",
         "keychain_write_failed" => "Couldn't save to Windows Credential Manager.",
         AntigravityAutoCapture.KeychainDeleteFailed => "Couldn't delete the copy from Windows Credential Manager.",
-        // DRAFT (maintainer approval pending, review F1): the app's own code,
-        // shown while this session's Antigravity settings cannot be saved
-        // (AntigravityAutoCapture.SettingsUnavailable).
+        // DRAFT (maintainer approval pending, reviews F1/R4): the app's own
+        // code, shown while this session's Antigravity settings cannot be
+        // saved: the move or the load failed at launch, or a save failed
+        // later (AntigravityAutoCapture.SettingsUnavailable).
         AntigravityAutoCapture.SettingsUnavailable =>
-            "Syrtis couldn't prepare its Antigravity settings on this PC, so Capture and automatic capture are off until Syrtis restarts.",
+            "Syrtis can't save its Antigravity settings on this PC right now, so Capture, automatic capture and Remove are off until Syrtis restarts.",
         _ => Generic,
     };
 

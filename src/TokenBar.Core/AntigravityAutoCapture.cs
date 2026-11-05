@@ -72,10 +72,13 @@ public sealed class AntigravityAutoCapture
 
     /// <summary>The code recorded while this session's Antigravity settings
     /// cannot be saved (<see cref="SettingsStore.Persists"/> false: the move
-    /// out of the roaming settings failed, or the local file could not be
-    /// read). Capture and turning automatic capture on are refused then: a
-    /// captured credential would have no list row after exit, so no card and
-    /// no Remove (review F1).</summary>
+    /// out of the roaming settings failed, the local file could not be read,
+    /// or a save failed). Then Capture, automatic capture (it counts as off:
+    /// <see cref="IsEnabled"/>), turning it on, and Remove are all refused: a
+    /// captured credential would have no list row after exit, and a Remove
+    /// would delete a credential whose row and removed key cannot be saved
+    /// (reviews F1, R1, R3). Recorded at construction, and when a save fails
+    /// mid-session (R4), so Settings shows it without a click.</summary>
     public const string SettingsUnavailable = "settings_unavailable";
 
     /// <summary>The code recorded when Remove could not take the key out of
@@ -128,6 +131,16 @@ public sealed class AntigravityAutoCapture
         {
             _errorCode = SettingsUnavailable;
         }
+
+        store.PersistsLost += () =>
+        {
+            lock (_gate)
+            {
+                _errorCode = SettingsUnavailable;
+            }
+
+            Notify(false);
+        };
     }
 
     /// <summary>A stored <see cref="CurrentKey"/> value: its key and marker,
@@ -156,7 +169,9 @@ public sealed class AntigravityAutoCapture
         }
     }
 
-    public bool IsEnabled => _store.GetBool(EnabledKey, false);
+    /// <summary>The toggle, and off whatever it says while the settings
+    /// cannot be saved (review R1): every automatic capture commits on this.</summary>
+    public bool IsEnabled => _store.Persists && _store.GetBool(EnabledKey, false);
 
     public bool Busy { get { lock (_gate) { return _busy; } } }
 
@@ -345,6 +360,12 @@ public sealed class AntigravityAutoCapture
     /// never waits on Google. Never throws.</summary>
     public async Task<Task?> PrepareForFetch()
     {
+        // Review R1: nothing to prepare while automatic capture counts as off.
+        if (!IsEnabled)
+        {
+            return null;
+        }
+
         lock (_gate)
         {
             if (_paused || _checking)
@@ -570,6 +591,12 @@ public sealed class AntigravityAutoCapture
     /// </para></summary>
     public async Task Remove(string key)
     {
+        // Review R3: the row and removed key could not be saved after the delete.
+        if (RefusedForSettings())
+        {
+            return;
+        }
+
         lock (_gate)
         {
             if (_busy)

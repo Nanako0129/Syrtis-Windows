@@ -287,9 +287,10 @@ public class AntigravityLocalSettingsTests
         Remove: _ => calls.Enqueue("remove"),
         Install: () => { calls.Enqueue("install"); return true; });
 
-    /// <summary>Review D2: a save that fails at disk time (here the folder
-    /// cannot be created: its name is taken by a file) stops the store from
-    /// counting as persisting for the rest of the session.</summary>
+    /// <summary>Review D2: a save that fails at disk time (the test puts a file
+    /// where the store's folder should be, so the folder cannot be created)
+    /// stops the store from counting as persisting for the rest of the
+    /// session.</summary>
     [Fact]
     public void ASaveThatFailsAtDiskTimeStopsPersistingForTheSession()
     {
@@ -306,8 +307,11 @@ public class AntigravityLocalSettingsTests
         Assert.True(store.GetBool("k", false), "memory keeps the value");
     }
 
-    /// <summary>Review D2 through the move: its one save fails, so the session
-    /// store does not persist and Capture is refused with no core call.</summary>
+    /// <summary>Reviews D2 and R1 through the move: the local folder's name is
+    /// taken by a file, so the move's one save fails. That ends like a failed
+    /// probe (acceptance (5)): an empty in-memory session store, no roaming
+    /// value used (roaming has A here and the toggle on), automatic capture
+    /// off, and Capture refused with no core call.</summary>
     [Fact]
     public async Task AMoveWhoseSaveFailsLeavesCaptureRefused()
     {
@@ -318,8 +322,11 @@ public class AntigravityLocalSettingsTests
 
         var local = AntigravityLocalSettings.Open(Path.Combine(blocker, "antigravity.json"), roaming, OnlyAHere, NoLog);
         Assert.False(local.Persists);
+        Assert.Empty(AntigravityAccounts.Load(local));
+        Assert.False(local.GetBool(AntigravityAutoCapture.EnabledKey, false));
         var calls = new ConcurrentQueue<string>();
         var capture = new AntigravityAutoCapture(RecordingIo(calls), local);
+        Assert.False(capture.IsEnabled);
 
         await capture.ManualCapture();
 
@@ -327,10 +334,75 @@ public class AntigravityLocalSettingsTests
         Assert.Equal(AntigravityAutoCapture.SettingsUnavailable, capture.LastErrorCode);
     }
 
-    /// <summary>Review D3, the failed-load half of F1: a local file another
-    /// process holds with no sharing at launch cannot be loaded, so the store
-    /// does not persist, Capture is refused with no core call, and the file is
-    /// left as it was.</summary>
+    /// <summary>Reviews R1, R3 and R4: a save that fails mid-session (the
+    /// folder's name is taken by a file) after the toggle and an account
+    /// reached memory. From then on automatic capture counts as off (Poll and
+    /// PrepareForFetch start no capture), turning it on and Remove are
+    /// refused, and the code is recorded with a StateChanged, without a
+    /// click.</summary>
+    [Fact]
+    public async Task AMidSessionSaveFailureStopsAutomaticCaptureAndRemoveAndSaysSo()
+    {
+        var paths = new Paths();
+        Directory.CreateDirectory(paths.Dir);
+        var blocker = Path.Combine(paths.Dir, "blocker");
+        File.WriteAllText(blocker, "a file where the folder should be");
+        var store = new SettingsStore(Path.Combine(blocker, "antigravity.json"));
+        var calls = new ConcurrentQueue<string>();
+        var capture = new AntigravityAutoCapture(RecordingIo(calls), store);
+        Assert.Null(capture.LastErrorCode);
+        var raised = 0;
+        capture.StateChanged += () => Interlocked.Increment(ref raised);
+
+        AntigravityAccounts.Save(store, [new AntigravityAccount(KeyA, "a@example.com")]);
+        store.SetBool(AntigravityAutoCapture.EnabledKey, true);
+
+        Assert.False(store.Persists);
+        Assert.Equal(AntigravityAutoCapture.SettingsUnavailable, capture.LastErrorCode);
+        Assert.True(Volatile.Read(ref raised) > 0, "Settings was not told");
+        Assert.False(capture.IsEnabled);
+        Assert.Null(await capture.PrepareForFetch());
+        await capture.Poll();
+        await capture.SetEnabled(true);
+        Assert.False(await capture.TurnOn(() => Task.FromResult(true)));
+        await capture.Remove(KeyA);
+
+        Assert.DoesNotContain("auto", calls);
+        Assert.DoesNotContain("capture", calls);
+        Assert.DoesNotContain("remove", calls);
+        Assert.Equal([KeyA], AntigravityAccounts.Load(store).Select(a => a.Key));
+        Assert.Equal(AntigravityAutoCapture.SettingsUnavailable, capture.LastErrorCode);
+    }
+
+    /// <summary>Review R2: a corrupt local file is set aside as
+    /// <c>&lt;path&gt;.corrupt</c> when loaded. If that re-move fails (here
+    /// the probe), the next launch finds no local file, but the set-aside one
+    /// still proves a local file existed, so the roaming toggle is not
+    /// carried.</summary>
+    [Fact]
+    public void ASetAsideLocalFileStillCountsOnTheNextLaunch()
+    {
+        var paths = new Paths();
+        var roaming = Roaming(paths, KeyA);
+        Directory.CreateDirectory(Path.GetDirectoryName(paths.Local)!);
+        File.WriteAllText(paths.Local, "{ not json");
+
+        var failed = AntigravityLocalSettings.Open(paths.Local, roaming, _ => "failed", NoLog);
+        Assert.False(failed.Persists);
+        Assert.False(File.Exists(paths.Local));
+        Assert.True(File.Exists(paths.Local + SettingsStore.QuarantineSuffix), "fixture: the corrupt file was set aside");
+
+        var next = AntigravityLocalSettings.Open(paths.Local, new SettingsStore(paths.Roaming), OnlyAHere, NoLog);
+
+        Assert.Equal([KeyA], AntigravityAccounts.Load(next).Select(a => a.Key));
+        Assert.Null(next.GetNullableBool(AntigravityAutoCapture.EnabledKey));
+    }
+
+    /// <summary>Review D3, the failed-load half of F1: the test holds the
+    /// moved local file open with <c>FileShare.None</c> (in this process)
+    /// while <c>Open</c> runs, so it cannot be loaded; the store does not
+    /// persist, Capture is refused with no core call, and the file is left as
+    /// it was.</summary>
     [Fact]
     public async Task ALocalFileThatCannotBeLoadedAtLaunchRefusesCapture()
     {
