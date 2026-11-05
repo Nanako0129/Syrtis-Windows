@@ -220,7 +220,9 @@ public static class TbCore
         Unwrap<AntigravityMarker>(NativeMethods.tb_antigravity_login_marker()).Marker;
 
     /// <summary>One automatic capture; <paramref name="removedKeys"/> are
-    /// skipped before any request. Blocking, network.</summary>
+    /// never stored: skipped before any request when agy's login carries an
+    /// id_token, and after one refresh but before the write for agy 1.4.x's
+    /// login (no id_token). Blocking, network.</summary>
     public static AntigravityAutoCaptureResult AntigravityAutoCapture(IReadOnlyList<string> removedKeys) =>
         Unwrap<AntigravityAutoCaptureResult>(NativeMethods.tb_antigravity_auto_capture(
             JsonSerializer.Serialize(removedKeys, JsonOpts)));

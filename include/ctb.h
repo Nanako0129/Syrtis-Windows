@@ -229,7 +229,10 @@ char *tb_antigravity_capture(void);
 char *tb_antigravity_login_marker(void);
 
 // One automatic capture. removed_keys_json is ["<64 hex>",...]; a listed
-// account is skipped before any request. Success data:
+// account is never stored: with agy's stored id_token it is skipped before
+// any request; agy 1.4.x's login (no id_token) names its account only in
+// Google's answer, so it is refreshed once and skipped before the write.
+// Success data:
 // {"status":"captured"|"unchanged","key","label"} or
 // {"status":"skipped_removed"}. Errors: the capture codes (except
 // agy_not_signed_in), not_signed_in, paused, invalid_removed_keys.
