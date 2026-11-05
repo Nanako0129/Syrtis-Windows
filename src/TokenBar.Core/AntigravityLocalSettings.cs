@@ -42,7 +42,10 @@ namespace TokenBar.Core;
 /// <para>
 /// A move whose save fails ends like a failed probe (review R1): this session
 /// gets an empty in-memory store, no roaming value is used, and the next
-/// launch tries again.
+/// launch tries again. So does a roaming store that failed to load
+/// (<see cref="SettingsStore.LoadFailed"/>): moving its empty values would
+/// write the marker and skip the move for good. A missing roaming file is a
+/// normal move with nothing to move.
 /// </para>
 /// </summary>
 public static class AntigravityLocalSettings
@@ -99,9 +102,11 @@ public static class AntigravityLocalSettings
 
         if (roaming.LoadFailed)
         {
-            // The roaming file exists but could not be read (SettingsStore
-            // only sets LoadFailed then; a missing file is a normal "nothing
-            // to move"). Moving now would write the marker over empty values
+            // The roaming file could not be read: normally it exists and a
+            // read failed; a file removed between SettingsStore's existence
+            // check and its read also lands here, which only delays the move.
+            // A missing file is a normal "nothing to move", and a corrupt one is
+            // set aside and loads empty. Moving now would write the marker over empty values
             // and skip the move for good, so this ends like a failed probe:
             // nothing written, empty in-memory session, retry next launch.
             log("antigravity settings move: roaming settings unreadable; retrying at next launch");
