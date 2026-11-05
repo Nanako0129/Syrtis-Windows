@@ -471,9 +471,12 @@ public sealed class AntigravityAutoCapture
     /// capture once more when it is on.</summary>
     public async Task ManualCapture()
     {
-        // Review F1: a capture now would leave a credential with no list row
-        // after exit (no card, no Remove), so it is refused, before any call.
-        var refused = !_store.Persists;
+        // Review F1: no list row would survive exit (no card, no Remove).
+        if (RefusedForSettings())
+        {
+            return;
+        }
+
         lock (_gate)
         {
             if (_busy)
@@ -481,21 +484,8 @@ public sealed class AntigravityAutoCapture
                 return;
             }
 
-            if (refused)
-            {
-                _errorCode = SettingsUnavailable;
-            }
-            else
-            {
-                _busy = true;
-                _errorCode = null;
-            }
-        }
-
-        if (refused)
-        {
-            Notify(false);
-            return;
+            _busy = true;
+            _errorCode = null;
         }
 
         var changed = false;
@@ -571,6 +561,12 @@ public sealed class AntigravityAutoCapture
     /// while the key is registered and re-checks after writing, so a refresh in
     /// flight during this Remove cannot recreate the deleted item. A failed
     /// delete puts the row back where it was (the item is still there).
+    /// </para>
+    /// <para>
+    /// When that install does not reach the core (the setter failed, review
+    /// F3), the key is still registered there, so nothing is deleted: the row
+    /// goes back where it was and <see cref="KeychainDeleteFailed"/> is
+    /// recorded, as for a failed delete.
     /// </para></summary>
     public async Task Remove(string key)
     {
@@ -770,7 +766,7 @@ public sealed class AntigravityAutoCapture
         "agy_not_signed_in", "agy_login_unreadable", "agy_login_missing_identity",
         "oauth_client_not_found", "oauth_client_rejected", "refresh_rejected",
         "refresh_unreachable", "account_mismatch", "invalid_credential_format",
-        "keychain_write_failed", "keychain_delete_failed", "invalid_key",
+        "keychain_write_failed", KeychainDeleteFailed, "invalid_key",
         "not_signed_in", "paused", "invalid_removed_keys", "marker_unavailable",
     ];
 

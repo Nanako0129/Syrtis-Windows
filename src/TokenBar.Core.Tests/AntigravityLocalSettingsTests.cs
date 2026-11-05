@@ -221,7 +221,9 @@ public class AntigravityLocalSettingsTests
 
     /// <summary>Review F2: a local file without the done marker (a corrupt
     /// one SettingsStore sets aside, <c>null</c>, <c>{}</c>) has not been
-    /// moved to: the move runs, gated by the probe as always.</summary>
+    /// moved to: the move runs, gated by the probe as always. Review D1: that
+    /// re-move leaves the toggle off and unanswered even though roaming has it
+    /// on (the roaming value is stale; the user may have turned it off here).</summary>
     [Theory]
     [InlineData("{ not json")]
     [InlineData("null")]
@@ -234,11 +236,16 @@ public class AntigravityLocalSettingsTests
         Directory.CreateDirectory(Path.GetDirectoryName(paths.Local)!);
         File.WriteAllText(paths.Local, contents);
 
-        var local = AntigravityLocalSettings.Open(paths.Local, roaming, OnlyAHere, NoLog);
+        var log = new ConcurrentQueue<string>();
+
+        var local = AntigravityLocalSettings.Open(paths.Local, roaming, OnlyAHere, log.Enqueue);
 
         Assert.Equal([KeyA], AntigravityAccounts.Load(local).Select(a => a.Key));
-        Assert.True(local.GetBool(AntigravityAutoCapture.EnabledKey, false));
+        Assert.Equal(BindingA, local.GetString(AntigravityAutoCapture.CurrentKey));
+        Assert.Null(local.GetNullableBool(AntigravityAutoCapture.EnabledKey));
+        Assert.Contains(log, line => line.Contains("no move marker", StringComparison.Ordinal));
         var reread = new SettingsStore(paths.Local);
+        Assert.Null(reread.GetNullableBool(AntigravityAutoCapture.EnabledKey));
         Assert.True(reread.GetBool(AntigravityLocalSettings.MigratedKey, false));
         Assert.Equal([KeyA], AntigravityAccounts.Load(reread).Select(a => a.Key));
         Assert.Equal(before, Bytes(paths.Roaming));
@@ -271,6 +278,84 @@ public class AntigravityLocalSettingsTests
         Assert.Equal(AntigravityAutoCapture.SettingsUnavailable, capture.LastErrorCode);
         Assert.False(File.Exists(paths.Local));
         Assert.Equal(before, Bytes(paths.Roaming));
+    }
+
+    private static AntigravityAutoCapture.Io RecordingIo(ConcurrentQueue<string> calls) => new(
+        Marker: () => { calls.Enqueue("marker"); return "133000000000000001"; },
+        AutoCapture: _ => { calls.Enqueue("auto"); return new AntigravityAutoCaptureResult("captured", KeyA, "a@example.com"); },
+        Capture: () => { calls.Enqueue("capture"); return new AntigravityAccount(KeyA, "a@example.com"); },
+        Remove: _ => calls.Enqueue("remove"),
+        Install: () => { calls.Enqueue("install"); return true; });
+
+    /// <summary>Review D2: a save that fails at disk time (here the folder
+    /// cannot be created: its name is taken by a file) stops the store from
+    /// counting as persisting for the rest of the session.</summary>
+    [Fact]
+    public void ASaveThatFailsAtDiskTimeStopsPersistingForTheSession()
+    {
+        var paths = new Paths();
+        Directory.CreateDirectory(paths.Dir);
+        var blocker = Path.Combine(paths.Dir, "blocker");
+        File.WriteAllText(blocker, "a file where the folder should be");
+        var store = new SettingsStore(Path.Combine(blocker, "antigravity.json"));
+        Assert.True(store.Persists, "control: nothing has failed yet");
+
+        store.SetBool("k", true);
+
+        Assert.False(store.Persists);
+        Assert.True(store.GetBool("k", false), "memory keeps the value");
+    }
+
+    /// <summary>Review D2 through the move: its one save fails, so the session
+    /// store does not persist and Capture is refused with no core call.</summary>
+    [Fact]
+    public async Task AMoveWhoseSaveFailsLeavesCaptureRefused()
+    {
+        var paths = new Paths();
+        var roaming = Roaming(paths, KeyA);
+        var blocker = Path.Combine(paths.Dir, "blocker");
+        File.WriteAllText(blocker, "a file where the folder should be");
+
+        var local = AntigravityLocalSettings.Open(Path.Combine(blocker, "antigravity.json"), roaming, OnlyAHere, NoLog);
+        Assert.False(local.Persists);
+        var calls = new ConcurrentQueue<string>();
+        var capture = new AntigravityAutoCapture(RecordingIo(calls), local);
+
+        await capture.ManualCapture();
+
+        Assert.Empty(calls);
+        Assert.Equal(AntigravityAutoCapture.SettingsUnavailable, capture.LastErrorCode);
+    }
+
+    /// <summary>Review D3, the failed-load half of F1: a local file another
+    /// process holds with no sharing at launch cannot be loaded, so the store
+    /// does not persist, Capture is refused with no core call, and the file is
+    /// left as it was.</summary>
+    [Fact]
+    public async Task ALocalFileThatCannotBeLoadedAtLaunchRefusesCapture()
+    {
+        var paths = new Paths();
+        var roaming = Roaming(paths, KeyA);
+        var first = AntigravityLocalSettings.Open(paths.Local, roaming, OnlyAHere, NoLog);
+        Assert.True(first.Persists);
+        var moved = Bytes(paths.Local);
+        var calls = new ConcurrentQueue<string>();
+        SettingsStore local;
+        AntigravityAutoCapture capture;
+        using (new FileStream(paths.Local, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            local = AntigravityLocalSettings.Open(paths.Local, new SettingsStore(paths.Roaming), OnlyAHere, NoLog);
+            capture = new AntigravityAutoCapture(RecordingIo(calls), local);
+        }
+
+        Assert.True(local.LoadFailed, "fixture: the locked file did not load");
+        Assert.False(local.Persists);
+
+        await capture.ManualCapture();
+
+        Assert.Empty(calls);
+        Assert.Equal(AntigravityAutoCapture.SettingsUnavailable, capture.LastErrorCode);
+        Assert.Equal(moved, Bytes(paths.Local));
     }
 
     /// <summary>The move's single save: every key lands in one file write

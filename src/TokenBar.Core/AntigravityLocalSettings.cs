@@ -18,7 +18,8 @@ namespace TokenBar.Core;
 /// one atomic save (<see cref="SettingsStore.SetMany"/>), before the caller
 /// builds anything that reads them. "Already moved" means the marker. The
 /// roaming keys are left where they are for one release (an older build still
-/// reads them) and are never read again once the marker is written.
+/// reads them) and are read again only for a re-move (below); a store that
+/// carries the marker never reads them.
 /// </para>
 /// <para>
 /// A probe that fails or runs past <see cref="ProbeTimeout"/> stops the move:
@@ -31,7 +32,11 @@ namespace TokenBar.Core;
 /// <para>
 /// A local file without the marker (a corrupt one SettingsStore set aside,
 /// <c>null</c>, <c>{}</c>) has not been moved to, whatever else it holds: the
-/// move runs (review F2). The probe still gates every account.
+/// move runs again (review F2), the probe still gating every account. That
+/// re-move never carries the roaming toggle (review D1): the user may have
+/// turned automatic capture off on this PC since the first move, and the
+/// roaming value is stale, so the toggle stays off and unanswered. Only a
+/// first move (no local file at all) carries it.
 /// </para>
 /// </summary>
 public static class AntigravityLocalSettings
@@ -69,6 +74,7 @@ public static class AntigravityLocalSettings
         Action<string> log,
         TimeSpan? probeTimeout = null)
     {
+        var existed = File.Exists(path);
         var local = new SettingsStore(path, log);
         if (local.GetBool(MigratedKey, false))
         {
@@ -83,7 +89,12 @@ public static class AntigravityLocalSettings
             return local;
         }
 
-        var moved = Migrate(roaming, presence, log, probeTimeout ?? ProbeTimeout);
+        if (existed)
+        {
+            log("antigravity local settings had no move marker; moving again without the automatic-capture toggle");
+        }
+
+        var moved = Migrate(roaming, presence, log, probeTimeout ?? ProbeTimeout, carryToggle: !existed);
         if (moved is null)
         {
             return SettingsStore.InMemory(log);
@@ -94,9 +105,11 @@ public static class AntigravityLocalSettings
     }
 
     /// <summary>Every value the move writes, the marker included; null when a
-    /// probe failed, threw or timed out.</summary>
+    /// probe failed, threw or timed out. <paramref name="carryToggle"/> is
+    /// false for a re-move (review D1): the toggle is then never written.</summary>
     public static Dictionary<string, JsonElement>? Migrate(
-        SettingsStore roaming, Func<string, string> presence, Action<string> log, TimeSpan timeout)
+        SettingsStore roaming, Func<string, string> presence, Action<string> log, TimeSpan timeout,
+        bool carryToggle = true)
     {
         // Read exactly as today's readers read them: an unreadable value is
         // what they already treat it as (no accounts, no removed key, no
@@ -147,7 +160,7 @@ public static class AntigravityLocalSettings
         }
 
         values[AntigravityAccounts.Key] = JsonSerializer.SerializeToElement(AntigravityAccounts.PayloadJson(here));
-        if (roaming.GetBool(AntigravityAutoCapture.EnabledKey, false))
+        if (carryToggle && roaming.GetBool(AntigravityAutoCapture.EnabledKey, false))
         {
             values[AntigravityAutoCapture.EnabledKey] = JsonSerializer.SerializeToElement(true);
         }

@@ -22,6 +22,7 @@ public sealed class SettingsStore
     private readonly Dictionary<string, JsonElement> _values;
     private readonly bool _loadFailed;
     private readonly bool _inMemory;
+    private volatile bool _saveFailed;
 
     /// <summary>Fires after a key's value actually changes (set to the same
     /// value is a no-op, mirroring the signature-gated observers the macOS
@@ -53,9 +54,11 @@ public sealed class SettingsStore
     public bool LoadFailed => _loadFailed;
 
     /// <summary>Whether a set can reach a file: false for
-    /// <see cref="InMemory"/> and after a failed load. A write that fails at
-    /// disk time still counts as persisting (the next save heals it).</summary>
-    public bool Persists => !_inMemory && !_loadFailed;
+    /// <see cref="InMemory"/>, after a failed load, and, for the rest of the
+    /// session, once any save failed at disk time (review D2: an unwritable
+    /// folder; a later save may still heal the file, but nothing in this
+    /// session may rely on it).</summary>
+    public bool Persists => !_inMemory && !_loadFailed && !_saveFailed;
 
     private static Dictionary<string, JsonElement> Load(string path, out bool loadFailed)
     {
@@ -288,7 +291,8 @@ public sealed class SettingsStore
         {
             // Disk trouble (AV scan or a sync tool holding the file) must
             // not crash the caller: memory keeps the new value and the next
-            // successful save heals the file.
+            // successful save heals the file. Persists stays false from here.
+            _saveFailed = true;
             _log?.Invoke($"settings save failed: {ex.Message}");
         }
     }

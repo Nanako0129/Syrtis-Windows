@@ -33,8 +33,10 @@ public class AntigravityAccountsTests
             () => new AntigravityAutoCaptureResult("captured", KeyA, "a@example.com");
         public Exception? RemoveError;
         public Exception? InstallError;
-        /// <summary>The core refuses the list (the production installer
-        /// logs and answers false; it never throws).</summary>
+        /// <summary>The core refuses the NEXT list only (the production
+        /// installer logs and answers false, never throws; a later install
+        /// of the list the core still holds costs no setter call and answers
+        /// true, so Remove's restore succeeds as in production).</summary>
         public bool InstallFails;
         public ManualResetEventSlim? AutoGate;
         public readonly TaskCompletionSource AutoStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -100,7 +102,13 @@ public class AntigravityAccountsTests
                     throw error;
                 }
 
-                return !InstallFails;
+                if (InstallFails)
+                {
+                    InstallFails = false;
+                    return false;
+                }
+
+                return true;
             });
     }
 
@@ -1162,6 +1170,8 @@ public class AntigravityAccountsTests
         await capture.Remove(KeyA);
 
         Assert.DoesNotContain("remove", io.Calls);
+        // The drop install failed; the restore install answered true.
+        Assert.Equal(2, io.Calls.Count(c => c == "install"));
         Assert.Equal([KeyA, KeyB], AntigravityAccounts.Load(store).Select(a => a.Key));
         Assert.Equal(AntigravityAutoCapture.KeychainDeleteFailed, capture.LastErrorCode);
     }

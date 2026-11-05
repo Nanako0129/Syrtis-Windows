@@ -1,3 +1,5 @@
+using TokenBar.Core;
+
 namespace TokenBar.App;
 
 /// <summary>
@@ -112,11 +114,11 @@ internal static class AntigravityAccountsCopy
         "account_mismatch" => "Google answered for a different account. Nothing was saved.",
         "invalid_credential_format" => "The login had an unexpected format. Nothing was saved.",
         "keychain_write_failed" => "Couldn't save to Windows Credential Manager.",
-        "keychain_delete_failed" => "Couldn't delete the copy from Windows Credential Manager.",
+        AntigravityAutoCapture.KeychainDeleteFailed => "Couldn't delete the copy from Windows Credential Manager.",
         // DRAFT (maintainer approval pending, review F1): the app's own code,
         // shown while this session's Antigravity settings cannot be saved
         // (AntigravityAutoCapture.SettingsUnavailable).
-        "settings_unavailable" =>
+        AntigravityAutoCapture.SettingsUnavailable =>
             "Syrtis couldn't prepare its Antigravity settings on this PC, so Capture and automatic capture are off until Syrtis restarts.",
         _ => Generic,
     };
@@ -130,7 +132,8 @@ internal static class AntigravityAccountsCopy
         "agy_not_signed_in", "agy_login_unreadable", "agy_login_missing_identity",
         "oauth_client_not_found", "oauth_client_rejected", "refresh_rejected",
         "refresh_unreachable", "account_mismatch", "invalid_credential_format",
-        "keychain_write_failed", "keychain_delete_failed", "settings_unavailable",
+        "keychain_write_failed", AntigravityAutoCapture.KeychainDeleteFailed,
+        AntigravityAutoCapture.SettingsUnavailable,
     ];
 
     internal static IEnumerable<string> All() =>
