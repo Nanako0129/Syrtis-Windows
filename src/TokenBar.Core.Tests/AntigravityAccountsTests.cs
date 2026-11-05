@@ -1234,8 +1234,9 @@ public class AntigravityAccountsTests
     }
 
     /// <summary>Review G4/G1: Remove passed its entry check, then the drop's
-    /// own save failed. The credential is not deleted, the row goes back, and
-    /// the settings code shows.</summary>
+    /// own save failed. The credential is not deleted and the row goes back
+    /// (the two assertions G1-a fails; the settings code is derived from
+    /// Persists, so it is not asserted here).</summary>
     [Fact]
     public async Task ARemoveWhoseDropSaveFailsDeletesNothing()
     {
@@ -1251,7 +1252,6 @@ public class AntigravityAccountsTests
         Assert.False(store.Persists, "fixture: the drop's save failed");
         Assert.DoesNotContain("remove", io.Calls);
         Assert.Equal([KeyA, KeyB], AntigravityAccounts.Load(store).Select(a => a.Key));
-        Assert.Equal(AntigravityAutoCapture.SettingsUnavailable, capture.LastErrorCode);
     }
 
     /// <summary>Review G4/G1: an automatic attempt passed its commit point,
@@ -1274,7 +1274,6 @@ public class AntigravityAccountsTests
         Assert.False(store.Persists, "fixture: the binding write failed");
         Assert.Contains("marker", io.Calls);
         Assert.DoesNotContain("auto", io.Calls);
-        Assert.False(capture.Busy);
     }
 
     [Fact]

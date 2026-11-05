@@ -78,9 +78,14 @@ public sealed class AntigravityAutoCapture
     /// automatic attempt (<see cref="IsEnabled"/> is false). Remove and an
     /// automatic attempt also check again after their own store write and stop
     /// before the irreversible call (review G1). Not covered: a save that first
-    /// fails AFTER the Credential Manager call (the list write following a
-    /// capture, the removed-key write following a delete); that row or removed
-    /// key then lasts only until exit.</summary>
+    /// fails after the operation's last check and before or after its Credential
+    /// Manager call. The last check is the entry check for Capture, and the
+    /// re-check after the operation's own write for Remove and an automatic
+    /// attempt. A save on another thread can fail in that window, for example
+    /// while Capture reads agy's marker. A save can also fail after the call:
+    /// the list write following a capture, or the removed-key write following a
+    /// delete. Then a captured credential may have no list row after exit, or a
+    /// removed key lasts only until exit.</summary>
     public const string SettingsUnavailable = "settings_unavailable";
 
     /// <summary>The code recorded when Remove could not take the key out of
