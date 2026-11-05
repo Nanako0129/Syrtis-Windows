@@ -1292,6 +1292,46 @@ public class WindowCardTextTests
         }
     }
 
+    /// <summary>macOS #553 (SelfTest "WCP-label" Argon expect): agy names the
+    /// Argon bucket after its own group ("Gemini 4 Argon Weekly Limit", agy
+    /// /usage 2026-11-04; seen doubled on the Windows card in the 188 device
+    /// check), so the title and pill drop the repeat.</summary>
+    [Fact]
+    public void ABucketRepeatingItsGroupNameIsShortened()
+    {
+        const string argon = "Gemini 4 Argon · Gemini 4 Argon Weekly Limit";
+
+        Assert.Equal("Gemini 4 Argon · Weekly", WindowCardText.TabLabel(Labelled(argon)));
+        Assert.Equal("Gemini 4 Argon · Weekly window", WindowCardText.Title(Labelled(argon)));
+        Assert.Equal(
+            "Gemini 4 Argon · 5h",
+            WindowCardText.TabLabel(Labelled("Gemini 4 Argon · Gemini 4 Argon Five Hour Limit")));
+
+        // Not the shape, so unchanged: a bucket naming another group, a group
+        // name that is only a prefix of the bucket's first word, a bucket not
+        // ending in " Limit", and nothing between the group and " Limit".
+        foreach (var label in new[]
+                 {
+                     "Gemini 4 Argon · Other Weekly Limit",
+                     "Gemini 4 Argon · Gemini 4 Argonite Weekly Limit",
+                     "Gemini 4 Argon · Gemini 4 Argon Weekly Quota",
+                     "Gemini 4 Argon · Gemini 4 Argon Limit",
+                 })
+        {
+            Assert.Equal(label, WindowCardText.TabLabel(Labelled(label)));
+        }
+
+        Localization.Load("zh-Hant", AppContext.BaseDirectory);
+        try
+        {
+            Assert.Equal("Gemini 4 Argon · 每週", WindowCardText.TabLabel(Labelled(argon)));
+        }
+        finally
+        {
+            Localization.Load("en", AppContext.BaseDirectory);
+        }
+    }
+
     // ---- i18n ------------------------------------------------------------
     //
     // Against the *shipped* strings-zh-Hant.json, for the reason QuotaLensText's

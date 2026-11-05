@@ -45,6 +45,37 @@ const LANG_QUOTA_SUMMARY: &str =
 /// answer hold up the whole refresh.
 const LOCAL_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const CODE_ASSIST_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
+/// `retrieveUserQuotaSummary` only; see `code_assist_url`.
+const CODE_ASSIST_DAILY_BASE: &str = "https://daily-cloudcode-pa.googleapis.com/v1internal";
+const QUOTA_SUMMARY_METHOD: &str = "retrieveUserQuotaSummary";
+/// The summary is tried before the model catalog on every poll, so a daily
+/// host that never answers must not hold each refresh for the client's 30 s.
+/// codexbar caps the same call at 2 s; 10 s here is a chosen bound, not a
+/// measurement.
+const QUOTA_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// codexbar dbdd465b4 reports that Cloud Code answers quota calls with 403
+/// SUBSCRIPTION_REQUIRED or a legacy model list unless the User-Agent is in
+/// the `antigravity/hub/` family (not measured on Windows). Sent on every
+/// Code Assist method (loadCodeAssist, fetchAvailableModels,
+/// retrieveUserQuota, retrieveUserQuotaSummary), never on the oauth2 token
+/// refresh. The maintainer accepted the fingerprint risk
+/// for the Mac on 2026-11-04 and this Windows suffix on 2026-11-05 (WIN-P9 U2).
+///
+/// The version also decides which quota groups the summary carries. Measured
+/// on the maintainer's Mac only (2026-11-04/05, darwin suffix): with hub/2.9.1
+/// both accounts got "Gemini Models" and "Claude and GPT models" while
+/// `agy /usage` showed a third group, "Gemini 4 Argon"; with 2.23.0 the
+/// entitled account got Argon too. agy-swap (aklkbqx/agy-swap
+/// internal/app/user_agent.go) states the hub from 2.20 adds Argon, sends
+/// 2.23.0, and builds the suffix from Go's runtime.GOOS/GOARCH. What Google
+/// returns for this Windows suffix is unmeasured until the device check on the
+/// Windows test machine. Bump the version here when Google raises the
+/// threshold again. Windows ships x86_64 and aarch64 only; any other target
+/// fails to compile here instead of sending a wrong suffix.
+#[cfg(target_arch = "x86_64")]
+const CODE_ASSIST_USER_AGENT: &str = "antigravity/hub/2.23.0 windows/amd64";
+#[cfg(target_arch = "aarch64")]
+const CODE_ASSIST_USER_AGENT: &str = "antigravity/hub/2.23.0 windows/arm64";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const REFRESH_SAFETY_SECS: i64 = 60;
 
@@ -1632,7 +1663,7 @@ async fn fetch_oauth_primary(now: DateTime<Utc>) -> PrimaryAttempt<RemoteContext
         Ok(context) => context,
         Err(failure) => return PrimaryAttempt::FinalFailure(failure),
     };
-    match fetch_available_models(&context, now).await {
+    match primary_quota(&context, now).await {
         PrimaryQuotaAttempt::Success(windows) => PrimaryAttempt::Success(context.finish(windows)),
         PrimaryQuotaAttempt::Forbidden => PrimaryAttempt::Forbidden(context),
         PrimaryQuotaAttempt::SchemaContradiction(failure) => {
@@ -1641,6 +1672,18 @@ async fn fetch_oauth_primary(now: DateTime<Utc>) -> PrimaryAttempt<RemoteContext
         PrimaryQuotaAttempt::Transient => PrimaryAttempt::Transient(context),
         PrimaryQuotaAttempt::Terminal(failure) => PrimaryAttempt::FinalFailure(failure),
     }
+}
+
+/// The primary's quota windows for an already-built context: the grouped
+/// allowances agy's `/usage` prints first, as the captured route does; any
+/// summary miss falls through to the catalog unchanged. Split out of
+/// `fetch_oauth_primary` so a loopback test drives it without a Gemini home
+/// and without `finish` resolving the real history scope.
+async fn primary_quota(context: &RemoteContext, now: DateTime<Utc>) -> PrimaryQuotaAttempt {
+    if let Some(windows) = fetch_quota_summary(context, now).await {
+        return PrimaryQuotaAttempt::Success(windows);
+    }
+    fetch_available_models(context, now).await
 }
 
 async fn fetch_oauth_secondary(
@@ -1683,51 +1726,51 @@ async fn prepare_remote_context(now: DateTime<Utc>) -> Result<RemoteContext, Pro
             })
     };
 
-    request_after_verified_binding(
-        verified,
-        |(access_token, account_scope, cache_binding)| async move {
-            let client = provider_http_client_builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .map_err(|_| {
-                    ProviderFetchFailure::terminal(
-                        "Antigravity usage client could not be created.",
-                    )
-                })?;
-            let code_assist_body = code_assist_post(
-                &client,
-                "loadCodeAssist",
-                &json!({
-                    "metadata": { "ideType": "ANTIGRAVITY", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI" }
-                }),
-                &access_token,
-                cache_binding.clone(),
-                false,
-            )
-            .await
-            .map_err(|failure| match failure {
-                CodeAssistPostFailure::Forbidden => ProviderFetchFailure::terminal(
-                    "Antigravity loadCodeAssist permission was denied.",
-                ),
-                CodeAssistPostFailure::Failure(failure) => failure,
-            })?;
-            let code_assist: Value = serde_json::from_str(&code_assist_body).map_err(|_| {
-                ProviderFetchFailure::terminal(
-                    "Antigravity loadCodeAssist response could not be decoded.",
-                )
-            })?;
+    request_after_verified_binding(verified, |(access_token, account_scope, cache_binding)| {
+        load_remote_context(access_token, account_scope, cache_binding)
+    })
+    .await
+}
 
-            Ok(RemoteContext {
-                client,
-                access_token,
-                project: project_id(&code_assist),
-                plan: resolve_remote_plan(&code_assist),
-                account_scope,
-                cache_binding,
-            })
-        },
+/// The primary's bearer requests after the credential is verified: the client
+/// every later Code Assist call of this poll reuses, and `loadCodeAssist`.
+/// Split out of `prepare_remote_context` so a loopback test drives this exact
+/// client without a Gemini home.
+async fn load_remote_context(
+    access_token: String,
+    account_scope: AccountScope,
+    cache_binding: Option<ProviderCacheBinding>,
+) -> Result<RemoteContext, ProviderFetchFailure> {
+    let client = antigravity_http_client("Antigravity usage client could not be created.")?;
+    let code_assist_body = code_assist_post(
+        &client,
+        "loadCodeAssist",
+        &json!({
+            "metadata": { "ideType": "ANTIGRAVITY", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI" }
+        }),
+        &access_token,
+        cache_binding.clone(),
+        false,
     )
     .await
+    .map_err(|failure| match failure {
+        CodeAssistPostFailure::Forbidden => {
+            ProviderFetchFailure::terminal("Antigravity loadCodeAssist permission was denied.")
+        }
+        CodeAssistPostFailure::Failure(failure) => failure,
+    })?;
+    let code_assist: Value = serde_json::from_str(&code_assist_body).map_err(|_| {
+        ProviderFetchFailure::terminal("Antigravity loadCodeAssist response could not be decoded.")
+    })?;
+
+    Ok(RemoteContext {
+        client,
+        access_token,
+        project: project_id(&code_assist),
+        plan: resolve_remote_plan(&code_assist),
+        account_scope,
+        cache_binding,
+    })
 }
 
 fn remote_identity(plan: Option<String>) -> AgentIdentity {
@@ -1848,20 +1891,26 @@ async fn request_access_token(
             "Antigravity OAuth client was not found. Install Antigravity.app or configure its OAuth client.",
         )
     })?;
-    let http = provider_http_client_builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|_| {
-            ProviderFetchFailure::terminal("Antigravity refresh client could not be created.")
-        })?;
+    post_token_refresh(&client, &refresh_token, attempt_binding).await
+}
+
+/// The primary's oauth2 refresh POST. Split out of `request_access_token` so
+/// a loopback test drives it without resolving the installed IDE's OAuth
+/// client. Carries no Code Assist User-Agent.
+async fn post_token_refresh(
+    client: &(String, String),
+    refresh_token: &str,
+    attempt_binding: ProviderCacheBinding,
+) -> Result<Value, ProviderFetchFailure> {
+    let http = antigravity_http_client("Antigravity refresh client could not be created.")?;
     let form = format!(
         "client_id={}&client_secret={}&refresh_token={}&grant_type=refresh_token",
         percent_encode(&client.0),
         percent_encode(&client.1),
-        percent_encode(&refresh_token),
+        percent_encode(refresh_token),
     );
     let response = http
-        .post(GOOGLE_TOKEN_URL)
+        .post(google_url(GOOGLE_TOKEN_URL))
         .header(
             reqwest::header::CONTENT_TYPE,
             "application/x-www-form-urlencoded",
@@ -2086,21 +2135,98 @@ async fn code_assist_post(
     attempt_binding: Option<ProviderCacheBinding>,
     forbidden_is_route_miss: bool,
 ) -> Result<String, CodeAssistPostFailure> {
-    let response = client
-        .post(format!("{CODE_ASSIST_BASE}:{method}"))
+    let request = code_assist_request(client, method, access_token, body)
+        .build()
+        .map_err(|error| code_assist_send_failure(method, attempt_binding.clone(), &error))?;
+    code_assist_execute(
+        client,
+        request,
+        method,
+        attempt_binding,
+        forbidden_is_route_miss,
+    )
+    .await
+}
+
+/// Where a Code Assist method is served. Only `retrieveUserQuotaSummary`
+/// reads the daily host: codexbar 1c14f5abd reports that the stable host
+/// answers it with stale Gemini allowances, and on macOS the daily host
+/// returned the Gemini groups (measured 2026-11-04/05). Unverified on Windows
+/// until the 188 device check. Every other method stays on the stable host.
+/// Both hosts are compile-time constants; nothing at runtime can redirect
+/// them (only a test build's `google_url` can, for the loopback tests).
+fn code_assist_url(method: &str) -> String {
+    let base = if method == QUOTA_SUMMARY_METHOD {
+        CODE_ASSIST_DAILY_BASE
+    } else {
+        CODE_ASSIST_BASE
+    };
+    google_url(&format!("{base}:{method}"))
+}
+
+/// The one place a Code Assist request is built, so the URL and headers a
+/// test inspects are the ones `code_assist_post` sends.
+fn code_assist_request(
+    client: &reqwest::Client,
+    method: &'static str,
+    access_token: &str,
+    body: &Value,
+) -> reqwest::RequestBuilder {
+    client
+        .post(code_assist_url(method))
         .bearer_auth(access_token)
-        .header(reqwest::header::USER_AGENT, "antigravity")
+        .header(reqwest::header::USER_AGENT, CODE_ASSIST_USER_AGENT)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .json(body)
-        .send()
+}
+
+#[cfg(not(test))]
+fn google_url(url: &str) -> String {
+    url.to_string()
+}
+
+/// Test builds only: a redirect test points every Google URL sent from its
+/// thread at a loopback origin (scheme, host and port replaced, path kept),
+/// so the test drives the real call sites. Unset, the URL is unchanged.
+#[cfg(test)]
+fn google_url(url: &str) -> String {
+    match TEST_LOOPBACK_ORIGIN.with(|origin| origin.borrow().clone()) {
+        Some(origin) => format!("{origin}{}", reqwest::Url::parse(url).unwrap().path()),
+        None => url.to_string(),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_LOOPBACK_ORIGIN: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn code_assist_send_failure(
+    method: &str,
+    attempt_binding: Option<ProviderCacheBinding>,
+    error: &reqwest::Error,
+) -> CodeAssistPostFailure {
+    CodeAssistPostFailure::Failure(ProviderFetchFailure::from_send_error(
+        format!("Antigravity {method} request failed. Retrying automatically."),
+        attempt_binding,
+        error,
+    ))
+}
+
+/// Send a built Code Assist request and map its status. Diagnostics carry the
+/// method name and status only: no body, URL, project id or header.
+async fn code_assist_execute(
+    client: &reqwest::Client,
+    request: reqwest::Request,
+    method: &'static str,
+    attempt_binding: Option<ProviderCacheBinding>,
+    forbidden_is_route_miss: bool,
+) -> Result<String, CodeAssistPostFailure> {
+    let response = client
+        .execute(request)
         .await
-        .map_err(|error| {
-            CodeAssistPostFailure::Failure(ProviderFetchFailure::from_send_error(
-                format!("Antigravity {method} request failed. Retrying automatically."),
-                attempt_binding.clone(),
-                &error,
-            ))
-        })?;
+        .map_err(|error| code_assist_send_failure(method, attempt_binding.clone(), &error))?;
     let status = response.status().as_u16();
     if status == 403 && forbidden_is_route_miss {
         return Err(CodeAssistPostFailure::Forbidden);
@@ -3140,30 +3266,56 @@ where
 }
 
 /// `retrieveUserQuotaSummary`: the allowance groups agy's `/usage` prints,
-/// e.g. "Gemini Models" and "Claude and GPT models". Shape measured on macOS
-/// on 2026-10-02: `groups[].{displayName, buckets[].{bucketId, displayName,
+/// e.g. "Gemini Models" and "Claude and GPT models", each with a weekly and a
+/// five-hour bucket. Shape measured on macOS on 2026-10-02:
+/// `groups[].{displayName, buckets[].{bucketId, displayName,
 /// remainingFraction, resetTime, window}}`. Labels and card ids follow the
 /// Windows agy route (`parse_agy_usage`), so a captured card reads like the
 /// primary's. `None` on any failure or an empty answer: the caller falls back
-/// to the catalog.
+/// to the catalog. Read from the daily host only (`code_assist_url`); there is
+/// no stable-host retry, which per codexbar 1c14f5abd would serve stale Gemini
+/// values (not measured here).
 async fn fetch_quota_summary(
     context: &RemoteContext,
     now: DateTime<Utc>,
 ) -> Option<Vec<UsageWindow>> {
+    fetch_quota_summary_with(context, now, |request| {
+        code_assist_execute(
+            &context.client,
+            request,
+            QUOTA_SUMMARY_METHOD,
+            context.cache_binding.clone(),
+            true,
+        )
+    })
+    .await
+}
+
+/// `execute` is a test seam for sending the request this function built; it
+/// cannot change the request.
+async fn fetch_quota_summary_with<Execute, ExecuteFuture>(
+    context: &RemoteContext,
+    now: DateTime<Utc>,
+    execute: Execute,
+) -> Option<Vec<UsageWindow>>
+where
+    Execute: FnOnce(reqwest::Request) -> ExecuteFuture,
+    ExecuteFuture: std::future::Future<Output = Result<String, CodeAssistPostFailure>>,
+{
     let body = match context.project.as_deref() {
         Some(project) => json!({ "project": project }),
         None => json!({}),
     };
-    let response = code_assist_post(
+    let request = code_assist_request(
         &context.client,
-        "retrieveUserQuotaSummary",
-        &body,
+        QUOTA_SUMMARY_METHOD,
         &context.access_token,
-        context.cache_binding.clone(),
-        true,
+        &body,
     )
-    .await
+    .timeout(QUOTA_SUMMARY_TIMEOUT)
+    .build()
     .ok()?;
+    let response = execute(request).await.ok()?;
     let windows = windows_from_quota_summary(&response, now);
     (!windows.is_empty()).then_some(windows)
 }
@@ -3176,18 +3328,64 @@ pub(crate) fn windows_from_quota_summary_for_test(
     windows_from_quota_summary(body, now)
 }
 
+/// A bucket id becomes part of a card id (`agy.<id>.v1`) and a durable
+/// history key, so only a short plain token is accepted.
+fn valid_quota_bucket_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// codexbar `CodeValue.isOK`: `0`, `"0"`, `"ok"`, `"success"`.
+fn quota_summary_code_is_ok(code: &Value) -> bool {
+    match code {
+        Value::Number(number) => number.as_i64() == Some(0),
+        Value::String(text) => {
+            text == "0" || text.eq_ignore_ascii_case("ok") || text.eq_ignore_ascii_case("success")
+        }
+        _ => false,
+    }
+}
+
+/// The Code Assist answer. Envelopes follow codexbar's
+/// `AntigravityQuotaSummaryResponse` (897bff317): groups under `response`,
+/// `summary` or the root, in that order; a non-OK `code` is an error answer.
 fn windows_from_quota_summary(body: &str, now: DateTime<Utc>) -> Vec<UsageWindow> {
     let Ok(response) = serde_json::from_str::<Value>(body) else {
         return Vec::new();
     };
-    quota_summary_windows(&response, now, false)
+    if response
+        .get("code")
+        .is_some_and(|code| !code.is_null() && !quota_summary_code_is_ok(code))
+    {
+        return Vec::new();
+    }
+    let Some(container) = ["/response", "/summary", ""].iter().find_map(|pointer| {
+        response
+            .pointer(pointer)
+            .filter(|value| value.get("groups").is_some_and(Value::is_array))
+    }) else {
+        return Vec::new();
+    };
+    quota_summary_windows(container, now, false)
 }
 
+/// The buckets of `response.groups`, shared with the local server's weekly
+/// rows (`local_weekly_windows`, `weekly_only`). Aliases follow codexbar:
+/// `bucketId|id`, `displayName|name`, and the fraction as `remainingFraction`,
+/// `remaining.remainingFraction` or `remaining: {case: "remainingFraction",
+/// value}`. Unlike codexbar, a `disabled` bucket is skipped: it reports no
+/// allowance Google measures, and drawing it would fabricate a value.
 fn quota_summary_windows(
     response: &Value,
     now: DateTime<Utc>,
     weekly_only: bool,
 ) -> Vec<UsageWindow> {
+    fn either<'a>(value: &'a Value, first: &str, second: &str) -> Option<&'a str> {
+        non_empty_str(value, first).or_else(|| non_empty_str(value, second))
+    }
     let mut windows = Vec::new();
     for group in response
         .get("groups")
@@ -3195,23 +3393,37 @@ fn quota_summary_windows(
         .into_iter()
         .flatten()
     {
-        let group_name = non_empty_str(group, "displayName").unwrap_or("Antigravity");
+        let group_name = either(group, "displayName", "name").unwrap_or("Antigravity");
         for bucket in group
             .get("buckets")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
         {
-            let Some(id) = non_empty_str(bucket, "bucketId") else {
+            let Some(id) = either(bucket, "bucketId", "id").filter(|id| valid_quota_bucket_id(id))
+            else {
                 continue;
             };
+            if bucket.get("disabled").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
             let window = bucket.get("window").and_then(Value::as_str);
             if weekly_only
                 && agy_window_duration(window).map(|d| d.duration_seconds) != Some(7 * 86_400)
             {
                 continue;
             }
-            let Some(fraction) = bucket.get("remainingFraction").and_then(Value::as_f64) else {
+            let remaining = bucket.get("remaining");
+            let Some(fraction) = bucket
+                .get("remainingFraction")
+                .and_then(Value::as_f64)
+                .or_else(|| remaining?.get("remainingFraction")?.as_f64())
+                .or_else(|| {
+                    let remaining = remaining?;
+                    (remaining.get("case")?.as_str()? == "remainingFraction")
+                        .then(|| remaining.get("value")?.as_f64())?
+                })
+            else {
                 continue;
             };
             let reset = bucket
@@ -3220,7 +3432,7 @@ fn quota_summary_windows(
                 .and_then(parse_datetime);
             let label = format!(
                 "{group_name} · {}",
-                non_empty_str(bucket, "displayName").unwrap_or("Limit")
+                either(bucket, "displayName", "name").unwrap_or("Limit")
             );
             let card_id = format!("agy.{id}.v1");
             if let Some(window) = agy_bucket_window(label, fraction, reset, now, card_id, window) {
@@ -3231,15 +3443,22 @@ fn quota_summary_windows(
     windows
 }
 
-/// Both the token and the Code Assist requests of a captured account go
-/// through this client. No redirects: the default policy would resend a POST
-/// body carrying the refresh token or the bearer to wherever a 307/308 points.
-fn captured_http_client() -> Result<reqwest::Client, ProviderFetchFailure> {
+/// Every Google request Antigravity makes off the local IDE goes through this
+/// client: the captured account's token and Code Assist requests
+/// (`SystemCapturedIo`), and the primary's Code Assist requests
+/// (`load_remote_context`) and token refresh (`post_token_refresh`), on both
+/// Code Assist hosts. No redirects: the default policy would resend a POST
+/// body carrying the refresh token or the bearer to wherever a 307/308
+/// points, so a 3xx ends as a terminal non-2xx. `unavailable` is the caller's
+/// failure text.
+fn antigravity_http_client(
+    unavailable: &'static str,
+) -> Result<reqwest::Client, ProviderFetchFailure> {
     provider_http_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|_| ProviderFetchFailure::terminal(CAPTURED_CLIENT_UNAVAILABLE))
+        .map_err(|_| ProviderFetchFailure::terminal(unavailable))
 }
 
 /// The Credential Manager calls. Kept this thin on purpose: every input
@@ -3560,7 +3779,7 @@ impl CapturedIo for SystemCapturedIo {
         refresh_token: &str,
         binding: Option<ProviderCacheBinding>,
     ) -> Result<(u16, String), ProviderFetchFailure> {
-        let http = captured_http_client()?;
+        let http = antigravity_http_client(CAPTURED_CLIENT_UNAVAILABLE)?;
         let form = format!(
             "client_id={}&client_secret={}&refresh_token={}&grant_type=refresh_token",
             percent_encode(&client.id),
@@ -3568,7 +3787,7 @@ impl CapturedIo for SystemCapturedIo {
             percent_encode(refresh_token),
         );
         let response = http
-            .post(GOOGLE_TOKEN_URL)
+            .post(google_url(GOOGLE_TOKEN_URL))
             .header(
                 reqwest::header::CONTENT_TYPE,
                 "application/x-www-form-urlencoded",
@@ -3636,7 +3855,7 @@ impl CapturedIo for SystemCapturedIo {
         now: DateTime<Utc>,
     ) -> Result<Fetched, ProviderFetchFailure> {
         let cache_binding = ProviderCacheBinding::primary(account_scope.clone());
-        let client = captured_http_client()?;
+        let client = antigravity_http_client(CAPTURED_CLIENT_UNAVAILABLE)?;
         let code_assist_body = code_assist_post(
             &client,
             "loadCodeAssist",
@@ -7657,49 +7876,608 @@ mod captured_account_tests {
         assert!(local_weekly_windows("not json", now).is_empty());
     }
 
-    /// The captured client never follows a redirect, which would resend the
-    /// POST body (refresh token) or the bearer to the redirect target. Local
-    /// listeners only.
-    #[tokio::test]
-    async fn the_captured_client_does_not_follow_redirects() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let target_url = format!("http://{}/stolen", target.local_addr().unwrap());
-        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let origin_url = format!("http://{}/token", origin.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = origin.accept().await.unwrap();
-            let mut buf = [0_u8; 4096];
-            let _ = stream.read(&mut buf).await.unwrap();
-            let response = format!(
-                "HTTP/1.1 307 Temporary Redirect\r\nlocation: {target_url}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
-            // Answer a followed redirect too, so a regression fails on the
-            // assertions below rather than on a dropped connection.
-            let Ok(Ok((mut stream, _))) =
-                tokio::time::timeout(std::time::Duration::from_millis(300), target.accept()).await
-            else {
-                return false;
-            };
-            let _ = stream.read(&mut buf).await;
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                .await;
-            true
-        });
-        let response = captured_http_client()
+    /// S1 (WIN-P9): the local server's weekly rows share the bucket rules of
+    /// the Code Assist parser (`quota_summary_windows`), so since this slice a
+    /// `disabled` bucket and an id outside `[A-Za-z0-9._-]{1,64}` are dropped
+    /// there too. Intentional: the id becomes a card id and a history key.
+    #[test]
+    fn local_quota_summary_drops_disabled_buckets_and_unsafe_ids() {
+        let now = DateTime::parse_from_rfc3339("2026-10-29T08:00:00Z")
             .unwrap()
-            .post(&origin_url)
-            .body("refresh_token=SENTINEL")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status().as_u16(), 307);
-        assert!(
-            !server.await.unwrap(),
-            "the redirect target was never contacted"
+            .with_timezone(&Utc);
+        let body = json!({ "response": { "groups": [
+            { "displayName": "Gemini Models", "buckets": [
+                { "bucketId": "gemini-weekly", "displayName": "Weekly Limit Remaining",
+                  "window": "weekly", "remainingFraction": 0.9, "resetTime": "2026-11-04T09:32:38Z" },
+                { "bucketId": "off-weekly", "displayName": "Weekly Limit Remaining", "disabled": true,
+                  "window": "weekly", "remainingFraction": 0.5, "resetTime": "2026-11-04T09:32:38Z" },
+                { "bucketId": "a/b-weekly", "displayName": "Weekly Limit Remaining",
+                  "window": "weekly", "remainingFraction": 0.5, "resetTime": "2026-11-04T09:32:38Z" }
+            ]}
+        ]}});
+        let keys: Vec<_> = local_weekly_windows(&body.to_string(), now)
+            .iter()
+            .map(|w| w.pace_window_key_for_test().map(str::to_string))
+            .collect();
+        assert_eq!(keys, [Some("agy.gemini-weekly.v1".to_string())]);
+    }
+
+    /// The three groups and five buckets `agy /usage` printed on the
+    /// maintainer's Mac on 2026-11-04, in the summary API's field names
+    /// (ported from the Mac test; the Windows device check is separate).
+    fn three_group_summary() -> Value {
+        json!({ "groups": [
+            { "displayName": "Gemini Models", "buckets": [
+                { "bucketId": "gemini-weekly", "displayName": "Weekly Limit Remaining",
+                  "remainingFraction": 0.9, "resetTime": "2026-11-08T18:46:28Z", "window": "weekly" },
+                { "bucketId": "gemini-5h", "displayName": "Five Hour Limit Remaining",
+                  "remainingFraction": 0.8, "resetTime": "2026-11-04T11:20:43Z", "window": "5h" }
+            ]},
+            { "displayName": "Claude and GPT models", "buckets": [
+                { "bucketId": "3p-weekly", "displayName": "Weekly Limit Remaining",
+                  "remainingFraction": 0.7, "resetTime": "2026-11-09T07:58:14Z", "window": "weekly" },
+                { "bucketId": "3p-5h", "displayName": "Five Hour Limit Remaining",
+                  "remainingFraction": 0.6, "resetTime": "2026-11-04T12:00:00Z", "window": "5h" }
+            ]},
+            { "displayName": "Gemini 4 Argon", "buckets": [
+                { "bucketId": "gemini-argon-wtu-weekly", "displayName": "Gemini 4 Argon Weekly Limit",
+                  "remainingFraction": 0.5, "resetTime": "2026-11-10T00:00:00Z", "window": "weekly" }
+            ]}
+        ]})
+    }
+
+    fn summary_card_ids(body: &Value, now: DateTime<Utc>) -> Vec<String> {
+        windows_from_quota_summary(&body.to_string(), now)
+            .iter()
+            .map(|w| w.pace_window_key_for_test().unwrap().to_string())
+            .collect()
+    }
+
+    const THREE_GROUP_IDS: [&str; 5] = [
+        "agy.gemini-weekly.v1",
+        "agy.gemini-5h.v1",
+        "agy.3p-weekly.v1",
+        "agy.3p-5h.v1",
+        "agy.gemini-argon-wtu-weekly.v1",
+    ];
+
+    fn summary_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-04T08:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn quota_summary_keeps_every_measured_group_including_argon() {
+        let now = summary_now();
+        let windows = windows_from_quota_summary(&three_group_summary().to_string(), now);
+        assert_eq!(summary_card_ids(&three_group_summary(), now), THREE_GROUP_IDS);
+        assert_eq!(
+            windows[4].label_for_test(),
+            "Gemini 4 Argon · Gemini 4 Argon Weekly Limit"
         );
+    }
+
+    #[test]
+    fn quota_summary_accepts_codexbar_envelopes_and_rejects_error_codes() {
+        let now = summary_now();
+        let root = three_group_summary();
+        let groups = root["groups"].clone();
+        for body in [
+            root.clone(),
+            json!({ "response": { "groups": groups.clone() } }),
+            json!({ "summary": { "groups": groups.clone() } }),
+            json!({ "code": 0, "groups": groups.clone() }),
+            json!({ "code": "OK", "response": { "groups": groups.clone() } }),
+            json!({ "code": "success", "groups": groups.clone() }),
+            json!({ "code": "0", "groups": groups.clone() }),
+            json!({ "code": null, "groups": groups.clone() }),
+        ] {
+            assert_eq!(summary_card_ids(&body, now), THREE_GROUP_IDS, "{body}");
+        }
+        for body in [
+            json!({ "code": 7, "groups": groups.clone() }),
+            json!({ "code": "PERMISSION_DENIED", "response": { "groups": groups.clone() } }),
+            json!({ "code": true, "groups": groups.clone() }),
+        ] {
+            assert!(summary_card_ids(&body, now).is_empty(), "{body}");
+        }
+    }
+
+    #[test]
+    fn quota_summary_reads_field_aliases_remaining_wrappers_and_skips_disabled() {
+        let now = summary_now();
+        let body = json!({ "groups": [
+            { "name": "Gemini Models", "buckets": [
+                { "id": "by-id", "name": "Weekly Limit Remaining", "remainingFraction": 0.9 },
+                { "bucketId": "wrapped", "displayName": "Five Hour Limit Remaining",
+                  "remaining": { "remainingFraction": 0.4 } },
+                { "bucketId": "oneof", "remaining": { "case": "remainingFraction", "value": 0.3 } },
+                { "bucketId": "other-case", "remaining": { "case": "unlimited", "value": 0.3 } },
+                { "bucketId": "off", "disabled": true, "remainingFraction": 0.2 },
+                { "bucketId": "off-wrapped", "disabled": true, "remaining": { "remainingFraction": 0.2 } },
+                { "bucketId": "on", "disabled": false, "remainingFraction": 0.1 }
+            ]}
+        ]});
+        let windows = windows_from_quota_summary(&body.to_string(), now);
+        let rows: Vec<(&str, Option<&str>)> = windows
+            .iter()
+            .map(|w| (w.label_for_test(), w.pace_window_key_for_test()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Gemini Models · Weekly Limit Remaining", Some("agy.by-id.v1")),
+                ("Gemini Models · Five Hour Limit Remaining", Some("agy.wrapped.v1")),
+                ("Gemini Models · Limit", Some("agy.oneof.v1")),
+                ("Gemini Models · Limit", Some("agy.on.v1")),
+            ]
+        );
+        assert!((windows[1].remaining_for_test() - 40.0).abs() < 0.01);
+        assert!((windows[2].remaining_for_test() - 30.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn quota_summary_skips_a_disallowed_bucket_id() {
+        let now = summary_now();
+        let long = "a".repeat(65);
+        let max = "b".repeat(64);
+        let body = json!({ "groups": [ { "displayName": "G", "buckets": [
+            { "bucketId": "ok.id_1-x", "remainingFraction": 0.5 },
+            { "bucketId": "has space", "remainingFraction": 0.5 },
+            { "bucketId": "../escape", "remainingFraction": 0.5 },
+            { "bucketId": "ünicode", "remainingFraction": 0.5 },
+            { "bucketId": "back\\slash", "remainingFraction": 0.5 },
+            { "bucketId": long, "remainingFraction": 0.5 },
+            { "bucketId": max, "remainingFraction": 0.5 },
+            { "id": "a/b", "remainingFraction": 0.5 }
+        ]}]});
+        assert_eq!(
+            summary_card_ids(&body, now),
+            ["agy.ok.id_1-x.v1".to_string(), format!("agy.{max}.v1")]
+        );
+    }
+
+    #[test]
+    fn code_assist_url_maps_only_the_summary_to_the_daily_host() {
+        let host = |method| {
+            reqwest::Url::parse(&code_assist_url(method))
+                .unwrap()
+                .host_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(host("retrieveUserQuotaSummary"), "daily-cloudcode-pa.googleapis.com");
+        for method in ["loadCodeAssist", "fetchAvailableModels", "retrieveUserQuota"] {
+            assert_eq!(host(method), "cloudcode-pa.googleapis.com", "{method}");
+        }
+        assert_eq!(
+            code_assist_url("retrieveUserQuotaSummary"),
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+        );
+    }
+
+    #[test]
+    fn code_assist_request_sends_the_hub_user_agent_to_the_mapped_host() {
+        let client = antigravity_http_client(CAPTURED_CLIENT_UNAVAILABLE).unwrap();
+        #[cfg(target_arch = "x86_64")]
+        let expected = "antigravity/hub/2.23.0 windows/amd64";
+        #[cfg(target_arch = "aarch64")]
+        let expected = "antigravity/hub/2.23.0 windows/arm64";
+        for (method, expected_host) in [
+            ("retrieveUserQuotaSummary", "daily-cloudcode-pa.googleapis.com"),
+            ("loadCodeAssist", "cloudcode-pa.googleapis.com"),
+            ("fetchAvailableModels", "cloudcode-pa.googleapis.com"),
+            ("retrieveUserQuota", "cloudcode-pa.googleapis.com"),
+        ] {
+            let request = code_assist_request(&client, method, "token", &json!({}))
+                .build()
+                .unwrap();
+            let agent = request.headers()[reqwest::header::USER_AGENT]
+                .to_str()
+                .unwrap();
+            assert_eq!(agent, expected, "{method}");
+            assert_eq!(request.url().host_str(), Some(expected_host), "{method}");
+        }
+    }
+
+    fn test_account_scope(tag: &str) -> AccountScope {
+        crate::agent_account_scope::test_support::TestRefreshScope::new("antigravity", tag)
+            .resolve_authoritative("antigravity", AuthoritativeIdKind::OpaqueId, "sub-test")
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn quota_summary_sends_one_daily_host_request_and_never_retries() {
+        let now = summary_now();
+        let context = RemoteContext {
+            client: antigravity_http_client(CAPTURED_CLIENT_UNAVAILABLE).unwrap(),
+            access_token: "token".to_string(),
+            project: Some("project".to_string()),
+            plan: None,
+            account_scope: test_account_scope("qsum-summary"),
+            cache_binding: None,
+        };
+        let seen = std::cell::RefCell::new(Vec::new());
+        let record = |request: &reqwest::Request| {
+            assert_eq!(request.timeout(), Some(&QUOTA_SUMMARY_TIMEOUT));
+            seen.borrow_mut().push((
+                request.url().host_str().unwrap_or_default().to_string(),
+                request.url().path().to_string(),
+                request.headers()[reqwest::header::USER_AGENT]
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            ));
+        };
+
+        // Daily host answers: its groups become the windows.
+        let windows = fetch_quota_summary_with(&context, now, |request| {
+            record(&request);
+            async { Ok(three_group_summary().to_string()) }
+        })
+        .await
+        .expect("daily answer yields windows");
+        assert_eq!(windows.len(), 5);
+        assert_eq!(
+            *seen.borrow(),
+            [(
+                "daily-cloudcode-pa.googleapis.com".to_string(),
+                "/v1internal:retrieveUserQuotaSummary".to_string(),
+                CODE_ASSIST_USER_AGENT.to_string(),
+            )]
+        );
+
+        // Daily host fails (any failure, a 403 route miss included): None, and
+        // no second summary request to the stable host.
+        for failure in [
+            CodeAssistPostFailure::Forbidden,
+            CodeAssistPostFailure::Failure(ProviderFetchFailure::terminal("x")),
+        ] {
+            seen.borrow_mut().clear();
+            let result = fetch_quota_summary_with(&context, now, |request| {
+                record(&request);
+                async move { Err(failure) }
+            })
+            .await;
+            assert!(result.is_none());
+            assert_eq!(seen.borrow().len(), 1);
+            assert_eq!(seen.borrow()[0].0, "daily-cloudcode-pa.googleapis.com");
+        }
+    }
+
+    // ── loopback servers for the route and redirect tests ──
+
+    /// A loopback HTTP listener. Each connection is answered with
+    /// `reply(request)` after the full request (head and `content-length`
+    /// body) is recorded, so the record is complete when the client's call
+    /// returns. It keeps accepting until dropped, so a redirect target can
+    /// still record a followed redirect; drop stops the accept loop and joins
+    /// the thread, so neither the thread nor the socket outlives the test.
+    struct Loopback {
+        origin: String,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Loopback {
+        fn serve(reply: impl Fn(&str) -> Vec<u8> + Send + 'static) -> Self {
+            use std::io::{Read as _, Write as _};
+            use std::sync::atomic::Ordering;
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (log, stopped) = (seen.clone(), stop.clone());
+            let thread = std::thread::spawn(move || {
+                while !stopped.load(Ordering::SeqCst) {
+                    let mut stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
+                    // An accepted socket may inherit the listener's
+                    // non-blocking mode (platform-dependent); reads block.
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                    let mut request = Vec::new();
+                    let mut buffer = [0u8; 4096];
+                    let complete = |request: &[u8]| {
+                        let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                            return false;
+                        };
+                        let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let length = head
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        request.len() >= end + 4 + length
+                    };
+                    while !complete(request.as_slice()) && request.len() < 65_536 {
+                        match stream.read(&mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => request.extend_from_slice(&buffer[..n]),
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&request).into_owned();
+                    let answer = reply(request.as_str());
+                    log.lock().unwrap().push(request);
+                    let _ = stream.write_all(&answer);
+                }
+            });
+            Self {
+                origin,
+                seen,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for Loopback {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn http_reply(status: &str, body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// The request line's path, e.g. `/v1internal:loadCodeAssist`.
+    fn request_path(request: &str) -> &str {
+        request.split(' ').nth(1).unwrap_or_default()
+    }
+
+    /// `(origin, elsewhere)`: the origin 307s every request to `elsewhere`,
+    /// which answers `200 {}`, so a followed redirect would succeed and be
+    /// recorded there.
+    fn redirect_trap() -> (Loopback, Loopback) {
+        let elsewhere = Loopback::serve(|_| http_reply("200 OK", "{}"));
+        let location = format!("{}/stolen", elsewhere.origin);
+        let origin = Loopback::serve(move |_| {
+            format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .into_bytes()
+        });
+        (origin, elsewhere)
+    }
+
+    /// Points this thread's Google URLs (`google_url`) at a loopback origin
+    /// until dropped. `#[tokio::test]` runs the future on the test's thread.
+    struct LoopbackRoute;
+
+    impl LoopbackRoute {
+        fn set(origin: &str) -> Self {
+            TEST_LOOPBACK_ORIGIN.with(|cell| *cell.borrow_mut() = Some(origin.to_string()));
+            Self
+        }
+    }
+
+    impl Drop for LoopbackRoute {
+        fn drop(&mut self) {
+            TEST_LOOPBACK_ORIGIN.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+
+    fn sends_hub_user_agent(request: &str) -> bool {
+        request.to_ascii_lowercase().contains(&format!(
+            "user-agent: {}",
+            CODE_ASSIST_USER_AGENT.to_ascii_lowercase()
+        ))
+    }
+
+    // ── primary route: summary first, catalog as the fallback ──
+
+    const SUMMARY_PATH: &str = "/v1internal:retrieveUserQuotaSummary";
+    const CATALOG_PATH: &str = "/v1internal:fetchAvailableModels";
+
+    fn catalog_body() -> String {
+        json!({ "models": {
+            "gemini-3-pro": { "displayName": "Gemini 3 Pro", "quotaInfo": { "remainingFraction": 0.5 } }
+        }})
+        .to_string()
+    }
+
+    fn loopback_context(tag: &str) -> RemoteContext {
+        RemoteContext {
+            client: antigravity_http_client(CAPTURED_CLIENT_UNAVAILABLE).unwrap(),
+            access_token: "token".to_string(),
+            project: Some("project".to_string()),
+            plan: None,
+            account_scope: test_account_scope(tag),
+            cache_binding: None,
+        }
+    }
+
+    fn quota_card_ids(attempt: PrimaryQuotaAttempt) -> Vec<String> {
+        let PrimaryQuotaAttempt::Success(windows) = attempt else {
+            panic!("the primary quota attempt did not succeed");
+        };
+        windows
+            .iter()
+            .map(|w| w.pace_window_key_for_test().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// The summary answers: its `agy.<bucket>.v1` cards are the primary's,
+    /// and the catalog is never asked.
+    #[tokio::test]
+    async fn primary_reads_the_summary_first_and_skips_the_catalog() {
+        let server = Loopback::serve(|request| match request_path(request) {
+            SUMMARY_PATH => http_reply("200 OK", &three_group_summary().to_string()),
+            CATALOG_PATH => http_reply("200 OK", &catalog_body()),
+            _ => http_reply("404 Not Found", "{}"),
+        });
+        let _route = LoopbackRoute::set(&server.origin);
+        let attempt = primary_quota(&loopback_context("qsum-primary-summary"), summary_now()).await;
+        assert_eq!(quota_card_ids(attempt), THREE_GROUP_IDS);
+        let paths: Vec<String> = server
+            .requests()
+            .iter()
+            .map(|request| request_path(request).to_string())
+            .collect();
+        assert_eq!(paths, [SUMMARY_PATH], "the catalog must not be called");
+    }
+
+    /// The summary misses (a 5xx, or an error `code`): the catalog path runs
+    /// unchanged and its `model.<id>.v1` cards are the primary's.
+    #[tokio::test]
+    async fn primary_falls_back_to_the_catalog_when_the_summary_misses() {
+        let error_code = json!({ "code": 7, "groups": three_group_summary()["groups"].clone() });
+        for summary in [
+            http_reply("500 Internal Server Error", "{}"),
+            http_reply("200 OK", &error_code.to_string()),
+        ] {
+            let server = Loopback::serve(move |request| match request_path(request) {
+                SUMMARY_PATH => summary.clone(),
+                CATALOG_PATH => http_reply("200 OK", &catalog_body()),
+                _ => http_reply("404 Not Found", "{}"),
+            });
+            let _route = LoopbackRoute::set(&server.origin);
+            let attempt =
+                primary_quota(&loopback_context("qsum-primary-fallback"), summary_now()).await;
+            assert_eq!(quota_card_ids(attempt), ["model.gemini-3-pro.v1"]);
+            let paths: Vec<String> = server
+                .requests()
+                .iter()
+                .map(|request| request_path(request).to_string())
+                .collect();
+            assert_eq!(paths, [SUMMARY_PATH, CATALOG_PATH]);
+        }
+    }
+
+    // ── redirect policy, one loopback test per call site ──
+
+    /// The primary's Code Assist client (`load_remote_context`): a 307 must not
+    /// carry the bearer or body to its `Location`, and the request on the wire
+    /// carries the hub User-Agent.
+    #[tokio::test]
+    async fn primary_bearer_request_is_never_redirected() {
+        let (origin, elsewhere) = redirect_trap();
+        let _route = LoopbackRoute::set(&origin.origin);
+        let result = load_remote_context(
+            "SENTINEL-BEARER".to_string(),
+            test_account_scope("qsum-redirect-primary"),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ProviderFetchFailure::Terminal { .. })),
+            "a 3xx must end as a terminal non-2xx"
+        );
+        let seen = origin.requests();
+        assert_eq!(seen.len(), 1);
+        assert!(
+            seen[0].starts_with("POST /v1internal:loadCodeAssist "),
+            "{}",
+            seen[0].lines().next().unwrap_or_default()
+        );
+        // Control: the bearer did reach the origin, so the empty record below
+        // is about the redirect, not a request that was never sent.
+        assert!(seen[0].contains("SENTINEL-BEARER"));
+        assert!(
+            sends_hub_user_agent(&seen[0]),
+            "the hub User-Agent was not sent"
+        );
+        assert!(elsewhere.requests().is_empty(), "the redirect was followed");
+    }
+
+    /// The primary's oauth2 refresh (`post_token_refresh`): a 307 must not
+    /// re-send the form body (refresh token, client secret) to its `Location`,
+    /// and the refresh carries no hub User-Agent.
+    #[tokio::test]
+    async fn primary_refresh_post_is_never_redirected_and_sends_no_hub_user_agent() {
+        let (origin, elsewhere) = redirect_trap();
+        let _route = LoopbackRoute::set(&origin.origin);
+        let result = post_token_refresh(
+            &("client-id".to_string(), "client-secret".to_string()),
+            "SENTINEL-REFRESH",
+            ProviderCacheBinding::primary(test_account_scope("qsum-redirect-refresh")),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ProviderFetchFailure::Terminal { .. })),
+            "a 3xx must end as a terminal non-2xx"
+        );
+        let seen = origin.requests();
+        assert_eq!(seen.len(), 1);
+        assert!(
+            seen[0].starts_with("POST /token "),
+            "{}",
+            seen[0].lines().next().unwrap_or_default()
+        );
+        // Control: the body reached the origin.
+        assert!(seen[0].contains("SENTINEL-REFRESH"));
+        assert!(
+            !seen[0].to_ascii_lowercase().contains("antigravity/hub"),
+            "the refresh carried the Code Assist User-Agent"
+        );
+        assert!(elsewhere.requests().is_empty(), "the redirect was followed");
+    }
+
+    /// A captured account's token and Code Assist requests
+    /// (`SystemCapturedIo`): neither follows a 307, and only the Code Assist
+    /// request carries the hub User-Agent.
+    #[tokio::test]
+    async fn captured_requests_are_never_redirected() {
+        let (origin, elsewhere) = redirect_trap();
+        let _route = LoopbackRoute::set(&origin.origin);
+        let io = SystemCapturedIo;
+        let client = OAuthClient {
+            id: "client-id".to_string(),
+            secret: "client-secret".to_string(),
+        };
+        let (status, _) = io
+            .token_post(&client, "SENTINEL-REFRESH", None)
+            .await
+            .expect("a 307 is an answer, not a transport failure");
+        assert_eq!(status, 307);
+        let result = io
+            .quota(
+                "SENTINEL-BEARER".to_string(),
+                test_account_scope("qsum-redirect-captured"),
+                Err(AccountScopeError::NoTrustedEvidence),
+                summary_now(),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(ProviderFetchFailure::Terminal { .. })),
+            "a 3xx must end as a terminal non-2xx"
+        );
+        let seen = origin.requests();
+        assert_eq!(seen.len(), 2);
+        assert!(seen[0].starts_with("POST /token "));
+        assert!(seen[0].contains("SENTINEL-REFRESH"));
+        assert!(
+            !seen[0].to_ascii_lowercase().contains("antigravity/hub"),
+            "the captured refresh carried the Code Assist User-Agent"
+        );
+        assert!(seen[1].starts_with("POST /v1internal:loadCodeAssist "));
+        assert!(seen[1].contains("SENTINEL-BEARER"));
+        assert!(
+            sends_hub_user_agent(&seen[1]),
+            "the hub User-Agent was not sent"
+        );
+        assert!(elsewhere.requests().is_empty(), "the redirect was followed");
     }
 }
 
