@@ -750,19 +750,41 @@ public static class WindowCardText
             : ShortLabel(tab.Label);
 
     private const string LimitRemaining = " Limit Remaining";
+    private const string Limit = " Limit";
 
     /// <summary>The card title and window pills are narrow; Antigravity's
     /// grouped buckets arrive as "Gemini Models · Weekly Limit Remaining",
     /// which overflowed the pill row. Port of macOS
     /// <c>WindowUsageCard.shortLabel</c>: shortens only the
     /// "&lt;group&gt; · &lt;bucket&gt; Limit Remaining" shape to
-    /// "Gemini · Weekly", "Claude/GPT · 5h" (bucket localized); any other
-    /// label is returned localized and unchanged. The Agent-limits card,
-    /// history, heatmap, Overview, tray and tooltips keep the full name.</summary>
+    /// "Gemini · Weekly", "Claude/GPT · 5h" (bucket localized), and a bucket
+    /// that repeats its own group's name, "&lt;group&gt; · &lt;group&gt;
+    /// &lt;bucket&gt; Limit" (agy /usage names the Argon bucket "Gemini 4
+    /// Argon Weekly Limit"; macOS #553), to "Gemini 4 Argon · Weekly". A
+    /// bucket naming another group, or with nothing between the group and
+    /// " Limit", is not that shape. Any other label is returned localized and
+    /// unchanged. The Agent-limits card, history, heatmap, Overview, tray and
+    /// tooltips keep the full name.</summary>
     public static string ShortLabel(string label)
     {
         var parts = label.Split(" · ");
-        if (parts.Length != 2 || !parts[1].EndsWith(LimitRemaining, StringComparison.Ordinal))
+        if (parts.Length != 2)
+        {
+            return label.Localized();
+        }
+
+        string bucket;
+        if (parts[1].EndsWith(LimitRemaining, StringComparison.Ordinal))
+        {
+            bucket = parts[1][..^LimitRemaining.Length];
+        }
+        else if (parts[1].StartsWith(parts[0] + " ", StringComparison.Ordinal)
+                 && parts[1].EndsWith(Limit, StringComparison.Ordinal)
+                 && parts[1].Length > parts[0].Length + 1 + Limit.Length)
+        {
+            bucket = parts[1][(parts[0].Length + 1)..^Limit.Length];
+        }
+        else
         {
             return label.Localized();
         }
@@ -777,7 +799,6 @@ public static class WindowCardText
         }
 
         group = group.Replace(" and ", "/", StringComparison.Ordinal);
-        var bucket = parts[1][..^LimitRemaining.Length];
         var window = bucket switch
         {
             "Weekly" => "Weekly".Localized(),
