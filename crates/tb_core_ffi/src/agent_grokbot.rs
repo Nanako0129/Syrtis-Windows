@@ -1100,6 +1100,36 @@ pub(crate) mod tests {
         assert!(!fallback_loads("nonjwt", "tok-123"));
     }
 
+    /// Plan S3b (C1): decryption lives only in `cursor_sync`, never in the
+    /// shared reader the Grok fallback uses. Even with the "cursor" grant
+    /// installed, a sealed Cursor token is still "no Cursor login" here: the
+    /// fallback reads the stored token (`read_login`, which never decrypts)
+    /// and `jwt_claims` rejects the `cursor-safe-storage:` form, so no key is
+    /// ever loaded on this path.
+    /// Mutation: `load_credentials_from` decrypt a sealed token before the
+    /// `jwt_claims` check (e.g. call a key loader on a `cursor-safe-storage:`
+    /// value) — this test then loads a cookie and fails.
+    #[test]
+    fn the_cursor_fallback_ignores_a_sealed_token_even_when_cursor_is_granted() {
+        let _guard = crate::keychain_consent::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::keychain_consent::reset_for_test();
+        crate::keychain_consent::set_from_json(r#"{"cursor":true}"#).unwrap();
+        assert!(crate::keychain_consent::allowed("cursor"));
+
+        let sealed = format!(
+            "cursor-safe-storage:v1:{}",
+            base64::engine::general_purpose::STANDARD.encode(b"v10 sealed blob")
+        );
+        assert!(
+            !fallback_loads("sealed-granted", &format!("\"{sealed}\"")),
+            "the Grok fallback never decrypts, grant or no grant"
+        );
+
+        crate::keychain_consent::reset_for_test();
+    }
+
     /// Control for the two above: the JWT twin loads, unchanged.
     #[test]
     fn the_cursor_fallback_loads_a_plaintext_session_jwt() {

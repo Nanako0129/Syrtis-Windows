@@ -24,6 +24,10 @@ public sealed partial class SettingsWindow
     private TextBlock? _csCliQuestion;
     private Button? _csAnswer;
     private Button? _csSyncNow;
+    // S3b: the Cursor encrypted-sign-in consent. Allow opens the disclosure
+    // confirmation; Withdraw appears once the grant is stored.
+    private Button? _csKeychainAllow;
+    private Button? _csKeychainWithdraw;
     private bool _csAnswerConfirms;
     private bool _csUpdating;
     // The switch whose enable confirmation is open. UpdateCursorSync leaves
@@ -115,13 +119,63 @@ public sealed partial class SettingsWindow
             Padding = new Thickness(8, 3, 8, 4),
         };
         _csSyncNow.Click += (_, _) => _ = cursor.RunSync(userInitiated: true);
+
+        // Allow: the disclosure confirmation (C4), then store the "cursor"
+        // grant and run the one explicit round that reads the sealed sign-in.
+        _csKeychainAllow = new Button
+        {
+            Content = CursorSync.Copy.KeychainAllowAccess.Localized(),
+            FontSize = 12,
+            Padding = new Thickness(8, 3, 8, 4),
+        };
+        _csKeychainAllow.Click += async (_, _) =>
+        {
+            try
+            {
+                if (await ConfirmFlyout(_csKeychainAllow, CursorSync.Copy.Title,
+                        CursorSync.Copy.KeychainDisclosure,
+                        CursorSync.Copy.KeychainAllow.LocalizedKey(GrokBotConsent.Copy.AllowEnglish),
+                        CursorSync.Copy.Cancel))
+                {
+                    AppSettings.KeychainConsent.Install(KeychainConsentComposer.CursorId, true);
+                    await cursor.RunSync(userInitiated: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                DevLog.Write($"cursor-sync: keychain allow failed: {ex.GetType().Name}");
+            }
+        };
+
+        // Withdraw: store the "cursor" denial (composed payload) and refresh,
+        // so the consent prompt returns and no sealed sign-in is read.
+        _csKeychainWithdraw = new Button
+        {
+            Content = CursorSync.Copy.KeychainWithdraw.Localized(),
+            FontSize = 12,
+            Padding = new Thickness(8, 3, 8, 4),
+        };
+        _csKeychainWithdraw.Click += (_, _) =>
+        {
+            try
+            {
+                AppSettings.KeychainConsent.Install(KeychainConsentComposer.CursorId, false);
+                _ = cursor.RunSync(userInitiated: true);
+            }
+            catch (Exception ex)
+            {
+                DevLog.Write($"cursor-sync: keychain withdraw failed: {ex.GetType().Name}");
+            }
+        };
+
         SwallowKeyRepeat(_csSyncNow);
         SwallowKeyRepeat(_csAnswer);
+        SwallowKeyRepeat(_csKeychainWithdraw);
 
         foreach (var element in new UIElement[]
         {
             _csCleanupWarning, _csStatusHint, _csStatusWarning, _csCliQuestion,
-            _csAnswer, _csSyncNow,
+            _csAnswer, _csSyncNow, _csKeychainAllow, _csKeychainWithdraw,
         })
         {
             element.Visibility = Visibility.Collapsed;
@@ -143,7 +197,8 @@ public sealed partial class SettingsWindow
     private void UpdateCursorSync(SettingsStore store)
     {
         if (_csToggle is not { } toggle || _csSyncNow is not { } syncNow
-            || _csAnswer is not { } answer || CursorSyncController.Shared is not { } cursor)
+            || _csAnswer is not { } answer || _csKeychainAllow is not { } allow
+            || _csKeychainWithdraw is not { } withdraw || CursorSyncController.Shared is not { } cursor)
         {
             return;
         }
@@ -171,6 +226,17 @@ public sealed partial class SettingsWindow
         _csStatusWarning!.Text = line ?? "";
         Show(_csStatusHint, line is not null && !warning);
         Show(_csStatusWarning, line is not null && warning);
+
+        // S3b: the encrypted-sign-in consent. Allow shows while the core asks
+        // (keychain_consent); Withdraw shows once the grant is stored (so the
+        // user can take it back). Both only while sync is on.
+        var needAllow = on && CursorSync.NeedsKeychainAllow(state, cursor.Reason);
+        var cursorGranted = store.GetNullableBool(KeychainConsentComposer.CursorStorageKey) == true;
+        var fallback = on ? (Control)syncNow : toggle;
+        MoveFocusBeforeHiding(allow, needAllow, fallback);
+        MoveFocusBeforeHiding(withdraw, on && cursorGranted, fallback);
+        Show(allow, needAllow);
+        Show(withdraw, on && cursorGranted);
 
         var confirmed = CursorSync.TakeoverConfirmed(store);
         var askTakeover = on && state == "cliPresent" && !confirmed;

@@ -139,6 +139,38 @@ public static class CursorSync
         /// <summary>The core refused the settings (<see cref="ConfigRejectedState"/>):
         /// nothing syncs. macOS #532 wording.</summary>
         public const string ConfigRejected = "Cursor sync couldn't be set up, so nothing is being synced.";
+        // --- Cursor 3.27+ encrypted sign-in consent (S3b, U3) ----------------
+        // DRAFT copy: the disclosure (C4) is final only after the maintainer
+        // approves it. Windows has no OS dialog (DPAPI is silent), so this
+        // in-app confirmation is the only gate. No "Keychain" wording.
+
+        /// <summary>The status line when the core reports
+        /// <c>keychain_consent</c>: a sealed sign-in and no "cursor" grant yet
+        /// (or it was withdrawn). The Allow control sits beside it.</summary>
+        public const string KeychainConsentCode = "keychain_consent";
+        public const string KeychainConsentLine =
+            "Cursor stores its sign-in encrypted. Syrtis needs your permission to read it.";
+
+        /// <summary>The button that opens the disclosure confirmation.</summary>
+        public const string KeychainAllowAccess = "Allow reading Cursor's encrypted sign-in…";
+
+        /// <summary>The disclosure shown before Allow (C4 required content:
+        /// the Local State key decrypts everything Cursor stores encrypted;
+        /// Windows does not ask, so this is the only check; only the sign-in
+        /// token is used; the key stays in memory for that read only; the
+        /// sign-in is sent only to cursor.com; Withdraw stops reading the
+        /// encrypted sign-in and does not stop reading an unencrypted
+        /// one).</summary>
+        public const string KeychainDisclosure =
+            "Cursor 3.27 and later can store its sign-in encrypted. To read it, Syrtis unlocks the key Cursor keeps in its \"Local State\" file on this PC; Windows does not ask separately, so this is the only time you are asked. That key can decrypt everything Cursor stores encrypted, but Syrtis uses it only to read your Cursor sign-in, keeps it in memory for that read alone, and never saves or logs it. The sign-in is sent only to Cursor's usage service (cursor.com). Turning on Cursor sync does not grant this. Withdraw stops Syrtis reading Cursor's encrypted sign-in; if Cursor stores its sign-in unencrypted, Syrtis still reads that and Withdraw does not change it.";
+
+        /// <summary>The Withdraw control shown once the grant is stored.</summary>
+        public const string KeychainWithdraw = "Withdraw";
+
+        /// <summary>The semantic Allow key the Grok Bot consent already uses
+        /// ("允許"), reused so both consents share one action string.</summary>
+        public const string KeychainAllow = GrokBotConsent.Copy.Allow;
+
         /// <summary>Second consent paragraph once added profiles exist
         /// (<see cref="ConsentParagraphs"/>), macOS #535 wording. W2 shows it;
         /// each sentence is held to the code there.</summary>
@@ -154,6 +186,7 @@ public static class CursorSync
             Title, Toggle, Privacy, Continue, Cancel, TurnOff, LastSynced, Partial, Expired, NotSignedIn,
             Offline, Error, ErrorWithReason, CliPresent, SyncNow, Syncing, CliQuestion, UseSyrtis, KeepCli, CleanupFailed,
             ConfigRejected, ProfilesPrivacy,
+            KeychainConsentLine, KeychainAllowAccess, KeychainDisclosure, KeychainWithdraw, KeychainAllow,
         ];
     }
 
@@ -179,6 +212,11 @@ public static class CursorSync
             "expired" => Copy.Expired.Localized(),
             "notSignedIn" => Copy.NotSignedIn.Localized(),
             "offline" => Copy.Offline.Localized(),
+            // A sealed sign-in with no "cursor" grant: the consent prompt, not
+            // the generic error-with-reason line (the Allow control sits beside
+            // it). Checked before the reason-code branch, which would otherwise
+            // match this lowercase code.
+            "error" when reason == Copy.KeychainConsentCode => Copy.KeychainConsentLine.Localized(),
             // A char test, not a Regex: .NET's `$` also matches before a final "\n".
             "error" when reason is { Length: >= 1 and <= 40 } && reason.All(c => c is '_' or >= 'a' and <= 'z') =>
                 Copy.ErrorWithReason.Localized(reason),
@@ -191,6 +229,13 @@ public static class CursorSync
     /// <summary>ok is drawn in the secondary colour, every other line in
     /// orange (shared spec §2).</summary>
     public static bool StatusIsWarning(string? state) => state != "ok";
+
+    /// <summary>The Cursor section needs the Allow control: a sealed sign-in
+    /// with no "cursor" grant (the core reports <c>keychain_consent</c>, U3).
+    /// Unlike macOS there is no <c>keychain_denied</c>/<c>keychain_unlock</c>:
+    /// Windows has no OS dialog and no first-round rule.</summary>
+    public static bool NeedsKeychainAllow(string? state, string? reason) =>
+        state == "error" && reason == Copy.KeychainConsentCode;
 }
 
 /// <summary>

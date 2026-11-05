@@ -276,6 +276,53 @@ pub(crate) fn normalized_stored_string(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Sealed access tokens (plan CURSOR-SS-W S3b item 1). Cursor 3.27+ may store
+// `cursorAuth/accessToken` as `cursor-safe-storage:v1:<STANDARD base64 of an
+// Electron safeStorage blob>` (measured on 188: v10 || nonce12 || ct || tag16).
+// This function only CLASSIFIES, after `normalized_stored_string` has unquoted
+// the row (`query_login`), so every consumer sees the same form. It never
+// decrypts and never reads `Local State` or the DPAPI key (C1): only
+// `cursor_sync`, after its consent check, does that.
+
+const SEALED_PREFIX: &str = "cursor-safe-storage:";
+const SEALED_V1_PREFIX: &str = "cursor-safe-storage:v1:";
+
+/// What a stored access token is. Every refusal is a fixed reason code.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StoredToken {
+    /// No `cursor-safe-storage:` prefix: used as stored; no key is involved.
+    Plain,
+    /// `cursor-safe-storage:v1:`: the decoded Electron blob (`v10…`). The
+    /// version of the decoded blob is checked by `cursor_sync`, not here.
+    Sealed(Vec<u8>),
+    /// `token_sealed_unsupported` (a `cursor-safe-storage:` envelope that is
+    /// not `v1`, or any sealed token on a platform with no key source) /
+    /// `token_sealed_unreadable` (the `v1` base64 does not decode). One
+    /// `token_sealed_unreadable` for every decode failure (macOS T10).
+    Refused(&'static str),
+}
+
+/// Classify `cursorAuth/accessToken` (already unquoted). Windows decodes a
+/// `v1` envelope to its blob; a platform with no safeStorage reader refuses a
+/// sealed token as unsupported, before any consent lookup.
+pub(crate) fn stored_token(token: &str) -> StoredToken {
+    use base64::Engine as _;
+    if !token.starts_with(SEALED_PREFIX) {
+        return StoredToken::Plain;
+    }
+    let Some(encoded) = token.strip_prefix(SEALED_V1_PREFIX) else {
+        return StoredToken::Refused("token_sealed_unsupported");
+    };
+    if cfg!(not(target_os = "windows")) {
+        return StoredToken::Refused("token_sealed_unsupported");
+    }
+    match base64::engine::general_purpose::STANDARD.decode(encoded) {
+        Ok(blob) => StoredToken::Sealed(blob),
+        Err(_) => StoredToken::Refused("token_sealed_unreadable"),
+    }
+}
+
 /// The claims of a token that looks like a Cursor session JWT: only
 /// `[A-Za-z0-9._-]` (it goes into a cookie), exactly three non-empty
 /// segments, and a payload that decodes to a JSON object. On Windows this one
@@ -333,6 +380,48 @@ mod tests {
         );
         // Control: no qualifying occurrence at all.
         assert_eq!(extract_user_id(r#"{"user_id":"user_short"}"#), None);
+    }
+
+    /// Classification only: a plain token is `Plain`, a `v1` envelope decodes
+    /// to its blob, a non-`v1` envelope is unsupported, and `v1` whose base64
+    /// does not decode is unreadable. No decryption, no `Local State` read.
+    #[test]
+    fn stored_token_classifies_without_decrypting() {
+        use base64::Engine as _;
+        assert_eq!(stored_token("eyJ.a.b"), StoredToken::Plain);
+        assert_eq!(stored_token(""), StoredToken::Plain);
+
+        let blob = b"v10\x01\x02\x03".to_vec();
+        let sealed = format!(
+            "cursor-safe-storage:v1:{}",
+            base64::engine::general_purpose::STANDARD.encode(&blob)
+        );
+        // The `v1` envelope decodes to exactly its blob on Windows; a host
+        // with no safeStorage reader refuses it as unsupported.
+        #[cfg(target_os = "windows")]
+        assert_eq!(stored_token(&sealed), StoredToken::Sealed(blob));
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(
+            stored_token(&sealed),
+            StoredToken::Refused("token_sealed_unsupported")
+        );
+
+        // A non-`v1` envelope is unsupported on every host.
+        assert_eq!(
+            stored_token("cursor-safe-storage:v2:AAAA"),
+            StoredToken::Refused("token_sealed_unsupported")
+        );
+        assert_eq!(
+            stored_token("cursor-safe-storage:nope"),
+            StoredToken::Refused("token_sealed_unsupported")
+        );
+        // `v1` with non-base64 payload is unreadable (Windows only; elsewhere
+        // the unsupported refusal precedes any decode).
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            stored_token("cursor-safe-storage:v1:!!!!"),
+            StoredToken::Refused("token_sealed_unreadable")
+        );
     }
 
     fn empty_db(dir: &Path) -> PathBuf {

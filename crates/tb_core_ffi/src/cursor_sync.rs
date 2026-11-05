@@ -22,6 +22,14 @@
 //!   are fixed for one walk.
 //! - An expired token is refused locally, before any request; Cursor's
 //!   refresh token is never used (rotating it could sign the user out).
+//! - A Cursor 3.27+ sealed sign-in (`cursor-safe-storage:v1:…`, S3b) is
+//!   decrypted only here, only after the "cursor" consent check read
+//!   immediately before `Local State` is opened (C2), with the key from the
+//!   user-data-dir the database belongs to (C6); no key is cached (U3). The
+//!   decrypt plaintext and the key are wiped on every path (C8); a non-v10
+//!   blob is `token_sealed_unsupported`, any other failure
+//!   `token_sealed_unreadable` (win_safe_storage's text never passed through).
+//!   `query_login`/`read_login` never decrypt (C1).
 //! - The endpoint is a constant; only tests inject one, by parameter (S-4).
 //! - Redirects are never followed and production is https-only; any 3xx
 //!   (cursor.com sends an expired session to WorkOS) means `expired`.
@@ -1467,6 +1475,114 @@ struct Target<'a> {
     file_stem: &'a dyn Fn(&str) -> Option<String>,
     /// `GetDriveTypeW` for added profiles' roots (WB2).
     drive_type: &'a DriveType<'a>,
+    /// The user's Cursor encrypted-sign-in consent (production:
+    /// `keychain_consent::allowed("cursor")`), re-read immediately before a
+    /// sealed token's `Local State` is opened — never sampled at round start
+    /// (C2). A plaintext token never consults it (Design 1).
+    consent: &'a dyn Fn() -> bool,
+    /// Unwraps the safeStorage key from a user-data-dir's `Local State`
+    /// (production: `load_seal_key`). The only reader of `Local State` and the
+    /// DPAPI key; called at most once per sealed profile, only after consent,
+    /// no cache (U3). Tests inject a key straight from raw bytes (DPAPI seam).
+    load_seal_key: &'a LoadSealKey<'a>,
+}
+
+/// An unwrapped safeStorage key that decrypts one Electron v10 blob. The
+/// production key wipes itself on drop (`win_safe_storage::SafeStorageKey`);
+/// the returned plaintext is the caller's to wipe.
+pub(crate) trait SealKey {
+    /// Decrypt a decoded `"v10" || nonce || ct || tag` blob to its plaintext
+    /// bytes. `Err(())` for any failure (wrong key, length, tampering): the
+    /// caller maps it to one fixed reason, so no detail leaks (T5).
+    fn decrypt(&self, blob: &[u8]) -> Result<Vec<u8>, ()>;
+}
+
+/// Reads a user-data-dir's `Local State` and unwraps its key. `Err(())` maps
+/// to `token_sealed_unreadable`; the real error text (which can name a file
+/// path) is never carried through (T5).
+type LoadSealKey<'a> = dyn Fn(&Path) -> Result<Box<dyn SealKey>, ()> + 'a;
+
+#[cfg(windows)]
+impl SealKey for crate::win_safe_storage::SafeStorageKey {
+    fn decrypt(&self, blob: &[u8]) -> Result<Vec<u8>, ()> {
+        use base64::Engine as _;
+        // ponytail: re-encode to reuse the audited `win_safe_storage::decrypt`
+        // (base64 in) rather than widen its crypto API; a token is a few
+        // hundred bytes and this runs once per sealed profile per round.
+        let b64 = base64::engine::general_purpose::STANDARD.encode(blob);
+        crate::win_safe_storage::decrypt(self, &b64).map_err(|_| ())
+    }
+}
+
+/// Production loader: `<user-data-dir>\Local State` → the safeStorage key.
+#[cfg(windows)]
+fn load_seal_key(local_state: &Path) -> Result<Box<dyn SealKey>, ()> {
+    let raw = std::fs::read(local_state).map_err(|_| ())?;
+    let json: serde_json::Value = serde_json::from_slice(&raw).map_err(|_| ())?;
+    let key = crate::win_safe_storage::load_key(&json).map_err(|_| ())?;
+    Ok(Box::new(key))
+}
+
+/// Off Windows there is no safeStorage reader; a sealed token is refused by
+/// `stored_token` before this is reached, so the loader is only a stub.
+#[cfg(not(windows))]
+fn load_seal_key(_local_state: &Path) -> Result<Box<dyn SealKey>, ()> {
+    Err(())
+}
+
+/// The user-data-dir whose `Local State` holds the key for `slot`'s database
+/// (C6): an added profile's root is its own user-data-dir; the default
+/// profile's is `db_path`'s `…\Cursor` (three levels up from
+/// `…\Cursor\User\globalStorage\state.vscdb`). `Local State` sits directly in
+/// it (`%APPDATA%\Cursor\Local State` by default).
+#[cfg(windows)]
+fn local_state_path(target: &Target<'_>, slot: &Slot) -> Option<PathBuf> {
+    let user_data_dir = match &slot.root {
+        Some(root) => root.clone(),
+        None => target
+            .db_path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)?
+            .to_path_buf(),
+    };
+    Some(user_data_dir.join("Local State"))
+}
+
+/// Open one profile's sealed token (S3b item 1). Order: the decoded blob's
+/// version gate (non-`v10` is `token_sealed_unsupported`, no I/O); the consent
+/// check, immediately before `Local State` is opened (C2); the key load (the
+/// only `Local State`/DPAPI read); the AES-GCM decrypt; the plaintext wiped on
+/// every path, UTF-8 failure included (C8). Windows only; `stored_token` never
+/// yields `Sealed` elsewhere.
+#[cfg(windows)]
+fn open_sealed(blob: &[u8], target: &Target<'_>, slot: &Slot) -> Result<String, Stop> {
+    let refuse = Stop::error;
+    if !blob.starts_with(b"v10") {
+        return Err(refuse("token_sealed_unsupported"));
+    }
+    // C2: read consent here, not at round start; a withdrawal before this
+    // point stops the read, and `Local State` is not opened.
+    if !(target.consent)() {
+        return Err(refuse("keychain_consent"));
+    }
+    let local_state = local_state_path(target, slot).ok_or(refuse("token_sealed_unreadable"))?;
+    let key = (target.load_seal_key)(&local_state).map_err(|_| refuse("token_sealed_unreadable"))?;
+    let mut plaintext = key.decrypt(blob).map_err(|_| refuse("token_sealed_unreadable"))?;
+    drop(key); // SafeStorageKey wipes the key on drop (C8).
+    let token = std::str::from_utf8(&plaintext).ok().map(str::to_owned);
+    // C8: the decrypt output is wiped whether it was valid UTF-8 or not; the
+    // owned copy that becomes the cookie is the one unavoidable residual.
+    crate::win_safe_storage::wipe(&mut plaintext);
+    token.ok_or(refuse("token_sealed_unreadable"))
+}
+
+#[cfg(not(windows))]
+fn open_sealed(_blob: &[u8], target: &Target<'_>, _slot: &Slot) -> Result<String, Stop> {
+    // No safeStorage reader off Windows. Touch the seams so they are not dead
+    // fields on the macOS-host test build; neither is consulted here.
+    let _ = (&target.consent, target.load_seal_key);
+    Err(Stop::error("token_sealed_unsupported"))
 }
 
 fn now_secs() -> f64 {
@@ -1672,7 +1788,7 @@ async fn run(
         None => cursor_desktop::read_login_default(target.db_path),
         Some(root) => cursor_desktop::read_login_added(root, target.drive_type),
     };
-    let login = match read {
+    let mut login = match read {
         Ok(Some(login)) => login,
         Ok(None) => return stopped(Stop::new(State::NotSignedIn, None)),
         Err(reason) => return Outcome::refused(Stop::error(reason)),
@@ -1680,6 +1796,21 @@ async fn run(
     #[cfg(test)]
     if PANIC_AFTER_LOGIN.with(std::cell::Cell::get) {
         panic!("injected after the login was read");
+    }
+    #[cfg(test)]
+    run_after_login_hook();
+    // A sealed token is opened before anything reads it; a plaintext one is
+    // used as stored, with no consent lookup and no key load (Design 1). The
+    // classification never decrypts (C1).
+    match cursor_desktop::stored_token(&login.access_token) {
+        cursor_desktop::StoredToken::Plain => {}
+        cursor_desktop::StoredToken::Sealed(blob) => match open_sealed(&blob, target, slot) {
+            Ok(token) => login.access_token = token,
+            Err(stop) => return Outcome::refused(stop),
+        },
+        cursor_desktop::StoredToken::Refused(reason) => {
+            return Outcome::refused(Stop::error(reason))
+        }
     }
     let (user, exp) = match token_user(&login) {
         Ok(found) => found,
@@ -1844,6 +1975,8 @@ pub(crate) fn sync_now(explicit: bool) -> (serde_json::Value, bool) {
             https_only: true,
             file_stem: &stem,
             drive_type: &cursor_desktop::drive_type,
+            consent: &|| crate::keychain_consent::allowed("cursor"),
+            load_seal_key: &load_seal_key,
         },
         &config,
         None,
@@ -2055,6 +2188,34 @@ thread_local! {
 thread_local! {
     /// WB9: a panic while a login is held, to check what the envelope carries.
     static PANIC_AFTER_LOGIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Runs between the login read and the sealed-token open, on this thread,
+    /// so a test can withdraw consent "mid-round": correct code reads consent
+    /// only inside `open_sealed`, after this fires (C2 mutation test).
+    static AFTER_LOGIN_HOOK: std::cell::Cell<Option<*const (dyn Fn() + 'static)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn run_after_login_hook() {
+    if let Some(hook) = AFTER_LOGIN_HOOK.with(std::cell::Cell::get) {
+        // SAFETY: set only by `with_after_login`, which clears it before the
+        // hook it points to goes out of scope.
+        unsafe { (*hook)() }
+    }
+}
+
+/// Run `hook` between the login read and the sealed-token open, on this
+/// thread, for the duration of `body`.
+#[cfg(test)]
+pub(crate) fn with_after_login<R>(hook: &dyn Fn(), body: impl FnOnce() -> R) -> R {
+    let pointer: *const (dyn Fn() + '_) = hook;
+    // SAFETY: only the lifetime is erased; the pointer is cleared below,
+    // before `hook` can go out of scope (a panic in `body` ends the test).
+    let pointer: *const (dyn Fn() + 'static) = unsafe { std::mem::transmute(pointer) };
+    AFTER_LOGIN_HOOK.with(|cell| cell.set(Some(pointer)));
+    let result = body();
+    AFTER_LOGIN_HOOK.with(|cell| cell.set(None));
+    result
 }
 
 #[cfg(all(test, windows))]

@@ -11,8 +11,13 @@ internal static class AppSettings
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "TokenBar", "settings.json"));
 
+    /// <summary>The one composer that owns both credential-read answers
+    /// (Grok Bot and Cursor), so each installs one composed core payload
+    /// (C3).</summary>
+    public static KeychainConsentComposer KeychainConsent { get; } =
+        new(Store, KeychainConsentComposer.NativeSetter);
+
     /// <summary>The Grok Bot consent answer over <see cref="Store"/>, wired to
-    /// the core's registry.</summary>
-    public static GrokBotConsent GrokBotConsent { get; } =
-        new(Store, GrokBotConsent.NativeSetter);
+    /// the core's registry through the shared composer.</summary>
+    public static GrokBotConsent GrokBotConsent { get; } = new(Store, KeychainConsent);
 }

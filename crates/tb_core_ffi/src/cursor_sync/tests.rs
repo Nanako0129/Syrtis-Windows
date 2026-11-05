@@ -245,7 +245,9 @@ fn expected_file(dir: &Path) -> PathBuf {
 }
 
 /// The test target: a local server, the fixed key, the real drive-type
-/// query (fixtures live on the system drive, a fixed one).
+/// query (fixtures live on the system drive, a fixed one). Consent defaults to
+/// granted and the key loader to one that must never run — a plaintext test
+/// touches neither; sealed tests build their own with `sealed_target`.
 fn target<'a>(db: &'a Path, url: &'a str) -> Target<'a> {
     Target {
         db_path: db,
@@ -253,7 +255,18 @@ fn target<'a>(db: &'a Path, url: &'a str) -> Target<'a> {
         https_only: false,
         file_stem: &stem,
         drive_type: &cursor_desktop::drive_type,
+        consent: &allow_consent,
+        load_seal_key: &unexpected_seal_key,
     }
+}
+
+fn allow_consent() -> bool {
+    true
+}
+
+/// The default loader: a plaintext test must never reach a key load.
+fn unexpected_seal_key(_: &Path) -> Result<Box<dyn SealKey>, ()> {
+    panic!("a key load happened where no sealed token was expected");
 }
 
 /// One default-profile walk into `dir`.
@@ -4324,4 +4337,279 @@ fn token_user_accepts_and_rejects_as_before_through_the_shared_check() {
         token_user(&login(token, Some(OTHER_USER))).map(|(user, _)| user),
         Err(Stop::error("account_mismatch"))
     );
+}
+
+// --- sealed Cursor sign-in (S3b) ------------------------------------------
+//
+// Fixture ciphertext generated independently of the crate by
+// `gen_cursor_seal_fixture.py` (Python `cryptography`, AES-256-GCM, no AAD) on
+// the Mac, which has no DPAPI. The key is fed straight into the loader seam
+// (`key_from_raw`, no DPAPI, no Local State); the real CNG `AesGcm` still
+// decrypts, so this whole module is Windows only. The plaintext is a static
+// three-segment JWT twin (far-future `exp`, `sub` = USER).
+mod seal {
+    pub(crate) const SEAL_KEY: [u8; 32] = [
+        0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce,
+        0xcf, 0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd,
+        0xde, 0xdf,
+    ];
+    pub(crate) const SEAL_JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhdXRoMHx1c2VyX0NBTkFSWXVzZXIwMTIzNDU2Nzg5QUIiLCJ0eXBlIjoic2Vzc2lvbiIsImV4cCI6NDEwMjQ0NDgwMH0.CANARYsignatureXYZ";
+    pub(crate) const SEALED_V10_B64: &str = "djEwEBESExQVFhcYGRob8y7LMdbbURFTHfSpPmcsynvhlGKbC2JZQpeUYfF7FxHg8691IiNZby8jRSyfn6mEHjZ4GN8uqEuqMJ++cpZsz/aq9Wo5wZTO7dtzbn8osksl8kdVuz1t6WxA6b4t+eh2Ch5eUWit9b7T2vZrX8uKiowSTT0WTMYmqNrtgBwwLRFMrjReMmF0eHJs/s/8k263WIcFipqHnrZYhK6tFfyL";
+    pub(crate) const SEALED_V11_B64: &str = "djExEBESExQVFhcYGRob8y7LMdbbURFTHfSpPmcsynvhlGKbC2JZQpeUYfF7FxHg8691IiNZby8jRSyfn6mEHjZ4GN8uqEuqMJ++cpZsz/aq9Wo5wZTO7dtzbn8osksl8kdVuz1t6WxA6b4t+eh2Ch5eUWit9b7T2vZrX8uKiowSTT0WTMYmqNrtgBwwLRFMrjReMmF0eHJs/s/8k263WIcFipqHnrZYhK6tFfyL";
+    pub(crate) const SEALED_V20_B64: &str = "djIwEBESExQVFhcYGRob8y7LMdbbURFTHfSpPmcsynvhlGKbC2JZQpeUYfF7FxHg8691IiNZby8jRSyfn6mEHjZ4GN8uqEuqMJ++cpZsz/aq9Wo5wZTO7dtzbn8osksl8kdVuz1t6WxA6b4t+eh2Ch5eUWit9b7T2vZrX8uKiowSTT0WTMYmqNrtgBwwLRFMrjReMmF0eHJs/s/8k263WIcFipqHnrZYhK6tFfyL";
+    pub(crate) const SEALED_TRUNCATED_B64: &str = "djEwEBESExQVFhcYGRob8y7LMdbbURFTHfSpPmcsynvhlGKbC2JZQpeUYfF7FxHg8691IiNZby8jRSyfn6mEHjZ4GN8uqEuqMJ++cpZsz/aq9Wo5wZTO7dtzbn8osksl8kdVuz1t6WxA6b4t+eh2Ch5eUWit9b7T2vZrX8uKiowSTT0WTMYmqNrtgBwwLRFMrjReMmF0eHJs/s/8k263WIcFipqHng==";
+
+    /// The full stored `cursorAuth/accessToken` value for one base64 payload.
+    pub(crate) fn sealed_token(payload_b64: &str) -> String {
+        format!("cursor-safe-storage:v1:{payload_b64}")
+    }
+}
+
+/// A key loader that records every `Local State` path it is asked for and
+/// counts its calls, returning the fixture key straight from raw bytes.
+struct LoaderSpy {
+    calls: std::sync::Arc<AtomicU64>,
+    paths: std::sync::Arc<Mutex<Vec<PathBuf>>>,
+}
+
+impl LoaderSpy {
+    fn new() -> Self {
+        Self {
+            calls: std::sync::Arc::new(AtomicU64::new(0)),
+            paths: std::sync::Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn loader(&self) -> impl Fn(&Path) -> Result<Box<dyn SealKey>, ()> + '_ {
+        move |local_state| {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.paths.lock().unwrap().push(local_state.to_path_buf());
+            Ok(Box::new(crate::win_safe_storage::test_support::key_from_raw(seal::SEAL_KEY))
+                as Box<dyn SealKey>)
+        }
+    }
+
+    fn calls(&self) -> u64 {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+/// A default-profile `state.vscdb` at the real depth
+/// (`<base>\Cursor\User\globalStorage\state.vscdb`), so `local_state_path`
+/// resolves to `<base>\Cursor\Local State`.
+fn nested_signed_in_db(base: &Path, token: &str) -> PathBuf {
+    let gs = base.join("Cursor").join("User").join("globalStorage");
+    std::fs::create_dir_all(&gs).unwrap();
+    signed_in_db(&gs, token)
+}
+
+fn sealed_cookie_from(seen: &Arc<Mutex<Vec<Seen>>>) -> Option<String> {
+    let seen = seen.lock().unwrap();
+    seen.first().and_then(|r| header(&r.head, "cookie"))
+}
+
+/// Run one default-profile sync with an injected consent closure and key
+/// loader (the sealed-token seam).
+fn run_sealed(
+    db: &Path,
+    dir: &Path,
+    url: &str,
+    consent: &dyn Fn() -> bool,
+    loader: &LoadSealKey<'_>,
+    root: Option<PathBuf>,
+) -> Outcome {
+    let slot = Slot {
+        id: DEFAULT_PROFILE_ID.to_string(),
+        root,
+        dir: Some(dir.to_path_buf()),
+    };
+    let target = Target {
+        db_path: db,
+        url,
+        https_only: false,
+        file_stem: &stem,
+        drive_type: &cursor_desktop::drive_type,
+        consent,
+        load_seal_key: loader,
+    };
+    crate::RUNTIME.block_on(run(&target, &slot, dir, limits(), &|| true, &mut |_, _| None))
+}
+
+/// Acceptance 1: sealed + consent decrypts to the SAME cookie a plaintext twin
+/// of the JWT would send.
+/// Mutation: cursor_sync.rs `open_sealed` `Ok(token) => login.access_token = token`
+/// -> `Ok(_token) => {}` (drop the decrypted token, keep the sealed one) makes
+/// `token_user` see `cursor-safe-storage:v1:…` and refuse `token_unreadable`.
+#[test]
+fn a_sealed_token_decrypts_to_the_same_cookie_as_its_plaintext_twin() {
+    let tmp = TempDir::new();
+    let base = tmp.path();
+    let db = nested_signed_in_db(base, &seal::sealed_token(seal::SEALED_V10_B64));
+    let dir = base.join("sync");
+    let spy = LoaderSpy::new();
+    let (url, seen) = serve(vec![json_ok(&page(1, &["a"]))]);
+    let outcome = run_sealed(&db, &dir, &url, &|| true, &spy.loader(), None);
+    assert_eq!(outcome.stop.state, State::Ok, "{:?}", outcome.stop.reason);
+    assert_eq!(spy.calls(), 1, "the key is loaded once");
+    let sealed_cookie = sealed_cookie_from(&seen);
+    assert_eq!(
+        sealed_cookie.as_deref(),
+        Some(format!("WorkosCursorSessionToken={USER}%3A%3A{}", seal::SEAL_JWT).as_str()),
+        "the sealed path sent the decrypted JWT, keyed by its own sub"
+    );
+
+    // The plaintext twin: the same JWT stored unsealed sends the same cookie.
+    let twin = TempDir::new();
+    let twin_db = signed_in_db(twin.path(), seal::SEAL_JWT);
+    let twin_dir = twin.path().join("sync");
+    let (twin_url, twin_seen) = serve(vec![json_ok(&page(1, &["a"]))]);
+    let twin_outcome = run_with(&twin_db, &twin_dir, &twin_url, limits(), &|| true);
+    assert_eq!(twin_outcome.stop.state, State::Ok);
+    assert_eq!(sealed_cookie, sealed_cookie_from(&twin_seen));
+}
+
+/// Acceptance 1: a plaintext token syncs and the key source is never touched
+/// even when consent is denied (Design 1: plaintext never consults consent).
+/// Mutation: cursor_sync.rs `run` `StoredToken::Plain => {}`
+/// -> `StoredToken::Plain => { if !(target.consent)() { return Outcome::refused(Stop::error("keychain_consent")); } }`
+/// makes this plaintext sync refuse.
+#[test]
+fn a_plaintext_token_syncs_without_consent_or_a_key_load() {
+    let f = fixture(); // a plaintext JWT
+    let (url, _seen) = serve(vec![json_ok(&page(1, &["a"]))]);
+    // consent denied and a loader that panics if reached.
+    let outcome = run_sealed(&f.db, &f.dir, &url, &|| false, &unexpected_seal_key, None);
+    assert_eq!(outcome.stop.state, State::Ok, "{:?}", outcome.stop.reason);
+}
+
+/// Acceptance 1: a sealed token with consent denied refuses `keychain_consent`
+/// and never loads the key (the gate precedes the loader, C2/C1).
+/// Mutation: `open_sealed` move the consent check to after the key load
+/// (`let key = …; if !(target.consent)() { … }`) makes the loader run once.
+#[test]
+fn a_sealed_token_without_consent_refuses_and_loads_no_key() {
+    let tmp = TempDir::new();
+    let base = tmp.path();
+    let db = nested_signed_in_db(base, &seal::sealed_token(seal::SEALED_V10_B64));
+    let dir = base.join("sync");
+    let spy = LoaderSpy::new();
+    let (url, seen) = serve(vec![json_ok(&page(1, &["a"]))]);
+    let outcome = run_sealed(&db, &dir, &url, &|| false, &spy.loader(), None);
+    assert!(outcome.refused);
+    assert_eq!(outcome.stop.reason, Some("keychain_consent"));
+    assert_eq!(spy.calls(), 0, "Local State is not opened without consent");
+    assert!(seen.lock().unwrap().is_empty(), "nothing was sent");
+}
+
+/// Acceptance 1: every malformed sealed token yields a fixed reason and no
+/// fixture fragment appears in the reason. v11/v20 are unsupported; a wrong
+/// key and a truncated blob are unreadable; bad base64 and a v2 envelope are
+/// refused at classification.
+/// Mutation: `open_sealed` drop the version gate
+/// (`if !blob.starts_with(b"v10") { … }` removed) makes v11/v20 reach the
+/// decrypt and report `token_sealed_unreadable`, not `token_sealed_unsupported`.
+#[test]
+fn malformed_sealed_tokens_map_to_fixed_reasons_without_leaking() {
+    let run_case = |token: &str, consent: &dyn Fn() -> bool, loader: &LoadSealKey<'_>| {
+        let tmp = TempDir::new();
+        let db = nested_signed_in_db(tmp.path(), token);
+        let dir = tmp.path().join("sync");
+        let (url, _seen) = serve(vec![json_ok(&page(1, &["a"]))]);
+        let outcome = run_sealed(&db, &dir, &url, consent, loader, None);
+        (outcome.stop.state, outcome.stop.reason)
+    };
+
+    // v11 / v20: unsupported, after consent, no decrypt success. The key is
+    // loaded (version gate is before consent? no — before load), so use a spy.
+    for payload in [seal::SEALED_V11_B64, seal::SEALED_V20_B64] {
+        let spy = LoaderSpy::new();
+        let (state, reason) =
+            run_case(&seal::sealed_token(payload), &|| true, &spy.loader());
+        assert_eq!(state, State::Error);
+        assert_eq!(reason, Some("token_sealed_unsupported"), "payload {payload}");
+        assert_eq!(spy.calls(), 0, "an unsupported version loads no key");
+    }
+
+    // A wrong key: the fixture decrypts only with SEAL_KEY; a different key
+    // fails AES-GCM -> unreadable.
+    let wrong = |_: &Path| -> Result<Box<dyn SealKey>, ()> {
+        Ok(Box::new(crate::win_safe_storage::test_support::key_from_raw([0x00; 32])))
+    };
+    let (_, reason) = run_case(&seal::sealed_token(seal::SEALED_V10_B64), &|| true, &wrong);
+    assert_eq!(reason, Some("token_sealed_unreadable"), "wrong key");
+
+    // A truncated blob: v10 passes the gate, the tag is short -> unreadable.
+    let spy = LoaderSpy::new();
+    let (_, reason) =
+        run_case(&seal::sealed_token(seal::SEALED_TRUNCATED_B64), &|| true, &spy.loader());
+    assert_eq!(reason, Some("token_sealed_unreadable"), "truncated");
+
+    // Bad base64 and a non-v1 envelope: refused at classification, no key,
+    // no consent needed.
+    for (token, code) in [
+        ("cursor-safe-storage:v1:!!!!", "token_sealed_unreadable"),
+        ("cursor-safe-storage:v2:AAAA", "token_sealed_unsupported"),
+    ] {
+        let (_, reason) = run_case(token, &|| true, &unexpected_seal_key);
+        assert_eq!(reason, Some(code), "{token}");
+    }
+
+    // No reason code carries any fixture fragment.
+    for code in ["token_sealed_unsupported", "token_sealed_unreadable", "keychain_consent"] {
+        assert!(!seal::SEAL_JWT.contains(code));
+        assert!(!seal::SEALED_V10_B64.contains(code));
+    }
+}
+
+/// Acceptance 1 (C2): consent withdrawn between the login read and the key
+/// read -> `keychain_consent`, 0 loader calls. The after-login hook flips the
+/// answer to "no" after the DB is read; correct code reads consent only inside
+/// `open_sealed` (after the hook), so it sees the withdrawal.
+/// Mutation: `open_sealed` read consent into a `bool` at the top of `run`
+/// (before `read_login`) and pass it in — the snapshot is taken before the
+/// hook flips it, so the loader runs once and the sync is not refused.
+#[test]
+fn consent_withdrawn_after_the_login_read_refuses_and_loads_no_key() {
+    let tmp = TempDir::new();
+    let base = tmp.path();
+    let db = nested_signed_in_db(base, &seal::sealed_token(seal::SEALED_V10_B64));
+    let dir = base.join("sync");
+    let spy = LoaderSpy::new();
+    let (url, seen) = serve(vec![json_ok(&page(1, &["a"]))]);
+    let withdrawn = std::cell::Cell::new(false);
+    let consent = || !withdrawn.get();
+    let flip = || withdrawn.set(true);
+    let outcome = with_after_login(&flip, || {
+        run_sealed(&db, &dir, &url, &consent, &spy.loader(), None)
+    });
+    assert!(outcome.refused);
+    assert_eq!(outcome.stop.reason, Some("keychain_consent"));
+    assert_eq!(spy.calls(), 0, "a round-start snapshot would have loaded the key");
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+/// Acceptance 1 (C6): an added profile's sealed token is opened with the key
+/// from THAT profile's user-data-dir `Local State`, not the default's.
+/// Mutation: cursor_sync.rs `local_state_path` `Some(root) => root.clone()`
+/// -> `Some(_root) => target.db_path...` (ignore the profile root) makes the
+/// loader see the default db's Local State path.
+#[test]
+fn an_added_profile_reads_its_own_user_data_dir_local_state() {
+    let tmp = TempDir::new();
+    // The added profile's root on a fixed drive (the system temp dir is one).
+    let root = tmp.path().join("profileA");
+    let gs = cursor_desktop::profile_db_path(&root);
+    std::fs::create_dir_all(gs.parent().unwrap()).unwrap();
+    let _db = signed_in_db(gs.parent().unwrap(), &seal::sealed_token(seal::SEALED_V10_B64));
+    let dir = tmp.path().join("sync");
+    let spy = LoaderSpy::new();
+    let (url, _seen) = serve(vec![json_ok(&page(1, &["a"]))]);
+    // db_path is the default one (unused for an added profile); the root drives
+    // the Local State path.
+    let default_db = tmp.path().join("Cursor").join("User").join("globalStorage").join("state.vscdb");
+    let outcome = run_sealed(&default_db, &dir, &url, &|| true, &spy.loader(), Some(root.clone()));
+    assert_eq!(outcome.stop.state, State::Ok, "{:?}", outcome.stop.reason);
+    assert_eq!(spy.calls(), 1);
+    let asked = spy.paths.lock().unwrap().clone();
+    assert_eq!(asked, vec![root.join("Local State")], "the profile's own Local State");
 }

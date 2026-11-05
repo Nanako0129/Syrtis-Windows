@@ -234,6 +234,15 @@ pub(crate) mod test_support {
     use super::*;
     use windows_sys::Win32::Security::Cryptography::{BCryptEncrypt, CryptProtectData};
 
+    /// A key built straight from 32 raw bytes, with no DPAPI and no
+    /// `Local State`: the DPAPI-behind-a-seam path for `cursor_sync`'s tests,
+    /// which feed a key generated off-device (the Mac has no DPAPI) and
+    /// decrypt a fixture made independently of this crate. The real
+    /// `AesGcm` (CNG) still runs, so these tests are Windows only.
+    pub(crate) fn key_from_raw(raw: [u8; KEY_LEN]) -> SafeStorageKey {
+        SafeStorageKey(raw)
+    }
+
     /// CryptProtectData(bytes) as the current user.
     pub(crate) fn dpapi_protect(bytes: &[u8]) -> Vec<u8> {
         let input = CRYPT_INTEGER_BLOB {

@@ -1136,6 +1136,26 @@ public class CursorSyncTests
         Assert.Equal(CursorSync.Copy.Offline, CursorSync.StatusLine("offline", null, reason: "token_unreadable"));
     }
 
+    /// <summary>S3b: a sealed sign-in with no "cursor" grant
+    /// (<c>keychain_consent</c>) shows the consent line, not the generic
+    /// error-with-reason line (the Allow control sits beside it), even though
+    /// the code has the lowercase shape the reason-code branch would match.
+    /// Mutation: drop the <c>keychain_consent</c> branch in
+    /// <see cref="CursorSync.StatusLine"/> -> the line reads
+    /// "Cursor usage couldn't be synced (keychain_consent)…".</summary>
+    [Fact]
+    public void AKeychainConsentReasonShowsTheConsentLine()
+    {
+        Assert.Equal(
+            CursorSync.Copy.KeychainConsentLine,
+            CursorSync.StatusLine("error", null, reason: "keychain_consent"));
+        Assert.True(CursorSync.NeedsKeychainAllow("error", "keychain_consent"));
+        // Not any other error, and not another state.
+        Assert.False(CursorSync.NeedsKeychainAllow("error", "token_sealed_unreadable"));
+        Assert.False(CursorSync.NeedsKeychainAllow("error", null));
+        Assert.False(CursorSync.NeedsKeychainAllow("ok", "keychain_consent"));
+    }
+
     /// <summary>#547: the controller keeps the round's reason for the status
     /// line, and a round that threw has none.</summary>
     [Fact]
@@ -1191,6 +1211,15 @@ public class CursorSyncTests
         ["Cursor sync couldn't be set up, so nothing is being synced."] = "無法設定 Cursor 同步，目前不會同步任何用量。",
         ["Add a folder you start Cursor with using --user-data-dir to sync it too (Syrtis keeps the folder path in its settings); each profile's sign-in is handled as described above. All profiles add up to one Cursor total, and an account signed in to several profiles counts once. Removing a profile deletes its downloaded usage the next time Syrtis can."] =
             "加入用 --user-data-dir 啟動 Cursor 的資料夾（資料夾路徑會儲存在 Syrtis 設定中），就能一起同步；每個設定檔的登入資訊都照上一段的方式處理。所有設定檔合計成一個 Cursor 總量，同一個帳號只算一次。移除設定檔後，Syrtis 會在下次能處理時刪除它已下載的用量。",
+        // S3b: DRAFT encrypted-sign-in consent copy (C4), pending maintainer
+        // approval before merge.
+        ["Cursor stores its sign-in encrypted. Syrtis needs your permission to read it."] =
+            "Cursor 把登入資訊加密儲存，Syrtis 需要你的授權才能讀取。",
+        ["Allow reading Cursor's encrypted sign-in…"] = "允許讀取 Cursor 的加密登入…",
+        ["Cursor 3.27 and later can store its sign-in encrypted. To read it, Syrtis unlocks the key Cursor keeps in its \"Local State\" file on this PC; Windows does not ask separately, so this is the only time you are asked. That key can decrypt everything Cursor stores encrypted, but Syrtis uses it only to read your Cursor sign-in, keeps it in memory for that read alone, and never saves or logs it. The sign-in is sent only to Cursor's usage service (cursor.com). Turning on Cursor sync does not grant this. Withdraw stops Syrtis reading Cursor's encrypted sign-in; if Cursor stores its sign-in unencrypted, Syrtis still reads that and Withdraw does not change it."] =
+            "Cursor 3.27 以後的版本可能會把登入資訊加密儲存。要讀取它，Syrtis 會解開 Cursor 存在這台電腦「Local State」檔案裡的金鑰；Windows 不會另外詢問，所以這是唯一一次向你徵詢。那把金鑰能解開 Cursor 所有加密儲存的資料，但 Syrtis 只用它來讀取你的 Cursor 登入，而且只在那次讀取時留在記憶體中，不會儲存或記錄。登入資訊只會送到 Cursor 的用量服務（cursor.com）。開啟 Cursor 同步並不代表授權這件事。撤回後，Syrtis 就不再讀取 Cursor 的加密登入；如果 Cursor 以未加密的方式儲存登入，Syrtis 仍會讀取，撤回不會改變這一點。",
+        ["Withdraw"] = "撤回",
+        ["consent.action.allow"] = "允許",
     };
 
     private static Dictionary<string, string> Catalog(string tag) =>
