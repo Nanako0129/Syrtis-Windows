@@ -313,9 +313,8 @@ public sealed class AntigravityAutoCapture
                     // attempt, as ManualCapture: the key is the account agy
                     // was signed into when the core read it, and a sign-in
                     // that landed meanwhile would label the next login's card
-                    // with this one's email. Stricter than macOS
-                    // (AntigravityAccounts.swift `poll` binds to the pre-attempt
-                    // marker unconditionally).
+                    // with this one's email. macOS binds the same
+                    // way (only when the re-read marker is unchanged).
                     // - Moved (a different marker): left unbound; the next
                     //   fetch sees the new marker and attempts again.
                     // - Unreadable (the re-read failed or timed out): left

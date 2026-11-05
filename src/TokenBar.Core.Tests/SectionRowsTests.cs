@@ -10,7 +10,9 @@ public class SectionRowsTests
     [Fact]
     public void KeysAreStableAndUniqueEvenForAnExactDuplicate()
     {
-        Assert.Equal([@"D:\a", @"D:\b", @"D:\a#1", @"D:\a#2"], SectionRows.Keys([@"D:\a", @"D:\b", @"D:\a", @"D:\a"]));
+        Assert.Equal([@"D:\a", @"D:\b", "D:\\a\01", "D:\\a\02"], SectionRows.Keys([@"D:\a", @"D:\b", @"D:\a", @"D:\a"]));
+        // A real folder named like a suffixed key does not collide with it.
+        Assert.Equal(3, SectionRows.Keys([@"D:\a", @"D:\a", @"D:\a#1"]).Distinct().Count());
         Assert.Equal([@"D:\b"], SectionRows.Keys([@"D:\b"]));
     }
 

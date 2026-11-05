@@ -26,7 +26,10 @@ public sealed partial class SettingsWindow
 
     private StackPanel BuildClaudeAccounts(SettingsStore store)
     {
+        // Rebuild() makes a new body each time (every Present and some store
+        // keys), so rows kept from the old one are parented to it: start over.
         _claudeAccountsBody = new StackPanel { Spacing = 6 };
+        _claudeRows.Clear();
         _claudeAdd = new Button
         {
             Content = ClaudeAccountsCopy.Add.Localized(),

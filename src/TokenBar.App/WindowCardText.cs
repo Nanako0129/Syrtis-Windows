@@ -513,7 +513,7 @@ public static class WindowCardText
 
     /// <summary>Which account's card the per-client window card shows: the
     /// primary when it is live; otherwise the first non-primary card of the
-    /// client (payload order) that is; otherwise the primary. A card is live
+    /// client (payload order) that is; otherwise the primary (or, with nothing live and the primary windowless, the first errored account with windows, so its own error shows). A card is live
     /// when it has windows to draw AND no error: the core re-sends last-good
     /// windows beside an error, and selecting such a card would stick on the
     /// blocked card (macOS filters <c>error == nil</c>). Returns the account
@@ -539,8 +539,17 @@ public static class WindowCardText
             return null;
         }
 
-        return cards.FirstOrDefault(a => a.Account.AccountKey is not null && IsLive(a))
-            ?.Account.AccountKey;
+        if (cards.FirstOrDefault(a => a.Account.AccountKey is not null && IsLive(a)) is { } other)
+        {
+            return other.Account.AccountKey;
+        }
+
+        // Nothing is live: the primary's blocked card, unless it has no
+        // windows to show and another account does (its own error, as before
+        // the liveness rule).
+        return cards.Any(a => a.Account.AccountKey is null && a.Windows.Count > 0)
+            ? null
+            : cards.FirstOrDefault(a => a.Account.AccountKey is not null && a.Windows.Count > 0)?.Account.AccountKey;
     }
 
     /// <summary>Windows to draw and no error (see <see cref="WindowCardAccount"/>).</summary>

@@ -284,9 +284,11 @@ public static class AntigravityFetch
 /// <para>
 /// An errored primary is instead replaced by the captured snapshot carrying
 /// <c>currentKey</c>, promoted to the primary slot
-/// (<see cref="PromotedToPrimary"/>), only when the same marker evidence holds
-/// (the errored card carries <c>currentMarker</c>, which only a re-sent
-/// last-good card can: a fresh error card carries none) and that snapshot has
+/// (<see cref="PromotedToPrimary"/>), only when the merge's whole evidence
+/// holds (source <c>agy</c>, or a substituted <c>oauth</c> primary whose
+/// history scope equals the captured card's; fetched under <c>currentMarker</c>,
+/// which only a re-sent last-good card can carry: a fresh error card carries
+/// none) and that snapshot has
 /// windows and no error. Otherwise both cards show and the error stays
 /// visible, as on macOS (an unverified replacement hid agy's real error).
 /// </para>
@@ -329,11 +331,11 @@ public static class AntigravityDedup
         var captured = agents[capturedIndex];
         if (primary.Error is not null)
         {
-            // The same evidence the merge needs: the card was fetched under
-            // agy's current login. An error card the core built fresh carries
-            // no marker, so it stays beside the captured card and shows agy's
-            // real error; only a re-sent last-good card keeps its marker.
-            if (primary.AgyLoginMarker != currentMarker || captured.Error is not null || captured.Windows.Count == 0)
+            // The merge's whole evidence (HasMergeEvidence). An error card the
+            // core built fresh carries no marker, so it stays beside the
+            // captured card and shows agy's real error; only a re-sent
+            // last-good card keeps its marker.
+            if (!HasMergeEvidence(primary, captured, currentMarker) || captured.Error is not null || captured.Windows.Count == 0)
             {
                 return payload;
             }
@@ -343,13 +345,7 @@ public static class AntigravityDedup
             return payload with { Agents = agents };
         }
 
-        var substituted = primary.Source == "oauth";
-        if ((primary.Source != "agy" && !substituted) || primary.AgyLoginMarker != currentMarker)
-        {
-            return payload;
-        }
-
-        if (substituted && (primary.HistoryScope is not { Scope: not null } || primary.HistoryScope != captured.HistoryScope))
+        if (!HasMergeEvidence(primary, captured, currentMarker))
         {
             return payload;
         }
@@ -368,6 +364,22 @@ public static class AntigravityDedup
         agents[primaryIndex] = AdoptingHistory(merged, captured);
         agents.RemoveAt(capturedIndex);
         return payload with { Agents = agents };
+    }
+
+    /// <summary>The evidence that the primary is agy's current account: the agy
+    /// route or the engine's bound substitution (<c>"oauth"</c>), fetched under
+    /// <paramref name="currentMarker"/>, and for a substituted primary a
+    /// history scope equal to the captured card's.</summary>
+    private static bool HasMergeEvidence(AgentUsageSnapshot primary, AgentUsageSnapshot captured, string currentMarker)
+    {
+        var substituted = primary.Source == "oauth";
+        if ((primary.Source != "agy" && !substituted) || primary.AgyLoginMarker != currentMarker)
+        {
+            return false;
+        }
+
+        return !substituted
+            || (primary.HistoryScope is { Scope: not null } && primary.HistoryScope == captured.HistoryScope);
     }
 
     /// <summary><paramref name="captured"/> standing in for an errored primary

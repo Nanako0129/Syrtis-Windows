@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using TokenBar.Core;
+using TokenBar.Interop;
 // TokenBar.Core.Grid collides with the XAML Grid (as in SettingsWindow.cs).
 using Grid = Microsoft.UI.Xaml.Controls.Grid;
 
@@ -26,7 +27,16 @@ public sealed partial class SettingsWindow
 
     private StackPanel BuildAntigravityAccounts(SettingsStore store)
     {
+        // Rebuild() makes a new body each time, so nothing kept from the old
+        // one may be reused: its controls are parented to the old body.
         _antigravityBody = new StackPanel { Spacing = 6 };
+        _antigravityRows.Clear();
+        _agyCapture = null;
+        _agyError = null;
+        _agyToggle = null;
+        _agyPaused = null;
+        _agyToggling = false;
+        _agySyncingToggle = false;
         if (!_antigravitySubscribed && AntigravityAutoCapture.Shared is { } capture)
         {
             // The window is hidden, never closed, so one subscription lives as
@@ -59,7 +69,7 @@ public sealed partial class SettingsWindow
         var toggle = _agyToggle!;
         var busy = capture.Busy;
         var accounts = AntigravityAccounts.Load(store);
-        var keys = accounts.Select(a => a.Key).ToList();
+        var keys = SectionRows.Keys(accounts.Select(a => a.Key));
 
         var focused = _antigravityRows.FirstOrDefault(r => r.Remove.FocusState != FocusState.Unfocused);
         var (move, to) = SectionRows.FocusHandoff([.. _antigravityRows.Select(r => r.Key)], keys, focused?.Key);
@@ -89,7 +99,7 @@ public sealed partial class SettingsWindow
         for (var i = 0; i < accounts.Count; i++)
         {
             var account = accounts[i];
-            var row = _antigravityRows.FirstOrDefault(r => r.Key == account.Key) ?? NewAntigravityRow(capture, account);
+            var row = _antigravityRows.FirstOrDefault(r => r.Key == keys[i]) ?? NewAntigravityRow(capture, keys[i], account);
             row.Label.Text = account.Label;
             row.Remove.IsEnabled = !busy;
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
@@ -121,7 +131,7 @@ public sealed partial class SettingsWindow
         _agyPaused!.Visibility = enabled && capture.Paused ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private AntigravityAccountRow NewAntigravityRow(AntigravityAutoCapture capture, AntigravityAccount account)
+    private AntigravityAccountRow NewAntigravityRow(AntigravityAutoCapture capture, string rowKey, AntigravityAccount account)
     {
         var row = new Grid { ColumnSpacing = 6 };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -141,7 +151,7 @@ public sealed partial class SettingsWindow
         remove.Click += async (_, _) => await capture.Remove(key);
         Grid.SetColumn(remove, 1);
         row.Children.Add(remove);
-        var made = new AntigravityAccountRow(key, label, remove, row);
+        var made = new AntigravityAccountRow(rowKey, label, remove, row);
         _antigravityRows.Add(made);
         return made;
     }

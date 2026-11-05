@@ -135,11 +135,13 @@ public class AntigravityAccountsTests
     /// carries neither the agy source nor a login marker; the core's re-sent
     /// last-good card (<paramref name="lastGood"/>) keeps the marker it was
     /// fetched under (<paramref name="marker"/>, null = none).</summary>
-    private static AgentUsageSnapshot ErroredPrimary(bool lastGood = false, string? marker = null) => new(
+    private static AgentUsageSnapshot ErroredPrimary(
+        bool lastGood = false, string? marker = null, string? scope = "scope-a") => new(
         "antigravity", "oauth", "2026-10-04T00:00:00Z",
         lastGood ? [Window("antigravity.weekly", 60)] : [],
         Identity: lastGood ? new AgentIdentity(Plan: "Free") : null, // remote_identity(plan): no email
-        Error: "timeout", HistoryScope: new AccountScopeStatus(Error: "noTrustedEvidence"),
+        Error: "timeout",
+        HistoryScope: scope is null ? new AccountScopeStatus(Error: "noTrustedEvidence") : new AccountScopeStatus(Scope: scope),
         AgyLoginMarker: marker);
 
     private static AgentUsageSnapshot Captured(
@@ -357,6 +359,19 @@ public class AntigravityAccountsTests
         Assert.Same(payload, AntigravityDedup.Apply(payload, KeyA, "M1"));
     }
 
+    /// <summary>The errored branch needs the merge's whole evidence: a
+    /// substituted primary whose history scope differs from the captured
+    /// card's (or has none) is not agy's account.</summary>
+    [Theory]
+    [InlineData("scope-other")]
+    [InlineData(null)]
+    public void AnErroredSubstitutedPrimaryWithAnotherScopeStaysBesideTheCapturedCard(string? scope)
+    {
+        var payload = Payload(ErroredPrimary(lastGood: true, marker: "M1", scope: scope), Captured());
+
+        Assert.Same(payload, AntigravityDedup.Apply(payload, KeyA, "M1"));
+    }
+
     public static TheoryData<string> StandInControls() => new()
     {
         "capturedError", "capturedNoWindows", "noCurrentKey", "noCapturedSnapshot", "markerPresent",
@@ -564,11 +579,11 @@ public class AntigravityAccountsTests
     /// (its binding was cleared), and here agy fails. The background re-capture
     /// may rebind the account, under the new marker, before the fetch returns
     /// (dedup reads the binding after the fetch). Rebound in time (the re-capture finished
-    /// during agy's run, up to its 35 s timeout): the binding is
-    /// current. Not yet: the error card stays, with the captured card beside
+    /// during agy's run, up to its 35 s timeout): one card, the captured
+    /// account. Not yet: the error card stays, with the captured card beside
     /// it (no account is verified for the new marker; limits-card shared spec
-    /// §2.3). Either way the errored card is not replaced (MA-7): it carries no
-    /// marker evidence.</summary>
+    /// §2.3). The errored card here is a last-good one carrying the new
+    /// marker, so the promotion path stays reachable.</summary>
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -597,7 +612,9 @@ public class AntigravityAccountsTests
                     SpinWait.SpinUntil(() => capture.Current == (KeyA, "M2"), TimeSpan.FromSeconds(10));
                 }
 
-                return Payload(ErroredPrimary(), Captured());
+                // A re-sent last-good card carrying the new login's marker
+                // is the one errored card the stand-in may replace.
+                return Payload(ErroredPrimary(lastGood: true, marker: "M2"), Captured());
             },
             null,
             capture,
@@ -605,11 +622,17 @@ public class AntigravityAccountsTests
         captureGate.Set();
 
         Assert.Equal("{\"key\":null}", bound); // this poll ran agy
-        // The errored card carries no marker for the new login either way
-        // (MA-7), so it is never replaced: agy's error stays beside the
-        // captured card.
-        Assert.Equal(2, payload.Agents.Count);
-        Assert.Equal("timeout", payload.Agents[0].Error);
+        if (reboundInTime)
+        {
+            var card = Assert.Single(payload.Agents);
+            Assert.Null(card.Error);
+            Assert.Equal(KeyA, card.HistoryAccountKey);
+        }
+        else
+        {
+            Assert.Equal(2, payload.Agents.Count);
+            Assert.Equal("timeout", payload.Agents[0].Error);
+        }
     }
 
     [Fact]

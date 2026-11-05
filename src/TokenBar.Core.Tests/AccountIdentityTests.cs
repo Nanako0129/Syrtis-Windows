@@ -425,6 +425,17 @@ public class AccountIdentityTests
             Card(Desktop, "S", null, Window("session.v1", "Session", 30, "session.v1")));
         Assert.Equal(Desktop, WindowCardText.WindowCardAccount(erroredPrimary, "claude"));
 
+        // Nothing live, primary has no windows: the errored account's own card.
+        var onlyErrored = Payload(
+            Card(null, "P", error: "x"),
+            Card(Desktop, "S", "expired", Window("session.v1", "Session", 30, "session.v1")));
+        Assert.Equal(Desktop, WindowCardText.WindowCardAccount(onlyErrored, "claude"));
+        // Nothing live, primary has windows: the primary's blocked card.
+        var bothErrored = Payload(
+            Card(null, "P", "x", Window("session.v1", "Session", 80, "session.v1")),
+            Card(Desktop, "S", "expired", Window("session.v1", "Session", 30, "session.v1")));
+        Assert.Null(WindowCardText.WindowCardAccount(bothErrored, "claude"));
+
         // Control: the same stored choice, healthy => honoured.
         Assert.Equal(Desktop, WindowCardText.WindowCardAccount(TwoAccounts(), "claude", Desktop));
     }

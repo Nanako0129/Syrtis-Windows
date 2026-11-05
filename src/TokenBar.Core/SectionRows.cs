@@ -8,7 +8,7 @@ namespace TokenBar.Core;
 public static class SectionRows
 {
     /// <summary>One unique key per value, in order: a value seen again gets a
-    /// <c>#n</c> suffix (a saved list can hold an exact duplicate, which the
+    /// <c>NUL + n</c> suffix (NUL cannot appear in a path) (a saved list can hold an exact duplicate, which the
     /// registry rejects but the page still shows), so each row keeps the same
     /// key across redraws.</summary>
     public static IReadOnlyList<string> Keys(IEnumerable<string> values)
@@ -19,7 +19,7 @@ public static class SectionRows
         {
             seen.TryGetValue(value, out var n);
             seen[value] = n + 1;
-            keys.Add(n == 0 ? value : $"{value}#{n}");
+            keys.Add(n == 0 ? value : $"{value}\0{n}");
         }
 
         return keys;
