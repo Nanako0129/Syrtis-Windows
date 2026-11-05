@@ -3307,6 +3307,10 @@ pub(crate) trait CapturedIo {
     );
     /// The captured-account registry right now (`captured_accounts()`).
     fn registered_accounts(&self) -> Vec<CapturedAccount>;
+    /// Whether `key` is in the registry right now. The token write-back asks
+    /// before and after it writes (security review S10): Remove takes the key
+    /// out of the registry before it deletes the credential.
+    fn is_registered(&self, key: &str) -> bool;
     async fn quota(
         &self,
         access_token: String,
@@ -3924,6 +3928,10 @@ impl CapturedIo for SystemCapturedIo {
         captured_accounts()
     }
 
+    fn is_registered(&self, key: &str) -> bool {
+        captured_accounts().iter().any(|account| account.key == key)
+    }
+
     /// loadCodeAssist, then retrieveUserQuotaSummary, then fetchAvailableModels
     /// with retrieveUserQuota as the fallback, with the same precedence as the
     /// primary remote route (`fetch_with` with no local route).
@@ -4064,7 +4072,10 @@ async fn captured_access_token<I: CapturedIo>(
         );
     }
     if let Some(rotated) = non_empty_str(&json, "refresh_token") {
-        if rotated != stored.refresh_token {
+        // Only while the account is still registered (S10): Remove drops the
+        // key from the registry before it deletes the credential, so a refresh
+        // that was in flight during a Remove must not write the item back.
+        if rotated != stored.refresh_token && io.is_registered(key) {
             let updated = StoredCredential {
                 refresh_token: rotated.to_string(),
                 client: stored.client.clone(),
@@ -4074,7 +4085,20 @@ async fn captured_access_token<I: CapturedIo>(
             if let Some(call) = write_item_call(key, encode_stored(&updated)) {
                 let _ = io.credential(call);
             }
+            // Checked again after the write: a Remove that landed between the
+            // check above and the write deleted the old item before this write
+            // recreated it, so delete it again.
+            if !io.is_registered(key) {
+                if let Some(call) = delete_item_call(key) {
+                    let _ = io.credential(call);
+                }
+            }
         }
+    }
+    // A removed account's access token is not kept: Remove cleared the cache
+    // before this refresh put it back.
+    if !io.is_registered(key) {
+        lock_tokens(cache).remove(key);
     }
     Ok(access_token)
 }
@@ -6797,6 +6821,15 @@ pub(crate) mod captured_test_support {
         pub scope: TestRefreshScope,
         /// What `registered_accounts` lists.
         pub registered_accounts: Vec<CapturedAccount>,
+        /// Keys `is_registered` answers false for; every other key is
+        /// registered, so tests that never remove need not list theirs.
+        pub unregistered: RefCell<std::collections::BTreeSet<String>>,
+        /// A Remove (registry drop, then credential delete: the C# order)
+        /// that lands while the token request for this key is in flight.
+        pub remove_during_token_post: Option<String>,
+        /// A Remove that lands while the write-back for this key is in
+        /// flight, before the written item is stored.
+        pub remove_during_write: Option<String>,
     }
 
     impl FakeIo {
@@ -6817,7 +6850,16 @@ pub(crate) mod captured_test_support {
                 quota_terminal: None,
                 scope: TestRefreshScope::new("antigravity", tag),
                 registered_accounts: Vec::new(),
+                unregistered: RefCell::new(std::collections::BTreeSet::new()),
+                remove_during_token_post: None,
+                remove_during_write: None,
             }
+        }
+
+        /// What Remove does, in its order: the registry first, then the item.
+        fn simulate_remove(&self, key: &str) {
+            self.unregistered.borrow_mut().insert(key.to_string());
+            self.items.borrow_mut().remove(key);
         }
 
         pub(crate) fn writes(&self) -> Vec<Write> {
@@ -6905,6 +6947,9 @@ pub(crate) mod captured_test_support {
                     if self.write_fails {
                         return CredOutcome::Failed;
                     }
+                    if self.remove_during_write.as_deref() == Some(key) {
+                        self.simulate_remove(key);
+                    }
                     self.items.borrow_mut().insert(key.to_string(), blob);
                     ok(Vec::new())
                 }
@@ -6939,6 +6984,9 @@ pub(crate) mod captured_test_support {
             _binding: Option<ProviderCacheBinding>,
         ) -> Result<(u16, String), ProviderFetchFailure> {
             self.event("token".to_string());
+            if let Some(key) = &self.remove_during_token_post {
+                self.simulate_remove(key);
+            }
             self.token_calls.borrow_mut().push((
                 client.id.clone(),
                 client.secret.clone(),
@@ -6963,6 +7011,10 @@ pub(crate) mod captured_test_support {
 
         fn registered_accounts(&self) -> Vec<CapturedAccount> {
             self.registered_accounts.clone()
+        }
+
+        fn is_registered(&self, key: &str) -> bool {
+            !self.unregistered.borrow().contains(key)
         }
 
         async fn quota(
@@ -7490,6 +7542,63 @@ mod captured_account_tests {
             items[&key_b], stored_b,
             "the other account's credential is untouched"
         );
+    }
+
+    /// S10 / slice W item 16b: a Remove (registry drop, then delete) while
+    /// the token request is in flight. The write-back must not recreate the
+    /// item, and the access token must not stay cached.
+    #[tokio::test]
+    async fn a_remove_during_the_token_request_leaves_no_item() {
+        let mut io = FakeIo::new("remove-during-refresh");
+        let key = captured_key("sub-a");
+        io.items
+            .borrow_mut()
+            .insert(key.clone(), stored_value("1//rt-a", AUD, &secret('a')));
+        io.token = Box::new(|_, _| Ok(token_ok("ya29.a", json!({ "refresh_token": "1//rt-a2" }))));
+        io.remove_during_token_post = Some(key.clone());
+        let cache = new_token_cache();
+
+        let _ = fetch_captured_with(&io, &cache, &key, "a", now()).await;
+
+        assert!(
+            io.writes().is_empty(),
+            "the write-back ran for a removed account"
+        );
+        assert!(
+            !io.items.borrow().contains_key(&key),
+            "the removed account's credential is back"
+        );
+        assert!(
+            cached_keys(&cache).is_empty(),
+            "the removed account's access token was cached"
+        );
+    }
+
+    /// S10 / item 16b: a Remove that lands between the registration check and
+    /// the write. The re-check after the write deletes the item again.
+    #[tokio::test]
+    async fn a_remove_during_the_write_back_is_undone_by_the_recheck() {
+        let mut io = FakeIo::new("remove-during-write");
+        let key = captured_key("sub-a");
+        io.items
+            .borrow_mut()
+            .insert(key.clone(), stored_value("1//rt-a", AUD, &secret('a')));
+        io.token = Box::new(|_, _| Ok(token_ok("ya29.a", json!({ "refresh_token": "1//rt-a2" }))));
+        io.remove_during_write = Some(key.clone());
+        let cache = new_token_cache();
+
+        let _ = fetch_captured_with(&io, &cache, &key, "a", now()).await;
+
+        assert_eq!(
+            io.writes().len(),
+            1,
+            "fixture: the write-back started before the remove"
+        );
+        assert!(
+            !io.items.borrow().contains_key(&key),
+            "the write-back left the removed account's credential"
+        );
+        assert!(cached_keys(&cache).is_empty());
     }
 
     /// Acceptance 7: the scopes come from the temp store only.

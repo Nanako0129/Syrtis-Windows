@@ -503,9 +503,16 @@ public sealed class AntigravityAutoCapture
         await PollIfOwed().ConfigureAwait(false);
     }
 
-    /// <summary>Delete one account's Credential Manager copy and drop it from
-    /// the list. While automatic capture is on, the key also goes on the
-    /// removed list so the next login change does not add it back.</summary>
+    /// <summary>Drop one account from the list, then delete its Credential
+    /// Manager copy. While automatic capture is on, the key also goes on the
+    /// removed list so the next login change does not add it back.
+    /// <para>
+    /// The list change (and its install in the core) comes first (security
+    /// review S10, slice W item 16b): the core's token write-back writes only
+    /// while the key is registered and re-checks after writing, so a refresh in
+    /// flight during this Remove cannot recreate the deleted item. A failed
+    /// delete puts the row back where it was (the item is still there).
+    /// </para></summary>
     public async Task Remove(string key)
     {
         lock (_gate)
@@ -523,6 +530,14 @@ public sealed class AntigravityAutoCapture
         try
         {
             Notify(false);
+            var position = -1;
+            AntigravityAccount? row = null;
+            AntigravityAccounts.Mutate(_store, _io.Install, accounts =>
+            {
+                position = accounts.ToList().FindIndex(a => a.Key == key);
+                row = position >= 0 ? accounts[position] : null;
+                return [.. accounts.Where(a => a.Key != key)];
+            });
             string? code = null;
             try
             {
@@ -535,10 +550,9 @@ public sealed class AntigravityAutoCapture
             }
 
             // An invalid key has no Credential Manager entry and no card (the
-            // core registry rejects it): dropping the row is all that is left.
+            // core registry rejects it): dropping the row is all there was.
             if (code is null or "invalid_key")
             {
-                AntigravityAccounts.Mutate(_store, _io.Install, accounts => [.. accounts.Where(a => a.Key != key)]);
                 lock (_gate)
                 {
                     if (_currentKey == key)
@@ -558,6 +572,14 @@ public sealed class AntigravityAutoCapture
             }
             else
             {
+                if (row is { } restored)
+                {
+                    AntigravityAccounts.Mutate(_store, _io.Install, accounts =>
+                        accounts.Any(a => a.Key == key)
+                            ? accounts
+                            : [.. accounts.Take(position), restored, .. accounts.Skip(position)]);
+                }
+
                 lock (_gate)
                 {
                     _errorCode = code;

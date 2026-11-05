@@ -1117,6 +1117,41 @@ public class AntigravityAccountsTests
         Assert.Equal(KeyA, capture.Current.Key);
     }
 
+    /// <summary>Slice W item 16b (security review S10): the core sees the
+    /// list without the key before the credential delete reaches it, so its
+    /// token write-back (check, write, re-check) cannot recreate the item.</summary>
+    [Fact]
+    public async Task RemoveInstallsTheListWithoutTheKeyBeforeDeletingItsCredential()
+    {
+        var store = TempStore();
+        AntigravityAccounts.Save(store, [new(KeyA, "a@example.com"), new(KeyB, "b@example.com")]);
+        var events = new ConcurrentQueue<string>();
+        var io = new FakeIo().Io with
+        {
+            Install = () => events.Enqueue("install:" + string.Join(",", AntigravityAccounts.Load(store).Select(a => a.Key))),
+            Remove = key => events.Enqueue("remove:" + key),
+        };
+
+        await new AntigravityAutoCapture(io, store).Remove(KeyA);
+
+        Assert.Equal(["install:" + KeyB, "remove:" + KeyA], events);
+        Assert.Equal([KeyB], AntigravityAccounts.Load(store).Select(a => a.Key));
+    }
+
+    [Fact]
+    public async Task AFailedRemovePutsTheRowBackWhereItWas()
+    {
+        var store = TempStore();
+        AntigravityAccounts.Save(store, [new(KeyA, "a@example.com"), new(KeyB, "b@example.com")]);
+        var io = new FakeIo { RemoveError = new TbCoreException("keychain_delete_failed") };
+        var capture = new AntigravityAutoCapture(io.Io, store);
+
+        await capture.Remove(KeyA);
+
+        Assert.Equal([KeyA, KeyB], AntigravityAccounts.Load(store).Select(a => a.Key));
+        Assert.Equal("keychain_delete_failed", capture.LastErrorCode);
+    }
+
     [Fact]
     public async Task ManualCaptureTakesTheKeyOffTheRemovedList()
     {
