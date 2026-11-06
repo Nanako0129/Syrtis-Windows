@@ -433,6 +433,14 @@ public class AntigravityAccountsTests
         Assert.Null(noWindows.HistoryAccountKey);
         Assert.Equal(AgyPace, Assert.Single(noWindows.Windows).PaceStatus);
 
+        // An errored captured account usually has no windows at all (a 403
+        // before any quota was read); the error still relabels.
+        var erroredEmpty = AntigravityDedup.AdoptingHistory(Primary(), Captured(error: "refresh_rejected", windows: false));
+        Assert.Equal(UsagePaceUnavailableReason.AccountFetchFailed, Assert.Single(erroredEmpty.Windows).PaceStatus.Reason);
+
+        // The relabelled window still serializes (the converter names every reason the app can hold).
+        Assert.Contains("\"accountFetchFailed\"", JsonSerializer.Serialize(withError));
+
         var adopted = AntigravityDedup.AdoptingHistory(Primary(), Captured());
         Assert.Equal(KeyA, adopted.HistoryAccountKey);
         Assert.Null(adopted.AccountKey);

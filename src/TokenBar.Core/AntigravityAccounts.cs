@@ -436,7 +436,7 @@ public static class AntigravityDedup
     /// <summary><paramref name="window"/> with its <c>accountScope</c> reason
     /// replaced by <see cref="UsagePaceUnavailableReason.AccountFetchFailed"/>;
     /// any other window is returned unchanged.</summary>
-    public static UsageWindow MarkingAccountFetchFailed(UsageWindow window) =>
+    private static UsageWindow MarkingAccountFetchFailed(UsageWindow window) =>
         window.PaceStatus is { State: UsagePaceState.Unavailable, Reason: UsagePaceUnavailableReason.AccountScope } pace
             ? window with { PaceStatus = pace with { Reason = UsagePaceUnavailableReason.AccountFetchFailed } }
             : window;
