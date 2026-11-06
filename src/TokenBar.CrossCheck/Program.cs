@@ -169,6 +169,7 @@ static string? PaceReasonName(UsagePaceUnavailableReason? reason) => reason swit
     UsagePaceUnavailableReason.StoreCapacity => "storeCapacity",
     UsagePaceUnavailableReason.History => "history",
     UsagePaceUnavailableReason.NonRecurring => "nonRecurring",
+    UsagePaceUnavailableReason.AccountFetchFailed => "accountFetchFailed",
     _ => throw new ArgumentOutOfRangeException(nameof(reason), reason, null),
 };
 

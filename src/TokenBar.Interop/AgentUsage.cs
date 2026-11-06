@@ -59,6 +59,13 @@ public enum UsagePaceUnavailableReason
     StoreCapacity,
     History,
     NonRecurring,
+    /// <summary>App only, never decoded from the engine (see
+    /// <c>OptionalReason</c>): an <see cref="AccountScope"/> window of the
+    /// Antigravity agy primary whose merged captured account (the same account)
+    /// failed its own fetch (<c>AntigravityDedup.AdoptingHistory</c>). Like
+    /// <see cref="AccountScope"/>, nothing is recorded or read for it (macOS
+    /// <c>accountFetchFailed</c>).</summary>
+    AccountFetchFailed,
 }
 
 public sealed record PaceStatus(
