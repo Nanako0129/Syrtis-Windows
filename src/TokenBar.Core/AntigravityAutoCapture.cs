@@ -54,7 +54,7 @@ public sealed class AntigravityAutoCapture
         Func<IReadOnlyList<string>, AntigravityAutoCaptureResult> AutoCapture,
         Func<AntigravityAccount> Capture,
         Action<string> Remove,
-        Action Install);
+        Func<bool> Install);
 
     public const string EnabledKey = "tokenbar.antigravity.autoCapture";
 
@@ -69,6 +69,34 @@ public sealed class AntigravityAutoCapture
     /// <summary>The error code recorded for a failure that carried no core
     /// code (it maps to the generic sentence).</summary>
     public const string UnexpectedError = "unexpected";
+
+    /// <summary><see cref="LastErrorCode"/> whenever this session's
+    /// Antigravity settings do not persist (<see cref="SettingsStore.Persists"/>
+    /// false: the move out of the roaming settings failed, the local file could
+    /// not be read, or a save failed). While it shows, an operation that STARTS
+    /// is refused: Capture, turning automatic capture on, Remove, and every
+    /// automatic attempt (<see cref="IsEnabled"/> is false). Remove and an
+    /// automatic attempt also check again after their own store write and stop
+    /// before the irreversible call (review G1). Not covered: a save that first
+    /// fails after the operation's last check and before or after its Credential
+    /// Manager call. The last check is the entry check for Capture, and the
+    /// re-check after the operation's own write for Remove and an automatic
+    /// attempt. A save on another thread can fail in that window, for example
+    /// while Capture reads agy's marker. A save can also fail after the call:
+    /// the list write following a capture, or the removed-key write following a
+    /// delete. Then a captured credential may have no list row after exit, or a
+    /// removed key lasts only until exit.</summary>
+    public const string SettingsUnavailable = "settings_unavailable";
+
+    /// <summary>The code recorded when Remove could not take the key out of
+    /// the core's registry, so the account list was not updated and nothing
+    /// was deleted (review F3). A real Credential Manager delete failure
+    /// records <see cref="KeychainDeleteFailed"/> instead.</summary>
+    public const string AccountListUpdateFailed = "account_list_update_failed";
+
+    /// <summary>The code recorded when the Credential Manager delete itself
+    /// failed (core code <c>keychain_delete_failed</c>).</summary>
+    public const string KeychainDeleteFailed = "keychain_delete_failed";
 
     /// <summary>The live instance for this process; set once at launch.</summary>
     public static AntigravityAutoCapture? Shared { get; set; }
@@ -105,34 +133,60 @@ public sealed class AntigravityAutoCapture
         _store = store;
         _log = log ?? (_ => { });
         _markerTimeout = markerTimeout ?? MarkerTimeout;
+        if (ParseBinding(store.GetString(CurrentKey)) is { } binding)
+        {
+            _currentKey = binding.Key;
+            _currentMarker = binding.Marker;
+        }
+
+        // Only a redraw: the code is derived (LastErrorCode). Posted, not run
+        // inline: the failing save can run on a thread that holds _gate
+        // (review G3).
+        store.PersistsLost += () => _ = Task.Run(() => Notify(false));
+    }
+
+    /// <summary>A stored <see cref="CurrentKey"/> value: its key and marker,
+    /// both non-empty; null when absent or unreadable (then there is no
+    /// binding, exactly as if none was stored).</summary>
+    internal static (string Key, string Marker)? ParseBinding(string? raw)
+    {
+        if (string.IsNullOrEmpty(raw))
+        {
+            return null;
+        }
+
         try
         {
-            if (store.GetString(CurrentKey) is { Length: > 0 } raw
-                && JsonSerializer.Deserialize<Dictionary<string, string>>(raw) is { } stored
+            return JsonSerializer.Deserialize<Dictionary<string, string>>(raw) is { } stored
                 && stored.TryGetValue("key", out var key)
                 && stored.TryGetValue("marker", out var marker)
                 && !string.IsNullOrEmpty(key)
-                && !string.IsNullOrEmpty(marker))
-            {
-                _currentKey = key;
-                _currentMarker = marker;
-            }
+                && !string.IsNullOrEmpty(marker)
+                    ? (key, marker)
+                    : null;
         }
         catch (JsonException)
         {
-            // Unreadable: no binding, exactly as if none was stored.
+            return null;
         }
     }
 
-    public bool IsEnabled => _store.GetBool(EnabledKey, false);
+    /// <summary>The toggle, read as off while the settings do not persist
+    /// (review R1). Poll's commit point checks it before an attempt (Poll
+    /// then checks <see cref="SettingsStore.Persists"/> once more after its
+    /// binding write, G1), and the fetch checks it before
+    /// <see cref="PrepareForFetch"/>.</summary>
+    public bool IsEnabled => _store.Persists && _store.GetBool(EnabledKey, false);
 
     public bool Busy { get { lock (_gate) { return _busy; } } }
 
     public bool Paused { get { lock (_gate) { return _paused; } } }
 
     /// <summary>The fixed code of the last manual Capture or Remove that
-    /// failed; shown only through the sentence map, never raw.</summary>
-    public string? LastErrorCode { get { lock (_gate) { return _errorCode; } } }
+    /// failed, or <see cref="SettingsUnavailable"/> whenever the settings do
+    /// not persist (derived, review G2); shown only through the sentence map,
+    /// never raw.</summary>
+    public string? LastErrorCode { get { lock (_gate) { return _store.Persists ? _errorCode : SettingsUnavailable; } } }
 
     public string? LastAttemptedMarker { get { lock (_gate) { return _lastAttemptedMarker; } } }
 
@@ -210,11 +264,23 @@ public sealed class AntigravityAutoCapture
                 // marker.
                 changed = ClearCurrentLocked();
                 _lastAttemptedMarker = marker;
+                // Review G1: that binding write may have been the save that
+                // failed; then no attempt starts (its row could not be saved).
+                if (!_store.Persists)
+                {
+                    _busy = false;
+                    marker = null;
+                }
             }
         }
 
         if (marker is null)
         {
+            if (changed)
+            {
+                Notify(true);
+            }
+
             await PollIfOwed().ConfigureAwait(false);
             return;
         }
@@ -252,8 +318,8 @@ public sealed class AntigravityAutoCapture
                     // attempt, as ManualCapture: the key is the account agy
                     // was signed into when the core read it, and a sign-in
                     // that landed meanwhile would label the next login's card
-                    // with this one's email. Stricter than macOS (SW:306
-                    // binds to the pre-attempt marker unconditionally).
+                    // with this one's email. macOS binds the same
+                    // way (only when the re-read marker is unchanged).
                     // - Moved (a different marker): left unbound; the next
                     //   fetch sees the new marker and attempts again.
                     // - Unreadable (the re-read failed or timed out): left
@@ -313,6 +379,12 @@ public sealed class AntigravityAutoCapture
     /// never waits on Google. Never throws.</summary>
     public async Task<Task?> PrepareForFetch()
     {
+        // Review R1: nothing to prepare while automatic capture counts as off.
+        if (!IsEnabled)
+        {
+            return null;
+        }
+
         lock (_gate)
         {
             if (_paused || _checking)
@@ -389,6 +461,11 @@ public sealed class AntigravityAutoCapture
     /// Settings turns it on only through <see cref="TurnOn"/>.</summary>
     public async Task SetEnabled(bool on)
     {
+        if (on && RefusedForSettings())
+        {
+            return;
+        }
+
         lock (_gate)
         {
             // Under the gate, so the in-lock toggle checks (Poll's commit
@@ -414,6 +491,12 @@ public sealed class AntigravityAutoCapture
     /// was turned on.</summary>
     public async Task<bool> TurnOn(Func<Task<bool>> confirm)
     {
+        // Before the confirmation: there is nothing to confirm.
+        if (RefusedForSettings())
+        {
+            return false;
+        }
+
         if (!await confirm())
         {
             return false;
@@ -428,6 +511,12 @@ public sealed class AntigravityAutoCapture
     /// capture once more when it is on.</summary>
     public async Task ManualCapture()
     {
+        // Review F1: no list row would survive exit (no card, no Remove).
+        if (RefusedForSettings())
+        {
+            return;
+        }
+
         lock (_gate)
         {
             if (_busy)
@@ -503,11 +592,32 @@ public sealed class AntigravityAutoCapture
         await PollIfOwed().ConfigureAwait(false);
     }
 
-    /// <summary>Delete one account's Credential Manager copy and drop it from
-    /// the list. While automatic capture is on, the key also goes on the
-    /// removed list so the next login change does not add it back.</summary>
+    /// <summary>Drop one account from the list, then delete its Credential
+    /// Manager copy. While automatic capture is on, the key also goes on the
+    /// removed list so the next login change does not add it back.
+    /// <para>
+    /// The list change (and its install in the core) comes first (security
+    /// review S10, slice W item 16b): the core's token write-back writes only
+    /// while the key is registered and re-checks after writing, so a refresh in
+    /// flight during this Remove cannot recreate the deleted item. A failed
+    /// delete puts the row back where it was (the item is still there).
+    /// </para>
+    /// <para>
+    /// When that install does not reach the core (the setter failed, review
+    /// F3), the key is still registered there, so nothing is deleted: the row
+    /// goes back where it was and <see cref="AccountListUpdateFailed"/> is
+    /// recorded. The same when the drop's own save
+    /// failed (review G1): nothing is deleted, the row goes back, and
+    /// <see cref="SettingsUnavailable"/> shows.
+    /// </para></summary>
     public async Task Remove(string key)
     {
+        // Review R3: the row and removed key could not be saved after the delete.
+        if (RefusedForSettings())
+        {
+            return;
+        }
+
         lock (_gate)
         {
             if (_busy)
@@ -523,22 +633,42 @@ public sealed class AntigravityAutoCapture
         try
         {
             Notify(false);
-            string? code = null;
-            try
+            var position = -1;
+            AntigravityAccount? row = null;
+            var dropped = AntigravityAccounts.Mutate(_store, _io.Install, accounts =>
             {
-                await Task.Run(() => _io.Remove(key)).ConfigureAwait(false);
+                position = accounts.ToList().FindIndex(a => a.Key == key);
+                row = position >= 0 ? accounts[position] : null;
+                return [.. accounts.Where(a => a.Key != key)];
+            });
+            // The core did not take the shorter list: the key is still
+            // registered, so a refresh in flight could write the item back.
+            // Nothing is deleted; the row goes back below (review F3).
+            // Review G1: the drop's own save may have failed; then the list
+            // and removed-key change cannot outlast this session, so the
+            // credential is kept and the row goes back too.
+            string? code = !dropped ? AccountListUpdateFailed : !_store.Persists ? SettingsUnavailable : null;
+            if (code is not null)
+            {
+                _log($"antigravity remove: {code}; nothing deleted");
             }
-            catch (Exception ex)
+            else
             {
-                code = CodeOf(ex);
-                _log($"antigravity remove failed: {ex.GetType().Name}");
+                try
+                {
+                    await Task.Run(() => _io.Remove(key)).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    code = CodeOf(ex);
+                    _log($"antigravity remove failed: {ex.GetType().Name}");
+                }
             }
 
             // An invalid key has no Credential Manager entry and no card (the
-            // core registry rejects it): dropping the row is all that is left.
+            // core registry rejects it): dropping the row is all there was.
             if (code is null or "invalid_key")
             {
-                AntigravityAccounts.Mutate(_store, _io.Install, accounts => [.. accounts.Where(a => a.Key != key)]);
                 lock (_gate)
                 {
                     if (_currentKey == key)
@@ -558,6 +688,14 @@ public sealed class AntigravityAutoCapture
             }
             else
             {
+                if (row is { } restored)
+                {
+                    AntigravityAccounts.Mutate(_store, _io.Install, accounts =>
+                        accounts.Any(a => a.Key == key)
+                            ? accounts
+                            : [.. accounts.Take(position), restored, .. accounts.Skip(position)]);
+                }
+
                 lock (_gate)
                 {
                     _errorCode = code;
@@ -574,6 +712,19 @@ public sealed class AntigravityAutoCapture
 
         Notify(changed);
         await PollIfOwed().ConfigureAwait(false);
+    }
+
+    /// <summary>True, with Settings told to redraw (the code is derived),
+    /// when this session's settings do not persist.</summary>
+    private bool RefusedForSettings()
+    {
+        if (_store.Persists)
+        {
+            return false;
+        }
+
+        Notify(false);
+        return true;
     }
 
     private bool SetCurrentLocked(string key, string? marker)
@@ -661,7 +812,7 @@ public sealed class AntigravityAutoCapture
         "agy_not_signed_in", "agy_login_unreadable", "agy_login_missing_identity",
         "oauth_client_not_found", "oauth_client_rejected", "refresh_rejected",
         "refresh_unreachable", "account_mismatch", "invalid_credential_format",
-        "keychain_write_failed", "keychain_delete_failed", "invalid_key",
+        "keychain_write_failed", KeychainDeleteFailed, "invalid_key",
         "not_signed_in", "paused", "invalid_removed_keys", "marker_unavailable",
     ];
 

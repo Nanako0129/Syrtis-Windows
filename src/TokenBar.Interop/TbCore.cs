@@ -247,6 +247,13 @@ public static class TbCore
     public static void AntigravityRemove(string key) =>
         Unwrap<AntigravityRemoved>(NativeMethods.tb_antigravity_remove(key));
 
+    /// <summary>Whether one captured account's Credential Manager entry
+    /// exists on this PC (<c>present</c>, <c>absent</c> or <c>failed</c>):
+    /// existence only, no secret crosses. Blocking: call off the UI thread
+    /// with a time limit.</summary>
+    public static string AntigravityAccountPresence(string key) =>
+        Unwrap<AntigravityPresence>(NativeMethods.tb_antigravity_account_presence(key)).Presence;
+
     /// <summary>Configure Cursor desktop sync (in-memory, default off: re-apply
     /// at launch) with a <see cref="CursorSyncRequest.Json"/> payload. The
     /// native side chooses every directory. Turning sync off deletes Syrtis's

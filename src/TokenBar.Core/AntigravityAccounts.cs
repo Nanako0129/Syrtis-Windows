@@ -117,16 +117,18 @@ public static class AntigravityAccounts
     /// <summary>The one path every list change goes through: re-read the
     /// store, apply <paramref name="change"/>, save and install, under one
     /// lock, so two changes cannot interleave and none starts from a stale
-    /// copy (a capture that finished after a remove).</summary>
-    public static void Mutate(
+    /// copy (a capture that finished after a remove). Returns
+    /// <paramref name="install"/>'s answer: whether the core now holds the
+    /// saved list (Remove deletes nothing when it does not, review F3).</summary>
+    public static bool Mutate(
         SettingsStore store,
-        Action install,
+        Func<bool> install,
         Func<IReadOnlyList<AntigravityAccount>, IReadOnlyList<AntigravityAccount>> change)
     {
         lock (MutateGate)
         {
             Save(store, change(Load(store)));
-            install();
+            return install();
         }
     }
 
@@ -161,13 +163,18 @@ public sealed class AntigravityAccountsInstaller(
     /// <summary>Install after a list change (<see cref="AntigravityAccounts.Mutate"/>:
     /// a user action, or a capture that can land during an in-flight fetch),
     /// raising <see cref="AntigravityAccounts.Changed"/> when the core took a
-    /// new list, so the pollers (and an in-flight shared fetch) follow.</summary>
-    public void Install()
+    /// new list, so the pollers (and an in-flight shared fetch) follow.
+    /// Returns whether the core now holds the stored list: true when it took
+    /// it or already had it, false when the setter failed.</summary>
+    public bool Install()
     {
-        if (TryInstall())
+        var (installed, changed) = TryInstall();
+        if (changed)
         {
             AntigravityAccounts.RaiseChanged();
         }
+
+        return installed;
     }
 
     /// <summary>Install from the shared fetch itself, before its
@@ -177,7 +184,8 @@ public sealed class AntigravityAccountsInstaller(
     /// a stored account, and after every retried failed install).</summary>
     public void InstallForFetch() => TryInstall();
 
-    private bool TryInstall()
+    /// <summary>(the core holds the stored list, it took a new one).</summary>
+    private (bool Installed, bool Changed) TryInstall()
     {
         lock (_gate)
         {
@@ -185,7 +193,7 @@ public sealed class AntigravityAccountsInstaller(
             if (next == (_installed ?? AntigravityAccounts.EmptyPayload))
             {
                 _installed = next;
-                return false;
+                return (true, false);
             }
 
             try
@@ -196,11 +204,11 @@ public sealed class AntigravityAccountsInstaller(
             {
                 // Type only: nothing from the payload (an email) is logged.
                 log($"antigravityAccounts install failed: {ex.GetType().Name}");
-                return false;
+                return (false, false);
             }
 
             _installed = next;
-            return true;
+            return (true, true);
         }
     }
 }
@@ -274,13 +282,15 @@ public static class AntigravityFetch
 /// not to the marker alone: the engine's binding was read before the fetch,
 /// <c>currentKey</c> after it). Otherwise both are shown.
 /// <para>
-/// An errored primary (any route, e.g. agy timed out) is instead replaced by
-/// the captured snapshot carrying <c>currentKey</c>, promoted to the primary
-/// slot (<see cref="PromotedToPrimary"/>), when that snapshot has windows and
-/// no error (macOS 6dbd8cca): it is agy's current account, verified under
-/// agy's current marker by automatic capture, shown with its own data. With no
-/// such key (for example while a re-capture after a credential rewrite is
-/// still running) or a failing captured account, the error card stays.
+/// An errored primary is instead replaced by the captured snapshot carrying
+/// <c>currentKey</c>, promoted to the primary slot
+/// (<see cref="PromotedToPrimary"/>), only when the merge's whole evidence
+/// holds (source <c>agy</c>, or a substituted <c>oauth</c> primary whose
+/// history scope equals the captured card's; fetched under <c>currentMarker</c>,
+/// which only a re-sent last-good card can carry: a fresh error card carries
+/// none) and that snapshot has
+/// windows and no error. Otherwise both cards show and the error stays
+/// visible, as on macOS (an unverified replacement hid agy's real error).
 /// </para>
 /// <para>
 /// The primary keeps its own windows and values, and takes the captured
@@ -321,7 +331,11 @@ public static class AntigravityDedup
         var captured = agents[capturedIndex];
         if (primary.Error is not null)
         {
-            if (captured.Error is not null || captured.Windows.Count == 0)
+            // The merge's whole evidence (HasMergeEvidence). An error card the
+            // core built fresh carries no marker, so it stays beside the
+            // captured card and shows agy's real error; only a re-sent
+            // last-good card keeps its marker.
+            if (!HasMergeEvidence(primary, captured, currentMarker) || captured.Error is not null || captured.Windows.Count == 0)
             {
                 return payload;
             }
@@ -331,13 +345,7 @@ public static class AntigravityDedup
             return payload with { Agents = agents };
         }
 
-        var substituted = primary.Source == "oauth";
-        if ((primary.Source != "agy" && !substituted) || primary.AgyLoginMarker != currentMarker)
-        {
-            return payload;
-        }
-
-        if (substituted && (primary.HistoryScope is not { Scope: not null } || primary.HistoryScope != captured.HistoryScope))
+        if (!HasMergeEvidence(primary, captured, currentMarker))
         {
             return payload;
         }
@@ -356,6 +364,22 @@ public static class AntigravityDedup
         agents[primaryIndex] = AdoptingHistory(merged, captured);
         agents.RemoveAt(capturedIndex);
         return payload with { Agents = agents };
+    }
+
+    /// <summary>The evidence that the primary is agy's current account: the agy
+    /// route or the engine's bound substitution (<c>"oauth"</c>), fetched under
+    /// <paramref name="currentMarker"/>, and for a substituted primary a
+    /// history scope equal to the captured card's.</summary>
+    private static bool HasMergeEvidence(AgentUsageSnapshot primary, AgentUsageSnapshot captured, string currentMarker)
+    {
+        var substituted = primary.Source == "oauth";
+        if ((primary.Source != "agy" && !substituted) || primary.AgyLoginMarker != currentMarker)
+        {
+            return false;
+        }
+
+        return !substituted
+            || (primary.HistoryScope is { Scope: not null } && primary.HistoryScope == captured.HistoryScope);
     }
 
     /// <summary><paramref name="captured"/> standing in for an errored primary

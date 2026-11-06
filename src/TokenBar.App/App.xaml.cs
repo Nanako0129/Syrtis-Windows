@@ -707,12 +707,22 @@ public partial class App : Application
         }
     }
 
-    /// <summary>Wires the captured Antigravity accounts. Nothing native runs
-    /// here: the shared quota fetch installs the stored list before its first
-    /// call (AntigravityFetch), so no launch gate is needed.</summary>
+    /// <summary>Wires the captured Antigravity accounts. Their settings live
+    /// in the non-roaming local store (slice W item 13), opened here first:
+    /// on the first launch of this build on a PC it moves the roaming values
+    /// this PC's Credential Manager backs (one probe per account on the
+    /// thread pool, bounded by AntigravityLocalSettings.ProbeTimeout), before
+    /// AntigravityAutoCapture is constructed and before any fetch can run.
+    /// Nothing else native runs here: the shared quota fetch installs the
+    /// stored list before its first call (AntigravityFetch).</summary>
     private static void StartAntigravityAccounts()
     {
-        var store = AppSettings.Store;
+        var store = Core.AntigravityLocalSettings.Open(
+            Core.AntigravityLocalSettings.DefaultPath,
+            AppSettings.Store,
+            Interop.TbCore.AntigravityAccountPresence,
+            DevLog.Write);
+        AppSettings.Antigravity = store;
         var installer = new Core.AntigravityAccountsInstaller(
             () => Core.AntigravityAccounts.PayloadJson(Core.AntigravityAccounts.Load(store)),
             Interop.TbCore.SetAntigravityAccounts,

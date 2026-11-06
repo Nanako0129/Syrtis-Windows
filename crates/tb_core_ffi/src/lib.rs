@@ -1388,6 +1388,33 @@ pub unsafe extern "C" fn tb_antigravity_remove(key: *const c_char) -> *mut c_cha
     })
 }
 
+/// Whether a captured account's Credential Manager credential exists on this
+/// PC, for the one-time move of Antigravity settings out of the roaming
+/// profile (slice W item 13). Existence only: the blob is zeroed in the OS
+/// allocation and never copied, and only a `CRED_PERSIST_LOCAL_MACHINE`
+/// credential counts. Success data is `{"presence":"present"|"absent"|"failed"}`;
+/// an invalid or NULL key is `absent` without a Credential Manager call, and
+/// `failed` is a read that failed other than "not found". Blocking: call it
+/// off the UI thread with a time limit.
+///
+/// # Safety
+/// `key` must be NULL or a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_antigravity_account_presence(key: *const c_char) -> *mut c_char {
+    guarded("tb_antigravity_account_presence", || {
+        let key = if key.is_null() {
+            None
+        } else {
+            unsafe { CStr::from_ptr(key) }.to_str().ok()
+        };
+        let presence = key.map_or(
+            agent_antigravity::ItemPresence::Absent,
+            agent_antigravity::captured_item_presence,
+        );
+        envelope(Ok(serde_json::json!({ "presence": presence.code() })))
+    })
+}
+
 /// Configure Cursor desktop sync (see the `cursor_sync` module doc). `json`
 /// is `{"enabled":bool,"cliTakeoverConfirmed":bool,"profiles":[{"id","root"}]}`
 /// (`profiles` optional, each id an uppercase UUID, each root an added
@@ -1738,6 +1765,14 @@ mod tests {
             let s = unsafe { take(tb_antigravity_remove(bad.as_ptr())) };
             assert_eq!(s, r#"{"err":"invalid_key","ok":false}"#);
         }
+
+        // The migration probe: a NULL or malformed key is absent before
+        // Credential Manager is called.
+        let s = unsafe { take(tb_antigravity_account_presence(std::ptr::null())) };
+        assert_eq!(s, r#"{"data":{"presence":"absent"},"ok":true}"#);
+        let bad = CString::new("gemini:antigravity").unwrap();
+        let s = unsafe { take(tb_antigravity_account_presence(bad.as_ptr())) };
+        assert_eq!(s, r#"{"data":{"presence":"absent"},"ok":true}"#);
 
         // A NULL or non-array removed list is refused before agy's credential is read.
         let s = unsafe { take(tb_antigravity_auto_capture(std::ptr::null())) };

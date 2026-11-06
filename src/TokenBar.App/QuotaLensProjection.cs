@@ -493,8 +493,8 @@ public static class QuotaLensProjection
         // (WindowCardOwner).
         var cardOwner = WindowCardOwner(quota, clientId, selection.PresentClients, selection.TabHidden, selection.LimitsHidden);
         var owner = cardOwner ?? ClientRegistry.QuotaOwner(clientId);
-        // One card per client: the primary when it has windows, else the
-        // first other account that does (Desktop-only users).
+        // One card per client; WindowCardAccount picks which (stored choice,
+        // then liveness, then an error card with windows).
         var account = WindowCardText.WindowCardAccount(quota, owner, selection.WindowCardAccount);
         // A non-primary account reads local usage only from its own scan:
         // tb_window_usage(accountKey) for a Claude config directory, fetched

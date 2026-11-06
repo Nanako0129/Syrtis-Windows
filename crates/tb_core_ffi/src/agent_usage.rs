@@ -4725,6 +4725,11 @@ const CLAUDE_CONFIG_DIR_REJECTED_ERROR: &str =
     "Claude Code login for this config directory was rejected. Run `claude` with CLAUDE_CONFIG_DIR set to that directory to sign in again.";
 const CLAUDE_CONFIG_DIR_EXPIRED_ERROR: &str =
     "Claude Code login for this config directory has expired. Run `claude` with CLAUDE_CONFIG_DIR set to that directory to renew it.";
+/// The credential read refuses a config directory that is not on a fixed
+/// drive (slice W item 14, MA-13): a mapped network drive is still scanned for
+/// usage, but its login file is not read.
+const CLAUDE_CONFIG_DIR_NOT_FIXED_DRIVE_ERROR: &str =
+    "Claude Code login for this config directory is not read because the directory is not on a local fixed drive.";
 const CLAUDE_READ_ONLY_REFRESH_ERROR: &str = "This Claude login cannot be refreshed by TokenBar.";
 
 /// Load a configured directory's login from `<dir>\.credentials.json` and
@@ -4736,7 +4741,7 @@ fn load_claude_config_dir_credentials(
     dir: &str,
 ) -> Result<ClaudeCredentials, ProviderFetchFailure> {
     let dir = PathBuf::from(dir);
-    let raw = read_claude_config_dir_credentials(&dir.join(CLAUDE_CONFIG_DIR_CREDENTIALS_FILE))?;
+    let raw = read_claude_config_dir_credentials(&dir)?;
     if serde_json::from_str::<Value>(&raw).is_err() {
         // A torn read of a file Claude Code is rewriting.
         return Err(claude_read_retry_failure(
@@ -4812,29 +4817,85 @@ where
     }
 }
 
-fn read_claude_config_dir_credentials(path: &Path) -> Result<String, ProviderFetchFailure> {
+/// `<dir>\.credentials.json`, read through the handle it was checked on and
+/// closed as soon as the bounded read ends (the time limit is the caller's,
+/// `load_claude_config_dir_credentials_bounded`).
+fn read_claude_config_dir_credentials(dir: &Path) -> Result<String, ProviderFetchFailure> {
     use std::io::Read as _;
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ProviderFetchFailure::terminal(
-                CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR,
-            ));
-        }
-        Err(_) => {
-            return Err(claude_read_retry_failure(
-                CLAUDE_CONFIG_DIR_READ_RETRY_ERROR,
-            ))
-        }
-    };
+    let file = open_claude_config_dir_credentials(dir)?;
     let mut raw = String::new();
-    file.take(CLAUDE_CONFIG_DIR_CREDENTIALS_MAX_BYTES + 1)
-        .read_to_string(&mut raw)
-        .map_err(|_| claude_read_retry_failure(CLAUDE_CONFIG_DIR_READ_RETRY_ERROR))?;
+    let read = file
+        .take(CLAUDE_CONFIG_DIR_CREDENTIALS_MAX_BYTES + 1)
+        .read_to_string(&mut raw);
+    // `take` consumed the handle: it is closed here, before parsing.
+    read.map_err(|_| claude_read_retry_failure(CLAUDE_CONFIG_DIR_READ_RETRY_ERROR))?;
     if raw.len() as u64 > CLAUDE_CONFIG_DIR_CREDENTIALS_MAX_BYTES {
         return Err(ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_READ_ERROR));
     }
     Ok(raw)
+}
+
+/// Slice W item 14 (MA-12/13, security review S20/S21). In order: the
+/// directory's drive letter is a fixed drive (no other I/O before that); then
+/// the handle-first open of `<dir>\.credentials.json`
+/// (`agent_storage_windows::open_foreign_file_sharing_delete`): no reparse
+/// point followed or accepted except a cloud-file tag, a regular disk file,
+/// not UNC, on a fixed volume that keeps ACLs (asked again on the handle's
+/// volume), owned by the current user or BUILTIN\Administrators. The handle
+/// shares delete, so Claude Code's atomic save is never refused while we read.
+/// Codes map to this account's errors: absent is unconfigured, a sharing
+/// violation or any other failed query is retried, off a fixed drive is the
+/// fixed sentence, and a refused file is "could not be read".
+#[cfg(windows)]
+fn open_claude_config_dir_credentials(dir: &Path) -> Result<fs::File, ProviderFetchFailure> {
+    open_claude_config_dir_credentials_with(dir, &crate::cursor_desktop::drive_type)
+}
+
+#[cfg(windows)]
+fn open_claude_config_dir_credentials_with(
+    dir: &Path,
+    drive_type: &crate::cursor_desktop::DriveType<'_>,
+) -> Result<fs::File, ProviderFetchFailure> {
+    use crate::agent_storage_windows::{open_foreign_file_sharing_delete, ForeignRefusal};
+    if drive_type(dir) != crate::cursor_desktop::DRIVE_FIXED {
+        return Err(ProviderFetchFailure::terminal(
+            CLAUDE_CONFIG_DIR_NOT_FIXED_DRIVE_ERROR,
+        ));
+    }
+    let path = dir.join(CLAUDE_CONFIG_DIR_CREDENTIALS_FILE);
+    match open_foreign_file_sharing_delete(&path, drive_type) {
+        Ok((file, _identity)) => Ok(file),
+        Err(ForeignRefusal::Absent) => Err(ProviderFetchFailure::terminal(
+            CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR,
+        )),
+        Err(ForeignRefusal::Unreadable) => Err(claude_read_retry_failure(
+            CLAUDE_CONFIG_DIR_READ_RETRY_ERROR,
+        )),
+        Err(ForeignRefusal::Remote | ForeignRefusal::NotFixedDrive) => Err(
+            ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_NOT_FIXED_DRIVE_ERROR),
+        ),
+        Err(
+            ForeignRefusal::NotFile
+            | ForeignRefusal::Reparse
+            | ForeignRefusal::NoAclVolume
+            | ForeignRefusal::ForeignOwner,
+        ) => Err(ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_READ_ERROR)),
+    }
+}
+
+/// This repository ships Windows only; the non-Windows build runs the tests,
+/// which read their fixtures with a plain open.
+#[cfg(not(windows))]
+fn open_claude_config_dir_credentials(dir: &Path) -> Result<fs::File, ProviderFetchFailure> {
+    match fs::File::open(dir.join(CLAUDE_CONFIG_DIR_CREDENTIALS_FILE)) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(
+            ProviderFetchFailure::terminal(CLAUDE_CONFIG_DIR_UNCONFIGURED_ERROR),
+        ),
+        Err(_) => Err(claude_read_retry_failure(
+            CLAUDE_CONFIG_DIR_READ_RETRY_ERROR,
+        )),
+    }
 }
 
 /// The encrypted token-cache values in Claude Desktop's config.json, as
@@ -9643,6 +9704,97 @@ mod tests {
             load("valid", Some(br#"{"claudeAiOauth":{"accessToken":"a"}}"#)),
             "ok"
         );
+    }
+
+    /// Slice W item 14 (S21), Windows only: a directory whose drive is not a
+    /// fixed drive is refused with the fixed sentence, before its file is
+    /// opened; the same directory on a fixed answer is read (control).
+    #[cfg(windows)]
+    #[test]
+    fn config_dir_credentials_on_a_non_fixed_drive_are_not_read() {
+        let dir = config_dir_fixture(
+            "not-fixed",
+            Some(br#"{"claudeAiOauth":{"accessToken":"a"}}"#),
+        );
+        // DRIVE_REMOTE: a mapped network drive.
+        let remote = |_: &Path| 4u32;
+        let refused = open_claude_config_dir_credentials_with(&dir, &remote).err();
+        assert!(
+            matches!(
+                refused,
+                Some(ProviderFetchFailure::Terminal { ref display })
+                    if display == CLAUDE_CONFIG_DIR_NOT_FIXED_DRIVE_ERROR
+            ),
+            "a mapped drive's login file was read"
+        );
+        assert!(
+            open_claude_config_dir_credentials(&dir).is_ok(),
+            "control: the fixture's own fixed drive is read"
+        );
+        let _ = fs::remove_dir_all(&dir);
+
+        // Decided before the file is looked at: with no login file the answer
+        // is still the drive sentence, not "no login found".
+        let empty = config_dir_fixture("not-fixed-empty", None);
+        let refused = open_claude_config_dir_credentials_with(&empty, &remote).err();
+        let _ = fs::remove_dir_all(&empty);
+        assert!(
+            matches!(
+                refused,
+                Some(ProviderFetchFailure::Terminal { ref display })
+                    if display == CLAUDE_CONFIG_DIR_NOT_FIXED_DRIVE_ERROR
+            ),
+            "the drive check ran after the file was opened"
+        );
+    }
+
+    /// Item 14 (S21), Windows only: a login file another process holds with
+    /// no sharing (a sharing violation at open) is retried, not reported as a
+    /// broken login.
+    #[cfg(windows)]
+    #[test]
+    fn a_locked_config_dir_login_file_is_retried() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        let dir = config_dir_fixture(
+            "locked",
+            Some(br#"{"claudeAiOauth":{"accessToken":"a"}}"#),
+        );
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.join(CLAUDE_CONFIG_DIR_CREDENTIALS_FILE))
+            .unwrap();
+        let outcome = open_claude_config_dir_credentials(&dir).err();
+        drop(lock);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            matches!(
+                outcome,
+                Some(ProviderFetchFailure::Transient { ref display, .. })
+                    if display == CLAUDE_CONFIG_DIR_READ_RETRY_ERROR
+            ),
+            "a sharing violation was not a retry"
+        );
+    }
+
+    /// Slice W item 14 (S20), Windows only: while the credential read holds
+    /// its handle, Claude Code's atomic save (a temp renamed over
+    /// `.credentials.json`) succeeds. Fails if the read stops sharing delete
+    /// (for example by using the pinned `open_foreign_file`).
+    #[cfg(windows)]
+    #[test]
+    fn config_dir_credential_read_never_blocks_claude_codes_atomic_save() {
+        let dir = config_dir_fixture("share-delete", Some(b"old"));
+        let held = open_claude_config_dir_credentials(&dir).expect("open the fixture");
+        let staged = dir.join(".credentials.json.tmp.claude");
+        fs::write(&staged, "new").unwrap();
+        let renamed = fs::rename(&staged, dir.join(CLAUDE_CONFIG_DIR_CREDENTIALS_FILE));
+        drop(held);
+        let _ = fs::remove_file(&staged);
+        let after = fs::read_to_string(dir.join(CLAUDE_CONFIG_DIR_CREDENTIALS_FILE)).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(renamed.is_ok(), "the rename over the held file was refused");
+        assert_eq!(after, "new");
     }
 
     #[test]

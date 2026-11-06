@@ -164,7 +164,9 @@ char *tb_set_extra_scan_paths(const char *json);
 // Replace the registry of extra Claude config directories (CLAUDE_CONFIG_DIR
 // accounts) with a JSON array of absolute drive paths; [] clears it. Each
 // directory becomes its own Claude card (accountKey = the directory) on the
-// next tb_agent_usage, read only from <dir>\.credentials.json. Success data:
+// next tb_agent_usage, read only from <dir>\.credentials.json, and only when
+// the directory is on a fixed drive (a mapped drive is still accepted here and
+// scanned; its card shows a fixed "not on a local fixed drive" error). Success data:
 // {"registeredCount":N,"rejected":[{"index":i,"reason":code}]}. Errors and
 // reasons are fixed codes: empty, unsupportedPath, rootDirectory,
 // invalidComponent, homeDirectory (the home folder itself), defaultConfigDir
@@ -258,6 +260,13 @@ char *tb_antigravity_auto_capture(const char *removed_keys_json);
 // Already gone counts as removed; never revokes at Google. Success data:
 // {"removed":true}; errors invalid_key, keychain_delete_failed.
 char *tb_antigravity_remove(const char *key);
+
+// Whether a captured account's credential exists on this PC (one-time move of
+// Antigravity settings out of the roaming profile). Existence only: the blob
+// is never copied; only a persist-local-machine credential counts. Success
+// data: {"presence":"present"|"absent"|"failed"}; an invalid or NULL key is
+// absent without a Credential Manager call. Blocking.
+char *tb_antigravity_account_presence(const char *key);
 
 // Configure Cursor desktop sync. `json` is {"enabled":bool,
 // "cliTakeoverConfirmed":bool,"profiles":[{"id":"<UPPERCASE UUID>",

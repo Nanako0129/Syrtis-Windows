@@ -11,6 +11,13 @@ internal static class AppSettings
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "TokenBar", "settings.json"));
 
+    /// <summary>Antigravity's machine-bound settings (accounts, removed keys,
+    /// agy's binding, the automatic-capture toggle) in the local store
+    /// <see cref="AntigravityLocalSettings.DefaultPath"/>; set once at launch
+    /// (App.StartAntigravityAccounts), before any window exists. Never
+    /// <see cref="Store"/>: that file roams.</summary>
+    public static SettingsStore Antigravity { get; set; } = SettingsStore.InMemory();
+
     /// <summary>The one composer that owns both credential-read answers
     /// (Grok Bot and Cursor), so each installs one composed core payload
     /// (C3).</summary>

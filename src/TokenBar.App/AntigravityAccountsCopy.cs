@@ -1,3 +1,5 @@
+using TokenBar.Core;
+
 namespace TokenBar.App;
 
 /// <summary>
@@ -112,19 +114,28 @@ internal static class AntigravityAccountsCopy
         "account_mismatch" => "Google answered for a different account. Nothing was saved.",
         "invalid_credential_format" => "The login had an unexpected format. Nothing was saved.",
         "keychain_write_failed" => "Couldn't save to Windows Credential Manager.",
-        "keychain_delete_failed" => "Couldn't delete the copy from Windows Credential Manager.",
+        AntigravityAutoCapture.KeychainDeleteFailed => "Couldn't delete the copy from Windows Credential Manager.",
+        // The app's own code, shown while this session's Antigravity settings cannot be
+        // saved: the move or the load failed at launch, or a save failed
+        // later (AntigravityAutoCapture.SettingsUnavailable).
+        AntigravityAutoCapture.SettingsUnavailable =>
+            "Syrtis can't save its Antigravity settings on this PC right now, so Capture, automatic capture and Remove are off until Syrtis restarts.",
+        AntigravityAutoCapture.AccountListUpdateFailed =>
+            "Syrtis couldn't update its account list, so nothing was removed. Try again.",
         _ => Generic,
     };
 
     /// <summary>Every error code ctb.h lists for <c>tb_antigravity_capture</c>
     /// and <c>tb_antigravity_remove</c> (<c>invalid_key</c> is never shown:
-    /// Remove treats it as removed).</summary>
+    /// Remove treats it as removed), plus the app's own
+    /// <c>settings_unavailable</c>.</summary>
     internal static readonly string[] Codes =
     [
         "agy_not_signed_in", "agy_login_unreadable", "agy_login_missing_identity",
         "oauth_client_not_found", "oauth_client_rejected", "refresh_rejected",
         "refresh_unreachable", "account_mismatch", "invalid_credential_format",
-        "keychain_write_failed", "keychain_delete_failed",
+        "keychain_write_failed", AntigravityAutoCapture.KeychainDeleteFailed,
+        AntigravityAutoCapture.SettingsUnavailable, AntigravityAutoCapture.AccountListUpdateFailed,
     ];
 
     internal static IEnumerable<string> All() =>

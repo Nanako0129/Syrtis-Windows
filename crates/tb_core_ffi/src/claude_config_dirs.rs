@@ -35,7 +35,9 @@ pub(crate) fn snapshot() -> (Vec<String>, u64) {
 /// Accept only an absolute drive path (`C:\...` or `C:/...`). Verbatim
 /// (`\\?\`), UNC, device (`\\.\`), drive-relative (`C:x`) and rooted (`\x`)
 /// paths are refused; a mapped network drive is still a drive letter and is
-/// accepted (documented limitation). Trailing separators are stripped; nothing
+/// accepted here, so its usage is scanned, but the credential read refuses
+/// any directory not on a fixed drive (`agent_usage`,
+/// `open_claude_config_dir_credentials`). Trailing separators are stripped; nothing
 /// else is edited — no trimming, no case folding — so the registered string is
 /// the identity.
 ///
@@ -189,9 +191,10 @@ pub(crate) fn set_from_json(raw: &str) -> Result<(serde_json::Value, Vec<String>
 /// rule: the home folder itself (`homeDirectory`) and the primary's `.claude`
 /// or any folder above it (`defaultConfigDir`, security review R2); a folded
 /// duplicate; more than eight. A directory nested in another is allowed (the
-/// window_usage direct-children rule and macOS support it). The registered
-/// `projects`/`transcripts` roots overlap only when one sits inside the
-/// other's roots, which the scan registry refuses (`overlappingRoot`).
+/// window_usage direct-children rule and macOS support it). This function
+/// does not compare the `projects`/`transcripts` roots: [`validate`] refuses
+/// roots that overlap another account's (`overlappingRoot`) before a save,
+/// and the scan registry refuses them again when the pusher registers them.
 /// Known gap, not handled here: an account's window is captured with the
 /// account directory as home, and the engine also scans
 /// `<home>\.claude\projects`, so an inner account at `<outer>\.claude` is

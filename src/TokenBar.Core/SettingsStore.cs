@@ -21,6 +21,18 @@ public sealed class SettingsStore
     private readonly object _gate = new();
     private readonly Dictionary<string, JsonElement> _values;
     private readonly bool _loadFailed;
+    private readonly bool _inMemory;
+    private volatile bool _saveFailed;
+    private int _persistsLostPending;
+
+    /// <summary>The name a corrupt file is moved to at load (see
+    /// <see cref="Quarantine"/>), so a caller can tell that a file existed.</summary>
+    public const string QuarantineSuffix = ".corrupt";
+
+    /// <summary>Raised once, on the writing thread and outside this store's
+    /// lock, when <see cref="Persists"/> turns false because a save failed
+    /// (review R4). Handlers must not block.</summary>
+    public event Action? PersistsLost;
 
     /// <summary>Fires after a key's value actually changes (set to the same
     /// value is a no-op, mirroring the signature-gated observers the macOS
@@ -33,6 +45,30 @@ public sealed class SettingsStore
         _log = log;
         _values = Load(path, out _loadFailed);
     }
+
+    private SettingsStore(Action<string>? log)
+    {
+        _path = "";
+        _log = log;
+        _values = [];
+        _inMemory = true;
+    }
+
+    /// <summary>An empty store that never touches a file: what this session
+    /// uses when a store it needs could not be prepared (the Antigravity
+    /// settings move, slice W item 13). Its values last until exit.</summary>
+    public static SettingsStore InMemory(Action<string>? log = null) => new(log);
+
+    /// <summary>The file existed but could not be read at startup, so this
+    /// store holds nothing from it and never writes it (see <see cref="Save"/>).</summary>
+    public bool LoadFailed => _loadFailed;
+
+    /// <summary>Whether a set can reach a file: false for
+    /// <see cref="InMemory"/>, after a failed load, and, for the rest of the
+    /// session, once any save failed at disk time (review D2: an unwritable
+    /// folder; a later save may still heal the file, but nothing in this
+    /// session may rely on it).</summary>
+    public bool Persists => !_inMemory && !_loadFailed && !_saveFailed;
 
     private static Dictionary<string, JsonElement> Load(string path, out bool loadFailed)
     {
@@ -68,7 +104,7 @@ public sealed class SettingsStore
     {
         try
         {
-            var corrupt = path + ".corrupt";
+            var corrupt = path + QuarantineSuffix;
             File.Delete(corrupt); // no-op if absent; File.Move won't overwrite
             File.Move(path, corrupt);
         }
@@ -164,6 +200,41 @@ public sealed class SettingsStore
     public void SetDouble(string key, double value) =>
         Set(key, JsonSerializer.SerializeToElement(value));
 
+    /// <summary>Set several keys in ONE save (one temp file and one replacing
+    /// move), so a reader of the file sees all of them or none. Keys whose
+    /// value is unchanged are skipped; <see cref="Changed"/> fires per changed
+    /// key after the save.</summary>
+    public void SetMany(IReadOnlyDictionary<string, JsonElement> values)
+    {
+        List<string> changed = [];
+        lock (_gate)
+        {
+            foreach (var (key, value) in values)
+            {
+                if (_values.TryGetValue(key, out var old)
+                    && old.ValueKind == value.ValueKind
+                    && old.GetRawText() == value.GetRawText())
+                {
+                    continue;
+                }
+
+                _values[key] = value;
+                changed.Add(key);
+            }
+
+            if (changed.Count > 0)
+            {
+                Save();
+            }
+        }
+
+        RaiseIfPersistsLost();
+        foreach (var key in changed)
+        {
+            Changed?.Invoke(key);
+        }
+    }
+
     /// <summary>UserDefaults removeObject parity: reverts the key to
     /// whatever fallback its readers pass (e.g. the year filter's "all").</summary>
     public void Remove(string key)
@@ -178,6 +249,7 @@ public sealed class SettingsStore
             Save();
         }
 
+        RaiseIfPersistsLost();
         Changed?.Invoke(key);
     }
 
@@ -196,11 +268,25 @@ public sealed class SettingsStore
             Save();
         }
 
+        RaiseIfPersistsLost();
         Changed?.Invoke(key);
+    }
+
+    private void RaiseIfPersistsLost()
+    {
+        if (Interlocked.Exchange(ref _persistsLostPending, 0) == 1)
+        {
+            PersistsLost?.Invoke();
+        }
     }
 
     private void Save()
     {
+        if (_inMemory)
+        {
+            return;
+        }
+
         if (_loadFailed)
         {
             // The existing store couldn't be read at startup; writing now would
@@ -209,6 +295,7 @@ public sealed class SettingsStore
             return;
         }
 
+        var tmp = _path + ".tmp";
         try
         {
             var dir = Path.GetDirectoryName(_path);
@@ -217,7 +304,6 @@ public sealed class SettingsStore
                 Directory.CreateDirectory(dir);
             }
 
-            var tmp = _path + ".tmp";
             File.WriteAllText(tmp, JsonSerializer.Serialize(
                 new SortedDictionary<string, JsonElement>(_values), WriteOptions));
             File.Move(tmp, _path, overwrite: true);
@@ -226,7 +312,24 @@ public sealed class SettingsStore
         {
             // Disk trouble (AV scan or a sync tool holding the file) must
             // not crash the caller: memory keeps the new value and the next
-            // successful save heals the file.
+            // successful save heals the file. Persists stays false from here.
+            if (!_saveFailed)
+            {
+                _saveFailed = true;
+                _persistsLostPending = 1;
+            }
+
+            // Review G6: a failed move must not leave the values it was moving
+            // on disk under another name. Best effort.
+            try
+            {
+                File.Delete(tmp);
+            }
+            catch (Exception)
+            {
+                // Nothing more to do: the folder itself may be unreachable.
+            }
+
             _log?.Invoke($"settings save failed: {ex.Message}");
         }
     }

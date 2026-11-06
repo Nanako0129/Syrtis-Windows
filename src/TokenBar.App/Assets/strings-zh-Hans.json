@@ -571,6 +571,8 @@
   "The login had an unexpected format. Nothing was saved.": "登录的格式不符合预期，没有保存任何内容。",
   "Couldn't save to Windows Credential Manager.": "无法存入 Windows 凭据管理器。",
   "Couldn't delete the copy from Windows Credential Manager.": "无法从 Windows 凭据管理器删除副本。",
+  "Syrtis can't save its Antigravity settings on this PC right now, so Capture, automatic capture and Remove are off until Syrtis restarts.": "Syrtis 目前无法在这台电脑上保存 Antigravity 设置，在 Syrtis 重新启动前，捕获、自动捕获和移除都会停用。",
+  "Syrtis couldn't update its account list, so nothing was removed. Try again.": "Syrtis 无法更新账号列表，所以没有移除任何内容。请再试一次。",
   "Copy command": "复制命令",
   "No data": "暂无数据",
   "Checking…": "正在检查…",

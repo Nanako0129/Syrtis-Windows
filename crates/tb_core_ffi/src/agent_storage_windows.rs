@@ -1494,12 +1494,63 @@ pub(crate) fn open_foreign_file(
     path: &Path,
     drive_type: &crate::cursor_desktop::DriveType<'_>,
 ) -> Result<(File, FileIdentity), ForeignRefusal> {
+    open_foreign_file_with(path, drive_type, ForeignOpen::Pinned)
+}
+
+/// [`open_foreign_file`] for a file whose owner replaces it by rename while
+/// we may be reading it: a configured Claude directory's `.credentials.json`
+/// (slice W item 14, security review S20/S21). Two differences, nothing else:
+/// - the handle shares delete, so Claude Code's own atomic save (write a temp,
+///   rename it over the file) is never refused while we read; the name can
+///   then change under the handle, but every check is made on the handle and
+///   the caller reads through that same handle, so what is read is the file
+///   that was checked;
+/// - a cloud-file reparse tag (`IO_REPARSE_TAG_CLOUD*`, OneDrive Files
+///   On-Demand and other Cloud Files providers) is accepted, by maintainer
+///   decision; every other reparse point is still refused and none is
+///   followed (`FILE_FLAG_OPEN_REPARSE_POINT`).
+/// The caller holds the handle only for its bounded read.
+pub(crate) fn open_foreign_file_sharing_delete(
+    path: &Path,
+    drive_type: &crate::cursor_desktop::DriveType<'_>,
+) -> Result<(File, FileIdentity), ForeignRefusal> {
+    open_foreign_file_with(path, drive_type, ForeignOpen::SharingDelete)
+}
+
+/// Which of the two foreign opens: share mode and the cloud-tag allowance
+/// travel together, so no caller can ask for one without the other.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ForeignOpen {
+    /// `open_foreign_file`: no delete sharing, no reparse point of any kind.
+    Pinned,
+    /// `open_foreign_file_sharing_delete`.
+    SharingDelete,
+}
+
+impl ForeignOpen {
+    fn share_mode(self) -> u32 {
+        match self {
+            Self::Pinned => FILE_SHARE_READ | FILE_SHARE_WRITE,
+            Self::SharingDelete => FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        }
+    }
+
+    fn allows_cloud_files(self) -> bool {
+        self == Self::SharingDelete
+    }
+}
+
+fn open_foreign_file_with(
+    path: &Path,
+    drive_type: &crate::cursor_desktop::DriveType<'_>,
+    open: ForeignOpen,
+) -> Result<(File, FileIdentity), ForeignRefusal> {
     let file = open_windows_path_with_share(
         path,
         GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES,
         OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        open.share_mode(),
     )
     .map_err(|error| classify_failed_open(path, &error))?;
     let handle = file.as_raw_handle() as HANDLE;
@@ -1536,7 +1587,12 @@ pub(crate) fn open_foreign_file(
     if flags & FILE_PERSISTENT_ACLS == 0 {
         return Err(ForeignRefusal::NoAclVolume);
     }
-    let identity = foreign_identity(handle)?;
+    let identity = if open.allows_cloud_files() {
+        foreign_kind_with(handle, true)?;
+        file_id(handle)?
+    } else {
+        foreign_identity(handle)?
+    };
     let owner = read_security_snapshot(handle)
         .map_err(|_| ForeignRefusal::Unreadable)?
         .owner;
@@ -1588,6 +1644,43 @@ fn foreign_identity(handle: HANDLE) -> Result<FileIdentity, ForeignRefusal> {
 
 /// A regular disk file that is not a reparse point of any kind.
 fn foreign_kind(handle: HANDLE) -> Result<(), ForeignRefusal> {
+    foreign_kind_with(handle, false)
+}
+
+/// `IO_REPARSE_TAG_CLOUD` and its fifteen variants `IO_REPARSE_TAG_CLOUD_1`
+/// to `_F` (0x9000_101A to 0x9000_F01A), which differ from it only in the
+/// bits of `IO_REPARSE_TAG_CLOUD_MASK` (winnt.h).
+const IO_REPARSE_TAG_CLOUD: u32 = 0x9000_001A;
+const IO_REPARSE_TAG_CLOUD_MASK: u32 = 0x0000_F000;
+
+fn is_cloud_file_tag(tag: u32) -> bool {
+    (tag & !IO_REPARSE_TAG_CLOUD_MASK) == IO_REPARSE_TAG_CLOUD
+}
+
+/// The volume serial number and 128-bit file id of the handle's file, with no
+/// attribute rule (the caller has applied one).
+fn file_id(handle: HANDLE) -> Result<FileIdentity, ForeignRefusal> {
+    let mut identity = FILE_ID_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&mut identity as *mut FILE_ID_INFO).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(ForeignRefusal::Unreadable);
+    }
+    Ok(FileIdentity(
+        identity.VolumeSerialNumber,
+        identity.FileId.Identifier,
+    ))
+}
+
+/// A regular disk file that is not a reparse point, except a cloud-file one
+/// when `allow_cloud` is set.
+fn foreign_kind_with(handle: HANDLE, allow_cloud: bool) -> Result<(), ForeignRefusal> {
     validate_handle(handle).map_err(|_| ForeignRefusal::Unreadable)?;
     if unsafe { GetFileType(handle) } != FILE_TYPE_DISK {
         return Err(ForeignRefusal::NotFile);
@@ -1604,7 +1697,9 @@ fn foreign_kind(handle: HANDLE) -> Result<(), ForeignRefusal> {
     {
         return Err(ForeignRefusal::Unreadable);
     }
-    if attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    if attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        && !(allow_cloud && is_cloud_file_tag(attributes.ReparseTag))
+    {
         return Err(ForeignRefusal::Reparse);
     }
     if attributes.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_DEVICE) != 0 {
@@ -4353,5 +4448,62 @@ mod tests {
             handle_location(Some(r"\\?\C:\x\f"), Some(guid), &removable),
             Err(ForeignRefusal::NotFixedDrive)
         );
+    }
+
+    /// Slice W item 14 (security review S20): while our reader holds the
+    /// handle of a configured Claude directory's `.credentials.json`, Claude
+    /// Code's own atomic save (a temp renamed over the file) must succeed.
+    /// Windows only (this module is). The control shows the fixture can see
+    /// the difference: the pinned open (no delete sharing) refuses the same
+    /// rename.
+    #[test]
+    fn the_sharing_delete_open_lets_the_owner_rename_over_the_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "tb-foreign-share-delete-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".credentials.json");
+        let replace = |text: &str| {
+            let staged = dir.join(format!(".credentials.json.tmp.{text}"));
+            fs::write(&staged, text).unwrap();
+            let renamed = fs::rename(&staged, &path);
+            let _ = fs::remove_file(&staged);
+            renamed
+        };
+        fs::write(&path, "old").unwrap();
+
+        {
+            let (_pinned, _) = open_foreign_file(&path, &drive_type).expect("pinned open");
+            assert!(
+                replace("blocked").is_err(),
+                "control: a handle without delete sharing must refuse the rename"
+            );
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
+
+        let (mut held, _) =
+            open_foreign_file_sharing_delete(&path, &drive_type).expect("sharing-delete open");
+        replace("new").expect("the owner's atomic save failed while our handle was open");
+        let mut read = String::new();
+        held.read_to_string(&mut read).unwrap();
+        assert_eq!(read, "old", "the held handle reads the file it checked");
+        drop(held);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Item 14 (S21, maintainer decision): the sharing-delete open accepts a
+    /// cloud-file reparse tag and nothing else that is a reparse point.
+    #[test]
+    fn only_cloud_file_tags_are_accepted() {
+        for tag in [0x9000_001A_u32, 0x9000_101A, 0x9000_F01A] {
+            assert!(is_cloud_file_tag(tag), "{tag:#x}");
+        }
+        // Symlink, mount point (junction), WOF, AppExecLink, near misses.
+        for tag in [0xA000_000C_u32, 0xA000_0003, 0x8000_0017, 0x8000_001B, 0x9000_001B, 0x9000_0FFA] {
+            assert!(!is_cloud_file_tag(tag), "{tag:#x}");
+        }
     }
 }

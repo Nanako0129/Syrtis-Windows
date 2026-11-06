@@ -52,7 +52,8 @@ public enum WindowCardState
 
     /// <summary>Windows-only (no macOS counterpart: macOS has no rule 6): the
     /// last window ended, but this account's local usage can NEVER be
-    /// attributed (Claude Desktop, another provider's extra account, a grouped
+    /// attributed (Claude Desktop, another provider's extra account — not a
+    /// Claude config directory, which has its own scan — a grouped
     /// tab whose owner differs, a tab with no local records), so whether a new
     /// window started is unknowable. Never pending: no scan would ever settle
     /// it. An attributable account whose own scan has not landed is not this:
@@ -202,8 +203,9 @@ public static class WindowCardText
 
     public static string BlockedSubtitle() => "Quota unavailable".Localized();
 
-    /// <summary>Rule 6: Windows has no per-account transcript scan, so local
-    /// usage can only be attributed to the primary account.</summary>
+    /// <summary>Rule 6: local usage is attributed to the primary account and
+    /// to a Claude config directory's own scan; any other account (Claude
+    /// Desktop, another provider's extra account) has none, so it says so.</summary>
     public static string LocalUsageUnattributed() =>
         "Local usage can't be attributed to this account yet.".Localized();
 
@@ -509,32 +511,57 @@ public static class WindowCardText
         return tabs;
     }
 
-    /// <summary>Which account's card the per-client window card shows: the
-    /// primary when it has windows to draw; otherwise the first non-primary
-    /// card of the client (payload order) that has; otherwise the primary.
+    /// <summary>Which account's card the per-client window card shows, first
+    /// match wins: the stored account (<paramref name="storedAccountKey"/>,
+    /// null/"" = primary, as stored) when it is in the payload and live; the
+    /// primary when it is live; the first non-primary card of the client
+    /// (payload order) that is live. With nothing live, an error card is shown
+    /// with its own error: the stored account if it has windows, else the
+    /// primary if it has windows, else the first other account with windows.
+    /// A card is live when it has windows to draw AND no error: the core
+    /// re-sends last-good windows beside an error, and selecting such a card
+    /// would stick on the blocked card (macOS filters <c>error == nil</c>).
     /// Returns the account key (null = primary), for <see cref="Tabs"/>.
-    /// <paramref name="storedAccountKey"/> (null/"" = primary, as stored) wins
-    /// when that account is in the payload WITH windows; otherwise the rule
-    /// above applies. The stored value is never touched here.</summary>
+    /// The stored value is never touched here, so the selection
+    /// returns when the account recovers; the pills
+    /// (<see cref="AccountPills"/>) keep listing an errored account.</summary>
     public static string? WindowCardAccount(
         AgentUsagePayload? quota, string clientId, string? storedAccountKey = null)
     {
         var cards = (quota?.Agents ?? []).Where(a => a.ClientId == clientId).ToList();
         var stored = AccountIdentity.Normalize(storedAccountKey);
         if (storedAccountKey is not null
+            && cards.Any(a => a.Account.AccountKey == stored && IsLive(a)))
+        {
+            return stored;
+        }
+
+        if (cards.Any(a => a.Account.AccountKey is null && IsLive(a)))
+        {
+            return null;
+        }
+
+        if (cards.FirstOrDefault(a => a.Account.AccountKey is not null && IsLive(a)) is { } other)
+        {
+            return other.Account.AccountKey;
+        }
+
+        // Nothing is live: show an error card anyway (its own error, as before
+        // the liveness rule). The stored choice if it has windows, else the
+        // primary if it has, else the first other account that has.
+        if (storedAccountKey is not null
             && cards.Any(a => a.Account.AccountKey == stored && a.Windows.Count > 0))
         {
             return stored;
         }
 
-        if (cards.Any(a => a.Account.AccountKey is null && a.Windows.Count > 0))
-        {
-            return null;
-        }
-
-        return cards.FirstOrDefault(a => a.Account.AccountKey is not null && a.Windows.Count > 0)
-            ?.Account.AccountKey;
+        return cards.Any(a => a.Account.AccountKey is null && a.Windows.Count > 0)
+            ? null
+            : cards.FirstOrDefault(a => a.Account.AccountKey is not null && a.Windows.Count > 0)?.Account.AccountKey;
     }
+
+    /// <summary>Windows to draw and no error (see <see cref="WindowCardAccount"/>).</summary>
+    internal static bool IsLive(AgentUsageSnapshot agent) => agent.Error is null && agent.Windows.Count > 0;
 
     /// <summary>Whether <paramref name="windowKey"/> names a session-class
     /// window — a dot-COMPONENT match, so <c>weekly_scoped.fable.v1</c> does
