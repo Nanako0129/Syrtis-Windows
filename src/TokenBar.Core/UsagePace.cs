@@ -327,6 +327,8 @@ public sealed record UsagePace(
                 "Pace unavailable · history unavailable".Localized(),
             UsagePaceUnavailableReason.NonRecurring =>
                 "Pace unavailable · non-recurring quota".Localized(),
+            UsagePaceUnavailableReason.AccountFetchFailed =>
+                "Pace unavailable · this account's quota check failed".Localized(),
             _ => "Pace unavailable · unavailable reason".Localized(),
         };
 

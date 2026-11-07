@@ -299,7 +299,11 @@ public static class AntigravityFetch
 /// historical pace and duration per matching card id and records it as
 /// <see cref="AgentUsageSnapshot.HistoryAccountKey"/>, so every stored-series
 /// read for the card uses the captured account's scope
-/// (<see cref="AgentUsageSnapshot.HistoryReadScope"/>). Idempotent: a merged
+/// (<see cref="AgentUsageSnapshot.HistoryReadScope"/>). When the captured
+/// snapshot errored (e.g. Google blocked the account), its card is still
+/// dropped and the primary's <c>accountScope</c> windows say
+/// <see cref="UsagePaceUnavailableReason.AccountFetchFailed"/> ("this
+/// account's quota check failed") instead of an unknown identity. Idempotent: a merged
 /// payload has no captured card left to merge.
 /// </para>
 /// </summary>
@@ -396,12 +400,27 @@ public static class AntigravityDedup
 
     /// <summary><paramref name="primary"/> with <paramref name="captured"/>'s
     /// pace per matching card id and its history identity, only when the
-    /// captured snapshot has no error and offers windows; otherwise
-    /// unchanged. A window <paramref name="captured"/> lacks keeps its own
-    /// pace.</summary>
+    /// captured snapshot has no error and offers windows. When
+    /// <paramref name="captured"/> errored (its fetch failed: a blocked
+    /// account, an expired login), every <c>accountScope</c> window of the
+    /// primary is marked <see cref="UsagePaceUnavailableReason.AccountFetchFailed"/>
+    /// instead, so the merged card says the account's check failed rather than
+    /// that its identity is unknown; nothing else changes (macOS
+    /// <c>adoptingHistory(of:)</c>). Otherwise unchanged. A window
+    /// <paramref name="captured"/> lacks keeps its own pace.</summary>
     public static AgentUsageSnapshot AdoptingHistory(AgentUsageSnapshot primary, AgentUsageSnapshot captured)
     {
-        if (captured.Error is not null || captured.AccountKey is not { } key || captured.Windows.Count == 0)
+        if (captured.AccountKey is not { } key)
+        {
+            return primary;
+        }
+
+        if (captured.Error is not null)
+        {
+            return primary with { Windows = [.. primary.Windows.Select(MarkingAccountFetchFailed)] };
+        }
+
+        if (captured.Windows.Count == 0)
         {
             return primary;
         }
@@ -413,6 +432,14 @@ public static class AntigravityDedup
                 : window)];
         return primary with { Windows = windows, HistoryAccountKey = key, HistoryAccountScope = captured.HistoryScope };
     }
+
+    /// <summary><paramref name="window"/> with its <c>accountScope</c> reason
+    /// replaced by <see cref="UsagePaceUnavailableReason.AccountFetchFailed"/>;
+    /// any other window is returned unchanged.</summary>
+    private static UsageWindow MarkingAccountFetchFailed(UsageWindow window) =>
+        window.PaceStatus is { State: UsagePaceState.Unavailable, Reason: UsagePaceUnavailableReason.AccountScope } pace
+            ? window with { PaceStatus = pace with { Reason = UsagePaceUnavailableReason.AccountFetchFailed } }
+            : window;
 
     /// <summary><paramref name="mine"/> with <paramref name="other"/>'s pace
     /// status, historical pace and the duration they describe; usage, reset

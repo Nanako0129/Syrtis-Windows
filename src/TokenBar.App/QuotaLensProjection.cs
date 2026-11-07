@@ -404,11 +404,14 @@ public static class QuotaLensProjection
             && s.Id.WindowKey == window.PaceStatus.WindowKey
             && (agent.HistoryReadScope?.Scope is not { } scope || s.Id.AccountScope == scope));
 
-    // macOS PaceStatus.historyKey (TokenBarCore/AgentUsage.swift:148-150).
+    // macOS PaceStatus.historyKey (TokenBarCore/AgentUsage.swift): an
+    // AccountFetchFailed window is an AccountScope window relabelled for
+    // display, so it is not read either.
     private static bool HasHistoryKey(UsageWindow window) =>
         window.PaceStatus.WindowKey is not null
         && !(window.PaceStatus.State == UsagePaceState.Unavailable
-            && window.PaceStatus.Reason == UsagePaceUnavailableReason.AccountScope);
+            && window.PaceStatus.Reason is UsagePaceUnavailableReason.AccountScope
+                or UsagePaceUnavailableReason.AccountFetchFailed);
 
     /// <summary>Whether a stored series may get a local-usage equivalence.
     /// A client with no non-primary card keeps every series (as before). With

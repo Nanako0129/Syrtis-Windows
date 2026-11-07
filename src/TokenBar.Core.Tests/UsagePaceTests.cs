@@ -444,6 +444,10 @@ public class UsagePaceTests
         "Pace unavailable · account identity unavailable")]
     [InlineData(
         UsagePaceState.Unavailable,
+        UsagePaceUnavailableReason.AccountFetchFailed,
+        "Pace unavailable · this account's quota check failed")]
+    [InlineData(
+        UsagePaceState.Unavailable,
         UsagePaceUnavailableReason.StoreCapacity,
         "Pace unavailable · history storage full")]
     [InlineData(

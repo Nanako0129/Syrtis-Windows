@@ -424,10 +424,22 @@ public class AntigravityAccountsTests
     {
         var withError = AntigravityDedup.AdoptingHistory(Primary(), Captured(error: "refresh_rejected"));
         Assert.Null(withError.HistoryAccountKey);
-        Assert.Equal(AgyPace, Assert.Single(withError.Windows).PaceStatus);
+        var marked = Assert.Single(withError.Windows);
+        Assert.Equal(AgyPace with { Reason = UsagePaceUnavailableReason.AccountFetchFailed }, marked.PaceStatus);
+        Assert.Equal(30, marked.UsedPercent); // the primary's own value is kept
+        Assert.Null(marked.HistoricalPace);
 
         var noWindows = AntigravityDedup.AdoptingHistory(Primary(), Captured(windows: false));
         Assert.Null(noWindows.HistoryAccountKey);
+        Assert.Equal(AgyPace, Assert.Single(noWindows.Windows).PaceStatus);
+
+        // An errored captured account usually has no windows at all (a 403
+        // before any quota was read); the error still relabels.
+        var erroredEmpty = AntigravityDedup.AdoptingHistory(Primary(), Captured(error: "refresh_rejected", windows: false));
+        Assert.Equal(UsagePaceUnavailableReason.AccountFetchFailed, Assert.Single(erroredEmpty.Windows).PaceStatus.Reason);
+
+        // The relabelled window still serializes (the converter names every reason the app can hold).
+        Assert.Contains("\"accountFetchFailed\"", JsonSerializer.Serialize(withError));
 
         var adopted = AntigravityDedup.AdoptingHistory(Primary(), Captured());
         Assert.Equal(KeyA, adopted.HistoryAccountKey);
@@ -446,6 +458,22 @@ public class AntigravityAccountsTests
         var card = Assert.Single(merged.Agents);
         Assert.Null(card.HistoryAccountKey);
         Assert.Equal("noTrustedEvidence", card.HistoryReadScope?.Error);
+        Assert.Equal(UsagePaceUnavailableReason.AccountFetchFailed, Assert.Single(card.Windows).PaceStatus.Reason);
+    }
+
+    /// <summary>An errored captured account relabels only the primary's
+    /// accountScope windows; a window with any other pace state keeps it.</summary>
+    [Fact]
+    public void AnErroredCapturedAccountRelabelsOnlyAccountScopeWindows()
+    {
+        var history = new PaceStatus(UsagePaceState.Unavailable, WindowKey: "daily.v1", Reason: UsagePaceUnavailableReason.History);
+        var primary = Primary() with { Windows = [Window("antigravity.weekly", 70, AgyPace), Window("antigravity.daily", 70, history)] };
+
+        var marked = AntigravityDedup.AdoptingHistory(primary, Captured(error: "refresh_rejected"));
+
+        Assert.Equal(
+            [UsagePaceUnavailableReason.AccountFetchFailed, UsagePaceUnavailableReason.History],
+            marked.Windows.Select(w => w.PaceStatus.Reason));
     }
 
     [Fact]

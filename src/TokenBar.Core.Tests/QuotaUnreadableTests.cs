@@ -135,13 +135,16 @@ public class QuotaUnreadableTests
     // macOS reads only windows with a history key (DashboardModel.swift:1686):
     // an account-scope-unavailable window (agy CLI route, Grok Bot with no
     // subject) is never read, so it is never "could not be read".
-    [Fact]
-    public void AnAccountScopeUnavailableWindowIsNeverUnreadable()
+    // AccountFetchFailed is the same window relabelled by the dedup.
+    [Theory]
+    [InlineData(UsagePaceUnavailableReason.AccountScope)]
+    [InlineData(UsagePaceUnavailableReason.AccountFetchFailed)]
+    public void AnAccountScopeUnavailableWindowIsNeverUnreadable(UsagePaceUnavailableReason reason)
     {
         var noHistory = new UsageWindow(Label: "Weekly", UsedPercent: 10, RemainingPercent: 90,
             CardId: "antigravity|weekly.v1",
             PaceStatus: new PaceStatus(UsagePaceState.Unavailable, WindowKey: "weekly.v1",
-                Reason: UsagePaceUnavailableReason.AccountScope));
+                Reason: reason));
         var o = Overview(Payload(Agent("antigravity", null, noHistory)), Failed);
 
         Assert.Empty(o.UnreadableClients);

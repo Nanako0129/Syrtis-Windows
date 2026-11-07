@@ -59,6 +59,14 @@ public enum UsagePaceUnavailableReason
     StoreCapacity,
     History,
     NonRecurring,
+    /// <summary>App only, never decoded from the engine (see
+    /// <c>OptionalReason</c>): an <see cref="AccountScope"/> window of the
+    /// Antigravity agy primary whose merged captured account (the same account)
+    /// failed its own fetch (<c>AntigravityDedup.AdoptingHistory</c>). Like
+    /// <see cref="AccountScope"/>, the engine records nothing for it, and
+    /// <c>QuotaLensProjection.HasHistoryKey</c> treats it the same way (macOS
+    /// <c>accountFetchFailed</c>).</summary>
+    AccountFetchFailed,
 }
 
 public sealed record PaceStatus(
@@ -652,6 +660,9 @@ public sealed class UsageWindowJsonConverter : JsonConverter<UsageWindow>
                 UsagePaceUnavailableReason.StoreCapacity => "storeCapacity",
                 UsagePaceUnavailableReason.History => "history",
                 UsagePaceUnavailableReason.NonRecurring => "nonRecurring",
+                // App-produced (AntigravityDedup); written for diagnostics and round-trip
+                // tests, but OptionalReason does not read it back.
+                UsagePaceUnavailableReason.AccountFetchFailed => "accountFetchFailed",
                 _ => throw Invalid("unknown pace unavailable reason cannot be serialized")
             });
         }

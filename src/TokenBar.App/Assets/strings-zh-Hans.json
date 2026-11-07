@@ -208,6 +208,7 @@
   "Pace unavailable · legacy data": "消耗节奏不可用 · 旧版数据",
   "Pace unavailable · missing reset": "消耗节奏不可用 · 缺少重置时间",
   "Pace unavailable · non-recurring quota": "消耗节奏不可用 · 非周期性额度",
+  "Pace unavailable · this account's quota check failed": "消耗节奏不可用 · 此账户的额度查询失败",
   "Pace unavailable · unavailable reason": "消耗节奏不可用 · 原因未知",
   "Pace unavailable · unknown quota window": "消耗节奏不可用 · 未知额度窗口",
   "Rolling": "滚动",
