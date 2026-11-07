@@ -33,8 +33,8 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot "lib\RuntimeConfig.ps1")
 . (Join-Path $PSScriptRoot "lib\NativePdbGate.ps1")
 
-$ExpectedSemanticVersion = "1.3.0"
-$ExpectedAssemblyVersion = "1.3.0.0"
+$ExpectedSemanticVersion = "1.4.0"
+$ExpectedAssemblyVersion = "1.4.0.0"
 $ExpectedDotnetVersion = "10.0.301"
 $ExpectedRustVersion = "1.96.1"
 
