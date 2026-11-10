@@ -3414,7 +3414,8 @@ public sealed partial class DashboardView : UserControl
         {
             foreach (var part in parts)
             {
-                var share = (int)Math.Round(part.Total / (double)Math.Max(1, entry.Total) * 100);
+                var share = (int)Math.Round(
+                    part.Total / (double)Math.Max(1, entry.Total) * 100, MidpointRounding.AwayFromZero);
                 panel.Children.Add(TipRow(
                     TipText(ClientRegistry.ShortName(part.Client), 10, 0.6),
                     $"{Format.CompactTokens(part.Total)} · {share}%", 0.6));

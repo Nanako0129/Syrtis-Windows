@@ -28,9 +28,10 @@ public static class UsageAttributionBreakdown
         IReadOnlyList<string> clientIds,
         IReadOnlyList<UsageAttribution.Record> confirmed)
     {
-        // Both sides canonicalised, as the Stats lens's own entry filter does
-        // (DashboardView SelectedModelEntries): the report carries raw ids such
-        // as claude-code and codex-cli while the selection holds short ids.
+        // Both sides canonicalised through ClientRegistry.CanonicalClient, as
+        // ModelReportFold.TabEntries does for the Models lens: the report
+        // carries raw ids such as claude-code and codex-cli while the selection
+        // holds short ids (claude, codex).
         var allowed = new HashSet<string>(
             clientIds.Select(ClientRegistry.CanonicalClient), StringComparer.Ordinal);
         var assigned = new Dictionary<string, (long Tokens, double Cost)>(StringComparer.Ordinal);

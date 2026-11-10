@@ -99,4 +99,34 @@ public class ModelReportTabEntriesTests
             [new ClientPart("a", 10), new ClientPart("b", 10)],
             Assert.Single(rows).ClientParts);
     }
+
+    [Fact]
+    public void RawEngineIdsMatchACanonicalSelection()
+    {
+        // The report carries claude-code and codex-cli; the selection holds the
+        // short ids claude and codex.
+        var rows = Report(
+            Row("claude-code", "m", "p", 10, 1, 1),
+            Row("codex-cli", "m", "p", 5, 1, 1),
+            Row("gemini-cli", "other", "p", 1, 1, 1)).TabEntries(["claude", "codex"]);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(15, row.Total);
+        Assert.Equal(
+            [new ClientPart("claude", 10), new ClientPart("codex", 5)], row.ClientParts);
+    }
+
+    [Fact]
+    public void AliasedRawIdsOfOneClientShareOnePart()
+    {
+        var rows = Report(
+            Row("claude", "m", "p", 10, 1, 1),
+            Row("claude-code", "m", "p", 20, 1, 1),
+            Row("codex-cli", "m", "p", 25, 1, 1)).TabEntries(["claude", "codex"]);
+
+        // claude 30 beats codex 25 only once the two claude spellings are summed.
+        Assert.Equal(
+            [new ClientPart("claude", 30), new ClientPart("codex", 25)],
+            Assert.Single(rows).ClientParts);
+    }
 }
