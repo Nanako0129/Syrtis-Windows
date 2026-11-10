@@ -2369,15 +2369,14 @@ public sealed partial class DashboardView : UserControl
     }
 
     /// <summary>Model rows for the current client selection, folded to one row
-    /// per <c>(client, model)</c> first (<see cref="ModelReportFold.ModelLevelEntries"/>)
-    /// — tokscale groups by <c>(client, provider, model)</c>, so a model used
+    /// per <c>(client, model)</c> first (<see cref="ModelReportFold.ModelLevelEntries"/>),
+    /// then across clients when the selection spans several
+    /// (<see cref="ModelReportFold.TabEntries"/>) — tokscale groups by <c>(client, provider, model)</c>, so a model used
     /// through two providers would otherwise show twice, inflate the "N
     /// models" count, and let the larger provider-split component win
     /// "Favorite model" on Stats instead of the model itself.</summary>
     private List<ModelReportEntry> SelectedModelEntries(DashboardModel.Snapshot snapshot) =>
-        (snapshot.Models?.ModelLevelEntries() ?? [])
-            .Where(e => _selectedSet.Contains(ClientRegistry.CanonicalClient(e.Client)))
-            .ToList();
+        [.. snapshot.Models?.TabEntries(_selectedSet) ?? []];
 
     /// <summary>The model rows. <paramref name="collapsible"/> (the Overview
     /// card) caps them at <see cref="OverviewScope.ModelRowCap"/> behind a
@@ -3404,12 +3403,23 @@ public sealed partial class DashboardView : UserControl
         panel.Children.Add(head);
         // A Daily/Monthly drill-down row is merged across clients
         // (DailyRows.ByModel) and has no client to name.
+        // A row merged across the tab's clients names them in its parts below.
         panel.Children.Add(TipText(
-            entry.Client.Length == 0
+            entry.Client.Length == 0 || entry.ClientParts is not null
                 ? entry.Provider
                 : $"{ClientRegistry.ShortName(entry.Client)} · {entry.Provider}",
             10,
             0.6));
+        if (entry.ClientParts is { } parts)
+        {
+            foreach (var part in parts)
+            {
+                var share = (int)Math.Round(part.Total / (double)Math.Max(1, entry.Total) * 100);
+                panel.Children.Add(TipRow(
+                    TipText(ClientRegistry.ShortName(part.Client), 10, 0.6),
+                    $"{Format.CompactTokens(part.Total)} · {share}%", 0.6));
+            }
+        }
         panel.Children.Add(TipRow(
             TipText("{0} tokens".Localized(Format.CompactTokens(entry.Total)), 11, 0.9),
             CostSurfaceProjection.ModelTipCost(
