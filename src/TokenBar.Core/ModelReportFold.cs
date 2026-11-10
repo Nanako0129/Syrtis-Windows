@@ -71,13 +71,8 @@ public static class ModelReportFold
 
                 return g.Row with
                 {
-                    // One part per canonical client: the engine's raw ids
-                    // (claude, claude-code) are one client to the selection, so
-                    // listing them apart would split that client's share.
                     ClientParts = [.. g.Members
-                        .GroupBy(m => ClientRegistry.CanonicalClient(m.Client), StringComparer.Ordinal)
-                        .Select(c => new ClientPart(
-                            c.Key, c.Aggregate(0L, (sum, m) => sum.SaturatingAdd(m.Total))))
+                        .Select(m => new ClientPart(m.Client, m.Total))
                         .OrderByDescending(p => p.Total)
                         .ThenBy(p => p.Client, StringComparer.Ordinal)],
                 };

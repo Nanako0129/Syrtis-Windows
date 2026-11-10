@@ -40,8 +40,7 @@ Consumer side, matching Syrtis #558:
   (`model_grouping_cases_match_the_engine`); both require at least 28.
 - `ModelReportFold.TabEntries` (port of macOS `tabEntries(clientIds:)`): when
   the selection spans more than one client, rows sharing model and provider
-  merge into one with per-client parts in the tooltip (one part per canonical
-  client; the raw ids `claude` and `claude-code` are one). The Overview Models
+  merge into one with per-client parts in the tooltip. The Overview Models
   card reads the same rows, so with the whole selection it merges one model and
   provider across all clients. A row flagged by
   `CostPlausibility` is never merged. The Models lens and the Stats favourite
