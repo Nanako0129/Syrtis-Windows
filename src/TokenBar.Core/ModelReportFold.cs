@@ -40,8 +40,7 @@ public static class ModelReportFold
     /// <c>ModelReport.tabEntries(clientIds:)</c>). A merged row lists every
     /// client's token total in <see cref="ModelReportEntry.ClientParts"/>; its
     /// <c>Client</c> is whichever client the engine listed first, so do not label
-    /// a merged row by it, nor key any <see cref="ModelReportEntry.TabKeyed"/>
-    /// row by it.
+    /// a merged row by it.
     /// <para>
     /// A row whose own cost is flagged by <see cref="CostPlausibility"/> is never
     /// merged: summed with a healthy row of the same model its ratio would drop
@@ -65,16 +64,12 @@ public static class ModelReportFold
             e => CostPlausibility.ImplausibleRatio(e) is null ? e.Model + "\u0000" + e.Provider : null)
             .Select(g =>
             {
-                var row = g.Row with
-                {
-                    TabKeyed = CostPlausibility.ImplausibleRatio(g.Row) is null || g.Members.Count > 1,
-                };
                 if (g.Members.Count == 1)
                 {
-                    return row;
+                    return g.Row;
                 }
 
-                return row with
+                return g.Row with
                 {
                     ClientParts = [.. g.Members
                         .Select(m => new ClientPart(m.Client, m.Total))

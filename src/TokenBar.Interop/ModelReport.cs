@@ -32,20 +32,6 @@ public sealed record ModelReportEntry(
     /// client. Never on the wire.</summary>
     [JsonIgnore]
     public IReadOnlyList<ClientPart>? ClientParts { get; init; }
-
-    /// <summary>True for a row <c>TabEntries</c> keyed by model and provider in a
-    /// multi-client tab, merged or not yet: its identity must not depend on
-    /// which client it came from, or it would change when a second client starts
-    /// using the model. Never on the wire.</summary>
-    [JsonIgnore]
-    public bool TabKeyed { get; init; }
-
-    /// <summary>Stable row identity across re-sorts. A <see cref="TabKeyed"/>
-    /// row is unique by model and provider in its tab and its client depends on
-    /// the engine's row order, so the client is left out; a flagged row in such
-    /// a tab keeps the triple and cannot collide with it.</summary>
-    [JsonIgnore]
-    public string RowId => TabKeyed ? $"*|{Model}|{Provider}" : $"{Client}|{Model}|{Provider}";
 }
 
 /// <summary>One client's share of a model row merged across a tab's clients.</summary>

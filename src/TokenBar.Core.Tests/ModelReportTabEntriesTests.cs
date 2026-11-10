@@ -46,7 +46,6 @@ public class ModelReportTabEntriesTests
         var row = Assert.Single(rows);
         Assert.Equal(7, row.Total);
         Assert.Null(row.ClientParts);
-        Assert.False(row.TabKeyed);
     }
 
     [Fact]
@@ -99,30 +98,5 @@ public class ModelReportTabEntriesTests
         Assert.Equal(
             [new ClientPart("a", 10), new ClientPart("b", 10)],
             Assert.Single(rows).ClientParts);
-    }
-
-    [Fact]
-    public void RowIdIsStableWhenASecondClientJoins()
-    {
-        // The same model alone in a multi-client tab, then merged once the other
-        // client starts using it, keeps one id regardless of which client the
-        // engine listed first. The flagged row keeps the client-bearing triple
-        // so it cannot collide with a merged row of the same model.
-        var alone = Report(Row("a", "m", "p", 10, 1, 1), Row("b", "x", "p", 5, 1, 1))
-            .TabEntries(["a", "b"]);
-        var joined = Report(Row("b", "m", "p", 10, 1, 1), Row("a", "m", "p", 10, 1, 1))
-            .TabEntries(["a", "b"]);
-        Assert.Equal(Assert.Single(alone, r => r.Model == "m").RowId, Assert.Single(joined).RowId);
-        Assert.Equal("*|m|p", Assert.Single(joined).RowId);
-
-        var flagged = Report(Row("a", "m", "p", 10, 300, 1), Row("b", "m", "p", 10, 1, 100))
-            .TabEntries(["a", "b"]);
-        var flaggedRow = Assert.Single(flagged, r => r.Client == "a");
-        Assert.False(flaggedRow.TabKeyed);
-        Assert.Equal("a|m|p", flaggedRow.RowId);
-        Assert.Equal("*|m|p", Assert.Single(flagged, r => r.Client == "b").RowId);
-
-        Assert.Equal("claude|gemini-3.8-flash|google",
-            Assert.Single(AntigravityReport().TabEntries(["claude"])).RowId);
     }
 }
