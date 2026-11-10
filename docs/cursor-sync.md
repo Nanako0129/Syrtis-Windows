@@ -412,13 +412,20 @@ once.
   contract, so a live file or sidecar failing it stops a V2 round
   (`write_failed`; macOS reads a non-regular live file as empty). An added
   profile's dir is resolved (and created) only at commit, so a V2 round
-  plans from the dir resolution would pick, found without creating
-  anything (`planned_dir`), and the commit re-reads under the lock in the
+  plans from the dir resolution would pick, decided by the same rule
+  without creating anything (`agent_storage_windows::peek_secure_storage_directory`;
+  an error there stops the round `write_failed` before any request, as the
+  commit's resolution would), and the commit re-reads under the lock in the
   dir it resolves. When that dir holds neither file (the first commit after
   the sticky `.secure` sibling appeared), the history in the profile's
   other dir is carried over (frozen rows, cutover, fetched months) before
-  that dir is cleaned. Files read back are capped at 128 MiB
-  (`MAX_STORED_FILE_BYTES`).
+  that dir is cleaned, but only from a dir that passes the check cleanup
+  applies (a real directory meeting the storage contract; never through a
+  junction or from a loosened dir); a readable live file there is carried
+  over even beside an unreadable sidecar (frozen whole). Files read back
+  are capped at 128 MiB (`MAX_STORED_FILE_BYTES`), and a V2 commit that
+  would write a bigger live file or sidecar writes nothing
+  (`write_failed`).
 - The old walk's commit deletes the sidecar after the live write (macOS
   deletes it before; a failed live write there leaves a sidecar-less V2
   file, which the next V2 round freezes whole).

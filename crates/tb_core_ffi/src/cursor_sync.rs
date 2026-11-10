@@ -155,6 +155,15 @@ const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 /// an unreadable one (the round fails `write_failed`). Unmeasured ceiling:
 /// a real history that grew past it would stop V2 rounds until disable.
 const MAX_STORED_FILE_BYTES: u64 = 2 * MAX_BODY_BYTES as u64;
+
+/// `MAX_STORED_FILE_BYTES`, or a test's smaller cap on this thread.
+fn stored_cap() -> u64 {
+    #[cfg(test)]
+    if let Some(cap) = STORED_CAP_FOR_TEST.with(std::cell::Cell::get) {
+        return cap;
+    }
+    MAX_STORED_FILE_BYTES
+}
 /// The first sync (no complete file yet) and every explicit "Sync now".
 const FULL_BUDGET: Duration = Duration::from_secs(10 * 60);
 /// Later background syncs (macOS D4: ≥ 2× the measured full walk, ≤ 10 min).
@@ -1054,6 +1063,16 @@ mod secure {
         storage::ensure_secure_storage_directory(path)
     }
 
+    /// What `resolve_dir` would return, creating nothing (same rule).
+    pub(super) fn peek_dir(preferred: &Path) -> io::Result<PathBuf> {
+        storage::peek_secure_storage_directory(preferred)
+    }
+
+    /// An existing dir that meets the contract; never created or changed.
+    pub(super) fn verify_dir(path: &Path) -> io::Result<()> {
+        storage::verify_existing_secure_storage_directory(path)
+    }
+
     pub(super) fn open_lock(path: &Path) -> io::Result<File> {
         storage::open_secure_lock_file(path)
     }
@@ -1118,14 +1137,15 @@ mod secure {
         use std::io::Read as _;
         let file = storage::open_existing_secure_file(path, false)?;
         storage::verify_secure_file_path(&file, path)?;
+        let cap = super::stored_cap();
         let length = file.metadata()?.len();
-        if length > super::MAX_STORED_FILE_BYTES {
+        if length > cap {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized"));
         }
         let mut bytes = Vec::with_capacity(length as usize);
         // The cap holds even if the file grows after the length was read.
-        file.take(super::MAX_STORED_FILE_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > super::MAX_STORED_FILE_BYTES {
+        file.take(cap + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > cap {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized"));
         }
         Ok(bytes)
@@ -1148,6 +1168,12 @@ mod secure {
         Err(unsupported())
     }
     pub(super) fn ensure_dir(_: &Path) -> io::Result<File> {
+        Err(unsupported())
+    }
+    pub(super) fn peek_dir(_: &Path) -> io::Result<PathBuf> {
+        Err(unsupported())
+    }
+    pub(super) fn verify_dir(_: &Path) -> io::Result<()> {
         Err(unsupported())
     }
     pub(super) fn open_lock(_: &Path) -> io::Result<File> {
@@ -1313,8 +1339,9 @@ struct UsageFile<'a> {
 /// removed (an orphan temp does not count); and how many of our files it
 /// could not delete (`Commit::left`, reported as `cleanupFailedProfiles`).
 /// Billing V2: an old walk brings the full old history back, so this stem's
-/// sidecar goes first (best effort, see below), and a directory at a
-/// sidecar name is spared (`remove_usage_files`).
+/// sidecar goes with the superseded files, after the live file was written
+/// (see below), and a directory, junction or symbolic link at a sidecar name
+/// is spared (`remove_usage_files`).
 fn commit_file(
     dir: &Path,
     resolve: bool,
@@ -1332,15 +1359,15 @@ fn commit_file(
     .map_err(|_| failed())?;
     let final_name = live_name(stem);
     let changed = write_payload(&locked, &final_name, &payload)?;
-    // Only once the live file holds the old walk's rows: a failed live
-    // write leaves the V2 live file and its sidecar a matching pair, so the
-    // next V2 round never freezes V2 rows as old history. Best effort: the
-    // old walk's commit never fails on the sidecar. One that outlives this
-    // commit (it fails the storage contract, say) no longer matches the live
-    // file's SHA-256: it is stale, and the next V2 commit freezes this file
-    // afresh (`commit_v2`). A same-stem sidecar Syrtis cannot read in this
-    // dir never gets here (`run` refuses the round first).
-    let _ = secure::remove_file(&dir.join(sidecar_name(stem)));
+    // The same-stem sidecar is one of ours and not kept, so the pass below
+    // deletes it, only once the live file holds the old walk's rows: a
+    // failed live write returns above and leaves the V2 live file and its
+    // sidecar a matching pair, so the next V2 round never freezes V2 rows
+    // as old history. One that outlives this commit (it fails the storage
+    // contract, say; reported as a cleanup failure) no longer matches the
+    // live file's SHA-256: it is stale, and the next V2 commit freezes this
+    // file afresh (`commit_v2`). A same-stem sidecar Syrtis cannot read in
+    // this dir never gets here (`run` refuses the round first).
     // Superseded files and orphan temps go. A Syrtis-named file that cannot
     // be deleted (one failing the storage contract is never deleted), or a
     // dir that cannot be listed, is a cleanup failure, so the round reports
@@ -1515,29 +1542,20 @@ fn read_live(dir: &Path, stem: &str) -> Result<Live, ()> {
     }
 }
 
-/// The dir a commit for this profile would use (`lock_dir`), found without
-/// creating anything: the default profile's dir as resolved at the on push;
-/// for an added profile (`resolve`) the sticky `.secure` sibling when
-/// anything exists at that name (resolution then uses it, or fails closed),
-/// else the preferred dir unless it exists and fails the storage contract
-/// (resolution would then create the sibling). Only a guess for planning and
-/// the pre-walk check: the commit resolves for real and re-reads there under
-/// the lock (`v2_source`), so a race only changes which months are read.
-fn planned_dir(dir: &Path, resolve: bool) -> PathBuf {
-    if !resolve {
-        return dir.to_path_buf();
-    }
-    let mut fallback = dir.as_os_str().to_os_string();
-    fallback.push(secure::FALLBACK_SUFFIX);
-    let fallback = PathBuf::from(fallback);
-    if std::fs::symlink_metadata(&fallback).is_ok() {
-        return fallback;
-    }
-    match std::fs::symlink_metadata(dir) {
-        Err(_) => dir.to_path_buf(),
-        // An existing dir is opened and verified, never created or repaired.
-        Ok(_) if secure::ensure_dir(dir).is_ok() => dir.to_path_buf(),
-        Ok(_) => fallback,
+/// The dir a commit for this profile will use (`lock_dir`), decided by the
+/// commit's own rule but creating nothing: the default profile's dir as
+/// resolved at the on push; for an added profile what
+/// `secure::resolve_dir` would return (`secure::peek_dir`, the same sticky
+/// `.secure` rule in `agent_storage_windows`). An error is the error the
+/// commit's resolution would meet (the round then stops `write_failed`
+/// before any request). Planning and the pre-walk check use it; the commit
+/// still resolves for real and re-reads under the lock (`v2_source`), so a
+/// concurrent change only changes which months are read.
+fn planned_dir(dir: &Path, resolve: bool) -> io::Result<PathBuf> {
+    if resolve {
+        secure::peek_dir(dir)
+    } else {
+        Ok(dir.to_path_buf())
     }
 }
 
@@ -1545,11 +1563,17 @@ fn planned_dir(dir: &Path, resolve: bool) -> PathBuf {
 /// the dir the commit writes: one there that cannot be read refuses the
 /// round (D5). When `used` holds neither (the first commit after an added
 /// profile's sticky `.secure` sibling appeared, with the history still in
-/// its other dir), those of the first other candidate holding either are
-/// carried over, so the old rows are frozen into `used` before the other
-/// dir is cleaned, never lost. Nothing writes the other dir any more (the
-/// fallback is sticky), so it is read without its lock. An unreadable file
-/// there is skipped, never a refusal: its cleanup reports it.
+/// its other dir), the history of the first other candidate that passes the
+/// check cleanup applies to it (a real directory, not a reparse point, that
+/// meets the storage contract; `secure::verify_dir`, which opens and
+/// verifies but never creates) is carried over, so the old rows are frozen
+/// into `used` before that dir is cleaned, never lost. A candidate failing
+/// that check is never read (its files are not ours to trust; cleanup
+/// reports them). Within a passing one, a readable live file is carried
+/// over even when its sidecar cannot be read, as a stale-sidecar case
+/// (`stored` None: the live file is frozen whole); an unreadable live file
+/// skips the candidate. Never a refusal. Nothing writes the other dir any
+/// more (the fallback is sticky), so it is read without its lock.
 fn v2_source(
     used: &Path,
     candidates: &[PathBuf],
@@ -1561,10 +1585,15 @@ fn v2_source(
         return Ok((stored, live));
     }
     for other in candidates.iter().filter(|other| other.as_path() != used) {
-        if let (Ok(stored), Ok(live)) = (read_history(other, stem), read_live(other, stem)) {
-            if stored.is_some() || live.sha256.is_some() {
-                return Ok((stored, live));
-            }
+        if !matches!(real_dir(other), Ok(true)) || secure::verify_dir(other).is_err() {
+            continue;
+        }
+        let Ok(other_live) = read_live(other, stem) else {
+            continue;
+        };
+        let other_stored = read_history(other, stem).ok().flatten();
+        if other_stored.is_some() || other_live.sha256.is_some() {
+            return Ok((other_stored, other_live));
         }
     }
     Ok((stored, live))
@@ -1736,6 +1765,10 @@ fn commit_v2(
         live_sha256: &live_sha256,
     })
     .map_err(|_| failed())?;
+    // Never write a file every later round would refuse to read back.
+    if payload.len() as u64 > stored_cap() || sidecar.len() as u64 > stored_cap() {
+        return Err(failed());
+    }
     let sidecar_name = sidecar_name(stem);
     let final_name = live_name(stem);
     // The live file first. Should the sidecar write then fail, the previous
@@ -2451,10 +2484,14 @@ async fn run(
     drop(value);
     drop(login);
     // D5: a same-stem sidecar Syrtis cannot read (a non-file, one failing
-    // the storage contract, or not ours to parse) in the dir a commit would
-    // use stops the round before any request, old or V2. One in the
-    // profile's other dir never refuses: its cleanup reports it.
-    if read_history(&planned_dir(dir, slot.root.is_some()), &stem).is_err() {
+    // the storage contract, one over the cap, or not ours to parse) in the
+    // dir a commit will use stops the round before any request, old or V2,
+    // and so does an error resolving that dir (the commit would meet it).
+    // One in the profile's other dir never refuses: its cleanup reports it.
+    let Ok(planned) = planned_dir(dir, slot.root.is_some()) else {
+        return stopped(Stop::error("write_failed"));
+    };
+    if read_history(&planned, &stem).is_err() {
         return stopped(Stop::error("write_failed"));
     }
     let client = match client(target) {
@@ -2476,8 +2513,10 @@ async fn run(
                 ..limits
             };
             let (synced, dropped) =
-                billing_v2(&client, slot, dir, target, &stem, &user, &cookie, limits, enabled)
-                    .await;
+                billing_v2(
+                    &client, slot, dir, &planned, target, &stem, &user, &cookie, limits, enabled,
+                )
+                .await;
             drop(cookie);
             if let Err(stop) = synced {
                 if covers_account(stop) {
@@ -2536,14 +2575,16 @@ async fn run(
 /// refusal or partial walk returns before the commit, so the live file and
 /// the sidecar stay as they were. Any failure here covers the account like
 /// a walk failure (`covers_account`): write_failed and disabled do not.
-/// The plan reads what the commit will build on (`v2_source` in
-/// `planned_dir`: an added profile's dir is resolved, and created, only at
-/// commit); the commit re-reads under the lock in the dir it resolves.
+/// The plan reads what the commit will build on (`v2_source` in `planned`,
+/// `run`'s `planned_dir`: an added profile's dir is resolved, and created,
+/// only at commit); the commit re-reads under the lock in the dir it
+/// resolves.
 #[allow(clippy::too_many_arguments)]
 async fn billing_v2(
     client: &reqwest::Client,
     slot: &Slot,
     dir: &Path,
+    planned: &Path,
     target: &Target<'_>,
     stem: &str,
     user: &str,
@@ -2557,8 +2598,7 @@ async fn billing_v2(
     // A live file (or a sidecar, since `run` checked it) the commit could
     // not read fails here, before any V2 request.
     let candidates = slot.candidates();
-    let planned = planned_dir(dir, slot.root.is_some());
-    let Ok((stored, live)) = v2_source(&planned, &candidates, stem) else {
+    let Ok((stored, live)) = v2_source(planned, &candidates, stem) else {
         return (Err(Stop::error("write_failed")), 0);
     };
     let stale = stored
@@ -2874,6 +2914,8 @@ thread_local! {
     /// Test fault: listing a dir for cleanup yields one unreadable entry
     /// after the real ones.
     static LISTING_ERROR_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test seam: a smaller `MAX_STORED_FILE_BYTES` (`stored_cap`).
+    static STORED_CAP_FOR_TEST: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]

@@ -6522,26 +6522,37 @@ fn a_junction_at_a_sidecar_name_spares_the_old_commit() {
     assert!(target.join("inside.txt").exists());
 }
 
-/// Review round 1, item 7: a same-stem sidecar larger than
-/// `MAX_STORED_FILE_BYTES` (here valid JSON padded with spaces, so only the
-/// size refuses it) stops the round before any request; at the cap it is
-/// read. Mutation: in `secure::read`, both size checks -> `if false {` and
-/// `take(MAX_STORED_FILE_BYTES + 1)` -> `take(u64::MAX)` (no cap).
+/// Runs `body` with `MAX_STORED_FILE_BYTES` replaced by `cap` on this
+/// thread (the sync runs on it: `RUNTIME.block_on`).
+fn with_stored_cap<R>(cap: u64, body: impl FnOnce() -> R) -> R {
+    STORED_CAP_FOR_TEST.with(|cell| cell.set(Some(cap)));
+    let result = body();
+    STORED_CAP_FOR_TEST.with(|cell| cell.set(None));
+    result
+}
+
+fn v2_month_replies(items: Vec<serde_json::Value>) -> Vec<Reply> {
+    let mut replies = vec![old_migrated(), v2_page(&items, None)];
+    replies.extend((0..11).map(|_| v2_empty()));
+    replies
+}
+
+/// Review round 1, item 7 (round 2: a small test cap): a same-stem sidecar
+/// larger than the stored-file cap (valid JSON padded with spaces, so only
+/// the size refuses it) stops the round before any request; at the cap it
+/// is read. Mutation: in `secure::read`, both size checks -> `if false {`
+/// and `take(cap + 1)` -> `take(u64::MAX)` (no cap).
 #[test]
 fn an_oversized_sidecar_is_refused_before_any_request() {
+    const CAP: u64 = 4096;
     let json = br#"{"frozen":[],"cutoverMs":null,"fetched":[]}"#;
-    for (size, refused) in [
-        (MAX_STORED_FILE_BYTES as usize + 1, true),
-        (MAX_STORED_FILE_BYTES as usize, false),
-    ] {
+    for (size, refused) in [(CAP as usize + 1, true), (CAP as usize, false)] {
         let f = fixture();
         let mut bytes = json.to_vec();
         bytes.resize(size, b' ');
         write_secure(&sidecar_path(&f.dir), &bytes);
-        drop(bytes);
-        let mut replies = vec![old_migrated()];
-        replies.extend((0..12).map(|i| v2_page(&[item(&format!("u{i}"), month_start_ms(0))], None)));
-        let (outcome, seen) = run_v2(&f, replies, v2_limits(true));
+        let replies = v2_month_replies(vec![item("u", month_start_ms(0))]);
+        let (outcome, seen) = with_stored_cap(CAP, || run_v2(&f, replies, v2_limits(true)));
         if refused {
             assert_eq!(outcome, stop(State::Error, Some("write_failed")));
             assert!(seen.is_empty(), "requests sent before failing");
@@ -6549,4 +6560,150 @@ fn an_oversized_sidecar_is_refused_before_any_request() {
             assert_eq!(outcome.stop.state, State::Ok, "control: {outcome:?}");
         }
     }
+}
+
+// --- Billing V2, Windows review round 2 -----------------------------------------
+
+/// A live file of old rows, as an old walk writes it.
+fn old_live_bytes(rows: &[serde_json::Value]) -> Vec<u8> {
+    serde_json::json!({"totalUsageEventsCount": rows.len(), "usageEventsDisplay": rows})
+        .to_string()
+        .into_bytes()
+}
+
+fn sibling_history(c: &SiblingCase) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(c.sibling.join(sidecar_name(&c.stem))).unwrap()).unwrap()
+}
+
+/// Review round 2, item 1: the carry-over reads the other candidate only
+/// when it passes cleanup's check (a real directory that meets the storage
+/// contract): a junction at the preferred dir, and a preferred dir whose
+/// owner was changed, are never carried over (nothing frozen), and their
+/// files are left alone. Mutation: in `v2_source`, delete the `if
+/// !matches!(real_dir(other), Ok(true)) || secure::verify_dir(other).is_err()
+/// { continue; }` gate.
+#[test]
+fn a_candidate_failing_the_storage_contract_is_never_carried_over() {
+    let _guard = lock();
+    let old = [
+        old_row("a", month_start_ms(1) + HOUR),
+        old_row("b", month_start_ms(1) + 2 * HOUR),
+    ];
+    // A junction at the preferred dir, to a secure dir holding a live file.
+    let c = sibling_case();
+    let elsewhere = c._tmp.path().join("elsewhere");
+    drop(secure::ensure_dir(&elsewhere).unwrap());
+    let planted = elsewhere.join(format!("usage.{}.json", c.stem));
+    write_secure(&planted, &old_live_bytes(&old));
+    junction(&c.preferred, &elsewhere);
+    drop(secure::ensure_dir(&c.sibling).unwrap());
+    let (url, _) = serve(v2_month_replies(vec![as_other("m0", month_start_ms(0))]));
+    let status = sync_round(&c.default_db, &url, &c.registry);
+    assert_eq!(states(&status), ["notSignedIn", "ok"], "junction: {status}");
+    let history = sibling_history(&c);
+    assert!(history["frozen"].as_array().unwrap().is_empty(), "junction carried over");
+    assert_eq!(history["cutoverMs"], serde_json::Value::Null);
+    assert!(planted.exists(), "the junction's target was touched");
+
+    // A preferred dir that no longer meets the contract (another owner).
+    let c = sibling_case();
+    let live = c.preferred.join(format!("usage.{}.json", c.stem));
+    write_secure(&live, &old_live_bytes(&old));
+    set_owner(&c.preferred, crate::agent_storage_windows::TestOwner::Administrators);
+    let (url, _) = serve(v2_month_replies(vec![as_other("m0", month_start_ms(0))]));
+    let status = sync_round(&c.default_db, &url, &c.registry);
+    assert_eq!(states(&status), ["notSignedIn", "ok"], "loosened: {status}");
+    let history = sibling_history(&c);
+    assert!(history["frozen"].as_array().unwrap().is_empty(), "a loosened dir carried over");
+    assert!(live.exists(), "a file in a dir failing the contract was deleted");
+    set_owner(&c.preferred, crate::agent_storage_windows::TestOwner::CurrentUser);
+}
+
+/// Review round 2, item 2: `secure::peek_dir` answers what
+/// `secure::resolve_dir` then returns, in each state the rule knows, and
+/// creates nothing: nothing there (preferred), a secure preferred dir
+/// (preferred), a loose preferred dir (the sibling), an existing sibling
+/// (the sibling). Mutations: in `peek_secure_storage_directory`, the
+/// security-failure arm -> `Ok(preferred.to_path_buf())`; open the
+/// preferred dir with `ensure_secure_storage_directory` (creates it).
+#[test]
+fn peeking_the_commit_dir_matches_resolution_and_creates_nothing() {
+    let tmp = TempDir::new();
+    let base = tmp.path().join("p");
+    drop(secure::ensure_dir(&base).unwrap());
+    let sibling_of = |dir: &Path| {
+        let mut name = dir.as_os_str().to_os_string();
+        name.push(".secure");
+        PathBuf::from(name)
+    };
+    // Nothing there: the preferred dir, and nothing created.
+    let a = base.join("a");
+    assert_eq!(secure::peek_dir(&a).unwrap(), a);
+    assert!(!a.exists() && !sibling_of(&a).exists(), "the peek created a dir");
+    assert_eq!(secure::resolve_dir(&a).unwrap(), a);
+    // A secure preferred dir.
+    assert_eq!(secure::peek_dir(&a).unwrap(), a);
+    // A loose preferred dir: the sibling, not created by the peek.
+    let c = base.join("c");
+    std::fs::create_dir(&c).unwrap();
+    assert_eq!(secure::peek_dir(&c).unwrap(), sibling_of(&c));
+    assert!(!sibling_of(&c).exists(), "the peek created the sibling");
+    assert_eq!(secure::resolve_dir(&c).unwrap(), sibling_of(&c));
+    // An existing sibling.
+    assert_eq!(secure::peek_dir(&c).unwrap(), sibling_of(&c));
+}
+
+/// Review round 2, item 3: a V2 commit whose live file would exceed the
+/// stored-file cap writes nothing (`write_failed`), so no later round meets
+/// a file it must refuse; under the cap it commits. Mutation: delete the
+/// `if payload.len() as u64 > stored_cap() || … { return Err(failed()); }`
+/// check in `commit_v2`.
+#[test]
+fn a_v2_commit_over_the_cap_writes_nothing() {
+    let many = |count: usize| {
+        (0..count)
+            .map(|i| item(&format!("n{i}"), month_start_ms(0) + i as i64))
+            .collect::<Vec<_>>()
+    };
+    let f = fixture();
+    let (outcome, seen) =
+        with_stored_cap(2048, || run_v2(&f, v2_month_replies(many(20)), v2_limits(true)));
+    assert_eq!(outcome, stop(State::Error, Some("write_failed")));
+    assert_eq!(v2_requests(&seen).len(), 12, "control: the walk ran");
+    assert!(!expected_file(&f.dir).exists(), "an oversized live file was written");
+    assert!(!sidecar_path(&f.dir).exists());
+    // Control: the same rows under a larger cap commit.
+    let (outcome, _) =
+        with_stored_cap(1 << 20, || run_v2(&f, v2_month_replies(many(20)), v2_limits(true)));
+    assert_eq!(outcome, ok(20));
+}
+
+/// Review round 2, item 4: in a candidate that passes the contract, a
+/// readable live file is carried over even when its sidecar cannot be read
+/// (frozen whole, as a stale sidecar is), so cleanup never deletes the only
+/// copy of the old rows. Mutation: in `v2_source`, `let other_stored =
+/// read_history(other, stem).ok().flatten();` -> `let Ok(other_stored) =
+/// read_history(other, stem) else { continue; };`.
+#[test]
+fn a_readable_live_file_is_carried_over_beside_an_unreadable_sidecar() {
+    let _guard = lock();
+    let c = sibling_case();
+    let newest = month_start_ms(1) + 2 * HOUR;
+    let old = [old_row("a", month_start_ms(1) + HOUR), old_row("b", newest)];
+    write_secure(&c.preferred.join(format!("usage.{}.json", c.stem)), &old_live_bytes(&old));
+    std::fs::create_dir(c.preferred.join(sidecar_name(&c.stem))).unwrap();
+    drop(secure::ensure_dir(&c.sibling).unwrap());
+    let mut replies = vec![
+        old_migrated(),
+        v2_page(&[as_other("v-current", month_start_ms(0))], None),
+        v2_page(&[as_other("v-after", newest + HOUR)], None),
+    ];
+    replies.extend((0..10).map(|_| v2_empty()));
+    let (url, _) = serve(replies);
+    let status = sync_round(&c.default_db, &url, &c.registry);
+    assert_eq!(states(&status), ["notSignedIn", "ok"], "{status}");
+    let history = sibling_history(&c);
+    assert_eq!(history["cutoverMs"], newest, "the old rows were not carried over");
+    assert_eq!(history["frozen"].as_array().unwrap().len(), 2);
+    assert_eq!(rows_in(&c.sibling.join(format!("usage.{}.json", c.stem))).len(), 4);
 }
