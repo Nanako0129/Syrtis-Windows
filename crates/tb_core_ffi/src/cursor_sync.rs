@@ -148,6 +148,13 @@ const MAX_V2_PAGES: u32 = 1280;
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// Only a 403 body is read, to tell an auth refusal (JSON) from an HTML wall.
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+/// The largest Billing V2 sidecar or live usage file Syrtis reads back
+/// (`secure::read`): twice the per-walk body cap. A walk writes trimmed rows
+/// (fewer bytes than the bodies it read), the largest history seen is
+/// ≈ 2 MB, so a bigger file is not one of ours to trust and is refused like
+/// an unreadable one (the round fails `write_failed`). Unmeasured ceiling:
+/// a real history that grew past it would stop V2 rounds until disable.
+const MAX_STORED_FILE_BYTES: u64 = 2 * MAX_BODY_BYTES as u64;
 /// The first sync (no complete file yet) and every explicit "Sync now".
 const FULL_BUDGET: Duration = Duration::from_secs(10 * 60);
 /// Later background syncs (macOS D4: ≥ 2× the measured full walk, ≤ 10 min).
@@ -1104,14 +1111,23 @@ mod secure {
 
     /// The bytes of one Syrtis file (the Billing V2 sidecar or the live
     /// usage file), read only if it is a regular file that meets the storage
-    /// contract at that pathname. `NotFound` when there is none; any other
-    /// error (a directory, a reparse point, a loosened file) is a refusal.
+    /// contract at that pathname, and is at most `MAX_STORED_FILE_BYTES`.
+    /// `NotFound` when there is none; any other error (a directory, a
+    /// reparse point, a loosened file, an oversized one) is a refusal.
     pub(super) fn read(path: &Path) -> io::Result<Vec<u8>> {
         use std::io::Read as _;
-        let mut file = storage::open_existing_secure_file(path, false)?;
+        let file = storage::open_existing_secure_file(path, false)?;
         storage::verify_secure_file_path(&file, path)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
+        let length = file.metadata()?.len();
+        if length > super::MAX_STORED_FILE_BYTES {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized"));
+        }
+        let mut bytes = Vec::with_capacity(length as usize);
+        // The cap holds even if the file grows after the length was read.
+        file.take(super::MAX_STORED_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > super::MAX_STORED_FILE_BYTES {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized"));
+        }
         Ok(bytes)
     }
 }
@@ -1209,8 +1225,9 @@ impl Removal {
 /// on, so files removed before it still count; only a dir that cannot be
 /// listed at all is an `Err` (nothing removed). `spare_sidecar_dirs`: the
 /// old walk's commit only (macOS #554 round 3): Syrtis only ever writes a
-/// sidecar as a file, so a directory with that name must not turn an old
-/// walk's otherwise unchanged commit into a cleanup failure; disable,
+/// sidecar as a file, so a directory (or a junction or symbolic link) with
+/// that name must not turn an old walk's otherwise unchanged commit into a
+/// cleanup failure; disable,
 /// profile removal and the V2 commit still try it and count it in `left`.
 fn remove_usage_files(dir: &Path, keep: &[&str], spare_sidecar_dirs: bool) -> io::Result<Removal> {
     let mut removal = Removal::default();
@@ -1235,9 +1252,13 @@ fn remove_usage_files(dir: &Path, keep: &[&str], spare_sidecar_dirs: bool) -> io
         if !is_ours(&name) {
             continue;
         }
+        // A junction or symbolic link at a sidecar name (a reparse point,
+        // which `secure::remove_file` refuses) is spared the same way.
         if spare_sidecar_dirs
             && is_sidecar_name(&name)
-            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            && entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_dir() || kind.is_symlink())
         {
             continue;
         }
@@ -1304,12 +1325,6 @@ fn commit_file(
     let failed = || Stop::error("write_failed");
     let locked = lock_dir(dir, resolve, still_wanted)?;
     let dir = locked.dir.as_path();
-    // Best effort: the old walk's commit never fails on the sidecar. One
-    // that outlives this commit (it fails the storage contract, say) no
-    // longer matches the live file's SHA-256: it is stale, and the next V2
-    // commit freezes this file afresh (`commit_v2`). A same-stem sidecar
-    // Syrtis cannot read never gets here (`run` refuses the round first).
-    let _ = secure::remove_file(&dir.join(sidecar_name(stem)));
     let payload = serde_json::to_vec(&UsageFile {
         total_usage_events_count: events.len(),
         usage_events_display: events,
@@ -1317,6 +1332,15 @@ fn commit_file(
     .map_err(|_| failed())?;
     let final_name = live_name(stem);
     let changed = write_payload(&locked, &final_name, &payload)?;
+    // Only once the live file holds the old walk's rows: a failed live
+    // write leaves the V2 live file and its sidecar a matching pair, so the
+    // next V2 round never freezes V2 rows as old history. Best effort: the
+    // old walk's commit never fails on the sidecar. One that outlives this
+    // commit (it fails the storage contract, say) no longer matches the live
+    // file's SHA-256: it is stale, and the next V2 commit freezes this file
+    // afresh (`commit_v2`). A same-stem sidecar Syrtis cannot read in this
+    // dir never gets here (`run` refuses the round first).
+    let _ = secure::remove_file(&dir.join(sidecar_name(stem)));
     // Superseded files and orphan temps go. A Syrtis-named file that cannot
     // be deleted (one failing the storage contract is never deleted), or a
     // dir that cannot be listed, is a cleanup failure, so the round reports
@@ -1491,6 +1515,61 @@ fn read_live(dir: &Path, stem: &str) -> Result<Live, ()> {
     }
 }
 
+/// The dir a commit for this profile would use (`lock_dir`), found without
+/// creating anything: the default profile's dir as resolved at the on push;
+/// for an added profile (`resolve`) the sticky `.secure` sibling when
+/// anything exists at that name (resolution then uses it, or fails closed),
+/// else the preferred dir unless it exists and fails the storage contract
+/// (resolution would then create the sibling). Only a guess for planning and
+/// the pre-walk check: the commit resolves for real and re-reads there under
+/// the lock (`v2_source`), so a race only changes which months are read.
+fn planned_dir(dir: &Path, resolve: bool) -> PathBuf {
+    if !resolve {
+        return dir.to_path_buf();
+    }
+    let mut fallback = dir.as_os_str().to_os_string();
+    fallback.push(secure::FALLBACK_SUFFIX);
+    let fallback = PathBuf::from(fallback);
+    if std::fs::symlink_metadata(&fallback).is_ok() {
+        return fallback;
+    }
+    match std::fs::symlink_metadata(dir) {
+        Err(_) => dir.to_path_buf(),
+        // An existing dir is opened and verified, never created or repaired.
+        Ok(_) if secure::ensure_dir(dir).is_ok() => dir.to_path_buf(),
+        Ok(_) => fallback,
+    }
+}
+
+/// The stem's sidecar and live file a V2 round builds on. Those in `used`,
+/// the dir the commit writes: one there that cannot be read refuses the
+/// round (D5). When `used` holds neither (the first commit after an added
+/// profile's sticky `.secure` sibling appeared, with the history still in
+/// its other dir), those of the first other candidate holding either are
+/// carried over, so the old rows are frozen into `used` before the other
+/// dir is cleaned, never lost. Nothing writes the other dir any more (the
+/// fallback is sticky), so it is read without its lock. An unreadable file
+/// there is skipped, never a refusal: its cleanup reports it.
+fn v2_source(
+    used: &Path,
+    candidates: &[PathBuf],
+    stem: &str,
+) -> Result<(Option<History>, Live), ()> {
+    let stored = read_history(used, stem)?;
+    let live = read_live(used, stem)?;
+    if stored.is_some() || live.sha256.is_some() {
+        return Ok((stored, live));
+    }
+    for other in candidates.iter().filter(|other| other.as_path() != used) {
+        if let (Ok(stored), Ok(live)) = (read_history(other, stem), read_live(other, stem)) {
+            if stored.is_some() || live.sha256.is_some() {
+                return Ok((stored, live));
+            }
+        }
+    }
+    Ok((stored, live))
+}
+
 /// Unix ms from a timestamp the engine accepts: base-10 ms, else RFC 3339
 /// (engine `parse_ms_timestamp`).
 pub(crate) fn timestamp_ms(text: &str) -> Option<i64> {
@@ -1588,11 +1667,14 @@ fn v2_windows(
 /// min(newest, now), nothing read yet. A month re-read with no rows keeps
 /// its rows. Nothing at all to write (no old rows, no V2 rows):
 /// `billing_v2_no_items`, nothing written. Both files go through the
-/// storage contract (secure temp + secure replace). Returns the commit and
-/// the live file's row count.
+/// storage contract (secure temp + secure replace). The rows build on
+/// `v2_source` in the dir the commit resolves (`candidates`: the profile's
+/// dirs, for the carry-over). Returns the commit and the live file's row
+/// count.
 fn commit_v2(
     dir: &Path,
     resolve: bool,
+    candidates: &[PathBuf],
     stem: &str,
     fetched: Fetched,
     now_ms: i64,
@@ -1601,8 +1683,7 @@ fn commit_v2(
     let failed = || Stop::error("write_failed");
     let locked = lock_dir(dir, resolve, still_wanted)?;
     let dir = locked.dir.as_path();
-    let live = read_live(dir, stem).map_err(|_| failed())?;
-    let stored = read_history(dir, stem).map_err(|_| failed())?;
+    let (stored, live) = v2_source(dir, candidates, stem).map_err(|_| failed())?;
     let trusted = stored.as_ref().is_some_and(|history| history.trusts(&live));
     let (mut history, live_v2) = match stored {
         Some(history) if trusted => {
@@ -2370,13 +2451,10 @@ async fn run(
     drop(value);
     drop(login);
     // D5: a same-stem sidecar Syrtis cannot read (a non-file, one failing
-    // the storage contract, or not ours to parse) in any of this profile's
-    // dirs stops the round before any request, old or V2.
-    if slot
-        .candidates()
-        .iter()
-        .any(|dir| read_history(dir, &stem).is_err())
-    {
+    // the storage contract, or not ours to parse) in the dir a commit would
+    // use stops the round before any request, old or V2. One in the
+    // profile's other dir never refuses: its cleanup reports it.
+    if read_history(&planned_dir(dir, slot.root.is_some()), &stem).is_err() {
         return stopped(Stop::error("write_failed"));
     }
     let client = match client(target) {
@@ -2458,10 +2536,9 @@ async fn run(
 /// refusal or partial walk returns before the commit, so the live file and
 /// the sidecar stay as they were. Any failure here covers the account like
 /// a walk failure (`covers_account`): write_failed and disabled do not.
-/// The plan reads the first of the profile's dirs that holds this stem's
-/// sidecar or live file (an added profile's files sit in its dir or its
-/// `.secure` sibling, resolved only at commit); the commit re-reads both
-/// under the lock in the dir it resolves.
+/// The plan reads what the commit will build on (`v2_source` in
+/// `planned_dir`: an added profile's dir is resolved, and created, only at
+/// commit); the commit re-reads under the lock in the dir it resolves.
 #[allow(clippy::too_many_arguments)]
 async fn billing_v2(
     client: &reqwest::Client,
@@ -2479,22 +2556,11 @@ async fn billing_v2(
         .map_or(0, |d| d.as_millis() as i64);
     // A live file (or a sidecar, since `run` checked it) the commit could
     // not read fails here, before any V2 request.
-    let none = Live {
-        rows: Vec::new(),
-        sha256: None,
+    let candidates = slot.candidates();
+    let planned = planned_dir(dir, slot.root.is_some());
+    let Ok((stored, live)) = v2_source(&planned, &candidates, stem) else {
+        return (Err(Stop::error("write_failed")), 0);
     };
-    let mut source = (None, none);
-    for candidate in slot.candidates() {
-        let (Ok(stored), Ok(live)) = (read_history(&candidate, stem), read_live(&candidate, stem))
-        else {
-            return (Err(Stop::error("write_failed")), 0);
-        };
-        if stored.is_some() || live.sha256.is_some() {
-            source = (stored, live);
-            break;
-        }
-    }
-    let (stored, live) = source;
     let stale = stored
         .as_ref()
         .is_some_and(|history| !history.trusts(&live));
@@ -2519,7 +2585,7 @@ async fn billing_v2(
     };
     let dropped = fetched.dropped_after(plan.cutover);
     (
-        commit_v2(dir, slot.root.is_some(), stem, fetched, now_ms, enabled),
+        commit_v2(dir, slot.root.is_some(), &candidates, stem, fetched, now_ms, enabled),
         dropped,
     )
 }

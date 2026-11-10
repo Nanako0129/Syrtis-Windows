@@ -6316,3 +6316,237 @@ fn an_added_profile_plans_from_the_history_in_its_secure_sibling() {
         .clone();
     assert_eq!(rows.len(), 2, "month M-5 was dropped");
 }
+
+// --- Billing V2, Windows review round 1 -----------------------------------------
+
+/// An added profile whose files are in its preferred dir, then the
+/// commit's dir moves to the sticky `.secure` sibling.
+struct SiblingCase {
+    _tmp: TempDir,
+    default_db: PathBuf,
+    registry: RwLock<Config>,
+    preferred: PathBuf,
+    sibling: PathBuf,
+    stem: String,
+}
+
+fn sibling_case() -> SiblingCase {
+    let tmp = TempDir::new();
+    let default_dir = tmp.path().join("default");
+    std::fs::create_dir_all(&default_dir).unwrap();
+    let default_db = state_db(&default_dir, &[]);
+    let root = profile_root(tmp.path(), "b", &other_token(), OTHER_USER);
+    let p = profile(PROFILE_A, &root);
+    let registry = RwLock::new(multi(tmp.path(), true, vec![p.clone()]));
+    let preferred = profile_dir(tmp.path(), &p);
+    let mut sibling = preferred.clone().into_os_string();
+    sibling.push(".secure");
+    SiblingCase {
+        _tmp: tmp,
+        default_db,
+        registry,
+        preferred,
+        sibling: PathBuf::from(sibling),
+        stem: stem(OTHER_USER).unwrap(),
+    }
+}
+
+fn as_other(id: &str, ms: i64) -> serde_json::Value {
+    let mut item = item(id, ms);
+    item["principal"]["id"] = OTHER_USER.into();
+    item
+}
+
+fn rows_in(path: &Path) -> Vec<serde_json::Value> {
+    serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap()).unwrap()
+        ["usageEventsDisplay"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// Review round 1, item 1: the live file and a trusted sidecar sit in an
+/// added profile's preferred dir when its `.secure` sibling appears; the next
+/// V2 commit goes into the sibling and carries the history over (same
+/// cutover, same frozen rows, every row kept) before the preferred dir is
+/// cleaned. Mutation: in `v2_source`, delete the `for other in …` carry-over
+/// loop (the plan then reads all 12 months and the commit freezes nothing:
+/// no cutover, the old rows lost).
+#[test]
+fn a_sticky_secure_sibling_carries_the_v2_history_over() {
+    let _guard = lock();
+    let c = sibling_case();
+    let cutover = v2_cutover();
+    let (url, _) = serve(vec![old_page(&[
+        old_row("a", month_start_ms(1) + HOUR),
+        old_row("b", cutover),
+    ])]);
+    assert_eq!(states(&sync_round(&c.default_db, &url, &c.registry)), ["notSignedIn", "ok"]);
+    let v2_round = || {
+        vec![
+            old_migrated(),
+            v2_page(&[as_other("v-current", month_start_ms(0))], None),
+            v2_page(&[as_other("v-after", cutover + HOUR)], None),
+        ]
+    };
+    let (url, _) = serve(v2_round());
+    assert_eq!(states(&sync_round(&c.default_db, &url, &c.registry)), ["notSignedIn", "ok"]);
+    let first: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(c.preferred.join(sidecar_name(&c.stem))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(first["cutoverMs"], cutover, "fixture");
+
+    drop(secure::ensure_dir(&c.sibling).unwrap());
+    // Padded, so a round planned without the carried-over history (all 12
+    // months) still completes and the commit's rows decide.
+    let mut replies = v2_round();
+    replies.extend((0..10).map(|_| v2_empty()));
+    let (url, _) = serve(replies);
+    let status = sync_round(&c.default_db, &url, &c.registry);
+    assert_eq!(states(&status), ["notSignedIn", "ok"], "{status}");
+    let side: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(c.sibling.join(sidecar_name(&c.stem))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(side["cutoverMs"], first["cutoverMs"], "the cutover was not carried over");
+    assert_eq!(side["frozen"].to_string(), first["frozen"].to_string());
+    let rows = rows_in(&c.sibling.join(format!("usage.{}.json", c.stem)));
+    assert_eq!(rows.len(), 4, "old rows lost");
+    let pre: f64 = rows.iter().filter(|r| row_ms(r) <= cutover).map(row_tokens).sum();
+    assert_eq!(pre, 2.0 * OLD_ROW_TOKENS);
+    assert!(!c.preferred.join(format!("usage.{}.json", c.stem)).exists());
+    assert!(!c.preferred.join(sidecar_name(&c.stem)).exists());
+}
+
+/// Review round 1, item 2: an unreadable same-stem sidecar in an added
+/// profile's dir that a commit does not use (here a loose preferred dir, so
+/// commits go to the sibling) never refuses the round, V2 or old: the round
+/// syncs and its cleanup reports the profile. The same sidecar in the dir the
+/// commit uses still refuses before any request. Mutations: in `run`, check
+/// every candidate (`slot.candidates().iter().any(|d| read_history(d,
+/// &stem).is_err())`); in `v2_source`, refuse an unreadable other candidate
+/// (`let (Ok(stored), Ok(live)) = … else { return Err(()) };`).
+#[test]
+fn only_the_dir_a_commit_uses_can_refuse_the_round() {
+    let _guard = lock();
+    let c = sibling_case();
+    std::fs::create_dir(&c.preferred).unwrap();
+    std::fs::create_dir(c.preferred.join(sidecar_name(&c.stem))).unwrap();
+    let mut replies = vec![
+        old_migrated(),
+        v2_page(&[as_other("m0", month_start_ms(0))], None),
+    ];
+    replies.extend((0..11).map(|_| v2_empty()));
+    let (url, _) = serve(replies);
+    let status = sync_round(&c.default_db, &url, &c.registry);
+    assert_eq!(states(&status), ["notSignedIn", "ok"], "V2: {status}");
+    assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([PROFILE_A]));
+    assert!(c.sibling.join(format!("usage.{}.json", c.stem)).exists());
+
+    let (url, _) = serve(vec![old_page(&[old_row("a", month_start_ms(1) + HOUR)])]);
+    let status = sync_round(&c.default_db, &url, &c.registry);
+    assert_eq!(states(&status), ["notSignedIn", "ok"], "old: {status}");
+    assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([PROFILE_A]));
+
+    // Control: in the dir the commit uses, it refuses before any request.
+    let used = c.sibling.join(sidecar_name(&c.stem));
+    assert!(!used.exists(), "fixture: the old commit left its sidecar");
+    std::fs::create_dir(&used).unwrap();
+    let (url, seen) = serve(vec![json_ok(&page(1, &["a"]))]);
+    let status = sync_round(&c.default_db, &url, &c.registry);
+    assert_eq!(states(&status), ["notSignedIn", "error:write_failed"], "{status}");
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+/// Review round 1, item 3: an old walk whose live write fails (a reader
+/// holds the live file) leaves the V2 sidecar in place, so the next V2 round
+/// still trusts it: frozen rows and cutover unchanged, no V2 row frozen as
+/// old history. Mutation: in `commit_file`, delete the sidecar before
+/// `write_payload` (the earlier order).
+#[test]
+fn a_failed_old_commit_keeps_the_v2_sidecar() {
+    let f = fixture();
+    assert_eq!(first_v2_round(&f).stop.state, State::Ok);
+    let side = std::fs::read(sidecar_path(&f.dir)).unwrap();
+    let reader = std::fs::File::open(expected_file(&f.dir)).unwrap();
+    let cutover = v2_cutover();
+    let (outcome, _) = run_v2(
+        &f,
+        vec![old_page(&[
+            old_row("a", month_start_ms(1) + HOUR),
+            old_row("b", cutover),
+            old_row("c", cutover + 3 * HOUR),
+        ])],
+        v2_limits(false),
+    );
+    drop(reader);
+    assert_eq!(outcome, stop(State::Error, Some("write_failed")));
+    assert_eq!(
+        std::fs::read(sidecar_path(&f.dir)).ok(),
+        Some(side),
+        "the sidecar went before the live write"
+    );
+    let (outcome, _) = run_v2(
+        &f,
+        vec![
+            old_migrated(),
+            v2_page(&[item("v-current", month_start_ms(0))], None),
+            v2_page(&[item("v-after", cutover + HOUR)], None),
+        ],
+        v2_limits(false),
+    );
+    assert_eq!(outcome.stop.state, State::Ok);
+    let history = sidecar_json(&f.dir);
+    assert_eq!(history["cutoverMs"], cutover, "V2 rows were frozen as old history");
+    assert_eq!(history["frozen"].as_array().unwrap().len(), 2);
+}
+
+/// Review round 1, item 5: a junction at another stem's sidecar name is
+/// spared by the old walk's commit like a directory (no cleanup failure, the
+/// junction and its target stay). Mutation: in `remove_usage_files`,
+/// `kind.is_dir() || kind.is_symlink()` -> `kind.is_dir()`.
+#[test]
+fn a_junction_at_a_sidecar_name_spares_the_old_commit() {
+    let f = fixture();
+    drop(secure::ensure_dir(&f.dir).unwrap());
+    let target = f._tmp.path().join("elsewhere");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("inside.txt"), b"x").unwrap();
+    let link = f.dir.join(sidecar_of('d'));
+    junction(&link, &target);
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "fixture");
+    let (outcome, _) = run_v2(&f, vec![json_ok(&page(1, &["a"]))], v2_limits(false));
+    assert_eq!(outcome, ok(1));
+    assert!(std::fs::symlink_metadata(&link).is_ok(), "the junction was removed");
+    assert!(target.join("inside.txt").exists());
+}
+
+/// Review round 1, item 7: a same-stem sidecar larger than
+/// `MAX_STORED_FILE_BYTES` (here valid JSON padded with spaces, so only the
+/// size refuses it) stops the round before any request; at the cap it is
+/// read. Mutation: in `secure::read`, both size checks -> `if false {` and
+/// `take(MAX_STORED_FILE_BYTES + 1)` -> `take(u64::MAX)` (no cap).
+#[test]
+fn an_oversized_sidecar_is_refused_before_any_request() {
+    let json = br#"{"frozen":[],"cutoverMs":null,"fetched":[]}"#;
+    for (size, refused) in [
+        (MAX_STORED_FILE_BYTES as usize + 1, true),
+        (MAX_STORED_FILE_BYTES as usize, false),
+    ] {
+        let f = fixture();
+        let mut bytes = json.to_vec();
+        bytes.resize(size, b' ');
+        write_secure(&sidecar_path(&f.dir), &bytes);
+        drop(bytes);
+        let mut replies = vec![old_migrated()];
+        replies.extend((0..12).map(|i| v2_page(&[item(&format!("u{i}"), month_start_ms(0))], None)));
+        let (outcome, seen) = run_v2(&f, replies, v2_limits(true));
+        if refused {
+            assert_eq!(outcome, stop(State::Error, Some("write_failed")));
+            assert!(seen.is_empty(), "requests sent before failing");
+        } else {
+            assert_eq!(outcome.stop.state, State::Ok, "control: {outcome:?}");
+        }
+    }
+}

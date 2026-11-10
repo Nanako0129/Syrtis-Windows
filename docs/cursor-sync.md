@@ -101,10 +101,13 @@ fixed reasons below.
   cleanup (disable, profile removal, account switch, other candidates), and a
   duplicate profile keeps its own account's sidecar with its file. A
   same-stem sidecar Syrtis cannot read (a directory, one failing the
-  contract, or one that does not parse) in any of the profile's dirs stops
-  the round with `write_failed` before any request, old or V2. The old walk's
-  commit never fails on a sidecar: its delete is best effort, and a
-  directory at a sidecar name is spared there (disable still reports it).
+  contract, one over 128 MiB, or one that does not parse) in the dir a
+  commit would use stops the round with `write_failed` before any request,
+  old or V2; one in the profile's other dir never refuses (its cleanup
+  reports it). The old walk's commit never fails on a sidecar: it deletes
+  it, best effort, only after the live file was written, and a directory,
+  junction or symbolic link at a sidecar name is spared there (disable still
+  reports it).
 - **Reasons** (each shown with its own line that keeps the code, macOS copy
   verbatim): `billing_v2_team_required`, `billing_v2_unavailable`,
   `billing_v2_no_items`, `billing_v2_principal_mismatch`.
@@ -407,7 +410,15 @@ once.
   added profiles and their list are local only.
 - Billing V2: the sidecar and the live file are read through the storage
   contract, so a live file or sidecar failing it stops a V2 round
-  (`write_failed`; macOS reads a non-regular live file as empty). The plan
-  of a V2 round reads the first of the profile's dirs (an added profile's
-  dir or its `.secure` sibling) that holds the account's sidecar or live
-  file; the commit re-reads both under the lock in the dir it resolves.
+  (`write_failed`; macOS reads a non-regular live file as empty). An added
+  profile's dir is resolved (and created) only at commit, so a V2 round
+  plans from the dir resolution would pick, found without creating
+  anything (`planned_dir`), and the commit re-reads under the lock in the
+  dir it resolves. When that dir holds neither file (the first commit after
+  the sticky `.secure` sibling appeared), the history in the profile's
+  other dir is carried over (frozen rows, cutover, fetched months) before
+  that dir is cleaned. Files read back are capped at 128 MiB
+  (`MAX_STORED_FILE_BYTES`).
+- The old walk's commit deletes the sidecar after the live write (macOS
+  deletes it before; a failed live write there leaves a sidecar-less V2
+  file, which the next V2 round freezes whole).
