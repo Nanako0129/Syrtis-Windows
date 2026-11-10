@@ -12,6 +12,8 @@ per profile, one at a time (the default first, then each added --user-data-dir f
 Cursor state.vscdb (read-only)
   └─ access token + its own JWT `sub`
        └─ POST https://cursor.com/api/dashboard/get-filtered-usage-events   (paginated, full history)
+            │   (page 1 a JSON object without usageEventsDisplay: a Billing V2 account, see below)
+            │  └─ GET https://cursor.com/api/dashboard/v2/query-billing-items   (per UTC month, cursor pages)
             └─ usage.<hmac>.json  in  %APPDATA%\com.nyanako.tokenbar\cursor-cache                      (default profile)
                                   or  %LOCALAPPDATA%\com.nyanako.tokenbar\cursor-profiles\<UUID>-<root digest>  (added profile)
                  └─ engine scans the newest copy of each account's file as an extra Cursor root
@@ -21,7 +23,8 @@ Cursor state.vscdb (read-only)
 | Piece | Where |
 | --- | --- |
 | Login reader, shared with the Grok Bot Cursor fallback | `crates/tb_core_ffi/src/cursor_desktop.rs` |
-| Walk, file, registry, takeover decision | `crates/tb_core_ffi/src/cursor_sync.rs` |
+| Walk, file, registry, takeover decision, Billing V2 switch, sidecar and commit | `crates/tb_core_ffi/src/cursor_sync.rs` |
+| Billing V2 walker (`query-billing-items`, item mapping, S7 principal rule) | `crates/tb_core_ffi/src/cursor_billing_v2.rs` |
 | Takeover applied to the process scan, recheck, exports | `crates/tb_core_ffi/src/lib.rs` (`capture_process_context`, `recheck_cursor_takeover`, `tb_set_cursor_sync`, `tb_cursor_sync`, `tb_validate_cursor_profile`, `tb_cursor_present`) |
 | Added-profile database checks (handle-first) | `crates/tb_core_ffi/src/agent_storage_windows.rs` (`open_foreign_file`, `drive_type`, `directory_identity`) |
 | C# surface | `src/TokenBar.Interop/CursorSync.cs`, `TbCore.SetCursorSync` / `CursorSync` / `ValidateCursorProfile` / `CursorPresent`; `src/TokenBar.Core/CursorSync.cs` (controller, `configRejected`), `CursorProfileStore.cs` (local-only list of added folders) |
@@ -37,6 +40,74 @@ cookie (header marked sensitive), keyed by the user id taken from the token's
 own JWT `sub`; a stored glass or profile id that differs refuses the walk. An
 expired token, or one within 60 s of `exp`, is refused before any request;
 Cursor's refresh token is never used.
+
+## Billing V2 accounts (CURSOR-BV2-W, port of macOS #554 and #559)
+
+Cursor moved some accounts to a new billing system ("Billing V2", syrtis#520).
+For those, the old endpoint's page 1 is a 2xx JSON object without
+`usageEventsDisplay`. All of Billing V2 lives in Rust; C# only shows the four
+fixed reasons below.
+
+- **Switch (D1a).** The old walk runs first every round and keeps every result
+  it had. Only that page-1 shape switches the profile's round to the V2
+  walker; any other answer (`[]`, a malformed `usageEventsDisplay`, a status)
+  is what it was. An unmigrated account never sends a V2 request.
+- **V2 walk.** `GET query-billing-items?scope=user&startTime&endTime&pageSize=100[&cursor]`
+  with the same client (no redirects, https only) and the same sensitive
+  cookie; the URL is a constant base plus `query_pairs_mut`. Windows are UTC
+  calendar months, newest first, at most the current one and the 11 before
+  it; an earlier month ends 23:59:59Z, the current one now. The cursor is at
+  most 4096 bytes and never repeats (else `partial`, `too_many_pages`); pages
+  (`MAX_V2_PAGES` = 1280, unmeasured) and body bytes (64 MiB) are capped over
+  the whole walk, inside the round's remaining budget. A background round
+  reads the last three months plus any month V2 has never read (and, with no
+  old rows, stops after three empty calendar months in a row); Sync Now reads
+  the whole range. 3xx/401/403/429/5xx map as on the old walk;
+  `availability: missing_team_id` is `billing_v2_team_required`, any other
+  `availability` `billing_v2_unavailable`. Any refusal or partial walk
+  writes nothing.
+- **Items.** Only `billingItemId`, `eventTime`, `product`,
+  `displayExtras.model`, the four token meters, `pricing.currency` and
+  `.contracted`, `hasTokenMeters` and `principal.{type,id}` are read
+  (`userEmail` never). Only `product == "cursor"` rows are written (D3), with
+  no conversation id (sessions per account-day, D4); `contracted` 0 writes no
+  `chargedCents` (the engine prices the row locally, D2), a positive USD
+  amount writes integer cents from its digits (at least 1). Rows whose
+  `eventTime` does not parse, or with no model, are dropped and counted
+  (`droppedRows` on the profile's status). Items are deduped by
+  `billingItemId` in memory only.
+- **S7, principal (macOS #559).** Every item, written or not, must be on the
+  cookie's own user id (any `type`), or on one other non-empty id whose
+  principal `type` is exactly `user`; the first such item fixes that id for
+  every later page and month of the walk. A second other id, another id whose
+  `type` is not exactly `user` (`User`, `team`, missing), an empty id or a
+  missing principal ends the walk with `billing_v2_principal_mismatch`, and
+  nothing is written. Neither id is stored, written or put in a reason.
+- **History sidecar (D5, D6).** The live `usage.<hmac>.json` stays the one
+  file the engine reads. Beside it, `.cursor-sync.history.<hmac>.json` (dot
+  prefixed, never scanned; the same name as macOS) holds the old rows frozen
+  at the first V2 commit, the cutover (the newest frozen row, clamped to now),
+  the months V2 has read, and the SHA-256 of the live file the last V2 commit
+  wrote. A V2 commit writes frozen rows, then the earlier V2 rows of months
+  not re-read with rows, then this walk's rows after the cutover; a month
+  that answers empty keeps its rows. A sidecar whose digest no longer matches
+  the live file (an older build or an old walk replaced it) is not trusted:
+  the next V2 commit freezes the live file afresh. No old rows and no V2 rows
+  is `billing_v2_no_items` and writes nothing. A successful old walk deletes
+  the sidecar (the full old history is back).
+- **Windows storage.** Both files are read and written only through the
+  storage contract above (`secure::read`, secure temp, secure replace), under
+  the dir's secure lock; the sidecar is one of Syrtis's names for every
+  cleanup (disable, profile removal, account switch, other candidates), and a
+  duplicate profile keeps its own account's sidecar with its file. A
+  same-stem sidecar Syrtis cannot read (a directory, one failing the
+  contract, or one that does not parse) in any of the profile's dirs stops
+  the round with `write_failed` before any request, old or V2. The old walk's
+  commit never fails on a sidecar: its delete is best effort, and a
+  directory at a sidecar name is spared there (disable still reports it).
+- **Reasons** (each shown with its own line that keeps the code, macOS copy
+  verbatim): `billing_v2_team_required`, `billing_v2_unavailable`,
+  `billing_v2_no_items`, `billing_v2_principal_mismatch`.
 
 ## Several Cursor profiles (CMP-W, port of macOS #532)
 
@@ -251,7 +322,7 @@ walk (at most one sync interval), and the status then says `cliPresent`.
 - Writes: secure lock (`.cursor-sync.lock`), secure temp
   (`.cursor-sync.tmp-*`, never matching `usage*`), flush, secure replace.
 - Only a complete walk replaces the file. Turning sync off deletes the synced
-  file and temps from every sync dir that exists: both roots
+  file, temps and Billing V2 sidecars from every sync dir that exists: both roots
   (`com.nyanako.tokenbar`, `com.nyanako.tokenbar.secure`) times both child
   names (`cursor-cache`, `cursor-cache.secure`), because the `.secure`
   fallbacks are sticky and the dir in use can move after a file was written
@@ -334,3 +405,9 @@ once.
   reader is handle-first with a fixed-drive rule (macOS: `SQLITE_OPEN_NOFOLLOW`
   plus an owner uid check), and accepts BUILTIN\Administrators as an owner;
   added profiles and their list are local only.
+- Billing V2: the sidecar and the live file are read through the storage
+  contract, so a live file or sidecar failing it stops a V2 round
+  (`write_failed`; macOS reads a non-regular live file as empty). The plan
+  of a V2 round reads the first of the profile's dirs (an added profile's
+  dir or its `.secure` sibling) that holds the account's sidecar or live
+  file; the commit re-reads both under the lock in the dir it resolves.

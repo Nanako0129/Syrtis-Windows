@@ -1156,6 +1156,28 @@ public class CursorSyncTests
         Assert.False(CursorSync.NeedsKeychainAllow("ok", "keychain_consent"));
     }
 
+    /// <summary>CURSOR-BV2-W (macOS #554 design 7): each Billing V2 reason has
+    /// its own line, which still carries the code and is not the generic
+    /// coded line. Mutation: drop the <c>BillingV2Copy</c> branch in
+    /// <see cref="CursorSync.StatusLine"/> -> each line reads "Cursor usage
+    /// couldn't be synced (billing_v2_…)…".</summary>
+    [Theory]
+    [InlineData("billing_v2_team_required", CursorSync.Copy.BillingV2TeamRequired)]
+    [InlineData("billing_v2_unavailable", CursorSync.Copy.BillingV2Unavailable)]
+    [InlineData("billing_v2_no_items", CursorSync.Copy.BillingV2NoItems)]
+    [InlineData("billing_v2_principal_mismatch", CursorSync.Copy.BillingV2PrincipalMismatch)]
+    public void EachBillingV2ReasonHasItsOwnLineCarryingItsCode(string code, string copy)
+    {
+        var line = CursorSync.StatusLine("error", null, reason: code);
+        Assert.Equal(string.Format(copy, code), line);
+        Assert.Contains(code, line);
+        Assert.NotEqual(CursorSync.Copy.ErrorWithReason.Localized(code), line);
+        Assert.True(CursorSync.StatusIsWarning("error"));
+        // Not on another state, and not the consent prompt.
+        Assert.Equal(CursorSync.Copy.Offline, CursorSync.StatusLine("offline", null, reason: code));
+        Assert.False(CursorSync.NeedsKeychainAllow("error", code));
+    }
+
     private static CursorSyncStatus NeedsConsent(bool changed = false) =>
         new("error", 0, null, changed, [], Reason: "keychain_consent");
 
@@ -1423,6 +1445,16 @@ public class CursorSyncTests
             "Cursor 3.27 以後的版本可能會把登入資訊加密儲存。要讀取它，Syrtis 會解開 Cursor 存在這台電腦「Local State」檔案裡的金鑰。Windows 不會詢問，所以這個確認是唯一的把關。那把金鑰能解開 Cursor 所有加密儲存的資料，但 Syrtis 只用它來讀取你的 Cursor 登入，而且只在那次讀取時留在記憶體中，不會儲存或記錄。登入資訊只會送到 Cursor 的用量服務（cursor.com）。開啟 Cursor 同步並不代表授權這件事。撤回後，Syrtis 就不再讀取 Cursor 的加密登入；如果 Cursor 以未加密的方式儲存登入，Syrtis 仍會讀取，撤回不會改變這一點。",
         ["Withdraw"] = "撤回",
         ["Allow access"] = "允許存取",
+        // CURSOR-BV2-W: Billing V2 reasons, verbatim from macOS #554 zh-Hant
+        // (%@ -> {0}).
+        ["Cursor's new billing asks for a team for this account, which Syrtis can't read yet ({0})."] =
+            "Cursor 新版計費要求這個帳號指定團隊，Syrtis 目前還無法讀取（{0}）。",
+        ["Cursor's new billing didn't provide this account's usage ({0}). Syrtis will try again later."] =
+            "Cursor 新版計費沒有提供這個帳號的用量（{0}），Syrtis 稍後會再試。",
+        ["Cursor's new billing has no usage for this account yet ({0}). Syrtis will try again later."] =
+            "Cursor 新版計費目前還沒有這個帳號的用量（{0}），Syrtis 稍後會再試。",
+        ["Cursor returned usage of another account, so Syrtis saved nothing ({0})."] =
+            "Cursor 回傳的是其他帳號的用量，因此 Syrtis 沒有儲存任何資料（{0}）。",
     };
 
     private static Dictionary<string, string> Catalog(string tag) =>
