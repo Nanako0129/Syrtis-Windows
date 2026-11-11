@@ -6610,6 +6610,7 @@ fn a_loosened_preferred_dir_is_carried_over_but_a_loose_file_is_not() {
     )
     .unwrap();
     set_owner(&c.preferred, crate::agent_storage_windows::TestOwner::Administrators);
+    let _restore = RestoreOwner(c.preferred.clone());
     let (url, _) = serve(v2_round());
     let status = sync_round(&c.default_db, &url, &c.registry);
     assert_eq!(states(&status), ["notSignedIn", "ok"], "loosened: {status}");
@@ -6617,7 +6618,10 @@ fn a_loosened_preferred_dir_is_carried_over_but_a_loose_file_is_not() {
     assert_eq!(history["cutoverMs"], first["cutoverMs"], "a loosened dir was not carried over");
     assert_eq!(history["frozen"].to_string(), first["frozen"].to_string());
     assert_eq!(rows_in(&c.sibling.join(format!("usage.{}.json", c.stem))).len(), 4);
-    set_owner(&c.preferred, crate::agent_storage_windows::TestOwner::CurrentUser);
+    // Cleanup as the doc states: the loosened dir keeps its files, reported.
+    assert!(c.preferred.join(format!("usage.{}.json", c.stem)).exists());
+    assert!(c.preferred.join(sidecar_name(&c.stem)).exists());
+    assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([PROFILE_A]));
 
     // A loose live file in a secure preferred dir: never read.
     let c = sibling_case();
@@ -6635,6 +6639,20 @@ fn a_loosened_preferred_dir_is_carried_over_but_a_loose_file_is_not() {
     let history = sibling_history(&c);
     assert!(history["frozen"].as_array().unwrap().is_empty(), "a loose file was read");
     assert!(loose.exists());
+    assert_eq!(status["cleanupFailedProfiles"], serde_json::json!([PROFILE_A]));
+}
+
+/// Gives a dir back to the current user when dropped, so a failed assert
+/// never leaves an Administrators-owned dir in a TempDir.
+struct RestoreOwner(PathBuf);
+
+impl Drop for RestoreOwner {
+    fn drop(&mut self) {
+        let _ = crate::agent_storage_windows::set_owner_for_test(
+            &self.0,
+            crate::agent_storage_windows::TestOwner::CurrentUser,
+        );
+    }
 }
 
 /// Review round 2, item 2: `secure::peek_dir` answers what
@@ -6766,7 +6784,9 @@ fn an_unresolvable_commit_dir_does_not_stop_the_old_walk() {
     let (url, seen) = serve(vec![old_migrated(), v2_empty()]);
     let status = sync_round(&c.default_db, &url, &c.registry);
     assert_eq!(states(&status), ["notSignedIn", "error:write_failed"], "{status}");
-    assert!(v2_requests(&seen.lock().unwrap()).is_empty(), "V2 ran without a commit dir");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "the old walk's own request was not made");
+    assert!(v2_requests(&seen).is_empty(), "V2 ran without a commit dir");
 }
 
 /// Review round 3, item 6: the sidecar alone over the cap (no new V2 rows,
@@ -6785,8 +6805,17 @@ fn a_v2_commit_whose_sidecar_alone_is_over_the_cap_writes_nothing() {
     replies.extend((0..12).map(|_| v2_empty()));
     // The payload re-serialises these rows (≈ the live file); the sidecar
     // adds about 90 bytes (cutover, two months, a 64-hex digest).
-    let (outcome, seen) =
-        with_stored_cap(live.len() as u64 + 20, || run_v2(&f, replies, v2_limits(false)));
+    let cap = live.len() as u64 + 20;
+    // The payload alone is under the cap: the commit's payload is these
+    // rows re-serialised, exactly as `commit_v2` builds it.
+    let rows = serde_json::from_slice::<Page>(&live).unwrap().usage_events_display;
+    let payload = serde_json::to_vec(&UsageFile {
+        total_usage_events_count: rows.len(),
+        usage_events_display: &rows,
+    })
+    .unwrap();
+    assert!(payload.len() as u64 <= cap, "fixture: the payload half would trip");
+    let (outcome, seen) = with_stored_cap(cap, || run_v2(&f, replies, v2_limits(false)));
     assert_eq!(outcome, stop(State::Error, Some("write_failed")));
     assert!(!v2_requests(&seen).is_empty(), "control: the walk ran");
     assert_eq!(std::fs::read(expected_file(&f.dir)).unwrap(), live);

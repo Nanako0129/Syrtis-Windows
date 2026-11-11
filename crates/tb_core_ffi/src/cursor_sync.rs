@@ -152,8 +152,16 @@ const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 /// (`secure::read`): twice the per-walk body cap. A walk writes trimmed rows
 /// (fewer bytes than the bodies it read), the largest history seen is
 /// ≈ 2 MB, so a bigger file is not one of ours to trust and is refused like
-/// an unreadable one (the round fails `write_failed`). Unmeasured ceiling:
-/// a real history that grew past it would stop V2 rounds until disable.
+/// an unreadable one (the round fails `write_failed`). The cap was not
+/// chosen from a measurement.
+///
+/// Known limitation (maintainer decision 2026-11-11, no code change): reads
+/// and the V2 commit refuse files over this cap, but the old walk's commit
+/// (`commit_file`) has none. So an account whose history passes 128 MiB is
+/// still written by the old walk, but once it switches to Billing V2 every
+/// round stops with `write_failed` (`v2_source` refuses the oversized live
+/// file, after the old walk's page 1 and before any V2 request) until sync
+/// is disabled.
 const MAX_STORED_FILE_BYTES: u64 = 2 * MAX_BODY_BYTES as u64;
 
 /// `MAX_STORED_FILE_BYTES`, or a test's smaller cap on this thread.
@@ -1538,10 +1546,12 @@ fn read_live(dir: &Path, stem: &str) -> Result<Live, ()> {
 /// commit's own rule but creating nothing: the default profile's dir as
 /// resolved at the on push; for an added profile what
 /// `secure::resolve_dir` would return (`secure::peek_dir`, the same sticky
-/// `.secure` rule in `agent_storage_windows`). An error is the error the
-/// commit's resolution would meet: `run` then skips the pre-walk check (the
-/// old walk runs and reports its own outcome) and stops a V2 round before
-/// its requests. Planning and the pre-walk check use it; the commit
+/// `.secure` rule in `agent_storage_windows`). The peek and the commit's
+/// resolution are separate opens, so an error here usually means the
+/// commit's resolution will fail too, but not always (the cause may be
+/// gone by then). On an error `run` skips the pre-walk check (the old walk
+/// runs and reports its own outcome) and stops a V2 round before its
+/// requests. Planning and the pre-walk check use it; the commit
 /// still resolves for real and re-reads under the lock (`v2_source`), so a
 /// concurrent change only changes which months are read.
 fn planned_dir(dir: &Path, resolve: bool) -> io::Result<PathBuf> {
@@ -1556,9 +1566,15 @@ fn planned_dir(dir: &Path, resolve: bool) -> io::Result<PathBuf> {
 /// the dir the commit writes: one there that cannot be read refuses the
 /// round (D5). When `used` holds neither (the first commit after an added
 /// profile's sticky `.secure` sibling appeared, with the history still in
-/// its other dir), the history of the first other candidate holding a
-/// readable live file is carried over, so the old rows are frozen into
-/// `used` before that dir is cleaned, never lost.
+/// its other dir), the other candidates are tried in order; the first one
+/// whose live file can be read (present, or absent) and that holds either a
+/// live file or a readable sidecar is returned, so the old rows are frozen
+/// into `used` before that dir is cleaned, never lost. A candidate whose
+/// live file is present but cannot be read is skipped; a sidecar that cannot
+/// be read counts as none (`stored` None: a stale-sidecar case, the live
+/// file is frozen whole). A candidate holding only a readable sidecar is
+/// returned too; with no live file it is untrusted, so the commit freezes
+/// nothing from it. Never a refusal.
 ///
 /// Accepted residual (maintainer decision 2026-11-11): the other candidate's
 /// folder is NOT checked. In practice the sibling exists only because the
@@ -1570,17 +1586,20 @@ fn planned_dir(dir: &Path, resolve: bool) -> io::Result<PathBuf> {
 /// the folder itself (ancestors are followed, as everywhere). What is still
 /// checked is each file: `secure::read` opens only a regular, non-reparse
 /// file that meets the exact owner/DACL contract at that pathname and is at
-/// most the stored-file cap; anything else is not read. A readable live file
-/// is carried over even when its sidecar cannot be read, as a stale-sidecar
-/// case (`stored` None: the live file is frozen whole); an unreadable live
-/// file skips the candidate. Never a refusal. After the commit, cleanup
-/// deletes the candidate's files only where it can: a folder failing the
-/// contract keeps them and is reported (`cleanupFailedProfiles`), a junction
-/// is skipped without a report (`clean_candidate`), and in both cases the
-/// newer copy in `used` is the one the engine reads (`newest_per_account`
-/// keeps one file per name; a junction is never listed). Nothing writes the
-/// other dir any more (the fallback is sticky), so it is read without its
-/// lock.
+/// most the stored-file cap; anything else is not read. Consequence: anyone
+/// who can write that folder (for example with FILE_DELETE_CHILD on it) can
+/// rename one of the user's own Syrtis files, which pass the per-file check,
+/// onto this stem's names, and its rows are then carried over as this
+/// account's history.
+///
+/// After the commit, cleanup deletes the candidate's files only where it
+/// can: a folder failing the contract keeps them and is reported
+/// (`cleanupFailedProfiles`), and a junction is skipped without a report
+/// (`clean_candidate`). The engine then reads the copy in `used` only while
+/// it is the newer one: `newest_per_account` keeps one file per name by
+/// modified time, and on a tie the earlier candidate (the preferred dir)
+/// wins; a junction is never listed (`sync_files`). Nothing writes the other
+/// dir any more (the fallback is sticky), so it is read without its lock.
 fn v2_source(
     used: &Path,
     candidates: &[PathBuf],
@@ -2492,8 +2511,14 @@ async fn run(
     // dir a commit will use stops the round before any request, old or V2.
     // One in the profile's other dir never refuses.
     // A peek error skips this check: the old walk then runs and reports its
-    // own outcome, and its commit meets the same error (`write_failed`), as
-    // before Billing V2. Only a V2 round stops on it, before its requests.
+    // own outcome. The peek and the commit's resolution are separate opens:
+    // usually the commit meets the same error (`write_failed`, as before
+    // Billing V2), but if its resolution succeeds, the old walk commits into
+    // a dir whose same-stem sidecar was not pre-checked; the commit then
+    // deletes it with the superseded files or, when it cannot (a
+    // contract-failing file), reports a cleanup failure (a directory,
+    // junction or symbolic link at that name is spared without one). Only a V2 round stops on a peek error, before its
+    // requests.
     let planned = planned_dir(dir, slot.root.is_some()).ok();
     if planned
         .as_deref()
