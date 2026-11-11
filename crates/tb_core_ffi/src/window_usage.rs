@@ -69,12 +69,9 @@
 //!
 //! A quota window belongs to one account, so its usage must come from that
 //! account's transcripts only. The primary (`account == None`) scans the
-//! process inputs without the registered Claude roots (macOS #561), with the
-//! configured directories and the registered Claude roots as
-//! `excluded_scan_paths`, which the engine applies to the Claude lane
-//! whichever route reached a file (W4c, tokscale-core #65; macOS
-//! `primary_exclusions`), except the entries that overlap the primary's
-//! resolved `<home>\.claude` roots (`keep_primary_roots`). An extra account
+//! process inputs without the registered Claude roots and with the other
+//! accounts' folders excluded (W4c; macOS `primary_exclusions`, #561); the
+//! exact rule is on `scoped_context` and `keep_primary_roots`. An extra account
 //! (`Some(<config dir>)`) reads only its own registered roots and the Claude
 //! client. Each scope runs
 //! on its own captured context (the engine reads scanner settings from the
@@ -182,7 +179,7 @@ fn scoped_context(
     // The primary window is the process context without the registered Claude
     // roots (macOS #561), with the configured directories and the registered
     // Claude roots in `excluded_scan_paths`, which the engine applies to the
-    // Claude lane whichever route reached a file (tokscale-core #65). When the
+    // Claude lane whichever route reached a file (tokscale-core #65, #76). When the
     // home folder is known, `keep_primary_roots` first removes the entries
     // that overlap the resolved `<home>\.claude\projects` or
     // `<home>\.claude\transcripts`, both sides as `canonical` returns them.
