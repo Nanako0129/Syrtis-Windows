@@ -6822,3 +6822,103 @@ fn a_v2_commit_whose_sidecar_alone_is_over_the_cap_writes_nothing() {
     assert_eq!(std::fs::read(expected_file(&f.dir)).unwrap(), live);
     assert!(!sidecar_path(&f.dir).exists(), "an oversized sidecar was written");
 }
+
+// --- Billing V2, S7 regressions (verifier on d461ec7c) --------------------------
+
+/// S7 (#559): the walk's one other id is pinned for the whole walk, and the
+/// cookie's own id in between never releases the pin: other id A, then a
+/// cookie-id item, then another id B on a later page or in a later window
+/// is refused with nothing written (F1). Every item is checked, written or
+/// not: a `grok-bot` item (never written, D3) carrying a `team` principal or
+/// a second other id, and a `hasTokenMeters: false` item (never written)
+/// carrying a `team` principal, are refused (F2). Mutations: in `walk`,
+/// `Owner::Cookie => true` -> `Owner::Cookie => { other = None; true }`
+/// (Vc2); run the S7 loop only over items whose `product` is `cursor` (Vc1).
+#[test]
+fn v2_the_principal_pin_holds_across_the_cookie_id_and_every_item_is_checked() {
+    let _guard = lock();
+    let as_user = |id: &str, ms: i64, user: &str| {
+        let mut item = item(id, ms);
+        item["principal"]["id"] = user.into();
+        item
+    };
+    let unwritten = |id: &str, change: &dyn Fn(&mut serde_json::Value)| {
+        let mut item = item(id, month_start_ms(0) + 2);
+        change(&mut item);
+        item
+    };
+    let grok = |i: &mut serde_json::Value| i["product"] = "grok-bot".into();
+    let meterless = |i: &mut serde_json::Value| i["hasTokenMeters"] = false.into();
+    let team = |i: &mut serde_json::Value| i["principal"]["type"] = "team".into();
+    let cases: Vec<(&str, Vec<Reply>)> = vec![
+        (
+            "A, cookie, B on later pages",
+            vec![
+                v2_page(&[as_user("a", month_start_ms(0), OTHER_USER)], Some("n1")),
+                v2_page(&[item("c", month_start_ms(0) + 1)], Some("n2")),
+                v2_page(&[as_user("b", month_start_ms(0) + 2, THIRD_USER)], None),
+            ],
+        ),
+        (
+            "A, cookie, B in a later window",
+            vec![
+                v2_page(&[as_user("a", month_start_ms(0), OTHER_USER)], Some("n1")),
+                v2_page(&[item("c", month_start_ms(0) + 1)], None),
+                v2_page(&[as_user("b", month_start_ms(1) + HOUR, THIRD_USER)], None),
+            ],
+        ),
+        (
+            "a grok-bot item on a team principal",
+            vec![v2_page(
+                &[
+                    item("fine", month_start_ms(0)),
+                    unwritten("g", &|i| {
+                        grok(i);
+                        team(i);
+                        i["principal"]["id"] = OTHER_USER.into();
+                    }),
+                ],
+                None,
+            )],
+        ),
+        (
+            "a grok-bot item on a second other id",
+            vec![v2_page(
+                &[
+                    as_user("a", month_start_ms(0), OTHER_USER),
+                    unwritten("g", &|i| {
+                        grok(i);
+                        i["principal"]["id"] = THIRD_USER.into();
+                    }),
+                ],
+                None,
+            )],
+        ),
+        (
+            "a meterless item on a team principal",
+            vec![v2_page(
+                &[
+                    item("fine", month_start_ms(0)),
+                    unwritten("m", &|i| {
+                        meterless(i);
+                        team(i);
+                        i["principal"]["id"] = OTHER_USER.into();
+                    }),
+                ],
+                None,
+            )],
+        ),
+    ];
+    for (case, pages) in cases {
+        let f = fixture();
+        let mut replies = vec![old_migrated()];
+        replies.extend(pages);
+        replies.extend((0..12).map(|_| v2_empty()));
+        let (url, _) = serve(replies);
+        let status = sync_status(&f, &url, &registry(true, &f.dir));
+        assert_eq!(status["state"], "error", "{case}: {status}");
+        assert_eq!(status["reason"], "billing_v2_principal_mismatch", "{case}");
+        assert!(!expected_file(&f.dir).exists(), "{case}");
+        assert!(!sidecar_path(&f.dir).exists(), "{case}");
+    }
+}
