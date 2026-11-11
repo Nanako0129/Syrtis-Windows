@@ -178,18 +178,15 @@ fn scoped_context(
 ) -> Result<crate::LocalSourceContext, String> {
     let registry = crate::extra_scan_paths::snapshot();
     // The primary window is the process context without the registered Claude
-    // roots (macOS #561: it does not walk them), excluding the configured
-    // directories and the registered Claude roots (macOS `primary_exclusions`,
-    // #258) on every route the engine applies `excluded_scan_paths` to: its
-    // own home roots, a `.cc-mirror` variant, `TOKSCALE_EXTRA_DIRS`
-    // (tokscale-core #65). When the home folder is known, `keep_primary_roots`
-    // first removes from that list the entries that overlap the primary's
-    // resolved `<home>\.claude` roots, so the primary's own transcripts they
-    // resolve onto stay counted.
+    // roots (macOS #561), with the configured directories and the registered
+    // Claude roots in `excluded_scan_paths`, which the engine applies whichever
+    // route reached a file (tokscale-core #65). When the home folder is known,
+    // `keep_primary_roots` first removes the entries whose resolved path
+    // overlaps `<home>\.claude\projects` or `<home>\.claude\transcripts`.
     //
-    // The roots half is read from the held context, not from the registry: a
-    // request holding a context captured with roots, racing a setter that just
-    // cleared them, would otherwise exclude nothing (CodeRabbit security
+    // The roots half is read from the held context, not the registry, so a
+    // setter clearing the roots mid-request cannot remove them from the
+    // exclusions of a context still captured with them (CodeRabbit security
     // review, #167).
     // The config dirs are not part of any context, so they come from their
     // registry; a config-dir setter racing this request moves the generation,
@@ -225,12 +222,10 @@ fn scoped_context(
             let mut settings = held.clone();
             // The registered Claude roots are the extra accounts' by
             // definition, so the primary window does not walk them (macOS
-            // #561). An exclusion `keep_primary_roots` drops then reaches the
-            // primary only through the engine's own routes (its roots, a
-            // `.cc-mirror` variant, `TOKSCALE_EXTRA_DIRS`); either one naming
-            // an account folder that contains a linked primary root would
-            // bring that account's other transcripts in (not tested). Other
-            // clients' extra roots stay.
+            // #561); other clients' extra roots stay. A `.cc-mirror` variant
+            // or `TOKSCALE_EXTRA_DIRS` entry naming an account folder whose
+            // exclusion `keep_primary_roots` removed would still bring that
+            // account's other transcripts in (not tested).
             settings.extra_scan_paths.remove(CLAUDE);
             settings
                 .excluded_scan_paths
