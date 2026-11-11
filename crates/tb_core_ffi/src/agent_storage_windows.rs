@@ -132,6 +132,38 @@ pub(crate) fn resolve_secure_storage_directory(preferred: &Path) -> io::Result<P
     }
 }
 
+/// The directory `resolve_secure_storage_directory` would return for
+/// `preferred`, decided by the same rule but without creating, tightening or
+/// changing anything: an existing fallback wins (or its error is returned);
+/// an existing preferred root that passes the exact contract is used; one
+/// that fails it with a confirmed contract rejection answers the fallback
+/// (resolution would create it there); an absent preferred root answers the
+/// preferred root (resolution would create it); any other error is returned,
+/// as resolution would return it. A concurrent change between this answer
+/// and a real resolution is not excluded: callers that write must resolve.
+pub(crate) fn peek_secure_storage_directory(preferred: &Path) -> io::Result<PathBuf> {
+    let preferred_name = preferred.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "secure storage root has no filename",
+        )
+    })?;
+    let mut fallback_name = preferred_name.to_os_string();
+    fallback_name.push(SECURE_STORAGE_FALLBACK_SUFFIX);
+    let fallback = preferred.with_file_name(fallback_name);
+    match open_existing_secure_storage_directory(&fallback) {
+        Ok(_) => return Ok(fallback),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    match open_existing_secure_storage_directory(preferred) {
+        Ok(_) => Ok(preferred.to_path_buf()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(preferred.to_path_buf()),
+        Err(error) if is_security_verification_failure(&error) => Ok(fallback),
+        Err(error) => Err(error),
+    }
+}
+
 fn open_existing_secure_storage_directory(path: &Path) -> io::Result<File> {
     open_secure_storage_object(
         path,

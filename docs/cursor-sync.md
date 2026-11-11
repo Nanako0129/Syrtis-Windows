@@ -12,6 +12,8 @@ per profile, one at a time (the default first, then each added --user-data-dir f
 Cursor state.vscdb (read-only)
   └─ access token + its own JWT `sub`
        └─ POST https://cursor.com/api/dashboard/get-filtered-usage-events   (paginated, full history)
+            │   (page 1 a JSON object without usageEventsDisplay: a Billing V2 account, see below)
+            │  └─ GET https://cursor.com/api/dashboard/v2/query-billing-items   (per UTC month, cursor pages)
             └─ usage.<hmac>.json  in  %APPDATA%\com.nyanako.tokenbar\cursor-cache                      (default profile)
                                   or  %LOCALAPPDATA%\com.nyanako.tokenbar\cursor-profiles\<UUID>-<root digest>  (added profile)
                  └─ engine scans the newest copy of each account's file as an extra Cursor root
@@ -21,7 +23,8 @@ Cursor state.vscdb (read-only)
 | Piece | Where |
 | --- | --- |
 | Login reader, shared with the Grok Bot Cursor fallback | `crates/tb_core_ffi/src/cursor_desktop.rs` |
-| Walk, file, registry, takeover decision | `crates/tb_core_ffi/src/cursor_sync.rs` |
+| Walk, file, registry, takeover decision, Billing V2 switch, sidecar and commit | `crates/tb_core_ffi/src/cursor_sync.rs` |
+| Billing V2 walker (`query-billing-items`, item mapping, S7 principal rule) | `crates/tb_core_ffi/src/cursor_billing_v2.rs` |
 | Takeover applied to the process scan, recheck, exports | `crates/tb_core_ffi/src/lib.rs` (`capture_process_context`, `recheck_cursor_takeover`, `tb_set_cursor_sync`, `tb_cursor_sync`, `tb_validate_cursor_profile`, `tb_cursor_present`) |
 | Added-profile database checks (handle-first) | `crates/tb_core_ffi/src/agent_storage_windows.rs` (`open_foreign_file`, `drive_type`, `directory_identity`) |
 | C# surface | `src/TokenBar.Interop/CursorSync.cs`, `TbCore.SetCursorSync` / `CursorSync` / `ValidateCursorProfile` / `CursorPresent`; `src/TokenBar.Core/CursorSync.cs` (controller, `configRejected`), `CursorProfileStore.cs` (local-only list of added folders) |
@@ -37,6 +40,81 @@ cookie (header marked sensitive), keyed by the user id taken from the token's
 own JWT `sub`; a stored glass or profile id that differs refuses the walk. An
 expired token, or one within 60 s of `exp`, is refused before any request;
 Cursor's refresh token is never used.
+
+## Billing V2 accounts (CURSOR-BV2-W, port of macOS #554 and #559)
+
+Cursor moved some accounts to a new billing system ("Billing V2", syrtis#520).
+For those, the old endpoint's page 1 is a 2xx JSON object without
+`usageEventsDisplay`. All of Billing V2 lives in Rust; C# only shows the four
+fixed reasons below.
+
+- **Switch (D1a).** The old walk runs first every round and keeps every result
+  it had. Only that page-1 shape switches the profile's round to the V2
+  walker; any other answer (`[]`, a malformed `usageEventsDisplay`, a status)
+  is what it was. An unmigrated account never sends a V2 request.
+- **V2 walk.** `GET query-billing-items?scope=user&startTime&endTime&pageSize=100[&cursor]`
+  with the same client (no redirects, https only) and the same sensitive
+  cookie; the URL is a constant base plus `query_pairs_mut`. Windows are UTC
+  calendar months, newest first, at most the current one and the 11 before
+  it; an earlier month ends 23:59:59Z, the current one now. The cursor is at
+  most 4096 bytes and never repeats (else `partial`, `too_many_pages`); pages
+  (`MAX_V2_PAGES` = 1280, unmeasured) and body bytes (64 MiB) are capped over
+  the whole walk, inside the round's remaining budget. A background round
+  reads the last three months plus any month V2 has never read (and, with no
+  old rows, stops after three empty calendar months in a row); Sync Now reads
+  the whole range. 3xx/401/403/429/5xx map as on the old walk;
+  `availability: missing_team_id` is `billing_v2_team_required`, any other
+  `availability` `billing_v2_unavailable`. Any refusal or partial walk
+  writes nothing.
+- **Items.** Only `billingItemId`, `eventTime`, `product`,
+  `displayExtras.model`, the four token meters, `pricing.currency` and
+  `.contracted`, `hasTokenMeters` and `principal.{type,id}` are read
+  (`userEmail` never). Only `product == "cursor"` rows are written (D3), with
+  no conversation id (sessions per account-day, D4); `contracted` 0 writes no
+  `chargedCents` (the engine prices the row locally, D2), a positive USD
+  amount writes integer cents from its digits (at least 1). Rows whose
+  `eventTime` does not parse, or with no model, are dropped and counted
+  (`droppedRows` on the profile's status). Items are deduped by
+  `billingItemId` in memory only.
+- **S7, principal (macOS #559).** Every item, written or not, must be on the
+  cookie's own user id (any `type`), or on one other non-empty id whose
+  principal `type` is exactly `user`; the first such item fixes that id for
+  every later page and month of the walk. A second other id, another id whose
+  `type` is not exactly `user` (`User`, `team`, missing), an empty id or a
+  missing principal ends the walk with `billing_v2_principal_mismatch`, and
+  nothing is written. Neither id is stored, written or put in a reason.
+- **History sidecar (D5, D6).** The live `usage.<hmac>.json` stays the one
+  file the engine reads. Beside it, `.cursor-sync.history.<hmac>.json` (dot
+  prefixed, never scanned; the same name as macOS) holds the old rows frozen
+  at the first V2 commit, the cutover (the newest frozen row, clamped to now),
+  the months V2 has read, and the SHA-256 of the live file the last V2 commit
+  wrote. A V2 commit writes frozen rows, then the earlier V2 rows of months
+  not re-read with rows, then this walk's rows after the cutover; a month
+  that answers empty keeps its rows. A sidecar whose digest no longer matches
+  the live file (an older build or an old walk replaced it) is not trusted:
+  the next V2 commit freezes the live file afresh. No old rows and no V2 rows
+  is `billing_v2_no_items` and writes nothing. A successful old walk deletes
+  the sidecar (the full old history is back).
+- **Windows storage.** Both files are read and written only through the
+  storage contract above (`secure::read`, secure temp, secure replace), under
+  the dir's secure lock; the sidecar is one of Syrtis's names for every
+  cleanup (disable, profile removal, account switch, other candidates), and a
+  duplicate profile keeps its own account's sidecar with its file. A
+  same-stem sidecar Syrtis cannot read (a directory, one failing the
+  contract, one over 128 MiB, or one that does not parse) in the planned
+  dir stops the round with `write_failed` before any request, old or V2.
+  If the dir peek fails, the old walk still runs, but a V2 round stops
+  before its V2 requests. The commit may resolve a different dir; a V2
+  commit rechecks that dir. A sidecar in the profile's other dir does not
+  trigger this precheck (cleanup reports it when
+  it cannot delete it in a real directory; one behind a junction is skipped
+  without a report). The old walk's commit never fails on a sidecar: it
+  deletes it, best effort, only after the live file was written, and a
+  directory, junction or symbolic link at a sidecar name is spared there
+  (disable still reports it).
+- **Reasons** (each shown with its own line that keeps the code, macOS copy
+  verbatim): `billing_v2_team_required`, `billing_v2_unavailable`,
+  `billing_v2_no_items`, `billing_v2_principal_mismatch`.
 
 ## Several Cursor profiles (CMP-W, port of macOS #532)
 
@@ -251,7 +329,7 @@ walk (at most one sync interval), and the status then says `cliPresent`.
 - Writes: secure lock (`.cursor-sync.lock`), secure temp
   (`.cursor-sync.tmp-*`, never matching `usage*`), flush, secure replace.
 - Only a complete walk replaces the file. Turning sync off deletes the synced
-  file and temps from every sync dir that exists: both roots
+  file, temps and Billing V2 sidecars from every sync dir that exists: both roots
   (`com.nyanako.tokenbar`, `com.nyanako.tokenbar.secure`) times both child
   names (`cursor-cache`, `cursor-cache.secure`), because the `.secure`
   fallbacks are sticky and the dir in use can move after a file was written
@@ -293,7 +371,7 @@ only.
 | Another standard user on the PC | yes | protected DACL {user, SYSTEM} |
 | Another process of the same user | no | it can read Cursor's own `state.vscdb` anyway |
 | Administrators / SYSTEM | no | SYSTEM is granted on purpose (backup, AV) |
-| Local planting (pre-created dir, junction, loose ACL) | yes | `agent_storage_windows` contract and `.secure` fallback |
+| Local planting (pre-created dir, junction, loose ACL) | partly | `agent_storage_windows` contract and `.secure` fallback for every write and for the dir a commit uses. Not covered: (1) the engine's file registration (`sync_files` + `newest_per_account`) lists every candidate dir of a profile, an added profile's `.secure` sibling and preferred dir alike; it requires the candidate dir itself (not its ancestors) to be a real directory, so a junction at the candidate is never listed, but checks neither the dir's owner/DACL nor the file's (a name match and a regular file whose modified time can be read are enough; the file is not opened), and keeps the newest modified time per file name, so a file planted in a loosened candidate dir with a later modified time is the one the engine counts; this predates Billing V2 (the same code is on origin/main 2912cdd8); (2) the Billing V2 carry-over reads an added profile's other dir without the folder check (per-file contract only), see the accepted residual under "Things that differ from macOS" |
 | Network attacker, proxy, DNS | yes | TLS, https-only, constant endpoint, redirects never followed (a 3xx means `expired`), body caps (64 MiB per walk) |
 | Concurrent readers | partly | see below |
 | Other local users and an added profile's folder | no (not Syrtis's to change) | A folder readable by other local users (for example one directly under `C:\`, whose children inherit Authenticated Users Modify, measured on 188) exposes the token to them through Cursor's own storage; Syrtis neither adds nor removes that exposure. Others with write access can also alter that database or plant `-wal` / `-journal` sidecars, which SQLite opens by path (integrity). Syrtis checks the database file's owner and type, not the folder's DACL (CMP-W WB6, decision 2026-11-02). |
@@ -334,3 +412,59 @@ once.
   reader is handle-first with a fixed-drive rule (macOS: `SQLITE_OPEN_NOFOLLOW`
   plus an owner uid check), and accepts BUILTIN\Administrators as an owner;
   added profiles and their list are local only.
+- Billing V2: the sidecar and the live file are read through the storage
+  contract, so a live file or sidecar failing it stops a V2 round
+  (`write_failed`; macOS reads a non-regular live file as empty). An added
+  profile's dir is resolved (and created) only at commit, so a V2 round plans
+  from the dir resolution would pick, decided by the same rule without
+  creating anything (`agent_storage_windows::peek_secure_storage_directory`;
+  on an error there the old walk still runs and reports its own outcome,
+  while a V2 round stops `write_failed` before its requests), and the commit
+  re-reads under the lock in the dir it resolves. The peek and the commit's
+  resolution are separate opens, so the dir pre-checked and the dir an old
+  walk's commit writes can differ both ways: a peek error skips the pre-check
+  while the commit's resolution may still succeed, and a peek of the
+  preferred dir can be followed by the sticky `.secure` sibling appearing
+  during the walk, which the commit then resolves to. Either way the commit
+  lands in a dir whose same-stem sidecar was not pre-checked, and deletes
+  that sidecar with the superseded files or, when it cannot (a
+  contract-failing file), reports a cleanup failure (a directory, junction or
+  symbolic link at that name is spared without one). When the dir the commit
+  uses holds neither file (the first commit after the sticky `.secure`
+  sibling appeared), the history in the profile's other dir is carried over
+  (frozen rows, cutover, fetched months) before that dir is cleaned; a
+  readable live file there is carried over even beside an unreadable sidecar
+  (frozen whole); a sidecar alone is stale, so nothing is frozen from it and
+  its fetched months are dropped.
+- Accepted residual of the carry-over (maintainer decision 2026-11-11): the
+  other dir's folder is not checked. The sibling exists in practice only
+  because the preferred dir failed the folder-level contract, and a folder
+  gate would stop the carry-over from ever running, dropping V2 history
+  older than the 12 re-read months. So Syrtis reads the live file and
+  sidecar from a folder that may have a loosened DACL or another owner, or
+  that is a junction or other reparse point. Each file is still checked:
+  it is read only if it is a regular, non-reparse file meeting the exact
+  owner/DACL contract at its path and within the size cap. Consequence:
+  anyone who can write that folder (for example with FILE_DELETE_CHILD)
+  can rename one of the user's own Syrtis files, which pass the per-file
+  check, onto this account's names, and its rows are carried over as this
+  account's history. Afterwards cleanup leaves the files in a
+  contract-failing folder (reported as `cleanupFailedProfiles`) and skips a
+  junction without a report; the engine reads the copy in the commit dir
+  only while it is the newer one (one file per name by modified time, the
+  preferred dir winning a tie; a junction is never listed). Files read back
+  are capped at 128 MiB (`MAX_STORED_FILE_BYTES`), and a V2 commit that
+  would write a bigger live file or sidecar writes nothing
+  (`write_failed`).
+- Known limitation (maintainer decision 2026-11-11, no code change):
+  Syrtis's own reads of the sidecar and live file (`secure::read`) and the
+  V2 commit refuse files over 128 MiB (`MAX_STORED_FILE_BYTES`); this cap is
+  not applied to the engine's own read of the registered live file, and the
+  old walk's commit has no size check of its own. A V2 live file grows
+  through V2 commits, and a V2 commit over the cap writes no usage file or
+  sidecar (`write_failed`). How an account behaves near the cap was not
+  exercised. The largest history seen is about 2 MB; the cap was not chosen
+  from a measurement.
+- The old walk's commit deletes the sidecar after the live write (macOS
+  deletes it before; a failed live write there leaves a sidecar-less V2
+  file, which the next V2 round freezes whole).

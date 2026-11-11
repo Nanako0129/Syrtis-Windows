@@ -184,14 +184,53 @@ public static class CursorSync
         /// the enable confirmation and the first-run notice card show.</summary>
         public static IEnumerable<(string Text, bool Heading)> InfoRows() => [(Privacy, false)];
 
+        // --- Cursor Billing V2 (plan CURSOR-BV2, slice BV2-W) -----------------
+        // macOS #554 copy verbatim (%@ -> {0}). Each keeps the core's code on
+        // the #547 line, so a screenshot can be diagnosed.
+
+        /// <summary><c>billing_v2_team_required</c>: V2 answered
+        /// <c>missing_team_id</c>.</summary>
+        public const string BillingV2TeamRequired =
+            "Cursor's new billing asks for a team for this account, which Syrtis can't read yet ({0}).";
+
+        /// <summary><c>billing_v2_unavailable</c>: V2 answered another
+        /// <c>availability</c>.</summary>
+        public const string BillingV2Unavailable =
+            "Cursor's new billing didn't provide this account's usage ({0}). Syrtis will try again later.";
+
+        /// <summary><c>billing_v2_no_items</c>: no earlier usage and V2
+        /// returned none.</summary>
+        public const string BillingV2NoItems =
+            "Cursor's new billing has no usage for this account yet ({0}). Syrtis will try again later.";
+
+        /// <summary><c>billing_v2_principal_mismatch</c>: a V2 item was neither
+        /// on the cookie's user id nor on the walk's one other <c>type: user</c>
+        /// principal (a second other user, another id that is not
+        /// <c>type: user</c>, an empty id, a missing principal); nothing
+        /// saved.</summary>
+        public const string BillingV2PrincipalMismatch =
+            "Cursor returned usage of another account, so Syrtis saved nothing ({0}).";
+
         public static readonly string[] All =
         [
             Title, Toggle, Privacy, Continue, Cancel, TurnOff, LastSynced, Partial, Expired, NotSignedIn,
             Offline, Error, ErrorWithReason, CliPresent, SyncNow, Syncing, CliQuestion, UseSyrtis, KeepCli, CleanupFailed,
             ConfigRejected, ProfilesPrivacy,
             KeychainConsentLine, KeychainAllowAccess, KeychainDisclosure, KeychainWithdraw, KeychainAllow,
+            BillingV2TeamRequired, BillingV2Unavailable, BillingV2NoItems, BillingV2PrincipalMismatch,
         ];
     }
+
+    /// <summary>The Billing V2 line for one of the core's four fixed
+    /// <c>billing_v2_*</c> codes, or null for any other reason.</summary>
+    private static string? BillingV2Copy(string? reason) => reason switch
+    {
+        "billing_v2_team_required" => Copy.BillingV2TeamRequired,
+        "billing_v2_unavailable" => Copy.BillingV2Unavailable,
+        "billing_v2_no_items" => Copy.BillingV2NoItems,
+        "billing_v2_principal_mismatch" => Copy.BillingV2PrincipalMismatch,
+        _ => null,
+    };
 
     /// <summary>What a consent surface shows: the privacy paragraph, plus the
     /// added profiles' paragraph once any folder is stored (they are read
@@ -220,6 +259,8 @@ public static class CursorSync
             // it). Checked before the reason-code branch, which would otherwise
             // match this lowercase code.
             "error" when reason == Copy.KeychainConsentCode => Copy.KeychainConsentLine.Localized(),
+            // Billing V2: its own line, still carrying the code (macOS #554).
+            "error" when BillingV2Copy(reason) is { } billing => billing.Localized(reason!),
             // A char test, not a Regex: .NET's `$` also matches before a final "\n".
             "error" when reason is { Length: >= 1 and <= 40 } && reason.All(c => c is '_' or >= 'a' and <= 'z') =>
                 Copy.ErrorWithReason.Localized(reason),
