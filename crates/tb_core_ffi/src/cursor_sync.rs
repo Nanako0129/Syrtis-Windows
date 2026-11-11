@@ -153,19 +153,10 @@ const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 /// body cap. The largest history seen is ≈ 2 MB; the cap was not chosen from
 /// a measurement. A bigger file is refused like an unreadable one.
 ///
-/// Known limitation (maintainer decision 2026-11-11, no code change). The old
-/// walk's bodies are capped at `MAX_BODY_BYTES` across the whole walk. Its
-/// commit has no size check of its own, and the rows it writes are
-/// re-serialised (a number can come back longer than the server sent it), so
-/// its file is normally far below this cap but not bounded by it. A V2 live
-/// file grows through V2 commits (frozen rows + the V2 months it keeps + this
-/// walk's rows). A V2 round whose live payload or sidecar would exceed the cap
-/// sends its V2 walk, then `commit_v2`'s size check returns `write_failed` and
-/// writes nothing; the file on disk stays as it was. A later round can come in
-/// under the cap again (a background round re-reads fewer months than an
-/// explicit one), or fail the same way. `v2_source` (and the pre-walk check,
-/// for a sidecar) refuse an oversized file before any V2 request when one
-/// exists, for example one the old walk wrote.
+/// Known limitation (maintainer decision 2026-11-11, no code change): the
+/// old walk's commit (`commit_file`) has no size check of its own; a V2 live
+/// file grows through V2 commits, and a V2 commit over the cap writes nothing
+/// (`write_failed`). How an account behaves near the cap was not exercised.
 const MAX_STORED_FILE_BYTES: u64 = 2 * MAX_BODY_BYTES as u64;
 
 /// `MAX_STORED_FILE_BYTES`, or a test's smaller cap on this thread.
@@ -1578,9 +1569,9 @@ fn planned_dir(dir: &Path, resolve: bool) -> io::Result<PathBuf> {
 /// counts as none (`stored` None: a stale-sidecar case, the live file is
 /// frozen whole). A candidate holding only a readable sidecar is returned
 /// too, and is stale (`History::trusts` is false without a live digest): the
-/// round plans with no cutover and, being stale, with no early stop (a first
-/// commit with no files at all does stop early, `v2_windows`), and the commit
-/// freezes nothing from it and drops its fetched months. Never a refusal.
+/// round plans with no cutover and, being stale, with no early stop
+/// (`v2_windows`), and the commit freezes nothing from it and drops its
+/// fetched months. Never a refusal.
 ///
 /// Accepted residual (maintainer decision 2026-11-11): the other candidate's
 /// folder is NOT checked. In practice the sibling exists only because the

@@ -368,7 +368,7 @@ only.
 | Another standard user on the PC | yes | protected DACL {user, SYSTEM} |
 | Another process of the same user | no | it can read Cursor's own `state.vscdb` anyway |
 | Administrators / SYSTEM | no | SYSTEM is granted on purpose (backup, AV) |
-| Local planting (pre-created dir, junction, loose ACL) | partly | `agent_storage_windows` contract and `.secure` fallback for every write and for the dir a commit uses. Not covered: (1) the engine's file registration (`sync_files` + `newest_per_account`) lists every candidate dir of a profile, an added profile's `.secure` sibling and preferred dir alike; it requires the dir to be a real directory (a junction is never listed) but checks neither the dir's owner/DACL nor the file's (a name match and a regular file are enough), and keeps the newest modified time per file name, so a file planted in a loosened candidate dir with a later modified time is the one the engine counts; this predates Billing V2 (the same code is on origin/main 2912cdd8); (2) the Billing V2 carry-over reads an added profile's other dir without the folder check (per-file contract only), see the accepted residual under "Things that differ from macOS" |
+| Local planting (pre-created dir, junction, loose ACL) | partly | `agent_storage_windows` contract and `.secure` fallback for every write and for the dir a commit uses. Not covered: (1) the engine's file registration (`sync_files` + `newest_per_account`) lists every candidate dir of a profile, an added profile's `.secure` sibling and preferred dir alike; it requires the candidate dir itself (not its ancestors) to be a real directory, so a junction at the candidate is never listed, but checks neither the dir's owner/DACL nor the file's (a name match and a readable regular file are enough), and keeps the newest modified time per file name, so a file planted in a loosened candidate dir with a later modified time is the one the engine counts; this predates Billing V2 (the same code is on origin/main 2912cdd8); (2) the Billing V2 carry-over reads an added profile's other dir without the folder check (per-file contract only), see the accepted residual under "Things that differ from macOS" |
 | Network attacker, proxy, DNS | yes | TLS, https-only, constant endpoint, redirects never followed (a 3xx means `expired`), body caps (64 MiB per walk) |
 | Concurrent readers | partly | see below |
 | Other local users and an added profile's folder | no (not Syrtis's to change) | A folder readable by other local users (for example one directly under `C:\`, whose children inherit Authenticated Users Modify, measured on 188) exposes the token to them through Cursor's own storage; Syrtis neither adds nor removes that exposure. Others with write access can also alter that database or plant `-wal` / `-journal` sidecars, which SQLite opens by path (integrity). Syrtis checks the database file's owner and type, not the folder's DACL (CMP-W WB6, decision 2026-11-02). |
@@ -454,17 +454,12 @@ once.
   would write a bigger live file or sidecar writes nothing
   (`write_failed`).
 - Known limitation (maintainer decision 2026-11-11, no code change): reads
-  and the V2 commit refuse files over 128 MiB (`MAX_STORED_FILE_BYTES`). The
-  old walk reads at most 64 MiB of bodies per walk but its commit has no size
-  check, and it re-serialises numbers (which can come back longer), so its
-  file is normally far below the cap but not bounded by it. A V2 live file
-  grows through V2 commits (frozen rows, the V2 months it keeps, and new
-  rows). A V2 round whose live file or sidecar would exceed the cap sends its
-  V2 walk and then fails `write_failed`, writing nothing; a later round can
-  come in under the cap again (a background round re-reads fewer months) or
-  fail the same way. An oversized file that already exists (for example one
-  the old walk wrote) is refused before any V2 request. The largest history
-  seen is about 2 MB; the cap was not chosen from a measurement.
+  and the V2 commit refuse files over 128 MiB (`MAX_STORED_FILE_BYTES`); the
+  old walk's commit has no size check of its own. A V2 live file grows
+  through V2 commits, and a V2 commit over the cap writes nothing
+  (`write_failed`). How an account behaves near the cap was not exercised.
+  The largest history seen is about 2 MB; the cap was not chosen from a
+  measurement.
 - The old walk's commit deletes the sidecar after the live write (macOS
   deletes it before; a failed live write there leaves a sidecar-less V2
   file, which the next V2 round freezes whole).
