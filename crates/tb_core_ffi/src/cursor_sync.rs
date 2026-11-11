@@ -1068,11 +1068,6 @@ mod secure {
         storage::peek_secure_storage_directory(preferred)
     }
 
-    /// An existing dir that meets the contract; never created or changed.
-    pub(super) fn verify_dir(path: &Path) -> io::Result<()> {
-        storage::verify_existing_secure_storage_directory(path)
-    }
-
     pub(super) fn open_lock(path: &Path) -> io::Result<File> {
         storage::open_secure_lock_file(path)
     }
@@ -1171,9 +1166,6 @@ mod secure {
         Err(unsupported())
     }
     pub(super) fn peek_dir(_: &Path) -> io::Result<PathBuf> {
-        Err(unsupported())
-    }
-    pub(super) fn verify_dir(_: &Path) -> io::Result<()> {
         Err(unsupported())
     }
     pub(super) fn open_lock(_: &Path) -> io::Result<File> {
@@ -1547,8 +1539,9 @@ fn read_live(dir: &Path, stem: &str) -> Result<Live, ()> {
 /// resolved at the on push; for an added profile what
 /// `secure::resolve_dir` would return (`secure::peek_dir`, the same sticky
 /// `.secure` rule in `agent_storage_windows`). An error is the error the
-/// commit's resolution would meet (the round then stops `write_failed`
-/// before any request). Planning and the pre-walk check use it; the commit
+/// commit's resolution would meet: `run` then skips the pre-walk check (the
+/// old walk runs and reports its own outcome) and stops a V2 round before
+/// its requests. Planning and the pre-walk check use it; the commit
 /// still resolves for real and re-reads under the lock (`v2_source`), so a
 /// concurrent change only changes which months are read.
 fn planned_dir(dir: &Path, resolve: bool) -> io::Result<PathBuf> {
@@ -1563,17 +1556,31 @@ fn planned_dir(dir: &Path, resolve: bool) -> io::Result<PathBuf> {
 /// the dir the commit writes: one there that cannot be read refuses the
 /// round (D5). When `used` holds neither (the first commit after an added
 /// profile's sticky `.secure` sibling appeared, with the history still in
-/// its other dir), the history of the first other candidate that passes the
-/// check cleanup applies to it (a real directory, not a reparse point, that
-/// meets the storage contract; `secure::verify_dir`, which opens and
-/// verifies but never creates) is carried over, so the old rows are frozen
-/// into `used` before that dir is cleaned, never lost. A candidate failing
-/// that check is never read (its files are not ours to trust; cleanup
-/// reports them). Within a passing one, a readable live file is carried
-/// over even when its sidecar cannot be read, as a stale-sidecar case
-/// (`stored` None: the live file is frozen whole); an unreadable live file
-/// skips the candidate. Never a refusal. Nothing writes the other dir any
-/// more (the fallback is sticky), so it is read without its lock.
+/// its other dir), the history of the first other candidate holding a
+/// readable live file is carried over, so the old rows are frozen into
+/// `used` before that dir is cleaned, never lost.
+///
+/// Accepted residual (maintainer decision 2026-11-11): the other candidate's
+/// folder is NOT checked. In practice the sibling exists only because the
+/// preferred dir failed the folder-level contract, so a folder gate would
+/// keep the carry-over from ever running and drop V2 history older than the
+/// 12 re-read months. Syrtis therefore reads the live file and the sidecar
+/// from a folder that may have failed that check (a loosened DACL, another
+/// owner) or that is reached through a junction or another reparse point at
+/// the folder itself (ancestors are followed, as everywhere). What is still
+/// checked is each file: `secure::read` opens only a regular, non-reparse
+/// file that meets the exact owner/DACL contract at that pathname and is at
+/// most the stored-file cap; anything else is not read. A readable live file
+/// is carried over even when its sidecar cannot be read, as a stale-sidecar
+/// case (`stored` None: the live file is frozen whole); an unreadable live
+/// file skips the candidate. Never a refusal. After the commit, cleanup
+/// deletes the candidate's files only where it can: a folder failing the
+/// contract keeps them and is reported (`cleanupFailedProfiles`), a junction
+/// is skipped without a report (`clean_candidate`), and in both cases the
+/// newer copy in `used` is the one the engine reads (`newest_per_account`
+/// keeps one file per name; a junction is never listed). Nothing writes the
+/// other dir any more (the fallback is sticky), so it is read without its
+/// lock.
 fn v2_source(
     used: &Path,
     candidates: &[PathBuf],
@@ -1585,9 +1592,6 @@ fn v2_source(
         return Ok((stored, live));
     }
     for other in candidates.iter().filter(|other| other.as_path() != used) {
-        if !matches!(real_dir(other), Ok(true)) || secure::verify_dir(other).is_err() {
-            continue;
-        }
         let Ok(other_live) = read_live(other, stem) else {
             continue;
         };
@@ -2485,13 +2489,16 @@ async fn run(
     drop(login);
     // D5: a same-stem sidecar Syrtis cannot read (a non-file, one failing
     // the storage contract, one over the cap, or not ours to parse) in the
-    // dir a commit will use stops the round before any request, old or V2,
-    // and so does an error resolving that dir (the commit would meet it).
-    // One in the profile's other dir never refuses: its cleanup reports it.
-    let Ok(planned) = planned_dir(dir, slot.root.is_some()) else {
-        return stopped(Stop::error("write_failed"));
-    };
-    if read_history(&planned, &stem).is_err() {
+    // dir a commit will use stops the round before any request, old or V2.
+    // One in the profile's other dir never refuses.
+    // A peek error skips this check: the old walk then runs and reports its
+    // own outcome, and its commit meets the same error (`write_failed`), as
+    // before Billing V2. Only a V2 round stops on it, before its requests.
+    let planned = planned_dir(dir, slot.root.is_some()).ok();
+    if planned
+        .as_deref()
+        .is_some_and(|planned| read_history(planned, &stem).is_err())
+    {
         return stopped(Stop::error("write_failed"));
     }
     let client = match client(target) {
@@ -2508,6 +2515,10 @@ async fn run(
             (committed, 0)
         }
         Ok(None) => {
+            // The commit's own resolution would fail too: no V2 request.
+            let Some(planned) = planned else {
+                return stopped(Stop::error("write_failed"));
+            };
             let limits = Limits {
                 budget: limits.budget.saturating_sub(walk_started.elapsed()),
                 ..limits

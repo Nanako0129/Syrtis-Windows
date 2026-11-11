@@ -164,12 +164,6 @@ pub(crate) fn peek_secure_storage_directory(preferred: &Path) -> io::Result<Path
     }
 }
 
-/// An existing directory that already meets the exact contract, opened and
-/// verified, never created or tightened (`NotFound` when absent).
-pub(crate) fn verify_existing_secure_storage_directory(path: &Path) -> io::Result<()> {
-    open_existing_secure_storage_directory(path).map(drop)
-}
-
 fn open_existing_secure_storage_directory(path: &Path) -> io::Result<File> {
     open_secure_storage_object(
         path,

@@ -414,15 +414,26 @@ once.
   profile's dir is resolved (and created) only at commit, so a V2 round
   plans from the dir resolution would pick, decided by the same rule
   without creating anything (`agent_storage_windows::peek_secure_storage_directory`;
-  an error there stops the round `write_failed` before any request, as the
-  commit's resolution would), and the commit re-reads under the lock in the
-  dir it resolves. When that dir holds neither file (the first commit after
+  on an error there the old walk still runs and reports its own outcome,
+  its commit failing as before, while a V2 round stops `write_failed`
+  before its requests), and the commit re-reads under the lock in the dir
+  it resolves. When that dir holds neither file (the first commit after
   the sticky `.secure` sibling appeared), the history in the profile's
   other dir is carried over (frozen rows, cutover, fetched months) before
-  that dir is cleaned, but only from a dir that passes the check cleanup
-  applies (a real directory meeting the storage contract; never through a
-  junction or from a loosened dir); a readable live file there is carried
-  over even beside an unreadable sidecar (frozen whole). Files read back
+  that dir is cleaned; a readable live file there is carried over even
+  beside an unreadable sidecar (frozen whole).
+- Accepted residual of the carry-over (maintainer decision 2026-11-11): the
+  other dir's folder is not checked. The sibling exists in practice only
+  because the preferred dir failed the folder-level contract, and a folder
+  gate would stop the carry-over from ever running, dropping V2 history
+  older than the 12 re-read months. So Syrtis reads the live file and
+  sidecar from a folder that may have a loosened DACL or another owner, or
+  that is a junction or other reparse point. Each file is still checked:
+  it is read only if it is a regular, non-reparse file meeting the exact
+  owner/DACL contract at its path and within the size cap. Afterwards
+  cleanup leaves the files in a contract-failing folder (reported as
+  `cleanupFailedProfiles`) and skips a junction without a report; the
+  newer copy in the commit dir is the one the engine reads. Files read back
   are capped at 128 MiB (`MAX_STORED_FILE_BYTES`), and a V2 commit that
   would write a bigger live file or sidecar writes nothing
   (`write_failed`).

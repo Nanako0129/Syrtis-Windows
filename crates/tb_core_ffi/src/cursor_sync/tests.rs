@@ -6575,57 +6575,78 @@ fn sibling_history(c: &SiblingCase) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(c.sibling.join(sidecar_name(&c.stem))).unwrap()).unwrap()
 }
 
-/// Review round 2, item 1: the carry-over reads the other candidate only
-/// when it passes cleanup's check (a real directory that meets the storage
-/// contract): a junction at the preferred dir, and a preferred dir whose
-/// owner was changed, are never carried over (nothing frozen), and their
-/// files are left alone. Mutation: in `v2_source`, delete the `if
-/// !matches!(real_dir(other), Ok(true)) || secure::verify_dir(other).is_err()
-/// { continue; }` gate.
+/// Maintainer decision 2026-11-11 (review round 3): the carry-over does not
+/// check the other dir's folder, only each file. A preferred dir that no
+/// longer meets the contract (another owner) still hands its trusted live
+/// file and sidecar to the sibling (same cutover, same frozen rows, every
+/// row kept); a live file that fails the per-file contract (inherited
+/// permissions) in a secure preferred dir is never read (nothing frozen)
+/// and is left in place. Mutation: in `v2_source`, re-add the folder gate
+/// `if !matches!(real_dir(other), Ok(true)) || secure::ensure_dir(other).is_err() { continue; }`.
 #[test]
-fn a_candidate_failing_the_storage_contract_is_never_carried_over() {
+fn a_loosened_preferred_dir_is_carried_over_but_a_loose_file_is_not() {
     let _guard = lock();
-    let old = [
+    let cutover = v2_cutover();
+    let v2_round = || {
+        let mut replies = vec![
+            old_migrated(),
+            v2_page(&[as_other("v-current", month_start_ms(0))], None),
+            v2_page(&[as_other("v-after", cutover + HOUR)], None),
+        ];
+        replies.extend((0..10).map(|_| v2_empty()));
+        replies
+    };
+    // A trusted pair in the preferred dir, then that dir gets another owner.
+    let c = sibling_case();
+    let (url, _) = serve(vec![old_page(&[
         old_row("a", month_start_ms(1) + HOUR),
-        old_row("b", month_start_ms(1) + 2 * HOUR),
-    ];
-    // A junction at the preferred dir, to a secure dir holding a live file.
-    let c = sibling_case();
-    let elsewhere = c._tmp.path().join("elsewhere");
-    drop(secure::ensure_dir(&elsewhere).unwrap());
-    let planted = elsewhere.join(format!("usage.{}.json", c.stem));
-    write_secure(&planted, &old_live_bytes(&old));
-    junction(&c.preferred, &elsewhere);
-    drop(secure::ensure_dir(&c.sibling).unwrap());
-    let (url, _) = serve(v2_month_replies(vec![as_other("m0", month_start_ms(0))]));
-    let status = sync_round(&c.default_db, &url, &c.registry);
-    assert_eq!(states(&status), ["notSignedIn", "ok"], "junction: {status}");
-    let history = sibling_history(&c);
-    assert!(history["frozen"].as_array().unwrap().is_empty(), "junction carried over");
-    assert_eq!(history["cutoverMs"], serde_json::Value::Null);
-    assert!(planted.exists(), "the junction's target was touched");
-
-    // A preferred dir that no longer meets the contract (another owner).
-    let c = sibling_case();
-    let live = c.preferred.join(format!("usage.{}.json", c.stem));
-    write_secure(&live, &old_live_bytes(&old));
+        old_row("b", cutover),
+    ])]);
+    assert_eq!(states(&sync_round(&c.default_db, &url, &c.registry)), ["notSignedIn", "ok"]);
+    let (url, _) = serve(v2_round());
+    assert_eq!(states(&sync_round(&c.default_db, &url, &c.registry)), ["notSignedIn", "ok"]);
+    let first: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(c.preferred.join(sidecar_name(&c.stem))).unwrap(),
+    )
+    .unwrap();
     set_owner(&c.preferred, crate::agent_storage_windows::TestOwner::Administrators);
-    let (url, _) = serve(v2_month_replies(vec![as_other("m0", month_start_ms(0))]));
+    let (url, _) = serve(v2_round());
     let status = sync_round(&c.default_db, &url, &c.registry);
     assert_eq!(states(&status), ["notSignedIn", "ok"], "loosened: {status}");
     let history = sibling_history(&c);
-    assert!(history["frozen"].as_array().unwrap().is_empty(), "a loosened dir carried over");
-    assert!(live.exists(), "a file in a dir failing the contract was deleted");
+    assert_eq!(history["cutoverMs"], first["cutoverMs"], "a loosened dir was not carried over");
+    assert_eq!(history["frozen"].to_string(), first["frozen"].to_string());
+    assert_eq!(rows_in(&c.sibling.join(format!("usage.{}.json", c.stem))).len(), 4);
     set_owner(&c.preferred, crate::agent_storage_windows::TestOwner::CurrentUser);
+
+    // A loose live file in a secure preferred dir: never read.
+    let c = sibling_case();
+    drop(secure::ensure_dir(&c.preferred).unwrap());
+    let loose = c.preferred.join(format!("usage.{}.json", c.stem));
+    std::fs::write(
+        &loose,
+        old_live_bytes(&[old_row("a", month_start_ms(1) + HOUR), old_row("b", cutover)]),
+    )
+    .unwrap();
+    drop(secure::ensure_dir(&c.sibling).unwrap());
+    let (url, _) = serve(v2_round());
+    let status = sync_round(&c.default_db, &url, &c.registry);
+    assert_eq!(states(&status), ["notSignedIn", "ok"], "loose file: {status}");
+    let history = sibling_history(&c);
+    assert!(history["frozen"].as_array().unwrap().is_empty(), "a loose file was read");
+    assert!(loose.exists());
 }
 
 /// Review round 2, item 2: `secure::peek_dir` answers what
 /// `secure::resolve_dir` then returns, in each state the rule knows, and
 /// creates nothing: nothing there (preferred), a secure preferred dir
 /// (preferred), a loose preferred dir (the sibling), an existing sibling
-/// (the sibling). Mutations: in `peek_secure_storage_directory`, the
-/// security-failure arm -> `Ok(preferred.to_path_buf())`; open the
-/// preferred dir with `ensure_secure_storage_directory` (creates it).
+/// (the sibling), a sibling beside a secure preferred dir (the sibling:
+/// sticky), a sibling failing the contract (the error). Mutations: in
+/// `peek_secure_storage_directory`, the security-failure arm ->
+/// `Ok(preferred.to_path_buf())`; open the preferred dir with
+/// `ensure_secure_storage_directory` (creates it); delete the first
+/// `match open_existing_secure_storage_directory(&fallback) {…}` block.
 #[test]
 fn peeking_the_commit_dir_matches_resolution_and_creates_nothing() {
     let tmp = TempDir::new();
@@ -6651,6 +6672,18 @@ fn peeking_the_commit_dir_matches_resolution_and_creates_nothing() {
     assert_eq!(secure::resolve_dir(&c).unwrap(), sibling_of(&c));
     // An existing sibling.
     assert_eq!(secure::peek_dir(&c).unwrap(), sibling_of(&c));
+    // Sticky: the sibling wins over a secure preferred dir.
+    let e = base.join("e");
+    drop(secure::ensure_dir(&e).unwrap());
+    drop(secure::ensure_dir(&sibling_of(&e)).unwrap());
+    assert_eq!(secure::peek_dir(&e).unwrap(), sibling_of(&e));
+    assert_eq!(secure::resolve_dir(&e).unwrap(), sibling_of(&e));
+    // A sibling that fails the contract: the error, as resolution returns it.
+    let g = base.join("g");
+    std::fs::create_dir(sibling_of(&g)).unwrap();
+    assert!(secure::peek_dir(&g).is_err(), "a loose sibling was not an error");
+    assert!(secure::resolve_dir(&g).is_err());
+    assert!(!g.exists(), "the peek created the preferred dir");
 }
 
 /// Review round 2, item 3: a V2 commit whose live file would exceed the
@@ -6706,4 +6739,56 @@ fn a_readable_live_file_is_carried_over_beside_an_unreadable_sidecar() {
     assert_eq!(history["cutoverMs"], newest, "the old rows were not carried over");
     assert_eq!(history["frozen"].as_array().unwrap().len(), 2);
     assert_eq!(rows_in(&c.sibling.join(format!("usage.{}.json", c.stem))).len(), 4);
+}
+
+// --- Billing V2, Windows review round 3 -----------------------------------------
+
+/// Review round 3, item 5: when the commit dir cannot be resolved (an
+/// added profile's sibling fails the contract), the old walk still runs and
+/// reports its own outcome (a 401 is `expired`), and an old success fails at
+/// its commit (`write_failed`) after its request, as before Billing V2; only
+/// a V2 round stops before its requests. Mutation: in `run`, stop on the
+/// peek error (`let Ok(planned) = planned_dir(..) else { return
+/// stopped(Stop::error("write_failed")); };`).
+#[test]
+fn an_unresolvable_commit_dir_does_not_stop_the_old_walk() {
+    let _guard = lock();
+    let c = sibling_case();
+    std::fs::create_dir(&c.sibling).unwrap();
+    let (url, seen) = serve(vec![http("401 Unauthorized", "application/json", "{}")]);
+    let status = sync_round(&c.default_db, &url, &c.registry);
+    assert_eq!(states(&status), ["notSignedIn", "expired"], "{status}");
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    let (url, seen) = serve(vec![old_page(&[old_row("a", month_start_ms(1) + HOUR)])]);
+    let status = sync_round(&c.default_db, &url, &c.registry);
+    assert_eq!(states(&status), ["notSignedIn", "error:write_failed"], "{status}");
+    assert_eq!(seen.lock().unwrap().len(), 1, "the old walk did not run");
+    let (url, seen) = serve(vec![old_migrated(), v2_empty()]);
+    let status = sync_round(&c.default_db, &url, &c.registry);
+    assert_eq!(states(&status), ["notSignedIn", "error:write_failed"], "{status}");
+    assert!(v2_requests(&seen.lock().unwrap()).is_empty(), "V2 ran without a commit dir");
+}
+
+/// Review round 3, item 6: the sidecar alone over the cap (no new V2 rows,
+/// so the payload is the old rows and the sidecar is those rows plus its
+/// cutover, months and digest) also writes nothing. Mutation: in
+/// `commit_v2`, drop `|| sidecar.len() as u64 > stored_cap()`.
+#[test]
+fn a_v2_commit_whose_sidecar_alone_is_over_the_cap_writes_nothing() {
+    let f = fixture();
+    seed_by_old_walk(
+        &f,
+        &[old_row("a", month_start_ms(1) + HOUR), old_row("b", v2_cutover())],
+    );
+    let live = std::fs::read(expected_file(&f.dir)).unwrap();
+    let mut replies = vec![old_migrated()];
+    replies.extend((0..12).map(|_| v2_empty()));
+    // The payload re-serialises these rows (≈ the live file); the sidecar
+    // adds about 90 bytes (cutover, two months, a 64-hex digest).
+    let (outcome, seen) =
+        with_stored_cap(live.len() as u64 + 20, || run_v2(&f, replies, v2_limits(false)));
+    assert_eq!(outcome, stop(State::Error, Some("write_failed")));
+    assert!(!v2_requests(&seen).is_empty(), "control: the walk ran");
+    assert_eq!(std::fs::read(expected_file(&f.dir)).unwrap(), live);
+    assert!(!sidecar_path(&f.dir).exists(), "an oversized sidecar was written");
 }
