@@ -115,6 +115,10 @@ public static class CursorSync
         /// <summary>macOS "Last synced %@"; .NET's placeholder is {0}.</summary>
         public const string LastSynced = "Last synced {0}";
         public const string Partial = "Only part of your usage was downloaded. Syrtis will try again.";
+        /// <summary><see cref="Partial"/> plus the core's fixed reason code
+        /// (<c>timeout</c>, <c>budget_exhausted</c>, <c>too_many_pages</c>), so a
+        /// screenshot tells them apart (macOS <c>partialWithReason</c>, #520).</summary>
+        public const string PartialWithReason = "Only part of your usage was downloaded ({0}). Syrtis will try again.";
         public const string Expired = "Your Cursor login has expired. Open Cursor to refresh it.";
         public const string NotSignedIn = "Sign in to the Cursor app to sync your usage.";
         public const string Offline = "Can't reach Cursor. Syrtis will try again.";
@@ -214,7 +218,7 @@ public static class CursorSync
         public static readonly string[] All =
         [
             Title, Toggle, Privacy, Continue, Cancel, TurnOff, LastSynced, Partial, Expired, NotSignedIn,
-            Offline, Error, ErrorWithReason, CliPresent, SyncNow, Syncing, CliQuestion, UseSyrtis, KeepCli, CleanupFailed,
+            Offline, Error, ErrorWithReason, PartialWithReason, CliPresent, SyncNow, Syncing, CliQuestion, UseSyrtis, KeepCli, CleanupFailed,
             ConfigRejected, ProfilesPrivacy,
             KeychainConsentLine, KeychainAllowAccess, KeychainDisclosure, KeychainWithdraw, KeychainAllow,
             BillingV2TeamRequired, BillingV2Unavailable, BillingV2NoItems, BillingV2PrincipalMismatch,
@@ -241,7 +245,7 @@ public static class CursorSync
     /// <summary>The status line for a core state; null where there is nothing
     /// to say (<c>disabled</c>, not yet synced, or <c>ok</c> with no recorded
     /// time). The relative time is this app's own (<see cref="Format.RelativeTime"/>).
-    /// For <c>error</c>, <paramref name="reason"/> is shown only if it looks
+    /// For <c>partial</c> and <c>error</c>, <paramref name="reason"/> is shown only if it looks
     /// like one of the core's fixed codes (<c>^[a-z_]{1,40}$</c>), so the line
     /// never carries free text (macOS <c>statusLine</c>, #547).</summary>
     public static string? StatusLine(
@@ -250,6 +254,7 @@ public static class CursorSync
         {
             "ok" when lastSuccessMs is { } ms =>
                 Copy.LastSynced.Localized(Format.RelativeTime((ulong)Math.Max(0, ms / 1000), now)),
+            "partial" when IsFixedCode(reason) => Copy.PartialWithReason.Localized(reason!),
             "partial" => Copy.Partial.Localized(),
             "expired" => Copy.Expired.Localized(),
             "notSignedIn" => Copy.NotSignedIn.Localized(),
@@ -261,14 +266,18 @@ public static class CursorSync
             "error" when reason == Copy.KeychainConsentCode => Copy.KeychainConsentLine.Localized(),
             // Billing V2: its own line, still carrying the code (macOS #554).
             "error" when BillingV2Copy(reason) is { } billing => billing.Localized(reason!),
-            // A char test, not a Regex: .NET's `$` also matches before a final "\n".
-            "error" when reason is { Length: >= 1 and <= 40 } && reason.All(c => c is '_' or >= 'a' and <= 'z') =>
-                Copy.ErrorWithReason.Localized(reason),
+            "error" when IsFixedCode(reason) => Copy.ErrorWithReason.Localized(reason!),
             "error" => Copy.Error.Localized(),
             "cliPresent" => Copy.CliPresent.Localized(),
             ConfigRejectedState => Copy.ConfigRejected.Localized(),
             _ => null,
         };
+
+    /// <summary>Whether <paramref name="reason"/> looks like one of the core's
+    /// fixed codes. A char test, not a Regex: .NET's <c>$</c> also matches
+    /// before a final "\n".</summary>
+    private static bool IsFixedCode(string? reason) =>
+        reason is { Length: >= 1 and <= 40 } && reason.All(c => c is '_' or >= 'a' and <= 'z');
 
     /// <summary>ok is drawn in the secondary colour, every other line in
     /// orange (shared spec §2).</summary>

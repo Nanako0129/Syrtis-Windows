@@ -1131,9 +1131,24 @@ public class CursorSyncTests
         foreach (var reason in invalid)
         {
             Assert.Equal(CursorSync.Copy.Error, CursorSync.StatusLine("error", null, reason: reason));
+            Assert.Equal(CursorSync.Copy.Partial, CursorSync.StatusLine("partial", null, reason: reason));
         }
 
         Assert.Equal(CursorSync.Copy.Offline, CursorSync.StatusLine("offline", null, reason: "token_unreadable"));
+    }
+
+    /// <summary>#520 (macOS <c>partialWithReason</c>): a partial line names the
+    /// core's reason code (<c>timeout</c>, <c>budget_exhausted</c>), so a
+    /// screenshot tells the two apart.</summary>
+    [Fact]
+    public void APartialLineShowsTheReasonCode()
+    {
+        Assert.Equal(
+            "Only part of your usage was downloaded (timeout). Syrtis will try again.",
+            CursorSync.StatusLine("partial", null, reason: "timeout"));
+        Assert.Equal(
+            "Only part of your usage was downloaded (budget_exhausted). Syrtis will try again.",
+            CursorSync.StatusLine("partial", null, reason: "budget_exhausted"));
     }
 
     /// <summary>S3b: a sealed sign-in with no "cursor" grant
@@ -1417,6 +1432,8 @@ public class CursorSyncTests
         ["Turn Off"] = "關閉",
         ["Last synced {0}"] = "上次同步：{0}",
         ["Only part of your usage was downloaded. Syrtis will try again."] = "只下載到部分用量，Syrtis 會再試一次。",
+        // #520, verbatim from macOS zh-Hant (%@ -> {0}).
+        ["Only part of your usage was downloaded ({0}). Syrtis will try again."] = "只下載到部分用量（{0}），Syrtis 會再試一次。",
         ["Your Cursor login has expired. Open Cursor to refresh it."] = "Cursor 的登入已過期，打開 Cursor 就會更新。",
         ["Sign in to the Cursor app to sync your usage."] = "在 Cursor App 登入後就能同步用量。",
         ["Can't reach Cursor. Syrtis will try again."] = "連不上 Cursor，Syrtis 會再試一次。",
