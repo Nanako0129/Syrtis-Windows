@@ -10,18 +10,43 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `fc339e98237fcb71f32ab1208b61aa77c3c35c02` |
-| TokenBar alignment | macOS `main` pins `0ece74befada3f56fd37312cdc5fdcb517e93429` (Nanako0129/syrtis PRs #537, #539, #541, #542 advanced it over `15204f4e`). This pin additionally carries engine #86 (ledger text only) and #87 (Goose Windows database, `RESOLVER_CONTRACT_VERSION` 4 to 5); macOS has not advanced to `fc339e98` |
-| Engine alignment | `15204f4e870716da9f0b42216ad63d98f1c5a320` → `fc339e98237fcb71f32ab1208b61aa77c3c35c02` (engine `main`) |
+| Reviewed pin | `e156d67caa9708458fd2030f379d3c2a77ff05bf` |
+| TokenBar alignment | macOS pins the same commit `e156d67c` (Nanako0129/syrtis #558), which carries engine #88 over `fc339e98` |
+| Engine alignment | `fc339e98237fcb71f32ab1208b61aa77c3c35c02` → `e156d67caa9708458fd2030f379d3c2a77ff05bf` (engine `main`; previous advance `15204f4e` → `fc339e98`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/fc339e98237fcb71f32ab1208b61aa77c3c35c02/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/e156d67caa9708458fd2030f379d3c2a77ff05bf/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `fc339e98`, the 2026-11 upstream sync (engine PRs #75 to #87)
+## Current pin: `e156d67c`, engine PR #88 (Gemini report grouping)
+
+`fc339e98` → `e156d67c` is 3 engine commits and one first-parent merge, PR #88.
+It extends `builtin_grouping` (`src/model_alias.rs`, the presentation-only seam
+the Grok `-build` rule uses): `gemini-4-argon-c` and `gemini-4-argon-trial`
+group as `gemini-4-argon`; `gemini-3.5-flash-{high,medium,low,extra-low}` group
+as `gemini-3.5-flash` (exact labels only, maintainer decision 2026-11-08). It
+applies to the model, monthly and hourly reports. Pricing, cache identity,
+graph keys and export keep the raw id, and nothing is re-parsed.
+
+Consumer side, matching Syrtis #558:
+
+- `ModelGrouping.GroupId` (`src/TokenBar.Core/ModelGrouping.cs`) mirrors the
+  same labels for graph-derived rows, which the engine's grouping does not
+  reach. `Fixtures/model-grouping-cases.json` (28 rows, shared with macOS) is
+  checked against it (`ModelGroupingTests`) and against the engine
+  (`model_grouping_cases_match_the_engine`); both require at least 28.
+- `ModelReportFold.TabEntries` (port of macOS `tabEntries(clientIds:)`): when
+  the selection spans more than one client, rows sharing model and provider
+  merge into one with per-client parts in the tooltip. The Overview Models
+  card reads the same rows, so with the whole selection it merges one model and
+  provider across all clients. A row flagged by
+  `CostPlausibility` is never merged. The Models lens and the Stats favourite
+  model both read these rows (`DashboardView.SelectedModelEntries`).
+
+## Previous pin: `fc339e98`, the 2026-11 upstream sync (engine PRs #75 to #87)
 
 The reviewed pin is the merge commit of tokscale-core PR #87 on the engine's
 `main`, covering `15204f4e` → `fc339e98`: 13 first-parent merges, PRs #75 to
@@ -500,8 +525,9 @@ What reaches the figures:
   sessions are scanned as Kimi on Windows and macOS (#56; `%APPDATA%` or the
   relocated `shareDir` when environment roots are on).
 - Grok Build turn usage keyed `grok-<version>-build` groups with the session's
-  `grok-<version>` in the engine's reports (#46); this consumer applies the same
-  display fold to graph-derived rows (`ModelGrouping`).
+  `grok-<version>` in the engine's reports (#46), and since #88 the listed
+  Gemini label variants group onto their bare model; this consumer applies the
+  same display fold to graph-derived rows (`ModelGrouping`).
 - Pi transcripts that start with a UTF-8 BOM are no longer dropped whole (#47).
 - Kiro conversations that report credits carry them as a provider-reported cost
   (credits × $0.04) on the turn that spent them; IDE and SQLite turns take their

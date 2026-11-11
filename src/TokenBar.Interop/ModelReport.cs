@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace TokenBar.Interop;
 
 // Per-model report (`ModelReport` in types.ts; Swift port:
@@ -23,7 +25,17 @@ public sealed record ModelReportEntry(
     // `costEstimate`), or null when it cannot price them. Evidence only: the
     // judgement is TokenBar.Core's CostPlausibility, taken on the row after
     // ModelReportFold has merged provider-split rows.
-    double? CostEstimate = null);
+    double? CostEstimate = null)
+{
+    /// <summary>Set only on a row <c>ModelReportFold.TabEntries</c> merged from
+    /// several clients: each client's token total, largest first, ties by
+    /// client. Never on the wire.</summary>
+    [JsonIgnore]
+    public IReadOnlyList<ClientPart>? ClientParts { get; init; }
+}
+
+/// <summary>One client's share of a model row merged across a tab's clients.</summary>
+public sealed record ClientPart(string Client, long Total);
 
 public sealed record ModelReport(
     IReadOnlyList<ModelReportEntry> Entries,

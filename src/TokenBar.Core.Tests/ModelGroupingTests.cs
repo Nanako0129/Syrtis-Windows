@@ -16,7 +16,7 @@ public class ModelGroupingTests
         var cases = table.RootElement.GetProperty("cases").EnumerateArray().ToList();
 
         // Control: an empty or truncated table must not pass vacuously.
-        Assert.True(cases.Count >= 17, $"case table has {cases.Count} rows, expected >= 17");
+        Assert.True(cases.Count >= 28, $"case table has {cases.Count} rows, expected >= 28");
         foreach (var row in cases)
         {
             var input = row[0].GetString()!;

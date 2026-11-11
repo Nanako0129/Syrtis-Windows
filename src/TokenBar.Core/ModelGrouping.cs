@@ -7,10 +7,11 @@ namespace TokenBar.Core;
 /// <c>normalize_model_for_grouping</c>, but the graph payload keys each row by
 /// the raw <c>canonical_model_id</c>, so surfaces that group graph rows by
 /// model apply the same fold themselves or they disagree with the Models view.
-/// This mirrors the engine's one built-in rule (<c>builtin_grouping</c> in
+/// This mirrors the engine's built-in rules (<c>builtin_grouping</c> in
 /// <c>vendor/tokscale-core/src/model_alias.rs</c>): Grok Build keys turn usage
 /// by <c>grok-&lt;version&gt;-build</c> while the session names
-/// <c>grok-&lt;version&gt;</c>.
+/// <c>grok-&lt;version&gt;</c>, and an exact list of Gemini label variants
+/// folds onto the bare model (engine #88).
 ///
 /// Presentation only. Anything that matches a model id — quota scopes and
 /// attribution records — keeps the raw id. <c>ModelColorMap</c> groups on
@@ -22,12 +23,33 @@ namespace TokenBar.Core;
 /// caught by it.</summary>
 public static class ModelGrouping
 {
-    /// <summary><c>grok-&lt;version&gt;-build</c> → <c>grok-&lt;version&gt;</c>,
+    /// <summary>Gemini labels the engine folds onto their bare model, listed
+    /// exactly as in <c>builtin_grouping</c> (engine #88, maintainer decision
+    /// 2026-11-08). An unlisted suffix may be a different model and is left
+    /// alone.</summary>
+    internal static readonly IReadOnlyDictionary<string, string> GeminiFolds =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["gemini-4-argon-c"] = "gemini-4-argon",
+            ["gemini-4-argon-trial"] = "gemini-4-argon",
+            ["gemini-3.5-flash-high"] = "gemini-3.5-flash",
+            ["gemini-3.5-flash-medium"] = "gemini-3.5-flash",
+            ["gemini-3.5-flash-low"] = "gemini-3.5-flash",
+            ["gemini-3.5-flash-extra-low"] = "gemini-3.5-flash",
+        };
+
+    /// <summary>A listed Gemini label → its bare model;
+    /// <c>grok-&lt;version&gt;-build</c> → <c>grok-&lt;version&gt;</c>,
     /// where the version is one or more dot-separated runs of ASCII digits.
     /// Every other id is returned unchanged. Expects the lowercase
     /// <c>canonical_model_id</c> spelling the graph payload carries.</summary>
     public static string GroupId(string canonicalId)
     {
+        if (GeminiFolds.TryGetValue(canonicalId, out var bare))
+        {
+            return bare;
+        }
+
         // Longer than "grok--build" so the prefix and suffix cannot overlap
         // ("grok-build") and the version between them is non-empty.
         if (canonicalId.Length <= "grok--build".Length
