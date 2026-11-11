@@ -6785,8 +6785,9 @@ fn an_unresolvable_commit_dir_does_not_stop_the_old_walk() {
     let status = sync_round(&c.default_db, &url, &c.registry);
     assert_eq!(states(&status), ["notSignedIn", "error:write_failed"], "{status}");
     let seen = seen.lock().unwrap().clone();
-    assert_eq!(seen.len(), 1, "the old walk's own request was not made");
     assert!(v2_requests(&seen).is_empty(), "V2 ran without a commit dir");
+    assert_eq!(seen.len(), 1, "the old walk's own request was not made");
+    assert!(seen[0].head.starts_with("POST /api/usage "), "{}", seen[0].head);
 }
 
 /// Review round 3, item 6: the sidecar alone over the cap (no new V2 rows,

@@ -101,14 +101,14 @@ fixed reasons below.
   cleanup (disable, profile removal, account switch, other candidates), and a
   duplicate profile keeps its own account's sidecar with its file. A
   same-stem sidecar Syrtis cannot read (a directory, one failing the
-  contract, one over 128 MiB, or one that does not parse) in the dir a
-  commit would use stops the round with `write_failed` before any request,
-  old or V2; one in the profile's other dir never refuses (cleanup reports
-  it when it cannot delete it in a real directory; one behind a junction is
-  skipped without a report). The old walk's commit never fails on a sidecar: it deletes
-  it, best effort, only after the live file was written, and a directory,
-  junction or symbolic link at a sidecar name is spared there (disable still
-  reports it).
+  contract, one over 128 MiB, or one that does not parse) in the dir a commit
+  would use stops the round with `write_failed` before any request, old or
+  V2; one in the profile's other dir never refuses (cleanup reports it when
+  it cannot delete it in a real directory; one behind a junction is skipped
+  without a report). The old walk's commit never fails on a sidecar: it
+  deletes it, best effort, only after the live file was written, and a
+  directory, junction or symbolic link at a sidecar name is spared there
+  (disable still reports it).
 - **Reasons** (each shown with its own line that keeps the code, macOS copy
   verbatim): `billing_v2_team_required`, `billing_v2_unavailable`,
   `billing_v2_no_items`, `billing_v2_principal_mismatch`.
@@ -368,7 +368,7 @@ only.
 | Another standard user on the PC | yes | protected DACL {user, SYSTEM} |
 | Another process of the same user | no | it can read Cursor's own `state.vscdb` anyway |
 | Administrators / SYSTEM | no | SYSTEM is granted on purpose (backup, AV) |
-| Local planting (pre-created dir, junction, loose ACL) | partly | `agent_storage_windows` contract and `.secure` fallback for every write and for the dir a commit uses; the Billing V2 carry-over reads an added profile's other dir without the folder check (per-file contract only), see the accepted residual under "Things that differ from macOS" |
+| Local planting (pre-created dir, junction, loose ACL) | partly | `agent_storage_windows` contract and `.secure` fallback for every write and for the dir a commit uses. Not covered: (1) the engine's file registration (`sync_files` + `newest_per_account`) lists every candidate dir of a profile, an added profile's `.secure` sibling and preferred dir alike, with no folder check and no per-file contract check (a name match and a regular file are enough), and keeps the newest modified time per file name, so a file planted in a loosened candidate dir with a later modified time is the one the engine counts; this predates Billing V2 (the same code is on origin/main 2912cdd8); (2) the Billing V2 carry-over reads an added profile's other dir without the folder check (per-file contract only), see the accepted residual under "Things that differ from macOS" |
 | Network attacker, proxy, DNS | yes | TLS, https-only, constant endpoint, redirects never followed (a 3xx means `expired`), body caps (64 MiB per walk) |
 | Concurrent readers | partly | see below |
 | Other local users and an added profile's folder | no (not Syrtis's to change) | A folder readable by other local users (for example one directly under `C:\`, whose children inherit Authenticated Users Modify, measured on 188) exposes the token to them through Cursor's own storage; Syrtis neither adds nor removes that exposure. Others with write access can also alter that database or plant `-wal` / `-journal` sidecars, which SQLite opens by path (integrity). Syrtis checks the database file's owner and type, not the folder's DACL (CMP-W WB6, decision 2026-11-02). |
@@ -412,22 +412,27 @@ once.
 - Billing V2: the sidecar and the live file are read through the storage
   contract, so a live file or sidecar failing it stops a V2 round
   (`write_failed`; macOS reads a non-regular live file as empty). An added
-  profile's dir is resolved (and created) only at commit, so a V2 round
-  plans from the dir resolution would pick, decided by the same rule
-  without creating anything (`agent_storage_windows::peek_secure_storage_directory`;
+  profile's dir is resolved (and created) only at commit, so a V2 round plans
+  from the dir resolution would pick, decided by the same rule without
+  creating anything (`agent_storage_windows::peek_secure_storage_directory`;
   on an error there the old walk still runs and reports its own outcome,
-  while a V2 round stops `write_failed` before its requests), and the
-  commit re-reads under the lock in the dir it resolves. The peek and the
-  commit's resolution are separate opens: usually the old walk's commit
-  then fails as before, but if its resolution succeeds it commits into a
-  dir whose same-stem sidecar was not pre-checked, and deletes that
-  sidecar with the superseded files or, when it cannot (a contract-failing
-  file), reports a cleanup failure (a directory, junction or symbolic link
-  at that name is spared without one). When that dir holds neither file (the first commit after
-  the sticky `.secure` sibling appeared), the history in the profile's
-  other dir is carried over (frozen rows, cutover, fetched months) before
-  that dir is cleaned; a readable live file there is carried over even
-  beside an unreadable sidecar (frozen whole).
+  while a V2 round stops `write_failed` before its requests), and the commit
+  re-reads under the lock in the dir it resolves. The peek and the commit's
+  resolution are separate opens, so the dir pre-checked and the dir an old
+  walk's commit writes can differ both ways: a peek error skips the pre-check
+  while the commit's resolution may still succeed, and a peek of the
+  preferred dir can be followed by the sticky `.secure` sibling appearing
+  during the walk, which the commit then resolves to. Either way the commit
+  lands in a dir whose same-stem sidecar was not pre-checked, and deletes
+  that sidecar with the superseded files or, when it cannot (a
+  contract-failing file), reports a cleanup failure (a directory, junction or
+  symbolic link at that name is spared without one). When the dir the commit
+  uses holds neither file (the first commit after the sticky `.secure`
+  sibling appeared), the history in the profile's other dir is carried over
+  (frozen rows, cutover, fetched months) before that dir is cleaned; a
+  readable live file there is carried over even beside an unreadable sidecar
+  (frozen whole); a sidecar alone is stale, so nothing is frozen from it and
+  its fetched months are dropped.
 - Accepted residual of the carry-over (maintainer decision 2026-11-11): the
   other dir's folder is not checked. The sibling exists in practice only
   because the preferred dir failed the folder-level contract, and a folder
@@ -449,12 +454,17 @@ once.
   would write a bigger live file or sidecar writes nothing
   (`write_failed`).
 - Known limitation (maintainer decision 2026-11-11, no code change): reads
-  and the V2 commit refuse files over 128 MiB (`MAX_STORED_FILE_BYTES`),
-  but the old walk's commit has no cap. An account whose history passes
-  128 MiB is therefore still written by the old walk, but once it switches
-  to Billing V2 every round stops with `write_failed` until sync is
-  disabled. The largest history seen is about 2 MB; the cap was not chosen
-  from a measurement.
+  and the V2 commit refuse files over 128 MiB (`MAX_STORED_FILE_BYTES`). The
+  old walk cannot reach that size (its bodies are capped at 64 MiB across the
+  walk, and it writes a trimmed subset), so a live file grows past it only
+  through V2 commits (frozen rows, the V2 months it keeps, and new rows). The
+  first V2 round whose live file or sidecar would exceed the cap sends its
+  full V2 walk and then fails `write_failed`, writing nothing; the file on
+  disk stays the last one under the cap, so every later round repeats that
+  (old page 1, the V2 walk, `write_failed`) until sync is disabled. An
+  oversized file is refused before any V2 request only when one exists, which
+  Syrtis itself never writes. The largest history seen is about 2 MB; the cap
+  was not chosen from a measurement.
 - The old walk's commit deletes the sidecar after the live write (macOS
   deletes it before; a failed live write there leaves a sidecar-less V2
   file, which the next V2 round freezes whole).

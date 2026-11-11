@@ -149,19 +149,22 @@ const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// Only a 403 body is read, to tell an auth refusal (JSON) from an HTML wall.
 const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 /// The largest Billing V2 sidecar or live usage file Syrtis reads back
-/// (`secure::read`): twice the per-walk body cap. A walk writes trimmed rows
-/// (fewer bytes than the bodies it read), the largest history seen is
-/// ≈ 2 MB, so a bigger file is not one of ours to trust and is refused like
-/// an unreadable one (the round fails `write_failed`). The cap was not
-/// chosen from a measurement.
+/// (`secure::read`) or a V2 commit writes (`commit_v2`): twice the per-walk
+/// body cap. The largest history seen is ≈ 2 MB; the cap was not chosen from
+/// a measurement. A bigger file is refused like an unreadable one.
 ///
-/// Known limitation (maintainer decision 2026-11-11, no code change): reads
-/// and the V2 commit refuse files over this cap, but the old walk's commit
-/// (`commit_file`) has none. So an account whose history passes 128 MiB is
-/// still written by the old walk, but once it switches to Billing V2 every
-/// round stops with `write_failed` (`v2_source` refuses the oversized live
-/// file, after the old walk's page 1 and before any V2 request) until sync
-/// is disabled.
+/// Known limitation (maintainer decision 2026-11-11, no code change). The old
+/// walk cannot reach the cap: its bodies are capped at `MAX_BODY_BYTES`
+/// across the whole walk, and the rows it writes are a trimmed subset of
+/// them. A live file grows past the old walk's size only through V2 commits
+/// (frozen rows + the V2 months it keeps + this walk's rows). The first V2
+/// round whose live payload or sidecar would exceed the cap sends its full V2
+/// walk, then `commit_v2`'s size check returns `write_failed` and writes
+/// nothing. The live file on disk stays the last one under the cap, so every
+/// later round does the same (old page 1, the V2 walk, `write_failed`) until
+/// sync is disabled. `v2_source` (and the pre-walk check, for a sidecar)
+/// refuse an oversized file before any V2 request only when one exists, which
+/// Syrtis itself never writes (another writer, a restored backup).
 const MAX_STORED_FILE_BYTES: u64 = 2 * MAX_BODY_BYTES as u64;
 
 /// `MAX_STORED_FILE_BYTES`, or a test's smaller cap on this thread.
@@ -1563,18 +1566,20 @@ fn planned_dir(dir: &Path, resolve: bool) -> io::Result<PathBuf> {
 }
 
 /// The stem's sidecar and live file a V2 round builds on. Those in `used`,
-/// the dir the commit writes: one there that cannot be read refuses the
-/// round (D5). When `used` holds neither (the first commit after an added
-/// profile's sticky `.secure` sibling appeared, with the history still in
-/// its other dir), the other candidates are tried in order; the first one
-/// whose live file can be read (present, or absent) and that holds either a
-/// live file or a readable sidecar is returned, so the old rows are frozen
-/// into `used` before that dir is cleaned, never lost. A candidate whose
-/// live file is present but cannot be read is skipped; a sidecar that cannot
-/// be read counts as none (`stored` None: a stale-sidecar case, the live
-/// file is frozen whole). A candidate holding only a readable sidecar is
-/// returned too; with no live file it is untrusted, so the commit freezes
-/// nothing from it. Never a refusal.
+/// the dir the commit writes: one there that cannot be read refuses the round
+/// (D5). When `used` holds neither (the first commit after an added profile's
+/// sticky `.secure` sibling appeared, with the history still in its other
+/// dir), the other candidates are tried in order; the first one whose live
+/// file can be read (present, or absent) and that holds either a live file or
+/// a readable sidecar is returned, so the old rows are frozen into `used`
+/// before that dir is cleaned, never lost. A candidate whose live file is
+/// present but cannot be read is skipped; a sidecar that cannot be read
+/// counts as none (`stored` None: a stale-sidecar case, the live file is
+/// frozen whole). A candidate holding only a readable sidecar is returned
+/// too, and is stale (`History::trusts` is false without a live digest): the
+/// round plans as a first commit would (the cutover from no rows, no early
+/// stop), and the commit freezes nothing from it and drops its fetched
+/// months. Never a refusal.
 ///
 /// Accepted residual (maintainer decision 2026-11-11): the other candidate's
 /// folder is NOT checked. In practice the sibling exists only because the
@@ -2506,19 +2511,26 @@ async fn run(
     cookie.set_sensitive(true);
     drop(value);
     drop(login);
-    // D5: a same-stem sidecar Syrtis cannot read (a non-file, one failing
-    // the storage contract, one over the cap, or not ours to parse) in the
-    // dir a commit will use stops the round before any request, old or V2.
-    // One in the profile's other dir never refuses.
-    // A peek error skips this check: the old walk then runs and reports its
-    // own outcome. The peek and the commit's resolution are separate opens:
-    // usually the commit meets the same error (`write_failed`, as before
-    // Billing V2), but if its resolution succeeds, the old walk commits into
-    // a dir whose same-stem sidecar was not pre-checked; the commit then
-    // deletes it with the superseded files or, when it cannot (a
-    // contract-failing file), reports a cleanup failure (a directory,
-    // junction or symbolic link at that name is spared without one). Only a V2 round stops on a peek error, before its
-    // requests.
+    // D5: a same-stem sidecar Syrtis cannot read (a non-file, one failing the
+    // storage contract, one over the cap, or not ours to parse) in the dir a
+    // commit will use stops the round before any request, old or V2. One in
+    // the profile's other dir never refuses.
+    //
+    // The peek (`planned_dir`) and the commit's resolution are separate
+    // opens, so the dir checked here and the dir an old walk's commit writes
+    // can differ, both ways. A peek error skips this check and the old walk
+    // runs and reports its own outcome; usually its commit meets the same
+    // error (`write_failed`, as before Billing V2), but if the resolution
+    // then succeeds, the commit lands in a dir whose same-stem sidecar was
+    // never checked. Conversely, the peek can succeed for the preferred dir
+    // and the sticky `.secure` sibling appear during the walk;
+    // `commit_file`'s resolution then returns the sibling, whose sidecar was
+    // never checked either. In both cases the commit deletes that sidecar
+    // with the superseded files or, when it cannot (a contract-failing file),
+    // reports a cleanup failure; a directory, junction or symbolic link at
+    // that name is spared without one. A V2 commit re-reads under the lock in
+    // the dir it resolves (`v2_source`) and refuses there. Only a V2 round
+    // stops on a peek error, before its requests.
     let planned = planned_dir(dir, slot.root.is_some()).ok();
     if planned
         .as_deref()
