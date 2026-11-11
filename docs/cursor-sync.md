@@ -101,9 +101,12 @@ fixed reasons below.
   cleanup (disable, profile removal, account switch, other candidates), and a
   duplicate profile keeps its own account's sidecar with its file. A
   same-stem sidecar Syrtis cannot read (a directory, one failing the
-  contract, one over 128 MiB, or one that does not parse) in the dir a commit
-  would use stops the round with `write_failed` before any request, old or
-  V2; one in the profile's other dir never refuses (cleanup reports it when
+  contract, one over 128 MiB, or one that does not parse) in the planned
+  dir stops the round with `write_failed` before any request, old or V2.
+  If the dir peek fails, the old walk still runs, but a V2 round stops
+  before its V2 requests. The commit may resolve a different dir; a V2
+  commit rechecks that dir. A sidecar in the profile's other dir does not
+  trigger this precheck (cleanup reports it when
   it cannot delete it in a real directory; one behind a junction is skipped
   without a report). The old walk's commit never fails on a sidecar: it
   deletes it, best effort, only after the live file was written, and a
