@@ -69,10 +69,12 @@
 //!
 //! A quota window belongs to one account, so its usage must come from that
 //! account's transcripts only. The primary (`account == None`) scans the
-//! process inputs with every extra account excluded — the configured
-//! directories and the registered Claude roots, as `excluded_scan_paths`,
-//! which the engine applies whichever route reached a directory (W4c,
-//! tokscale-core #65; macOS `primary_exclusions`). An extra account
+//! process inputs without the registered Claude roots (macOS #561), with the
+//! configured directories and the registered Claude roots as
+//! `excluded_scan_paths`, which the engine applies to the Claude lane
+//! whichever route reached a file (W4c, tokscale-core #65; macOS
+//! `primary_exclusions`), except the entries that overlap the primary's
+//! resolved `<home>\.claude` roots (`keep_primary_roots`). An extra account
 //! (`Some(<config dir>)`) reads only its own registered roots and the Claude
 //! client. Each scope runs
 //! on its own captured context (the engine reads scanner settings from the
@@ -275,8 +277,8 @@ fn scoped_context(
                     .cloned(),
             );
             // The registries compare folded strings, but the engine resolves
-            // exclusion prefixes with `canonicalize` before matching
-            // (`retain_unexcluded_scan_tasks`). A "nested" account that is an
+            // exclusion prefixes with `canonicalize` before matching (the
+            // engine's `ScanExclusions`). A "nested" account that is an
             // alias of this one (`<dir>\.claude` as a junction back to
             // `dir`) would then exclude this account's own roots and empty its
             // window. Drop any exclusion that covers one of our own roots,
