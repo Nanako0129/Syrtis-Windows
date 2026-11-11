@@ -6833,7 +6833,10 @@ fn a_v2_commit_whose_sidecar_alone_is_over_the_cap_writes_nothing() {
 /// a second other id, and a `hasTokenMeters: false` item (never written)
 /// carrying a `team` principal, are refused (F2). Mutations: in `walk`,
 /// `Owner::Cookie => true` -> `Owner::Cookie => { other = None; true }`
-/// (Vc2); run the S7 loop only over items whose `product` is `cursor` (Vc1).
+/// (Vc2, cases 1-2); run the S7 loop only over items whose `product` is
+/// `cursor` (Vc1, cases 3-4). Case 5 (the meterless item keeps product
+/// `cursor`) guards a different regression, skipping `hasTokenMeters: false`
+/// items in the S7 loop; that mutation was not run.
 #[test]
 fn v2_the_principal_pin_holds_across_the_cookie_id_and_every_item_is_checked() {
     let _guard = lock();
