@@ -178,18 +178,19 @@ fn scoped_context(
 ) -> Result<crate::LocalSourceContext, String> {
     let registry = crate::extra_scan_paths::snapshot();
     // The primary window is the process context without the registered Claude
-    // roots (macOS #561: it never walks them) and with every extra account
-    // excluded (macOS `account_options` / `primary_exclusions`, #258): the
-    // configured directories and the registered Claude roots. The engine
-    // drops an excluded prefix whichever route reached it, a `.cc-mirror`
-    // variant naming one of those directories or `TOKSCALE_EXTRA_DIRS`
-    // (tokscale-core #65, which made the source-context scan honor
-    // `excluded_scan_paths`); `keep_primary_roots` keeps out only the entries
-    // that overlap the primary's own resolved roots.
+    // roots (macOS #561: it does not walk them), excluding the configured
+    // directories and the registered Claude roots (macOS `primary_exclusions`,
+    // #258) on every route the engine applies `excluded_scan_paths` to: its
+    // own home roots, a `.cc-mirror` variant, `TOKSCALE_EXTRA_DIRS`
+    // (tokscale-core #65). When the home folder is known, `keep_primary_roots`
+    // first removes from that list the entries that overlap the primary's
+    // resolved `<home>\.claude` roots, so the primary's own transcripts they
+    // resolve onto stay counted.
     //
-    // The roots half is read from the held context, not from the registry, so
-    // the exclusions match the context this window was captured from even when
-    // a setter races this request (CodeRabbit security review, #167).
+    // The roots half is read from the held context, not from the registry: a
+    // request holding a context captured with roots, racing a setter that just
+    // cleared them, would otherwise exclude nothing (CodeRabbit security
+    // review, #167).
     // The config dirs are not part of any context, so they come from their
     // registry; a config-dir setter racing this request moves the generation,
     // and the publish of a window computed under the old one is dropped.
@@ -226,7 +227,7 @@ fn scoped_context(
             // definition, so the primary window does not walk them (macOS
             // #561). An exclusion `keep_primary_roots` drops then reaches the
             // primary only through the engine's own routes (its roots, a
-            // `.cc-mirror` variant, `TOKSCALE_EXTRA_DIRS`); a variant naming
+            // `.cc-mirror` variant, `TOKSCALE_EXTRA_DIRS`); either one naming
             // an account folder that contains a linked primary root would
             // bring that account's other transcripts in (not tested). Other
             // clients' extra roots stay.
