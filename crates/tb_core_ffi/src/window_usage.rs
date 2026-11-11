@@ -213,16 +213,27 @@ fn scoped_context(
             let mut excluded: Vec<std::path::PathBuf> =
                 config_dirs.iter().map(std::path::PathBuf::from).collect();
             excluded.extend(held.extra_scan_paths.get(CLAUDE).into_iter().flatten().cloned());
+            let home = crate::user_home_dir();
+            if let Some(home) = &home {
+                keep_primary_roots(&mut excluded, home);
+            }
             // Merged into the held exclusions, never replacing them: the
             // Cursor takeover excludes the CLI's Cursor root there, and a
             // Claude-only map would count that usage twice (Plan W-2).
             let mut settings = held.clone();
+            // The registered Claude roots are the extra accounts' by
+            // definition: the primary window never walks them, so an
+            // exclusion `keep_primary_roots` drops can only let in what the
+            // engine reaches on its own (the primary's roots, a `.cc-mirror`
+            // variant, `TOKSCALE_EXTRA_DIRS`), never an account's registered
+            // root (macOS #561). Other clients' extra roots stay.
+            settings.extra_scan_paths.remove(CLAUDE);
             settings
                 .excluded_scan_paths
                 .entry(CLAUDE.to_string())
                 .or_default()
                 .extend(excluded);
-            tokscale_core::ResolvedLocalSourceContext::capture(crate::user_home_dir(), true, settings)
+            tokscale_core::ResolvedLocalSourceContext::capture(home, true, settings)
         }
         Some(dir) => {
             let own = registered_roots_under(dir, &registry);
@@ -270,12 +281,9 @@ fn scoped_context(
             // window. Drop any exclusion that covers one of our own roots,
             // compared the way the engine compares. Erring here double counts
             // an aliased neighbour; erring the other way hid real usage.
-            let resolve = |path: &std::path::Path| {
-                std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-            };
-            let own_resolved: Vec<std::path::PathBuf> = own.iter().map(|root| resolve(root)).collect();
+            let own_resolved: Vec<std::path::PathBuf> = own.iter().map(|root| canonical(root)).collect();
             excluded.retain(|path| {
-                let prefix = resolve(path);
+                let prefix = canonical(path);
                 !own_resolved.iter().any(|root| root.starts_with(&prefix))
             });
             let mut excluded_scan_paths = std::collections::BTreeMap::new();
@@ -303,6 +311,38 @@ fn scoped_context(
         memo.insert(memo_key, scoped.clone());
     }
     Ok(scoped)
+}
+
+/// Drop the primary-window exclusions that would exclude the primary's own
+/// transcripts (macOS #561). The registries compare folded strings, but the
+/// engine resolves exclusion prefixes with `canonicalize` before matching, so
+/// an extra account whose `projects` is a junction or symlink to
+/// `<home>\.claude\projects`, or whose whole folder links to `<home>\.claude`,
+/// would exclude the primary's own roots and empty its window. An entry is
+/// dropped when its resolved path contains a resolved
+/// `<home>\.claude\{projects,transcripts}` root or lies under one. The
+/// primary window does not walk the registered roots (`scoped_context`), so
+/// each card counts what its own roots reach: transcripts shared through a
+/// link count on the primary card and on every card whose roots reach them,
+/// whichever side holds the link, and an account's transcripts that no
+/// primary root reaches stay out.
+///
+/// ponytail: only the two `<home>\.claude` roots; an alias of another
+/// primary root (a `.cc-mirror` variant) stays excluded, as before.
+fn keep_primary_roots(excluded: &mut Vec<std::path::PathBuf>, home: &std::path::Path) {
+    let claude = home.join(".claude");
+    let roots = ["projects", "transcripts"].map(|name| canonical(&claude.join(name)));
+    excluded.retain(|path| {
+        let resolved = canonical(path);
+        !roots
+            .iter()
+            .any(|root| resolved.starts_with(root) || root.starts_with(&resolved))
+    });
+}
+
+/// `path` with links resolved, or as given when it cannot be resolved.
+fn canonical(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Drop every cached window and scoped context (root change).
