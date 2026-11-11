@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using TokenBar.Interop;
 
 namespace TokenBar.Core;
@@ -217,8 +218,8 @@ public static class CursorSync
 
         public static readonly string[] All =
         [
-            Title, Toggle, Privacy, Continue, Cancel, TurnOff, LastSynced, Partial, Expired, NotSignedIn,
-            Offline, Error, ErrorWithReason, PartialWithReason, CliPresent, SyncNow, Syncing, CliQuestion, UseSyrtis, KeepCli, CleanupFailed,
+            Title, Toggle, Privacy, Continue, Cancel, TurnOff, LastSynced, Partial, PartialWithReason, Expired, NotSignedIn,
+            Offline, Error, ErrorWithReason, CliPresent, SyncNow, Syncing, CliQuestion, UseSyrtis, KeepCli, CleanupFailed,
             ConfigRejected, ProfilesPrivacy,
             KeychainConsentLine, KeychainAllowAccess, KeychainDisclosure, KeychainWithdraw, KeychainAllow,
             BillingV2TeamRequired, BillingV2Unavailable, BillingV2NoItems, BillingV2PrincipalMismatch,
@@ -254,7 +255,7 @@ public static class CursorSync
         {
             "ok" when lastSuccessMs is { } ms =>
                 Copy.LastSynced.Localized(Format.RelativeTime((ulong)Math.Max(0, ms / 1000), now)),
-            "partial" when IsFixedCode(reason) => Copy.PartialWithReason.Localized(reason!),
+            "partial" when IsFixedCode(reason) => Copy.PartialWithReason.Localized(reason),
             "partial" => Copy.Partial.Localized(),
             "expired" => Copy.Expired.Localized(),
             "notSignedIn" => Copy.NotSignedIn.Localized(),
@@ -266,7 +267,7 @@ public static class CursorSync
             "error" when reason == Copy.KeychainConsentCode => Copy.KeychainConsentLine.Localized(),
             // Billing V2: its own line, still carrying the code (macOS #554).
             "error" when BillingV2Copy(reason) is { } billing => billing.Localized(reason!),
-            "error" when IsFixedCode(reason) => Copy.ErrorWithReason.Localized(reason!),
+            "error" when IsFixedCode(reason) => Copy.ErrorWithReason.Localized(reason),
             "error" => Copy.Error.Localized(),
             "cliPresent" => Copy.CliPresent.Localized(),
             ConfigRejectedState => Copy.ConfigRejected.Localized(),
@@ -276,7 +277,7 @@ public static class CursorSync
     /// <summary>Whether <paramref name="reason"/> looks like one of the core's
     /// fixed codes. A char test, not a Regex: .NET's <c>$</c> also matches
     /// before a final "\n".</summary>
-    private static bool IsFixedCode(string? reason) =>
+    private static bool IsFixedCode([NotNullWhen(true)] string? reason) =>
         reason is { Length: >= 1 and <= 40 } && reason.All(c => c is '_' or >= 'a' and <= 'z');
 
     /// <summary>ok is drawn in the secondary colour, every other line in

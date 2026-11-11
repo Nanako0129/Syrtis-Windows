@@ -1112,7 +1112,7 @@ public class CursorSyncTests
     /// <summary>#547 (macOS <c>statusLine</c>): an error line names the core's
     /// reason code when it has the core's shape, <c>^[a-z_]{1,40}$</c>; any
     /// other reason falls back to the generic line, so no free text reaches
-    /// it. Only the error line carries a reason.</summary>
+    /// it. The partial line follows the same rule (#520); other lines carry no reason.</summary>
     [Fact]
     public void AnErrorLineShowsTheReasonCodeOnlyWhenItHasTheCoreShape()
     {
