@@ -69,10 +69,9 @@
 //!
 //! A quota window belongs to one account, so its usage must come from that
 //! account's transcripts only. The primary (`account == None`) scans the
-//! process inputs with every extra account excluded — the configured
-//! directories and the registered Claude roots, as `excluded_scan_paths`,
-//! which the engine applies whichever route reached a directory (W4c,
-//! tokscale-core #65; macOS `primary_exclusions`). An extra account
+//! process inputs without the registered Claude roots and with the other
+//! accounts' folders excluded (W4c; macOS `primary_exclusions`, #561); the
+//! exact rule is on `scoped_context` and `keep_primary_roots`. An extra account
 //! (`Some(<config dir>)`) reads only its own registered roots and the Claude
 //! client. Each scope runs
 //! on its own captured context (the engine reads scanner settings from the
@@ -177,18 +176,18 @@ fn scoped_context(
     account: &Option<String>,
 ) -> Result<crate::LocalSourceContext, String> {
     let registry = crate::extra_scan_paths::snapshot();
-    // The primary window is the process context with every extra account
-    // excluded (macOS `account_options` / `primary_exclusions`, #258): the
-    // configured directories and the registered Claude roots. The engine
-    // drops an excluded prefix whichever route reached it, the registered
-    // roots, a `.cc-mirror` variant naming one of those directories, or
-    // `TOKSCALE_EXTRA_DIRS` (tokscale-core #65, which made the source-context
-    // scan honor `excluded_scan_paths`).
+    // The primary window is the process context without the registered Claude
+    // roots (macOS #561), with the configured directories and the registered
+    // Claude roots in `excluded_scan_paths`, which the engine applies to the
+    // Claude lane whichever route reached a file (tokscale-core #65, #76). When the
+    // home folder is known, `keep_primary_roots` first removes the entries
+    // that overlap the resolved `<home>\.claude\projects` or
+    // `<home>\.claude\transcripts`, both sides as `canonical` returns them.
     //
-    // The roots half is read from the held context, not from the registry: a
-    // request holding a context captured with roots, racing a setter that just
-    // cleared them, would otherwise exclude nothing and scan the old context's
-    // removed roots under primary scope (CodeRabbit security review, #167).
+    // The roots half is read from the held context, not the registry, so a
+    // setter clearing the roots mid-request cannot remove them from the
+    // exclusions of a context still captured with them (CodeRabbit security
+    // review, #167).
     // The config dirs are not part of any context, so they come from their
     // registry; a config-dir setter racing this request moves the generation,
     // and the publish of a window computed under the old one is dropped.
@@ -213,16 +212,28 @@ fn scoped_context(
             let mut excluded: Vec<std::path::PathBuf> =
                 config_dirs.iter().map(std::path::PathBuf::from).collect();
             excluded.extend(held.extra_scan_paths.get(CLAUDE).into_iter().flatten().cloned());
+            let home = crate::user_home_dir();
+            if let Some(home) = &home {
+                keep_primary_roots(&mut excluded, home);
+            }
             // Merged into the held exclusions, never replacing them: the
             // Cursor takeover excludes the CLI's Cursor root there, and a
             // Claude-only map would count that usage twice (Plan W-2).
             let mut settings = held.clone();
+            // The registered Claude roots are the extra accounts' by
+            // definition, so the primary window does not walk them (macOS
+            // #561); other clients' extra roots stay. Beyond what the
+            // primary's own roots reach, a `.cc-mirror` variant or
+            // `TOKSCALE_EXTRA_DIRS` entry naming an account folder whose
+            // exclusion `keep_primary_roots` removed would still bring that
+            // account's other transcripts in (not tested).
+            settings.extra_scan_paths.remove(CLAUDE);
             settings
                 .excluded_scan_paths
                 .entry(CLAUDE.to_string())
                 .or_default()
                 .extend(excluded);
-            tokscale_core::ResolvedLocalSourceContext::capture(crate::user_home_dir(), true, settings)
+            tokscale_core::ResolvedLocalSourceContext::capture(home, true, settings)
         }
         Some(dir) => {
             let own = registered_roots_under(dir, &registry);
@@ -263,19 +274,16 @@ fn scoped_context(
                     .cloned(),
             );
             // The registries compare folded strings, but the engine resolves
-            // exclusion prefixes with `canonicalize` before matching
-            // (`retain_unexcluded_scan_tasks`). A "nested" account that is an
+            // exclusion prefixes with `canonicalize` before matching (the
+            // engine's `ScanExclusions`). A "nested" account that is an
             // alias of this one (`<dir>\.claude` as a junction back to
             // `dir`) would then exclude this account's own roots and empty its
             // window. Drop any exclusion that covers one of our own roots,
             // compared the way the engine compares. Erring here double counts
             // an aliased neighbour; erring the other way hid real usage.
-            let resolve = |path: &std::path::Path| {
-                std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-            };
-            let own_resolved: Vec<std::path::PathBuf> = own.iter().map(|root| resolve(root)).collect();
+            let own_resolved: Vec<std::path::PathBuf> = own.iter().map(|root| canonical(root)).collect();
             excluded.retain(|path| {
-                let prefix = resolve(path);
+                let prefix = canonical(path);
                 !own_resolved.iter().any(|root| root.starts_with(&prefix))
             });
             let mut excluded_scan_paths = std::collections::BTreeMap::new();
@@ -303,6 +311,38 @@ fn scoped_context(
         memo.insert(memo_key, scoped.clone());
     }
     Ok(scoped)
+}
+
+/// Drop the primary-window exclusions that would exclude the primary's own
+/// transcripts (macOS #561). The registries compare folded strings, but the
+/// engine resolves exclusion prefixes with `canonicalize` before matching, so
+/// an extra account whose `projects` is a junction or symlink to
+/// `<home>\.claude\projects`, or whose whole folder links to `<home>\.claude`,
+/// would exclude the primary's own roots and empty its window. An entry is
+/// dropped when its resolved path contains a resolved
+/// `<home>\.claude\{projects,transcripts}` root or lies under one. The
+/// primary window does not walk the registered roots (`scoped_context`), so
+/// each card counts what its own roots reach: transcripts shared through a
+/// link count on the primary card and on every card whose roots reach them,
+/// whichever side holds the link, and an account's transcripts that no
+/// primary root reaches stay out.
+///
+/// ponytail: only the two `<home>\.claude` roots; an alias of another
+/// primary root (a `.cc-mirror` variant) stays excluded, as before.
+fn keep_primary_roots(excluded: &mut Vec<std::path::PathBuf>, home: &std::path::Path) {
+    let claude = home.join(".claude");
+    let roots = ["projects", "transcripts"].map(|name| canonical(&claude.join(name)));
+    excluded.retain(|path| {
+        let resolved = canonical(path);
+        !roots
+            .iter()
+            .any(|root| resolved.starts_with(root) || root.starts_with(&resolved))
+    });
+}
+
+/// `path` with links resolved, or as given when it cannot be resolved.
+fn canonical(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Drop every cached window and scoped context (root change).

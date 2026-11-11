@@ -123,8 +123,12 @@ const WINDOW_UNTIL: i64 = 1_767_312_000_000; // 2026-01-02T00:00:00Z
 /// One Claude assistant turn with a distinct id, so a root's contribution is
 /// identifiable by its output tokens alone (macOS fixture shape).
 fn write_session(root: &Path, id: &str, output: i64) {
-    let dir = root.join("projects").join("proj");
-    std::fs::create_dir_all(&dir).unwrap();
+    write_turn(&root.join("projects").join("proj"), id, output);
+}
+
+/// The [`write_session`] turn at `dir\<id>.jsonl`, in any folder.
+fn write_turn(dir: &Path, id: &str, output: i64) {
+    std::fs::create_dir_all(dir).unwrap();
     std::fs::write(
         dir.join(format!("{id}.jsonl")),
         format!(
@@ -502,6 +506,165 @@ fn a_nested_alias_of_the_account_itself_does_not_empty_its_window() {
         7_000,
         "an alias of the account itself excluded the account's own roots"
     );
+}
+
+/// `link` as a directory junction to `target` (which must exist), the link an
+/// unprivileged Windows user can make; `is_symlink` reports it.
+#[cfg(windows)]
+fn junction(link: &Path, target: &Path) {
+    let cmd = std::env::var_os("SystemRoot")
+        .map(|system| PathBuf::from(system).join("System32").join("cmd.exe"))
+        .unwrap();
+    let made = std::process::Command::new(cmd)
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "mklink /J failed: {made:?}");
+    assert!(
+        std::fs::symlink_metadata(link).unwrap().file_type().is_symlink(),
+        "fixture is inert: the junction is not reported as a link"
+    );
+}
+
+/// macOS #561: an extra account that links to the primary's transcripts (its
+/// `projects` a junction to `<home>\.claude\projects`, the whole folder a
+/// junction to `<home>\.claude`, the first layout with
+/// `<home>\.claude\projects` itself moved elsewhere through a junction, or the
+/// whole folder a junction to the home folder) is excluded from the primary
+/// window, and the engine canonicalizes exclusion prefixes, so before the fix
+/// the primary window read 0. The primary keeps its 1,000; the linked
+/// account's own window reads the same shared 1,000 in the first three.
+#[cfg(windows)]
+#[test]
+fn an_extra_account_linked_to_the_primarys_transcripts_does_not_empty_the_primary() {
+    let Some(root) = child_root() else {
+        return run_in_child(
+            "an_extra_account_linked_to_the_primarys_transcripts_does_not_empty_the_primary",
+            "linked-to-primary",
+        );
+    };
+    const PRIMARY: i64 = 1_000;
+    let claude = root.join(".claude");
+    for shape in ["projects_link", "whole_folder", "relocated_root", "home_alias"] {
+        // Each shape gets a fresh `<home>\.claude`: remove the previous
+        // shape's junction itself (never through it), then the real folder.
+        if std::fs::symlink_metadata(claude.join("projects")).is_ok_and(|m| m.file_type().is_symlink()) {
+            std::fs::remove_dir(claude.join("projects")).unwrap();
+        }
+        if claude.exists() {
+            std::fs::remove_dir_all(&claude).unwrap();
+        }
+        if shape == "relocated_root" {
+            let disk = root.join("disk");
+            write_session(&disk, "primary", PRIMARY);
+            std::fs::create_dir_all(&claude).unwrap();
+            junction(&claude.join("projects"), &disk.join("projects"));
+        } else {
+            write_session(&claude, "primary", PRIMARY);
+        }
+        let account = root.join(format!("work-{shape}"));
+        match shape {
+            "whole_folder" => junction(&account, &claude),
+            "home_alias" => junction(&account, &root),
+            _ => {
+                std::fs::create_dir_all(&account).unwrap();
+                junction(&account.join("projects"), &claude.join("projects"));
+            }
+        }
+        register_accounts(&[&account]);
+
+        assert_eq!(
+            claude_output(&call_window(None, WINDOW_FROM, WINDOW_UNTIL)),
+            PRIMARY,
+            "{shape}: the linked account emptied the primary window"
+        );
+        if shape != "home_alias" {
+            assert_eq!(
+                claude_output(&call_window(Some(&account.display().to_string()), WINDOW_FROM, WINDOW_UNTIL)),
+                PRIMARY,
+                "{shape}: the linked account's own window"
+            );
+        }
+    }
+}
+
+/// The primary's side links into another folder `D`, registered in both
+/// registries. The primary window never walks the registered roots and keeps
+/// the exclusions that do not overlap its own resolved roots, so it counts
+/// exactly what its roots reach: `<home>\.claude\projects` ->
+/// `D\projects\shared` (the shared 1,000, not `D`'s other 7,000); -> `D`
+/// itself (`D` is the primary's projects folder, so everything under it,
+/// 8,000, plus the unlinked `<home>\.claude\transcripts`, 500);
+/// `<home>\.claude` -> `D\shared` (1,000, not `D\transcripts`);
+/// `<home>\.claude` -> `D` (a dotfiles layout: both windows read 1,000).
+#[cfg(windows)]
+#[test]
+fn a_primary_side_link_counts_what_the_primarys_roots_reach() {
+    let Some(root) = child_root() else {
+        return run_in_child(
+            "a_primary_side_link_counts_what_the_primarys_roots_reach",
+            "primary-side-link",
+        );
+    };
+    // The account window reads its own registered roots: `D\projects` holds
+    // nothing in the second and third shapes, so only `D\transcripts` counts.
+    for (shape, primary_output, account_output) in [
+        ("projects_to_subfolder", 1_000, 8_000),
+        ("projects_to_account", 8_500, 7_000),
+        ("claude_to_subfolder", 1_000, 7_000),
+        ("claude_to_its_dotfiles_target", 1_000, 1_000),
+    ] {
+        // Undo the previous shape's `<home>\.claude`: remove a junction itself
+        // (never through it), then whatever real folder is left.
+        let home_claude = root.join(".claude");
+        let is_link = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+        if is_link(&home_claude) {
+            std::fs::remove_dir(&home_claude).unwrap();
+        } else if home_claude.exists() {
+            if is_link(&home_claude.join("projects")) {
+                std::fs::remove_dir(home_claude.join("projects")).unwrap();
+            }
+            std::fs::remove_dir_all(&home_claude).unwrap();
+        }
+        let d = root.join(format!("work-{shape}"));
+        match shape {
+            "projects_to_subfolder" => {
+                write_turn(&d.join("projects").join("shared").join("p"), "a", 1_000);
+                write_turn(&d.join("projects").join("other"), "b", 7_000);
+                std::fs::create_dir_all(&home_claude).unwrap();
+                junction(&home_claude.join("projects"), &d.join("projects").join("shared"));
+            }
+            "projects_to_account" => {
+                write_turn(&d.join("p"), "a", 1_000);
+                write_turn(&d.join("transcripts").join("t"), "b", 7_000);
+                write_turn(&home_claude.join("transcripts").join("t"), "c", 500);
+                junction(&home_claude.join("projects"), &d);
+            }
+            "claude_to_its_dotfiles_target" => {
+                write_turn(&d.join("projects").join("p"), "a", 1_000);
+                junction(&home_claude, &d);
+            }
+            _ => {
+                write_turn(&d.join("shared").join("projects").join("p"), "a", 1_000);
+                write_turn(&d.join("transcripts").join("t"), "b", 7_000);
+                junction(&home_claude, &d.join("shared"));
+            }
+        }
+        register_accounts(&[&d]);
+
+        assert_eq!(
+            claude_output(&call_window(None, WINDOW_FROM, WINDOW_UNTIL)),
+            primary_output,
+            "{shape}: the primary window"
+        );
+        assert_eq!(
+            claude_output(&call_window(Some(&d.display().to_string()), WINDOW_FROM, WINDOW_UNTIL)),
+            account_output,
+            "{shape}: the account's own window"
+        );
+    }
 }
 
 /// Control: accounts that do not nest scan exactly what an account window
