@@ -155,8 +155,9 @@ const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 ///
 /// Known limitation (maintainer decision 2026-11-11, no code change): the
 /// old walk's commit (`commit_file`) has no size check of its own; a V2 live
-/// file grows through V2 commits, and a V2 commit over the cap writes nothing
-/// (`write_failed`). How an account behaves near the cap was not exercised.
+/// file grows through V2 commits, and a V2 commit over the cap writes no
+/// usage file or sidecar (`write_failed`; taking the lock may already have
+/// created the dir and its lock file). How an account behaves near the cap was not exercised.
 const MAX_STORED_FILE_BYTES: u64 = 2 * MAX_BODY_BYTES as u64;
 
 /// `MAX_STORED_FILE_BYTES`, or a test's smaller cap on this thread.
