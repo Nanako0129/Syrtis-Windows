@@ -2433,6 +2433,8 @@ public sealed partial class DashboardView : UserControl
             }
 
             var (discHost, discGlow) = GlowingDisc(colors.Color(entry.Provider, entry.Model));
+            // A transform, not a margin: the row's measured height stays the name's.
+            discHost.RenderTransform = new TranslateTransform { Y = ModelDiscDrop };
             name.Children.Add(discHost);
             var modelText = Ui.MiddleText(entry.Model, 11);
             Grid.SetColumn(modelText, 1);
@@ -2564,6 +2566,13 @@ public sealed partial class DashboardView : UserControl
     /// disc's arranged size while the glow scales out, so lighting one up never
     /// moves the row. Used by the Models lens and by the per-model rows inside
     /// an expanded Daily entry, which must light up the same way.</summary>
+    /// <summary>How far a model row's disc sits below the centre of the name's
+    /// line box. Centred there it reads high: an 11 px line has more room above
+    /// the lowercase letters than below, so the letters' middle is lower than
+    /// the box's. Measured on host 188 at 200% (2026-11-12): the disc's centre
+    /// was 3.5 to 5 px above the x-height's centre, about 2 DIP.</summary>
+    private const double ModelDiscDrop = 2;
+
     private static (Grid Host, Ellipse Glow) GlowingDisc(string hex, double size = 8)
     {
         var disc = Ui.Disc(hex, size);
