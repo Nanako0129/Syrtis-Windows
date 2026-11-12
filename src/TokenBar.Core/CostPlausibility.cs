@@ -7,9 +7,11 @@ namespace TokenBar.Core;
 /// (port of TokenBarCore/ModelReport.swift's <c>CostPlausibility</c> and
 /// <c>implausibleCostRatio</c>).
 /// <para>
-/// Judged on a row AFTER <see cref="ModelReportFold"/> has merged provider-split
-/// rows, because that is the row the reader sees and the fold sums both cost and
-/// estimate — judging a component would describe part of a row's spend.
+/// Judged on a row of <see cref="ModelReportFold.TabEntries"/>, because that is
+/// the row the reader sees and the fold sums both cost and estimate. A one-client
+/// tab's row joins that client's providers; a multi-client tab's row is one
+/// provider's, and a flagged row is never merged. Judging a row the reader does
+/// not see would describe part of its spend.
 /// </para>
 /// </summary>
 public static class CostPlausibility
