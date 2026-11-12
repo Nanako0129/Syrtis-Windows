@@ -60,6 +60,31 @@ public class ModelReportTabEntriesTests
     }
 
     [Fact]
+    public void EachProvidersTokensStayTogetherAcrossClients()
+    {
+        // a reaches the model through two providers, b through one of them.
+        var report = Report(
+            Row("a", "m", "nvidia", 10, 1, 1),
+            Row("a", "m", "openai", 20, 1, 1),
+            Row("b", "m", "openai", 5, 1, 1));
+
+        var rows = report.TabEntries(["a", "b"]);
+
+        Assert.Equal(2, rows.Count);
+        var openai = Assert.Single(rows, r => r.Provider == "openai");
+        Assert.Equal(25, openai.Total);
+        Assert.Equal([new ClientPart("a", 20), new ClientPart("b", 5)], openai.ClientParts);
+        var nvidia = Assert.Single(rows, r => r.Provider == "nvidia");
+        Assert.Equal(10, nvidia.Total);
+        Assert.Null(nvidia.ClientParts);
+
+        // Its own tab still joins that client's providers into one row.
+        var own = Assert.Single(report.TabEntries(["a"]));
+        Assert.Equal("nvidia, openai", own.Provider);
+        Assert.Equal(30, own.Total);
+    }
+
+    [Fact]
     public void FlaggedRowIsNeverMerged()
     {
         // a: 300 / 1 = 300x the estimate (flagged); b: healthy. Summed they would

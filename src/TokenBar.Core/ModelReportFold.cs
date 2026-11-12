@@ -46,21 +46,28 @@ public static class ModelReportFold
     /// merged: summed with a healthy row of the same model its ratio would drop
     /// under the threshold and the warning would vanish while the inflated cost
     /// stayed on screen.
+    /// </para>
+    /// <para>
+    /// The multi-client fold reads the engine's rows, not
+    /// <see cref="ModelLevelEntries"/>: that joins one client's providers into
+    /// one row ("nvidia, openai"), whose totals belong to neither provider and
+    /// which no other client's row for either provider would join. So a client
+    /// that reaches one model through two providers is two rows in a
+    /// multi-client tab and one in its own tab, and the cost check runs on each
+    /// provider's row there (macOS Syrtis #564).
     /// </para></summary>
     public static IReadOnlyList<ModelReportEntry> TabEntries(
         this ModelReport report, IReadOnlyCollection<string> clientIds)
     {
         var allow = clientIds.ToHashSet(StringComparer.Ordinal);
-        var perClient = report.ModelLevelEntries()
-            .Where(e => allow.Contains(ClientRegistry.CanonicalClient(e.Client)))
-            .ToList();
+        bool InTab(ModelReportEntry e) => allow.Contains(ClientRegistry.CanonicalClient(e.Client));
         if (allow.Count <= 1)
         {
-            return perClient;
+            return [.. report.ModelLevelEntries().Where(InTab)];
         }
 
         return [.. Fold(
-            perClient,
+            report.Entries.Where(InTab),
             e => CostPlausibility.ImplausibleRatio(e) is null ? e.Model + "\u0000" + e.Provider : null)
             .Select(g =>
             {
