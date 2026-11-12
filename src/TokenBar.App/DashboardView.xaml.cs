@@ -2411,15 +2411,17 @@ public sealed partial class DashboardView : UserControl
             // name unbounded so it never trims, and a long model id would push
             // the share out of the column. Left-aligned so the share sits right
             // after a short name (macOS ModelsView: name truncates, share stays).
-            // Top, so the row is one line high: in the Overview card Ui.Row would
-            // otherwise stretch it to the two-line trailing column, and the disc
-            // and the provider label (centred) would sit half a line below the
-            // name (at the top). The name stays on the tokens' line.
+            // Centred, not stretched: the row stays one line high, so the disc
+            // and the provider label sit on the name's line, and in the Overview
+            // card (where Ui.Row gives it the two-line trailing column's height)
+            // the whole row sits in the middle. At the top it read as part of
+            // the row above: measured on host 188 at 200%, 26 px from the bar
+            // above against 33 px to its own bar; centred it is 38 against 22.
             var name = new Grid
             {
                 ColumnSpacing = 6,
                 HorizontalAlignment = HorizontalAlignment.Left,
-                VerticalAlignment = VerticalAlignment.Top,
+                VerticalAlignment = VerticalAlignment.Center,
             };
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -2569,9 +2571,10 @@ public sealed partial class DashboardView : UserControl
     /// <summary>How far a model row's disc sits below the centre of the name's
     /// line box. Centred there it reads high: an 11 px line has more room above
     /// the lowercase letters than below, so the letters' middle is lower than
-    /// the box's. Measured on host 188 at 200% (2026-11-12): the disc's centre
-    /// was 3.5 to 5 px above the x-height's centre, about 2 DIP.</summary>
-    private const double ModelDiscDrop = 2;
+    /// the box's. Measured on host 188 at 200% (2026-11-12): with no drop the
+    /// disc's centre was 5 px above the x-height's centre in every row, and
+    /// with a drop of 2 it was still 1.5 px above.</summary>
+    private const double ModelDiscDrop = 2.75;
 
     private static (Grid Host, Ellipse Glow) GlowingDisc(string hex, double size = 8)
     {
