@@ -2368,13 +2368,11 @@ public sealed partial class DashboardView : UserControl
         return stack;
     }
 
-    /// <summary>Model rows for the current client selection, folded to one row
-    /// per <c>(client, model)</c> first (<see cref="ModelReportFold.ModelLevelEntries"/>),
-    /// then across clients when the selection spans several
-    /// (<see cref="ModelReportFold.TabEntries"/>) — tokscale groups by <c>(client, provider, model)</c>, so a model used
-    /// through two providers would otherwise show twice, inflate the "N
-    /// models" count, and let the larger provider-split component win
-    /// "Favorite model" on Stats instead of the model itself.</summary>
+    /// <summary>Model rows for the current client selection
+    /// (<see cref="ModelReportFold.TabEntries"/>): one row per <c>(client,
+    /// model)</c> for one client, one per model and provider across several.
+    /// One model can therefore be on several rows, so counts, the favorite and
+    /// the provider label go through <see cref="ModelRows"/>.</summary>
     private List<ModelReportEntry> SelectedModelEntries(DashboardModel.Snapshot snapshot) =>
         [.. snapshot.Models?.TabEntries(_selectedSet) ?? []];
 
@@ -2403,6 +2401,7 @@ public sealed partial class DashboardView : UserControl
 
         var colors = new ModelColorMap(
             snapshot.Models, snapshot.ModelsRankByCost);
+        var repeated = entries.RepeatedModels();
         foreach (var entry in entries)
         {
             var block = new StackPanel { Spacing = 3 };
@@ -2414,17 +2413,31 @@ public sealed partial class DashboardView : UserControl
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var (discHost, discGlow) = GlowingDisc(colors.Color(entry.Provider, entry.Model));
             name.Children.Add(discHost);
             var modelText = Ui.MiddleText(entry.Model, 11);
             Grid.SetColumn(modelText, 1);
             name.Children.Add(modelText);
+            if (repeated.Contains(entry.Model))
+            {
+                // Beside the name, as macOS: a model on several rows (one per
+                // provider in a multi-client tab) needs it to tell them apart.
+                // Auto column after the star one, so the name trims first.
+                var providerText = Ui.Text(entry.ProviderLabel().Localized(), 10, 0.5);
+                providerText.VerticalAlignment = VerticalAlignment.Center;
+                providerText.TextWrapping = TextWrapping.NoWrap;
+                providerText.TextTrimming = TextTrimming.CharacterEllipsis;
+                Grid.SetColumn(providerText, 2);
+                name.Children.Add(providerText);
+            }
+
             if (!collapsible
                 && CostSurfaceProjection.ModelShare(entry, listed, snapshot.ModelsCostAuthoritative) is { } share)
             {
                 var shareText = Ui.Text(share, 10, 0.5);
                 shareText.VerticalAlignment = VerticalAlignment.Center;
-                Grid.SetColumn(shareText, 2);
+                Grid.SetColumn(shareText, 3);
                 name.Children.Add(shareText);
             }
 

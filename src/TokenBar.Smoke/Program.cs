@@ -95,9 +95,11 @@ Step("tb_model_report", () =>
         throw new InvalidOperationException(
             $"tb_model_report expected client '{expectedClient}' in Entries");
     // Implausible-cost probe. Every folded (client, model) row whose reported
-    // cost the local estimate cannot justify, judged with the same
-    // ModelLevelEntries fold and CostPlausibility rule the Models lens uses,
-    // and named by the canonical client the lens's tabs are keyed on. All-time
+    // cost the local estimate cannot justify, judged with ModelLevelEntries (the
+    // rows a one-client tab shows) and the CostPlausibility rule the Models lens
+    // uses, and named by the canonical client the lens's tabs are keyed on. A
+    // multi-client tab (Overview, Antigravity) judges each provider's row
+    // instead, so it can flag a row this list does not. All-time
     // (this call passes no year): compare it against the lens with the year
     // picker on All years, or the two are looking at different slices.
     var flagged = r.ModelLevelEntries()

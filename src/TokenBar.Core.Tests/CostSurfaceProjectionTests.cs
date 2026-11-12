@@ -415,4 +415,18 @@ public class CostSurfaceProjectionTests
         }
         Assert.Equal("Main", CostSurfaceProjection.AgentLabel("Main"));
     }
+
+    [Fact]
+    public void ProviderSplitRowsCountAsOneModelAndFavoriteSumsThem()
+    {
+        // m is two provider rows (1 + 1 each) next to solo (1.5): by cost m wins
+        // as a model (2 > 1.5) though no single row of it beats solo.
+        ModelReportEntry R(string model, string provider, double cost) =>
+            new("a", model, provider, 1, 0, 0, 0, 0, 1, 1, cost);
+        var rows = new[] { R("solo", "p", 1.5), R("m", "x", 1), R("m", "y", 1) };
+
+        Assert.Equal("2 models · 3 · $3.50", CostSurfaceProjection.ModelsSubtitle(rows, true));
+        Assert.Equal("m", CostSurfaceProjection.FavoriteModel(rows, true)!.Model);
+    }
 }
+

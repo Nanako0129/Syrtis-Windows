@@ -80,10 +80,11 @@ public static class CostSurfaceProjection
     /// would state a number that is not on screen.
     /// </para>
     /// <para>
-    /// Takes the FOLDED row. <see cref="CostPlausibility.ImplausibleRatio"/> is
-    /// only meaningful after <see cref="ModelReportFold"/>, which sums cost and
-    /// estimate together; judging a provider-split component would describe
-    /// part of the row's spend.
+    /// Takes a row of <see cref="ModelReportFold.TabEntries"/>.
+    /// <see cref="CostPlausibility.ImplausibleRatio"/> is only meaningful on a
+    /// row whose cost and estimate were summed together: a one-client tab's row
+    /// joins that client's providers, a multi-client tab's row is one provider's
+    /// (a flagged one is never merged).
     /// </para>
     /// </summary>
     public static string? CostWarning(ModelReportEntry entry, bool authoritative) =>
@@ -115,8 +116,10 @@ public static class CostSurfaceProjection
         var tokens = entries.Aggregate(0L, (sum, e) => sum.SaturatingAdd(e.Total));
         // One key per plural form, as macOS ModelsView does ("%lld model · %@ · %@"
         // / "%lld models · %@ · %@"), so English reads "1 model".
-        return (entries.Count == 1 ? "{0} model · {1} · {2}" : "{0} models · {1} · {2}").Localized(
-            entries.Count,
+        // Distinct models, not rows: a multi-client tab has a row per provider.
+        var models = entries.ModelCount();
+        return (models == 1 ? "{0} model · {1} · {2}" : "{0} models · {1} · {2}").Localized(
+            models,
             Format.CompactTokens(tokens),
             authoritative ? Format.Money(tokens, entries.Sum(e => e.Cost)) : Checking);
     }
@@ -159,9 +162,12 @@ public static class CostSurfaceProjection
         return [.. query];
     }
 
+    /// <summary>The favorite model's costliest row (tokens while cost is
+    /// unconfirmed): the model whose rows sum highest, so a provider split does
+    /// not let one component win. Ordered first so ties break as the list does.</summary>
     public static ModelReportEntry? FavoriteModel(
         IEnumerable<ModelReportEntry> entries, bool authoritative) =>
-        OrderModels(entries, authoritative).FirstOrDefault();
+        OrderModels(entries, authoritative).FavoriteRow(authoritative);
 
     public static IReadOnlyList<ContributionClient> OrderContributionClients(
         IEnumerable<ContributionClient> clients, bool authoritative)

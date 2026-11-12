@@ -4,8 +4,11 @@ namespace TokenBar.Core;
 
 /// <summary>
 /// Folds provider-split <see cref="ModelReportEntry"/> rows back to the
-/// <c>(client, model)</c> view every consumer actually wants (port of
-/// TokenBarCore/ModelReport.swift's <c>modelLevelEntries</c>).
+/// <c>(client, model)</c> view (port of TokenBarCore/ModelReport.swift's
+/// <c>modelLevelEntries</c>), and to a tab's rows (<see cref="TabEntries"/>),
+/// which in a multi-client tab stay one per model and provider: read those
+/// through <see cref="ModelRows"/> so a provider split never counts as another
+/// model.
 /// <para>
 /// tokscale-core groups usage by <c>(client, provider, model)</c>, so one
 /// model used through two providers (or a provider name that changed
@@ -175,4 +178,71 @@ public static class ModelReportFold
             .Order(StringComparer.Ordinal);
         return string.Join(", ", parts);
     }
+}
+
+/// <summary>A tab's rows read as models (port of macOS
+/// <c>Array&lt;ModelReportEntry&gt;.modelCount / repeatedModels / favoriteRow /
+/// providerLabel</c>, Syrtis #565). A multi-client tab keeps one row per model
+/// and provider (<see cref="ModelReportFold.TabEntries"/>), so one model can be
+/// on several rows: counts, the favorite and the labels go through these.</summary>
+public static class ModelRows
+{
+    /// <summary>The key <see cref="ProviderLabel"/> returns for a row with no
+    /// provider; localize it at the view.</summary>
+    public const string UnspecifiedProvider = "Unspecified provider";
+
+    /// <summary>How many models the rows cover (not how many rows).</summary>
+    public static int ModelCount(this IEnumerable<ModelReportEntry> rows) =>
+        rows.Select(e => e.Model).Distinct(StringComparer.Ordinal).Count();
+
+    /// <summary>Models on more than one row; their rows need the provider beside
+    /// the name to be told apart.</summary>
+    public static IReadOnlySet<string> RepeatedModels(this IEnumerable<ModelReportEntry> rows)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var repeated = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var e in rows)
+        {
+            if (!seen.Add(e.Model))
+            {
+                repeated.Add(e.Model);
+            }
+        }
+
+        return repeated;
+    }
+
+    /// <summary>The costliest row of the model whose rows cost the most
+    /// together, so a model split across providers is compared as one model.
+    /// <paramref name="byCost"/> picks the measure (cost, or tokens while cost is
+    /// unconfirmed), the same one the caller ranks by; a non-finite cost counts
+    /// as zero. Ties go to the earlier row.</summary>
+    public static ModelReportEntry? FavoriteRow(this IEnumerable<ModelReportEntry> rows, bool byCost)
+    {
+        var list = rows.ToList();
+        double Measure(ModelReportEntry e) => byCost ? (double.IsFinite(e.Cost) ? e.Cost : 0) : e.Total;
+        var sums = new Dictionary<string, double>(StringComparer.Ordinal);
+        foreach (var e in list)
+        {
+            sums[e.Model] = sums.GetValueOrDefault(e.Model) + Measure(e);
+        }
+
+        ModelReportEntry? best = null;
+        foreach (var e in list)
+        {
+            if (best is null
+                || sums[e.Model] > sums[best.Model]
+                || (e.Model == best.Model && Measure(e) > Measure(best)))
+            {
+                best = e;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>The provider as a row label: the engine's name, or
+    /// <see cref="UnspecifiedProvider"/> for a row that has none.</summary>
+    public static string ProviderLabel(this ModelReportEntry entry) =>
+        entry.Provider.Length == 0 ? UnspecifiedProvider : entry.Provider;
 }

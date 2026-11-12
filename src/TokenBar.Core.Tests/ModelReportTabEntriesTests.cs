@@ -124,4 +124,73 @@ public class ModelReportTabEntriesTests
             [new ClientPart("a", 10), new ClientPart("b", 10)],
             Assert.Single(rows).ClientParts);
     }
+
+    // Port of the macOS SelfTest "a tab's rows count, label and rank by model,
+    // not by provider row".
+    [Fact]
+    public void RowsCountLabelAndRankByModelNotByProviderRow()
+    {
+        var rows = Report(
+            Row("a", "solo", "p", 1, 3, 3),
+            Row("a", "m", "nvidia", 1, 1.5, 1.5),
+            Row("a", "m", "", 1, 2.5, 2.5),
+            Row("b", "other", "p", 1, 0.1, null)).TabEntries(["a", "b"]);
+
+        Assert.Equal(4, rows.Count);
+        Assert.Equal(3, rows.ModelCount());
+        Assert.Equal(["m"], rows.RepeatedModels());
+        // m: 1.5 + 2.5 beats solo: 3, and its costliest row is the unspecified one.
+        var favorite = rows.FavoriteRow(byCost: true)!;
+        Assert.Equal("m", favorite.Model);
+        Assert.Equal("", favorite.Provider);
+        Assert.Equal("Unspecified provider", favorite.ProviderLabel());
+        Assert.Equal("nvidia", Assert.Single(rows, r => r.Provider == "nvidia").ProviderLabel());
+        Assert.Null(Array.Empty<ModelReportEntry>().FavoriteRow(true));
+        Assert.Equal(0, Array.Empty<ModelReportEntry>().ModelCount());
+    }
+
+    [Fact]
+    public void FavoriteMeasuresTokensWhenNotRankingByCost()
+    {
+        // By tokens m (2 + 2) beats solo (3) although solo costs more.
+        var rows = new[]
+        {
+            Row("a", "solo", "p", 3, 9, null),
+            Row("a", "m", "x", 2, 1, null),
+            Row("a", "m", "y", 2, 1, null),
+        };
+
+        Assert.Equal("solo", rows.FavoriteRow(byCost: true)!.Model);
+        Assert.Equal("m", rows.FavoriteRow(byCost: false)!.Model);
+    }
+
+    [Fact]
+    public void FavoriteTieGoesToTheEarlierRow()
+    {
+        var rows = new[] { Row("a", "x", "p", 1, 2, null), Row("a", "y", "p", 1, 2, null) };
+
+        Assert.Equal("x", rows.FavoriteRow(true)!.Model);
+    }
+
+    // Port of the macOS SelfTest "a flagged provider row stands alone in a
+    // multi-client tab".
+    [Fact]
+    public void FlaggedProviderRowStandsAloneInAMultiClientTab()
+    {
+        var report = Report(
+            Row("a", "m", "p1", 10, 300, 1),
+            Row("a", "m", "p2", 10, 1, 100),
+            Row("b", "m", "p2", 10, 1, 100));
+
+        var tab = report.TabEntries(["a", "b"]);
+
+        Assert.Equal(2, tab.Count);
+        var p1 = Assert.Single(tab, r => r.Provider == "p1");
+        Assert.NotNull(CostPlausibility.ImplausibleRatio(p1));
+        Assert.Null(p1.ClientParts);
+        Assert.Equal(20, Assert.Single(tab, r => r.Provider == "p2").Total);
+        // Its client's own tab joins the two providers and reads 301 / 101.
+        Assert.Null(CostPlausibility.ImplausibleRatio(Assert.Single(report.TabEntries(["a"]))));
+    }
 }
+

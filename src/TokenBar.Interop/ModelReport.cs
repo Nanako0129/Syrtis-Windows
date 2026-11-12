@@ -23,8 +23,9 @@ public sealed record ModelReportEntry(
     double? MsPer1kTokens = null,
     // What the local pricing table would charge for these tokens (wire key
     // `costEstimate`), or null when it cannot price them. Evidence only: the
-    // judgement is TokenBar.Core's CostPlausibility, taken on the row after
-    // ModelReportFold has merged provider-split rows.
+    // judgement is TokenBar.Core's CostPlausibility, taken on the row a tab shows
+    // (ModelReportFold.TabEntries: provider rows joined in a one-client tab,
+    // one provider's row in a multi-client tab).
     double? CostEstimate = null)
 {
     /// <summary>Set only on a row <c>ModelReportFold.TabEntries</c> merged from
