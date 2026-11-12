@@ -2426,6 +2426,10 @@ public sealed partial class DashboardView : UserControl
             var (discHost, discGlow) = GlowingDisc(colors.Color(entry.Provider, entry.Model));
             name.Children.Add(discHost);
             var modelText = Ui.MiddleText(entry.Model, 11);
+            // On the same centre line as the disc and the provider label: in
+            // the Overview card this row is stretched to the two-line trailing
+            // column, where a top-aligned name sat above the centred disc.
+            modelText.VerticalAlignment = VerticalAlignment.Center;
             Grid.SetColumn(modelText, 1);
             name.Children.Add(modelText);
             if (labelled)
