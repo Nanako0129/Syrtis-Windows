@@ -429,4 +429,3 @@ public class CostSurfaceProjectionTests
         Assert.Equal("m", CostSurfaceProjection.FavoriteModel(rows, true)!.Model);
     }
 }
-

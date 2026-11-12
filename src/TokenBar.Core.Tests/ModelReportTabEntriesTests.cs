@@ -193,4 +193,3 @@ public class ModelReportTabEntriesTests
         Assert.Null(CostPlausibility.ImplausibleRatio(Assert.Single(report.TabEntries(["a"]))));
     }
 }
-

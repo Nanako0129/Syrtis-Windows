@@ -2401,7 +2401,9 @@ public sealed partial class DashboardView : UserControl
 
         var colors = new ModelColorMap(
             snapshot.Models, snapshot.ModelsRankByCost);
-        var repeated = entries.RepeatedModels();
+        // From every row, not only the shown ones (macOS ModelBreakdownCard):
+        // a collapsed card still labels a row whose other provider row is hidden.
+        var repeated = listed.RepeatedModels();
         foreach (var entry in entries)
         {
             var block = new StackPanel { Spacing = 3 };
@@ -2413,18 +2415,28 @@ public sealed partial class DashboardView : UserControl
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            // The provider column only on a row that shows one: an empty Auto
+            // column would still add a ColumnSpacing gap before the share.
+            var labelled = repeated.Contains(entry.Model);
+            if (labelled)
+            {
+                name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            }
+
             var (discHost, discGlow) = GlowingDisc(colors.Color(entry.Provider, entry.Model));
             name.Children.Add(discHost);
             var modelText = Ui.MiddleText(entry.Model, 11);
             Grid.SetColumn(modelText, 1);
             name.Children.Add(modelText);
-            if (repeated.Contains(entry.Model))
+            if (labelled)
             {
                 // Beside the name, as macOS: a model on several rows (one per
                 // provider in a multi-client tab) needs it to tell them apart.
                 // Auto column after the star one, so the name trims first.
-                var providerText = Ui.Text(entry.ProviderLabel().Localized(), 10, 0.5);
+                // Only the fixed key is localized: an engine provider id that
+                // happens to equal a string-table key must stay as it is.
+                var providerText = Ui.Text(
+                    entry.Provider.Length == 0 ? entry.ProviderLabel().Localized() : entry.Provider, 10, 0.5);
                 providerText.VerticalAlignment = VerticalAlignment.Center;
                 providerText.TextWrapping = TextWrapping.NoWrap;
                 providerText.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -2437,7 +2449,7 @@ public sealed partial class DashboardView : UserControl
             {
                 var shareText = Ui.Text(share, 10, 0.5);
                 shareText.VerticalAlignment = VerticalAlignment.Center;
-                Grid.SetColumn(shareText, 3);
+                Grid.SetColumn(shareText, labelled ? 3 : 2);
                 name.Children.Add(shareText);
             }
 
