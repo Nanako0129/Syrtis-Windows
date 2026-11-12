@@ -2411,7 +2411,16 @@ public sealed partial class DashboardView : UserControl
             // name unbounded so it never trims, and a long model id would push
             // the share out of the column. Left-aligned so the share sits right
             // after a short name (macOS ModelsView: name truncates, share stays).
-            var name = new Grid { ColumnSpacing = 6, HorizontalAlignment = HorizontalAlignment.Left };
+            // Top, so the row is one line high: in the Overview card Ui.Row would
+            // otherwise stretch it to the two-line trailing column, and the disc
+            // and the provider label (centred) would sit half a line below the
+            // name (at the top). The name stays on the tokens' line.
+            var name = new Grid
+            {
+                ColumnSpacing = 6,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top,
+            };
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -2426,10 +2435,6 @@ public sealed partial class DashboardView : UserControl
             var (discHost, discGlow) = GlowingDisc(colors.Color(entry.Provider, entry.Model));
             name.Children.Add(discHost);
             var modelText = Ui.MiddleText(entry.Model, 11);
-            // On the same centre line as the disc and the provider label: in
-            // the Overview card this row is stretched to the two-line trailing
-            // column, where a top-aligned name sat above the centred disc.
-            modelText.VerticalAlignment = VerticalAlignment.Center;
             Grid.SetColumn(modelText, 1);
             name.Children.Add(modelText);
             if (labelled)
