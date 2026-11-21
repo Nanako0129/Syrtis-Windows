@@ -105,7 +105,8 @@ struct TokenContributionData {
 ///
 /// The existing path remains best-effort and retains its pricing fallback.
 pub(crate) fn run(context: &crate::LocalSourceContext, year: &str) -> Result<Value, String> {
-    run_mode(context, year, false)
+    let (graph, contract) = compute(context, year, false)?;
+    to_payload(graph, contract)
 }
 
 /// Build a per-call local-first graph. The engine entry structurally bypasses
@@ -114,14 +115,20 @@ pub(crate) fn run_local_first(
     context: &crate::LocalSourceContext,
     year: &str,
 ) -> Result<Value, String> {
-    run_mode(context, year, true)
+    let (graph, contract) = compute(context, year, true)?;
+    to_payload(graph, contract)
 }
 
-fn run_mode(
+/// The engine's graph and its pricing/coverage contract for `year`, before
+/// mapping (split out of [`run`] so a later caller can add remote records to
+/// the graph). The contract travels beside the graph because the engine's
+/// `GraphResultWithContract` has no public constructor to rebuild it from
+/// parts once the graph has been edited.
+pub(crate) fn compute(
     context: &crate::LocalSourceContext,
     year: &str,
     local_only: bool,
-) -> Result<Value, String> {
+) -> Result<(tokscale_core::GraphResult, tokscale_core::GraphMetaContract), String> {
     let year = normalize_year(year)?;
     let options = context.report_options(year, None);
 
@@ -144,12 +151,19 @@ fn run_mode(
             ),
         )?
     };
+    Ok(report.into_parts())
+}
 
-    let payload = map_graph(report);
+/// The payload of an engine graph: [`map_graph`], serialized.
+pub(crate) fn to_payload(
+    graph: tokscale_core::GraphResult,
+    contract: tokscale_core::GraphMetaContract,
+) -> Result<Value, String> {
+    let payload = map_graph(graph, contract);
     serde_json::to_value(payload).map_err(|e| format!("serialize usage graph: {}", e))
 }
 
-fn normalize_year(year: &str) -> Result<Option<String>, String> {
+pub(crate) fn normalize_year(year: &str) -> Result<Option<String>, String> {
     let trimmed = year.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -166,12 +180,7 @@ fn normalize_year(year: &str) -> Result<Option<String>, String> {
 /// `range_start/end`, the frontend expects nested `{ start, end }`. Extra
 /// tokscale fields (`active_time_ms`, `time_metrics`, `processing_time_ms`)
 /// are intentionally dropped. The reported `version` is branded as tokenbar.
-fn map_graph(report: tokscale_core::GraphResultWithContract) -> TokenContributionData {
-    let (graph, contract) = report.into_parts();
-    map_graph_with_contract(graph, contract)
-}
-
-fn map_graph_with_contract(
+fn map_graph(
     graph: tokscale_core::GraphResult,
     contract: tokscale_core::GraphMetaContract,
 ) -> TokenContributionData {
@@ -279,7 +288,7 @@ mod tests {
     #[test]
     fn maps_graph_meta_to_exact_camel_case_mode_and_coverage() {
         let graph = tokscale_core::build_graph_result_from_messages(&[], None);
-        let payload = map_graph_with_contract(
+        let payload = map_graph(
             graph,
             tokscale_core::GraphMetaContract {
                 pricing_mode: tokscale_core::GraphPricingMode::LocalOnly,

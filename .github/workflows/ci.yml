@@ -99,6 +99,11 @@ jobs:
       - name: native PDB freshness gate unit test
         shell: pwsh
         run: pwsh -File ./scripts/tests/test-native-pdb-gate.ps1
+      - name: ctb.h declares exactly the exported tb_* functions
+        shell: bash
+        run: |
+          python scripts/check_ctb_exports.py --self-test
+          python scripts/check_ctb_exports.py
       # Full x64 artifact (also covered by deployment-matrix). Kept here so the
       # primary build job still fails closed on the release contract early.
       # Run the clean-checkout artifact contract before any legacy tracked

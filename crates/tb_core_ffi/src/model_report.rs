@@ -13,7 +13,7 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ModelEntry {
+pub(crate) struct ModelEntry {
     client: String,
     model: String,
     provider: String,
@@ -33,13 +33,13 @@ struct ModelEntry {
     /// purpose: the frontend folds provider-split rows back to `(client,
     /// model)` first, and whether a cost is implausible is decided on the
     /// folded row (`CostPlausibility` in TokenBar.Core), not on a component.
-    cost_estimate: Option<f64>,
+    pub(crate) cost_estimate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ModelReportData {
-    entries: Vec<ModelEntry>,
+pub(crate) struct ModelReportData {
+    pub(crate) entries: Vec<ModelEntry>,
     total_input: i64,
     total_output: i64,
     total_cache_read: i64,
@@ -54,12 +54,11 @@ struct ModelReportData {
 
 /// Build the per-model report for `year` (empty string = all time).
 pub(crate) fn run(context: &crate::LocalSourceContext, year: &str) -> Result<Value, String> {
-    let year = normalize_year(year)?;
-    let data = load_report(context, report_options(context, year))?;
+    let data = map_with_cached_pricing(compute(context, year)?);
     serde_json::to_value(data).map_err(|e| format!("serialize model report: {}", e))
 }
 
-fn report_options(
+fn model_report_options(
     context: &crate::LocalSourceContext,
     year: Option<String>,
 ) -> tokscale_core::ReportOptions {
@@ -70,19 +69,32 @@ fn report_options(
     options
 }
 
-fn load_report(
+/// The engine's report for `year`, before mapping (split out of [`run`] so a
+/// later caller can add remote records to it).
+pub(crate) fn compute(
+    context: &crate::LocalSourceContext,
+    year: &str,
+) -> Result<tokscale_core::ModelReport, String> {
+    let year = normalize_year(year)?;
+    fetch(context, model_report_options(context, year))
+}
+
+fn fetch(
     context: &crate::LocalSourceContext,
     options: tokscale_core::ReportOptions,
-) -> Result<ModelReportData, String> {
+) -> Result<tokscale_core::ModelReport, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| format!("build runtime: {}", e))?;
-    let report = runtime.block_on(tokscale_core::get_model_report_with_source_context(
+    runtime.block_on(tokscale_core::get_model_report_with_source_context(
         context.resolved(),
         options,
-    ))?;
+    ))
+}
 
+/// Map an engine report, pricing the per-row estimate from the on-disk table.
+fn map_with_cached_pricing(report: tokscale_core::ModelReport) -> ModelReportData {
     // Read-only and offline: this reads a file, it never fetches. A cold cache
     // (first run, offline) yields None, which disables the check rather than
     // judging against a table that isn't there.
@@ -114,7 +126,7 @@ fn load_report(
     // price the same model at least 50x lower than the one the report used;
     // that is judged unlikely, not measured.
     let pricing = tokscale_core::pricing::PricingService::load_cached_any_age();
-    Ok(map_report(report, pricing.as_ref()))
+    map_report(report, pricing.as_ref())
 }
 
 fn normalize_year(year: &str) -> Result<Option<String>, String> {
@@ -129,7 +141,7 @@ fn normalize_year(year: &str) -> Result<Option<String>, String> {
     }
 }
 
-fn map_report(
+pub(crate) fn map_report(
     report: tokscale_core::ModelReport,
     pricing: Option<&tokscale_core::pricing::PricingService>,
 ) -> ModelReportData {
@@ -429,14 +441,14 @@ mod tests {
             tokscale_core::ScannerSettings::default(),
         )
         .unwrap();
-        let mut options = report_options(&context, None);
+        let mut options = model_report_options(&context, None);
         options.clients = Some(vec!["mux".to_string()]);
         assert_eq!(
             options.group_by,
             tokscale_core::GroupBy::ClientProviderModel
         );
 
-        let report = load_report(&context, options).unwrap();
+        let report = map_with_cached_pricing(fetch(&context, options).unwrap());
         assert_eq!(report.entries.len(), 3);
         assert!(report.entries.iter().all(|entry| entry.client == "mux"
             && entry.model == "same-model"
@@ -505,9 +517,9 @@ mod tests {
                 tokscale_core::ScannerSettings::default(),
             )
             .unwrap();
-            let mut options = report_options(&context, None);
+            let mut options = model_report_options(&context, None);
             options.clients = Some(vec!["cursor".to_string()]);
-            let report = load_report(&context, options).unwrap();
+            let report = map_with_cached_pricing(fetch(&context, options).unwrap());
             assert_eq!(report.entries.len(), 1, "one cursor row");
             let entry = &report.entries[0];
             assert_eq!(entry.client, "cursor");
@@ -574,9 +586,9 @@ mod tests {
             )
             .unwrap();
             let run = |clients: Option<Vec<&str>>| {
-                let mut options = report_options(&context, None);
+                let mut options = model_report_options(&context, None);
                 options.clients = clients.map(|c| c.into_iter().map(str::to_string).collect());
-                load_report(&context, options).unwrap()
+                map_with_cached_pricing(fetch(&context, options).unwrap())
             };
             // (client, input, output, message_count) per row, sorted.
             let rows = |report: &ModelReportData| {
