@@ -46,7 +46,8 @@ No `Cargo.toml`, `Cargo.lock`, parser identity, `CACHE_FORMAT_VERSION` or
 `RESOLVER_CONTRACT_VERSION` change, so nothing is re-parsed.
 
 Measured on the x64 test machine (2026-11-21) with the SA-4a method: release
-DLLs of both pins (`a2e1f8b5` and this commit), each run with a fresh
+DLLs built from Syrtis-Windows `a2e1f8b5` (engine `51047602`) and from this
+change (engine `2378f31a`), each run with a fresh
 `TOKSCALE_CONFIG_DIR` holding a copy of the live pricing files and
 `TOKSCALE_PRICING_CACHE_ONLY=1`, in the order old cold, new warm, new cold,
 old warm. All twelve outputs per run (`tb_refresh_graph`, `tb_model_report`,
