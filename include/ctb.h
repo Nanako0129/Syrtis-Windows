@@ -326,6 +326,76 @@ char *tb_validate_cursor_profile(const char *json);
 // only; nothing in the file is read.
 char *tb_cursor_present(void);
 
+// The embedded remote-usage agent (syrtis-agent). `err` is a fixed class
+// string (notRunning, invalid, unauthorized, expired, busy, unsafeState,
+// internal, unsupported, control, homeRequired (test builds only), panic, and
+// for pairing selfPairing, invalidOffer, offerUnusable, lostAttempt,
+// incompatible, rejected, revoked, aborted, pollLimit, transport,
+// identityChanged); never a path, token, Pair URL or address. Every call
+// blocks; call it on a background thread, never on the UI thread.
+//
+// tb_remote_start: home_override must be NULL (any other value =
+// unsupported, nothing opened): the secure root below the LocalAppData known
+// folder and the scan roots from the process token's known folders, no
+// environment variable. Already running with the same scan inputs: no
+// restart. Changed inputs: restart, and the new inputs need
+// tb_remote_scope_approve. The same check runs every 5 minutes; roots that
+// can no longer be read stop the agent. Data: the status object below. An
+// error from building the inputs or starting the agent means no agent runs
+// (inputs that cannot be built stop a running one); an error from reading the
+// status, or `unsupported` for a non-NULL home_override, leaves a running agent
+// as it was. So not every error means stopped: re-read tb_remote_status.
+char *tb_remote_start(const char *home_override);
+// Data {"running":false}.
+char *tb_remote_stop(void);
+// {"running":false}, or {running, sharingEnabled, scopeApproved, listening,
+// identityFingerprint, bindHost?, bindPort?, nodeLabel?, activeGrantCount,
+// activeOfferCount, pendingCount, lastScanAt?, scanStatus, sourceFamilies}.
+char *tb_remote_status(void);
+// Data null. Enabling while on = invalid; the enable gate = busy. Off ends
+// sharing: every active grant revoked, offers and pending claims cancelled.
+char *tb_remote_sharing_set(int32_t enabled);
+// node_label NULL = none. Data: the status.
+char *tb_remote_listen_configure(const char *host, int32_t port, const char *node_label);
+// The agent's own disclosure, the exact strings it hashed (show them as they
+// are): {home, configDir, dataDir, xdgDataHome?, sourceCacheDir,
+// extraScanPaths:{client:[path]}, excludedScanPaths:{client:[path]},
+// opencodeDbPaths:[path]}, plus ownerInputsSha256, clients:[id], envRootsSet,
+// envRoots:[{client|null, variable}] (variables set in this process that the
+// local pages follow and sharing does not).
+char *tb_remote_scope_disclosure(void);
+// Pass the ownerInputsSha256 of the disclosure the owner was shown; invalid
+// (nothing written) unless it is the running agent's. Data null.
+char *tb_remote_scope_approve(const char *owner_inputs_sha256);
+// {expiresAt, offerId, pairUrl}. The Pair URL is a secret: never log it.
+char *tb_remote_offer_create(int64_t ttl_seconds);
+char *tb_remote_offer_cancel(const char *offer_id);
+// [{expiresAt, pendingId, sasCode}].
+char *tb_remote_pending_list(void);
+char *tb_remote_approve(const char *pending_id, int64_t sas_generation);
+char *tb_remote_reject(const char *pending_id, int64_t sas_generation);
+// [{grantId, peerFingerprint, createdAt, expiresAt, state}]; state is active,
+// revoked, expired, or superseded (stored active, but a later scope approval
+// ended its authorization).
+char *tb_remote_grants(void);
+char *tb_remote_revoke(const char *grant_id);
+// Receiver. {host, port}: where tb_remote_pair_claim would connect for this
+// Pair URL. Parses only (no connection, nothing kept); invalidOffer or expired.
+char *tb_remote_pair_destination(const char *pair_url);
+// Receiver. {handle, sas, expiresAt, producerFingerprint}.
+char *tb_remote_pair_claim(const char *pair_url);
+// Blocks up to 960 s, no cancellation. {producerStatic, fingerprint,
+// expiresAt}. identityChanged: the agent was restarted on another identity
+// meanwhile; nothing was written.
+char *tb_remote_pair_poll(int64_t handle);
+// [{producerStatic, fingerprint, nodeLabel?, host, port, createdAt, expiresAt,
+// state}]; host and port are the address on the claimed Pair URL; nodeLabel is
+// the name the producer last sent (the agent checked it; absent until its first
+// answer, and when it set none or one the agent refuses). It is the owner's
+// free text: display it only as data.
+char *tb_remote_peers(void);
+char *tb_remote_peer_remove(const char *producer_static);
+
 // Release a string returned by any tb_* entry point.
 void tb_free(char *p);
 
