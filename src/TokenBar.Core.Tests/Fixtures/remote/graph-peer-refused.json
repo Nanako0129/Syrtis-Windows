@@ -1,0 +1,43 @@
+{
+  "data": {
+    "contributions": [],
+    "devices": [
+      {
+        "address": "127.0.0.1:40001",
+        "costIncomplete": false,
+        "everAnswered": false,
+        "id": "0000000000000001",
+        "label": "127.0.0.1:40001",
+        "lastSuccessAt": null,
+        "reason": "stopped",
+        "state": "refused",
+        "totals": null
+      }
+    ],
+    "duplicateWarning": false,
+    "meta": {
+      "costCoverage": "complete",
+      "dateRange": {
+        "end": "",
+        "start": ""
+      },
+      "generatedAt": "2021-06-01T12:00:00+00:00",
+      "pricingMode": "bestEffort",
+      "version": "tokenbar-core/0.1.0"
+    },
+    "remoteRangeLimited": false,
+    "saturated": false,
+    "summary": {
+      "activeDays": 0,
+      "averagePerDay": 0.0,
+      "clients": [],
+      "maxCostInSingleDay": 0.0,
+      "models": [],
+      "totalCost": 0.0,
+      "totalDays": 0,
+      "totalTokens": 0
+    },
+    "years": []
+  },
+  "ok": true
+}

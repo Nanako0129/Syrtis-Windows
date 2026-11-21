@@ -1,0 +1,52 @@
+{
+  "data": {
+    "devices": [
+      {
+        "address": "10.0.0.1:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000001",
+        "label": "10.0.0.1:40001",
+        "lastSuccessAt": 1622548800,
+        "reason": null,
+        "state": "fresh",
+        "totals": [
+          {
+            "client": "claude",
+            "costUsd": 0.001,
+            "messages": 1,
+            "tokens": 5
+          }
+        ]
+      }
+    ],
+    "duplicateWarning": false,
+    "entries": [
+      {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "client": "claude",
+        "cost": 0.001,
+        "costEstimate": null,
+        "input": 5,
+        "messageCount": 1,
+        "model": "m",
+        "msPer1kTokens": 3000.0,
+        "output": 0,
+        "provider": "deepseek",
+        "reasoning": 0,
+        "total": 5
+      }
+    ],
+    "pricingUpdatedAt": null,
+    "remoteRangeLimited": true,
+    "saturated": false,
+    "totalCacheRead": 0,
+    "totalCacheWrite": 0,
+    "totalCost": 0.001,
+    "totalInput": 5,
+    "totalMessages": 1,
+    "totalOutput": 0
+  },
+  "ok": true
+}

@@ -1,0 +1,174 @@
+{
+  "data": {
+    "contributions": [
+      {
+        "clients": [
+          {
+            "client": "claude",
+            "cost": 0.0,
+            "messages": 1,
+            "modelId": "claude-3-5-sonnet",
+            "providerId": "anthropic",
+            "tokens": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 7,
+              "output": 3,
+              "reasoning": 0
+            }
+          }
+        ],
+        "date": "2021-03-10",
+        "intensity": 0,
+        "tokenBreakdown": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 7,
+          "output": 3,
+          "reasoning": 0
+        },
+        "totals": {
+          "cost": 0.0,
+          "messages": 1,
+          "tokens": 10
+        },
+        "turnsByClient": {}
+      },
+      {
+        "clients": [
+          {
+            "client": "claude",
+            "cost": 0.0,
+            "messages": 1,
+            "modelId": "claude-3-opus",
+            "providerId": "anthropic",
+            "tokens": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 11,
+              "output": 1,
+              "reasoning": 0
+            }
+          }
+        ],
+        "date": "2021-03-12",
+        "intensity": 0,
+        "tokenBreakdown": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 11,
+          "output": 1,
+          "reasoning": 0
+        },
+        "totals": {
+          "cost": 0.0,
+          "messages": 1,
+          "tokens": 12
+        },
+        "turnsByClient": {}
+      },
+      {
+        "clients": [
+          {
+            "client": "claude",
+            "cost": 0.0,
+            "messages": 1,
+            "modelId": "claude-3-haiku",
+            "providerId": "anthropic",
+            "tokens": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 13,
+              "output": 2,
+              "reasoning": 0
+            }
+          }
+        ],
+        "date": "2021-03-14",
+        "intensity": 0,
+        "tokenBreakdown": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 13,
+          "output": 2,
+          "reasoning": 0
+        },
+        "totals": {
+          "cost": 0.0,
+          "messages": 1,
+          "tokens": 15
+        },
+        "turnsByClient": {}
+      }
+    ],
+    "devices": [
+      {
+        "id": "local",
+        "label": null,
+        "lastSuccessAt": null,
+        "reason": null,
+        "state": "local",
+        "totals": []
+      },
+      {
+        "address": "127.0.0.1:40001",
+        "costIncomplete": true,
+        "everAnswered": true,
+        "id": "0000000000000001",
+        "label": "desk",
+        "lastSuccessAt": 1622548800,
+        "reason": null,
+        "state": "fresh",
+        "totals": [
+          {
+            "client": "claude",
+            "costUsd": 0.0,
+            "messages": 3,
+            "tokens": 37
+          }
+        ]
+      }
+    ],
+    "duplicateWarning": true,
+    "meta": {
+      "costCoverage": "partial",
+      "dateRange": {
+        "end": "2021-03-14",
+        "start": "2021-03-10"
+      },
+      "generatedAt": "2021-06-01T12:00:00+00:00",
+      "pricingMode": "bestEffort",
+      "version": "tokenbar-core/0.1.0"
+    },
+    "remoteRangeLimited": false,
+    "saturated": false,
+    "summary": {
+      "activeDays": 3,
+      "averagePerDay": 0.0,
+      "clients": [
+        "claude"
+      ],
+      "maxCostInSingleDay": 0.0,
+      "models": [
+        "claude-3-5-sonnet",
+        "claude-3-haiku",
+        "claude-3-opus"
+      ],
+      "totalCost": 0.0,
+      "totalDays": 3,
+      "totalTokens": 37
+    },
+    "years": [
+      {
+        "range": {
+          "end": "2021-03-14",
+          "start": "2021-03-10"
+        },
+        "totalCost": 0.0,
+        "totalTokens": 37,
+        "year": "2021"
+      }
+    ]
+  },
+  "ok": true
+}

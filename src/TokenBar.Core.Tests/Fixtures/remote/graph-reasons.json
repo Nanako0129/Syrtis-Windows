@@ -1,0 +1,162 @@
+{
+  "data": {
+    "contributions": [
+      {
+        "clients": [
+          {
+            "client": "claude",
+            "cost": 0.002,
+            "messages": 2,
+            "modelId": "m",
+            "providerId": "p",
+            "tokens": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 10,
+              "output": 0,
+              "reasoning": 0
+            }
+          }
+        ],
+        "date": "2021-03-10",
+        "intensity": 4,
+        "tokenBreakdown": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 10,
+          "output": 0,
+          "reasoning": 0
+        },
+        "totals": {
+          "cost": 0.002,
+          "messages": 2,
+          "tokens": 10
+        },
+        "turnsByClient": {
+          "claude": 2
+        }
+      }
+    ],
+    "devices": [
+      {
+        "address": "10.0.0.1:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000001",
+        "label": "10.0.0.1:40001",
+        "lastSuccessAt": 1622548800,
+        "reason": null,
+        "state": "fresh",
+        "totals": [
+          {
+            "client": "claude",
+            "costUsd": 0.001,
+            "messages": 1,
+            "tokens": 5
+          }
+        ]
+      },
+      {
+        "address": "10.0.0.2:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000002",
+        "label": "10.0.0.2:40001",
+        "lastSuccessAt": null,
+        "reason": "unreachable",
+        "state": "unavailable",
+        "totals": null
+      },
+      {
+        "address": "10.0.0.3:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000003",
+        "label": "10.0.0.3:40001",
+        "lastSuccessAt": null,
+        "reason": "timeout",
+        "state": "unavailable",
+        "totals": null
+      },
+      {
+        "address": "10.0.0.4:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000004",
+        "label": "10.0.0.4:40001",
+        "lastSuccessAt": 1622548800,
+        "reason": "busy",
+        "state": "lastGood",
+        "totals": [
+          {
+            "client": "claude",
+            "costUsd": 0.001,
+            "messages": 1,
+            "tokens": 5
+          }
+        ]
+      },
+      {
+        "address": "10.0.0.5:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000005",
+        "label": "10.0.0.5:40001",
+        "lastSuccessAt": null,
+        "reason": "stopped",
+        "state": "refused",
+        "totals": null
+      },
+      {
+        "address": "10.0.0.6:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000006",
+        "label": "10.0.0.6:40001",
+        "lastSuccessAt": null,
+        "reason": "error",
+        "state": "refused",
+        "totals": null
+      }
+    ],
+    "duplicateWarning": true,
+    "meta": {
+      "costCoverage": "complete",
+      "dateRange": {
+        "end": "2021-03-10",
+        "start": "2021-03-10"
+      },
+      "generatedAt": "2021-06-01T12:00:00+00:00",
+      "pricingMode": "bestEffort",
+      "version": "tokenbar-core/0.1.0"
+    },
+    "remoteRangeLimited": false,
+    "saturated": false,
+    "summary": {
+      "activeDays": 1,
+      "averagePerDay": 0.002,
+      "clients": [
+        "claude"
+      ],
+      "maxCostInSingleDay": 0.002,
+      "models": [
+        "m"
+      ],
+      "totalCost": 0.002,
+      "totalDays": 1,
+      "totalTokens": 10
+    },
+    "years": [
+      {
+        "range": {
+          "end": "2021-03-10",
+          "start": "2021-03-10"
+        },
+        "totalCost": 0.002,
+        "totalTokens": 10,
+        "year": "2021"
+      }
+    ]
+  },
+  "ok": true
+}

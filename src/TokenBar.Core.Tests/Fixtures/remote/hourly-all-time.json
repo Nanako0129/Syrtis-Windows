@@ -1,0 +1,42 @@
+{
+  "data": {
+    "devices": [
+      {
+        "address": "10.0.0.1:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000001",
+        "label": "10.0.0.1:40001",
+        "lastSuccessAt": 1622548800,
+        "reason": null,
+        "state": "fresh",
+        "totals": null
+      }
+    ],
+    "duplicateWarning": false,
+    "entries": [
+      {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "clients": [
+          "claude"
+        ],
+        "cost": 0.001,
+        "hour": "2021-03-10 12:00",
+        "input": 5,
+        "messageCount": 1,
+        "models": [
+          "m"
+        ],
+        "output": 0,
+        "reasoning": 0,
+        "total": 5,
+        "turnCount": 0
+      }
+    ],
+    "remoteRangeLimited": true,
+    "saturated": false,
+    "totalCost": 0.001
+  },
+  "ok": true
+}

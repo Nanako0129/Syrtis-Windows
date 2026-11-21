@@ -1,0 +1,9 @@
+{
+  "data": {
+    "expiresAt": 1622548800,
+    "handle": 2,
+    "producerFingerprint": "0000000000000001",
+    "sas": "0000-0000"
+  },
+  "ok": true
+}

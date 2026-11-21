@@ -1,0 +1,110 @@
+{
+  "data": {
+    "clients": [
+      "opencode",
+      "claude",
+      "codex",
+      "cursor",
+      "gemini",
+      "amp",
+      "droid",
+      "openclaw",
+      "pi",
+      "kimi",
+      "qwen",
+      "roocode",
+      "kilocode",
+      "mux",
+      "kilo",
+      "crush",
+      "hermes",
+      "copilot",
+      "goose",
+      "codebuff",
+      "antigravity",
+      "zed",
+      "kiro",
+      "trae",
+      "warp",
+      "cline",
+      "antigravity-cli",
+      "jcode",
+      "micode",
+      "gjc",
+      "grok",
+      "junie",
+      "opencodereview",
+      "zcode",
+      "augment",
+      "hindsight",
+      "muse",
+      "reasonix",
+      "kimchi",
+      "senpi",
+      "omp",
+      "dsh",
+      "antigravity-extension"
+    ],
+    "configDir": "C:\\fixture\\configDir",
+    "dataDir": "C:\\fixture\\dataDir",
+    "envRoots": [
+      {
+        "client": null,
+        "variable": "HOME"
+      },
+      {
+        "client": "opencode",
+        "variable": "XDG_DATA_HOME"
+      },
+      {
+        "client": "amp",
+        "variable": "XDG_DATA_HOME"
+      },
+      {
+        "client": "kilo",
+        "variable": "XDG_DATA_HOME"
+      },
+      {
+        "client": "crush",
+        "variable": "XDG_DATA_HOME"
+      },
+      {
+        "client": "goose",
+        "variable": "XDG_DATA_HOME"
+      },
+      {
+        "client": "antigravity",
+        "variable": "TOKSCALE_CONFIG_DIR"
+      },
+      {
+        "client": "zed",
+        "variable": "XDG_DATA_HOME"
+      },
+      {
+        "client": "trae",
+        "variable": "TOKSCALE_CONFIG_DIR"
+      },
+      {
+        "client": "warp",
+        "variable": "TOKSCALE_CONFIG_DIR"
+      },
+      {
+        "client": "micode",
+        "variable": "XDG_DATA_HOME"
+      },
+      {
+        "client": "muse",
+        "variable": "XDG_DATA_HOME"
+      }
+    ],
+    "envRootsSet": true,
+    "excludedScanPaths": {},
+    "extraScanPaths": {},
+    "home": "C:\\fixture\\home",
+    "opencodeDbPaths": [],
+    "ownerInputsSha256": "0000000000000000000000000000000000000000000000000000000000000001",
+    "sourceCacheDir": "C:\\fixture\\sourceCacheDir",
+    "xdgDataHome": "C:\\fixture\\xdgDataHome"
+  },
+  "ok": true
+}

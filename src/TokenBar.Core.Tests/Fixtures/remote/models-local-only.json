@@ -1,0 +1,24 @@
+{
+  "data": {
+    "devices": [
+      {
+        "id": "local",
+        "label": null,
+        "lastSuccessAt": null,
+        "state": "local"
+      }
+    ],
+    "duplicateWarning": false,
+    "entries": [],
+    "pricingUpdatedAt": null,
+    "remoteRangeLimited": false,
+    "saturated": false,
+    "totalCacheRead": 0,
+    "totalCacheWrite": 0,
+    "totalCost": 0.0,
+    "totalInput": 0,
+    "totalMessages": 0,
+    "totalOutput": 0
+  },
+  "ok": true
+}

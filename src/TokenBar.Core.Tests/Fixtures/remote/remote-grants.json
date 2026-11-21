@@ -1,0 +1,26 @@
+{
+  "data": [
+    {
+      "createdAt": 1622548800,
+      "expiresAt": 1622548800,
+      "grantId": "00000000000000000000000000000001",
+      "peerFingerprint": "0000000000000002",
+      "state": "revoked"
+    },
+    {
+      "createdAt": 1622548800,
+      "expiresAt": 1622548800,
+      "grantId": "00000000000000000000000000000003",
+      "peerFingerprint": "0000000000000004",
+      "state": "superseded"
+    },
+    {
+      "createdAt": 1622548800,
+      "expiresAt": 1622548800,
+      "grantId": "00000000000000000000000000000005",
+      "peerFingerprint": "0000000000000006",
+      "state": "active"
+    }
+  ],
+  "ok": true
+}

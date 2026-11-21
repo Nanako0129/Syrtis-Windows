@@ -1,0 +1,31 @@
+{
+  "data": {
+    "devices": [
+      {
+        "id": "peers",
+        "label": null,
+        "lastSuccessAt": null,
+        "reason": null,
+        "state": "unavailable",
+        "totals": null
+      },
+      {
+        "address": null,
+        "costIncomplete": false,
+        "everAnswered": false,
+        "id": "0000000000000001",
+        "label": null,
+        "lastSuccessAt": null,
+        "reason": null,
+        "state": "unavailable",
+        "totals": null
+      }
+    ],
+    "duplicateWarning": false,
+    "entries": [],
+    "remoteRangeLimited": false,
+    "saturated": false,
+    "totalCost": 0.0
+  },
+  "ok": true
+}

@@ -1,0 +1,18 @@
+{
+  "data": {
+    "devices": [
+      {
+        "id": "local",
+        "label": null,
+        "lastSuccessAt": null,
+        "state": "local"
+      }
+    ],
+    "duplicateWarning": false,
+    "entries": [],
+    "remoteRangeLimited": false,
+    "saturated": false,
+    "totalCost": 0.0
+  },
+  "ok": true
+}

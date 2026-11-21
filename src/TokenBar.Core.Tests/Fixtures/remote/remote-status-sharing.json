@@ -1,0 +1,19 @@
+{
+  "data": {
+    "activeGrantCount": 0,
+    "activeOfferCount": 0,
+    "bindHost": "127.0.0.1",
+    "bindPort": 40001,
+    "identityFingerprint": "0000000000000001",
+    "lastScanAt": null,
+    "listening": true,
+    "nodeLabel": "desk",
+    "pendingCount": 0,
+    "running": true,
+    "scanStatus": "never",
+    "scopeApproved": true,
+    "sharingEnabled": true,
+    "sourceFamilies": []
+  },
+  "ok": true
+}

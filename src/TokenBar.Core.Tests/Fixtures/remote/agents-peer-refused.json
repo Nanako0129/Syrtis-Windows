@@ -1,0 +1,24 @@
+{
+  "data": {
+    "devices": [
+      {
+        "address": "127.0.0.1:40001",
+        "costIncomplete": false,
+        "everAnswered": false,
+        "id": "0000000000000001",
+        "label": "127.0.0.1:40001",
+        "lastSuccessAt": null,
+        "reason": "stopped",
+        "state": "refused",
+        "totals": null
+      }
+    ],
+    "duplicateWarning": false,
+    "entries": [],
+    "remoteRangeLimited": false,
+    "saturated": false,
+    "totalCost": 0.0,
+    "totalMessages": 0
+  },
+  "ok": true
+}
