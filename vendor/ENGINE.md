@@ -43,7 +43,19 @@ remote-report lane that the Syrtis agent's sharing feature uses:
 
 This app does not call the remote lane yet (the Devices port, SA-4, is the
 first consumer), so the local Graph, Models, Hourly and Agents reports should
-be the same as at `e156d67c`. The advance exists so the vendored engine equals the revision
+be the same as at `e156d67c`. Measured on the x64 test machine (2026-11-21):
+release DLLs of both pins, each run with a fresh `TOKSCALE_CONFIG_DIR` holding
+a copy of the live pricing files and `TOKSCALE_PRICING_CACHE_ONLY=1`, in the
+order old cold, new warm, new cold, old warm. All twelve outputs per run
+(`tb_refresh_graph`, `tb_model_report`, `tb_hourly_report`, `tb_agents_report`
+for all time, 2025 and 2026) are equal across all four runs once
+`generatedAt` is ignored and lists are compared as multisets: 31.1 billion
+tokens, $16,103.66, six clients with data (claude, codex, opencode, grok,
+antigravity-cli, dsh). The live tokscale and app directories were unchanged.
+Compared in list order, the rows inside a day's `clients` list and some rows
+of the model report come back in a different order from one run to the next,
+the old pin against itself included; that is existing behaviour, not this
+advance (the cause was not traced here). The advance exists so the vendored engine equals the revision
 the `syrtis-agent` crate pins, which the Devices port needs. No parser
 identity, `CACHE_FORMAT_VERSION`, `Cargo.toml` or `Cargo.lock` change, so
 nothing is re-parsed.
