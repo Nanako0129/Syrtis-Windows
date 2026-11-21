@@ -1644,8 +1644,11 @@ mod remote_ffi {
     /// owner's scope approval. The same re-check runs every 5 minutes on its
     /// own (a hand edit of the tokscale `settings.json` has no setter); if
     /// the roots can no longer be read there, the agent stops. Success data
-    /// is the `tb_remote_status` object; an error means no agent runs (inputs
-    /// that cannot be built stop a running one). Blocking.
+    /// is the `tb_remote_status` object. An error from building the inputs or
+    /// starting the agent means no agent runs (inputs that cannot be built
+    /// stop a running one); an error from reading the status, or
+    /// `unsupported` for a non-NULL `home_override`, leaves a running agent as
+    /// it was. Blocking.
     ///
     /// # Safety
     /// `home_override` must be NULL or a valid NUL-terminated string.

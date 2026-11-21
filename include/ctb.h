@@ -340,8 +340,11 @@ char *tb_cursor_present(void);
 // environment variable. Already running with the same scan inputs: no
 // restart. Changed inputs: restart, and the new inputs need
 // tb_remote_scope_approve. The same check runs every 5 minutes; roots that
-// can no longer be read stop the agent. Data: the status object below; an
-// error means no agent runs (inputs that cannot be built stop a running one).
+// can no longer be read stop the agent. Data: the status object below. An
+// error from building the inputs or starting the agent means no agent runs
+// (inputs that cannot be built stop a running one); an error from reading the
+// status, or `unsupported` for a non-NULL home_override, leaves a running agent
+// as it was. So not every error means stopped: re-read tb_remote_status.
 char *tb_remote_start(const char *home_override);
 // Data {"running":false}.
 char *tb_remote_stop(void);

@@ -215,8 +215,10 @@ impl RemoteAgent {
         // Unchanged inputs need no restart: answered under the read lock. A
         // running agent always has its monitor (a start that cannot spawn
         // one stops the agent it started). Inputs that cannot be built stop
-        // the running agent, as a monitor period does (`recheck`): an error
-        // from start always means no agent runs.
+        // the running agent, as a monitor period does (`recheck`): an input
+        // or start error means no agent runs. A status read that fails
+        // (`status_of`) is returned as is and leaves the agent running: it is
+        // usually transient and changes no input or scope.
         let failed = {
             let running = read(&self.running);
             match running.as_ref() {
