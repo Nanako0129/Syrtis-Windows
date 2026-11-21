@@ -10,18 +10,55 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `51047602c7052f4c7a2ec0fc96967958e79aa829` |
-| TokenBar alignment | macOS pins the same commit `51047602` (Nanako0129/syrtis #574, #575), which carries engine #89 and #90 over `e156d67c` |
-| Engine alignment | `e156d67caa9708458fd2030f379d3c2a77ff05bf` → `51047602c7052f4c7a2ec0fc96967958e79aa829` (engine `main`; previous advance `fc339e98` → `e156d67c`) |
+| Reviewed pin | `2378f31a258b4875349a2d857338e3ed63fa60d8` |
+| TokenBar alignment | macOS pins `51047602` (Nanako0129/syrtis #574 moved it to `b0e2e5f4`, #575 to `51047602`). This pin is one engine PR ahead, #91, which only adds remote-scan entry points; macOS callers of the existing ones are unaffected |
+| Engine alignment | `51047602c7052f4c7a2ec0fc96967958e79aa829` → `2378f31a258b4875349a2d857338e3ed63fa60d8` (engine `main`; previous advance `e156d67c` → `51047602`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/51047602c7052f4c7a2ec0fc96967958e79aa829/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/2378f31a258b4875349a2d857338e3ed63fa60d8/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `51047602`, engine PRs #89 and #90 (remote report lane)
+## Current pin: `2378f31a`, engine PR #91 (remote scan roots on Windows)
+
+`51047602` → `2378f31a` is one first-parent merge, PR #91. The diff touches 3
+files: `src/source_context.rs`, `tests/remote_source_report.rs` and
+`UPSTREAM.md`. It is on the remote-scan lane only:
+
+- `RemoteSourceContextV1::new_with_xdg_data_home` and
+  `preview_fingerprint_with_xdg_data_home` take the XDG data root as its own
+  argument. The existing `new` / `preview_fingerprint` delegate with `None`,
+  which keeps every fingerprint byte-identical. On Windows a remote scan can
+  then be given `%LOCALAPPDATA%` and `home\.local\share` separately, as a
+  local scan reads them.
+- `ResolvedLocalSourceContext::from_remote_explicit` gains that parameter, and
+  `admits_scan_root` admits the XDG root it was given. `admits_scan_root`
+  returns `true` at once for a context that is not injected-remote, so the
+  local capture this app uses (`ResolvedLocalSourceContext::capture`) is not
+  affected; `selection_ignores_report_filter` only moved within the file.
+
+This is the revision Syrtis-Agent `d3fc9177` pins, the first agent revision
+that starts on Windows; the Devices port (SA-4) builds that agent into this
+DLL with a workspace `[patch]` onto this vendor path, so the two must be equal.
+No `Cargo.toml`, `Cargo.lock`, parser identity, `CACHE_FORMAT_VERSION` or
+`RESOLVER_CONTRACT_VERSION` change, so nothing is re-parsed.
+
+Measured on the x64 test machine (2026-11-21) with the SA-4a method: release
+DLLs built from Syrtis-Windows `a2e1f8b5` (engine `51047602`) and from this
+change (engine `2378f31a`), each run with a fresh
+`TOKSCALE_CONFIG_DIR` holding a copy of the live pricing files and
+`TOKSCALE_PRICING_CACHE_ONLY=1`, in the order old cold, new warm, new cold,
+old warm. All twelve outputs per run (`tb_refresh_graph`, `tb_model_report`,
+`tb_hourly_report`, `tb_agents_report` for all time, 2025 and 2026) are equal
+across all four runs once `generatedAt` is ignored and lists are compared as
+multisets: 31.1 billion tokens, $16,103.66, six clients with data (claude,
+codex, opencode, grok, antigravity-cli, dsh). A copy with one output token
+changed is reported as a difference. The live tokscale and app directories
+were unchanged.
+
+## Previous pin: `51047602`, engine PRs #89 and #90 (remote report lane)
 
 `e156d67c` → `51047602` is two first-parent merges, PRs #89 and #90. The diff
 touches 5 files: `src/remote_report.rs`, `src/pricing/mod.rs`, `src/lib.rs`,
@@ -62,7 +99,7 @@ The advance exists so the vendored engine equals the revision the
 `CACHE_FORMAT_VERSION`, `Cargo.toml` or `Cargo.lock` change, so nothing is
 re-parsed.
 
-## Previous pin: `e156d67c`, engine PR #88 (Gemini report grouping)
+## Historical: `e156d67c`, engine PR #88 (Gemini report grouping)
 
 `fc339e98` → `e156d67c` is 3 engine commits and one first-parent merge, PR #88.
 It extends `builtin_grouping` (`src/model_alias.rs`, the presentation-only seam
