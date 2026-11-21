@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Check that include/ctb.h declares exactly the tb_* functions the crate exports.
+"""Check that include/ctb.h declares exactly the tb_* function names the crate exports.
+
+Names only: parameter lists and return types are not compared.
 
 Usage: check_ctb_exports.py [--self-test]
 Exit 1 and print both differences when the sets differ.
@@ -14,14 +16,17 @@ ROOT = Path(__file__).resolve().parent.parent
 TEST_SUPPORT = {"tb_test_set_cursor_sync"}
 
 HEADER_RE = re.compile(r"^[A-Za-z_][\w\s\*]*?\b(tb_\w+)\s*\(", re.M)
+# `#[no_mangle]` or the edition-2024 `#[unsafe(no_mangle)]`, then any further
+# attributes or `///` doc lines before the item.
 EXPORT_RE = re.compile(
-    r'#\[no_mangle\]\s*(?:#\[[^\]]*\]\s*)*pub\s+(?:unsafe\s+)?extern\s+"C"\s+fn\s+(tb_\w+)'
+    r'#\[(?:unsafe\()?no_mangle\)?\]\s*(?:(?:#\[[^\]]*\]|///[^\n]*)\s*)*'
+    r'pub\s+(?:unsafe\s+)?extern\s+"C"\s+fn\s+(tb_\w+)'
 )
 
 
 def header_names(text):
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    text = re.sub(r"//[^\n]*", "", text)
+    # One left-to-right pass, so a `/*` inside a `//` comment opens nothing.
+    text = re.sub(r"//[^\n]*|/\*.*?\*/", "", text, flags=re.S)
     return set(HEADER_RE.findall(text))
 
 
@@ -52,6 +57,16 @@ def self_test():
     assert diff(header, src) == ([], []), "matching pair must pass"
     assert diff(header.replace("void tb_free(char *p);", ""), src) == (["tb_free"], [])
     assert diff(header + "char *tb_ghost(void);\n", src) == ([], ["tb_ghost"])
+    # Block comments are ignored; a `/*` inside a `//` line opens nothing.
+    # The `/*` in the `//` line must not swallow tb_b up to the later `*/`.
+    commented = header + "// see /* below\nchar *tb_b(void);\n/* char *tb_hidden(void); */\n"
+    src_b = src + ['#[no_mangle]\npub extern "C" fn tb_b() {}\n']
+    assert diff(commented, src_b) == ([], []), "comments must not hide or add names"
+    # Return type on the line before the name.
+    assert diff(header + "char *\ntb_c(void);\n", src) == ([], ["tb_c"])
+    # Edition-2024 attribute and a doc line between attribute and item.
+    src_u = src + ['#[unsafe(no_mangle)]\n/// doc\npub extern "C" fn tb_new() {}\n']
+    assert diff(header, src_u) == (["tb_new"], [])
     print("self-test ok")
     return 0
 

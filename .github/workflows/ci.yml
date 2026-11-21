@@ -99,7 +99,7 @@ jobs:
       - name: native PDB freshness gate unit test
         shell: pwsh
         run: pwsh -File ./scripts/tests/test-native-pdb-gate.ps1
-      - name: ctb.h declares exactly the exported tb_* functions
+      - name: ctb.h declares exactly the exported tb_* function names
         shell: bash
         run: |
           python scripts/check_ctb_exports.py --self-test
