@@ -104,6 +104,17 @@ jobs:
         run: |
           python scripts/check_ctb_exports.py --self-test
           python scripts/check_ctb_exports.py
+      # The embedded syrtis-agent and the app must share one engine commit
+      # (the vendor gitlink equals the agent's pinned tokscale-core rev), the
+      # lock must hold one tokscale-core, and the agent's dependency closure
+      # (libc and windows-sys included) must equal the agent's reviewed lock
+      # baseline. Self-test first, so a script that cannot fail is caught here.
+      - name: Agent engine pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/check_agent_engine_pin.py --self-test
+          python scripts/check_agent_engine_pin.py
       # Full x64 artifact (also covered by deployment-matrix). Kept here so the
       # primary build job still fails closed on the release contract early.
       # Run the clean-checkout artifact contract before any legacy tracked
