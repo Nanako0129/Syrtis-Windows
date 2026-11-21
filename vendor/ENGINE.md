@@ -45,7 +45,17 @@ DLL with a workspace `[patch]` onto this vendor path, so the two must be equal.
 No `Cargo.toml`, `Cargo.lock`, parser identity, `CACHE_FORMAT_VERSION` or
 `RESOLVER_CONTRACT_VERSION` change, so nothing is re-parsed.
 
-MEASUREMENT_PLACEHOLDER
+Measured on the x64 test machine (2026-11-21) with the SA-4a method: release
+DLLs of both pins (`a2e1f8b5` and this commit), each run with a fresh
+`TOKSCALE_CONFIG_DIR` holding a copy of the live pricing files and
+`TOKSCALE_PRICING_CACHE_ONLY=1`, in the order old cold, new warm, new cold,
+old warm. All twelve outputs per run (`tb_refresh_graph`, `tb_model_report`,
+`tb_hourly_report`, `tb_agents_report` for all time, 2025 and 2026) are equal
+across all four runs once `generatedAt` is ignored and lists are compared as
+multisets: 31.1 billion tokens, $16,103.66, six clients with data (claude,
+codex, opencode, grok, antigravity-cli, dsh). A copy with one output token
+changed is reported as a difference. The live tokscale and app directories
+were unchanged.
 
 ## Previous pin: `51047602`, engine PRs #89 and #90 (remote report lane)
 
