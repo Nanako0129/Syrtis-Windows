@@ -985,7 +985,8 @@ fn product_roots() -> Result<(PathBuf, ScanRoots), String> {
 mod tests {
     //! Every agent here lives in a temp home below the temp directory (its
     //! long, non-verbatim form, as the agent's own `tests/support` makes
-    //! one) that the test creates and removes by its exact path. Every input
+    //! one) that the test creates, with a protected owner-only DACL
+    //! ([`create_owner_only_dir`]), and removes by its exact path. Every input
     //! is injected; nothing reads the product roots (`app_make_inputs` is
     //! `homeRequired` in a test build). Every listener binds `127.0.0.1`.
 
@@ -1055,8 +1056,84 @@ mod tests {
             ));
             // Exclusive: an existing path fails the test instead of being
             // written through.
-            fs::create_dir(&path).unwrap();
+            create_owner_only_dir(&path);
             Self(path)
+        }
+    }
+
+    /// Creates `path` (exclusively) with an explicit protected DACL: owner
+    /// and one inheritable full-control ACE for this process's user, no
+    /// inherited ACE. The secure root's base rule refuses a home whose DACL
+    /// lets another SID write (`secure_fs/windows.rs` `open_under`), and a
+    /// temp or profile directory can carry such inheritable grants (188's
+    /// profile carries `CodexSandboxUsers` Modify). The agent's own suffix
+    /// directory below it is not created here; `open_under` creates it.
+    fn create_owner_only_dir(path: &Path) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, LocalFree, HANDLE},
+            Security::{
+                Authorization::{
+                    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                    SDDL_REVISION_1,
+                },
+                GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+                TOKEN_QUERY, TOKEN_USER,
+            },
+            Storage::FileSystem::CreateDirectoryW,
+            System::Threading::{GetCurrentProcess, OpenProcessToken},
+        };
+        // SAFETY: every out parameter is a valid local; the TOKEN_USER
+        // buffer is 8-aligned and as long as the size query asked; the SID
+        // string and the descriptor are freed with `LocalFree` once used,
+        // and the descriptor outlives the `CreateDirectoryW` call.
+        unsafe {
+            let mut token: HANDLE = std::ptr::null_mut();
+            assert_ne!(
+                OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token),
+                0
+            );
+            let mut needed = 0u32;
+            GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+            let mut buffer = vec![0u64; (needed as usize).div_ceil(8)];
+            let read = GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            );
+            CloseHandle(token);
+            assert_ne!(read, 0);
+            let sid = (*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+            let mut text: *mut u16 = std::ptr::null_mut();
+            assert_ne!(ConvertSidToStringSidW(sid, &mut text), 0);
+            let len = (0..).take_while(|&i| *text.add(i) != 0).count();
+            let user = String::from_utf16(std::slice::from_raw_parts(text, len)).unwrap();
+            LocalFree(text.cast());
+            let sddl: Vec<u16> = format!("O:{user}D:P(A;OICI;FA;;;{user})")
+                .encode_utf16()
+                .chain([0])
+                .collect();
+            let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+            assert_ne!(
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    std::ptr::null_mut(),
+                ),
+                0
+            );
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor,
+                bInheritHandle: 0,
+            };
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+            let created = CreateDirectoryW(wide.as_ptr(), &attributes);
+            LocalFree(descriptor);
+            assert_ne!(created, 0, "the test home could not be created");
         }
     }
 
