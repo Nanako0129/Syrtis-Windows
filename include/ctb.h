@@ -396,6 +396,53 @@ char *tb_remote_pair_poll(int64_t handle);
 char *tb_remote_peers(void);
 char *tb_remote_peer_remove(const char *producer_static);
 
+// The four dashboard payloads with paired producers' usage folded in.
+// devices_json = {"local": bool, "peers": ["<64 hex producerStatic>", ...]}
+// (at least one source, at most 16 peers, none twice); timezone = IANA id of
+// the zone the local rows are computed in (this process's own zone; the core
+// cannot check it, and another zone would merge two zones' hour slots and
+// dates); mode = "cached" (no connection) or "refresh". Errors: invalid
+// (devices_json, timezone or mode malformed), sourceContextUnavailable,
+// panic, or the existing entry point's own error text. Data = the existing
+// payload plus devices:[{id ("local" or the 16-hex fingerprint), label (a
+// producer's row: the name that producer sent, else its host:port; null on
+// the local row), state (local|fresh|lastGood|stale|unavailable|overLimit|
+// refused|invalidReply|incompatible; incompatible is also the producer
+// answering code 6, a report schema other than this app's), lastSuccessAt
+// (Unix s or null)}] (an unreadable peer store adds {id:"peers",
+// state:"unavailable"}), duplicateWarning, saturated, remoteRangeLimited.
+// Local only: the existing data plus those keys (a local-only row has exactly
+// the four fields above).
+// With at least one producer every row also has reason (null, or why the pull
+// failed before it was classified: unreachable|timeout|busy|stopped|error;
+// state does not depend on it) and totals (graph and models pages: this
+// device's part of the merged page as [{client, messages, tokens, costUsd}],
+// one per client, taken before the sum; null when none of it was merged and
+// on hourly and agents pages). The rows' totals add up to the page's totals.
+// Producers' rows (not the local one, not the unreadable-store one) also have
+// address (the record's host:port, always, whatever the name), costIncomplete
+// (true only when the body this page merged, fresh or cached, said the
+// producer's price table was missing or corrupt; false when no body was
+// merged) and everAnswered (the producer ever gave this receiver a body; read
+// from the receiver cache, so false again after the entry is evicted or
+// removed). Graph with a producer: meta.pricingMode is the local graph's when
+// local is selected, else bestEffort; meta.costCoverage folds the local
+// coverage (when selected) and, per producer whose records were merged,
+// complete (costIncomplete false), partial (it carried some cost) or none:
+// all complete = complete, all none = none, else partial; nothing merged and
+// local not selected = complete. Producer strings (client, model, provider,
+// agent, label) may hold bidi or control characters: show them as plain text
+// only. Blocking (a refresh pulls each selected producer): call on a
+// background thread. Must never be written to the dashboard snapshot.
+char *tb_graph_devices(const char *year, const char *devices_json, const char *timezone,
+                       const char *mode);
+char *tb_model_report_devices(const char *year, const char *devices_json,
+                              const char *timezone, const char *mode);
+char *tb_hourly_report_devices(const char *year, const char *clients, const char *devices_json,
+                               const char *timezone, const char *mode);
+char *tb_agents_report_devices(const char *year, const char *clients, const char *devices_json,
+                               const char *timezone, const char *mode);
+
 // Release a string returned by any tb_* entry point.
 void tb_free(char *p);
 
