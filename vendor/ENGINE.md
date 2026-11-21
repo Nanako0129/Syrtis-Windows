@@ -15,7 +15,7 @@ app consumer advances its reviewed pin.
 | Engine alignment | `e156d67caa9708458fd2030f379d3c2a77ff05bf` → `51047602c7052f4c7a2ec0fc96967958e79aa829` (engine `main`; previous advance `fc339e98` → `e156d67c`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/e156d67caa9708458fd2030f379d3c2a77ff05bf/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/51047602c7052f4c7a2ec0fc96967958e79aa829/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
@@ -55,10 +55,12 @@ antigravity-cli, dsh). The live tokscale and app directories were unchanged.
 Compared in list order, the rows inside a day's `clients` list and some rows
 of the model report come back in a different order from one run to the next,
 the old pin against itself included; that is existing behaviour, not this
-advance (the cause was not traced here). The advance exists so the vendored engine equals the revision
-the `syrtis-agent` crate pins, which the Devices port needs. No parser
-identity, `CACHE_FORMAT_VERSION`, `Cargo.toml` or `Cargo.lock` change, so
-nothing is re-parsed.
+advance (the cause was not traced here).
+
+The advance exists so the vendored engine equals the revision the
+`syrtis-agent` crate pins, which the Devices port needs. No parser identity,
+`CACHE_FORMAT_VERSION`, `Cargo.toml` or `Cargo.lock` change, so nothing is
+re-parsed.
 
 ## Previous pin: `e156d67c`, engine PR #88 (Gemini report grouping)
 
