@@ -39,10 +39,9 @@ files: `src/source_context.rs`, `tests/remote_source_report.rs` and
   local capture this app uses (`ResolvedLocalSourceContext::capture`) is not
   affected; `selection_ignores_report_filter` only moved within the file.
 
-This is the engine revision Syrtis-Agent pins from `d3fc9177`, the first
-agent revision that starts on Windows, onward (`f5e09711`, the revision
-`tb_core_ffi` embeds, pins it too); the Devices port (SA-4) builds the agent
-into this DLL with a workspace `[patch]` onto this vendor path, so the two must be equal.
+This is the engine revision Syrtis-Agent pins at both `d3fc9177` and
+`f5e09711`, the revision `tb_core_ffi` embeds; the Devices port (SA-4) builds
+the agent into this DLL with a workspace `[patch]` onto this vendor path, so the two must be equal.
 No `Cargo.toml`, `Cargo.lock`, parser identity, `CACHE_FORMAT_VERSION` or
 `RESOLVER_CONTRACT_VERSION` change, so nothing is re-parsed.
 

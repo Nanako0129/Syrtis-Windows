@@ -1121,11 +1121,12 @@ mod tests {
 
     /// Creates `path` (exclusively) with an explicit protected DACL: owner
     /// and one inheritable full-control ACE for this process's user, no
-    /// inherited ACE. The secure root's base rule refuses a home whose DACL
-    /// lets another SID write (`secure_fs/windows.rs` `open_under`), and a
-    /// temp or profile directory can carry such inheritable grants (188's
-    /// profile carries `CodexSandboxUsers` Modify). The agent's own suffix
-    /// directory below it is not created here; `open_under` creates it.
+    /// inherited ACE. Written for agent d3fc9177, whose base rule refused a
+    /// home that let another SID write (188's profile carries
+    /// `CodexSandboxUsers` Modify); since f5e09711 (W4) the base may be
+    /// writable by others, so this is no longer required, only harmless. The
+    /// agent's own suffix directory below it is not created here;
+    /// `open_under` creates it.
     fn create_owner_only_dir(path: &Path) {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::{
