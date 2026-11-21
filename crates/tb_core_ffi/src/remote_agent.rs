@@ -23,7 +23,7 @@
 
 use std::{
     collections::BTreeMap,
-    ffi::c_char,
+    ffi::{c_char, OsString},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -214,19 +214,36 @@ impl RemoteAgent {
     pub(crate) fn start(self: &Arc<Self>, make: MakeInputs) -> Reply {
         // Unchanged inputs need no restart: answered under the read lock. A
         // running agent always has its monitor (a start that cannot spawn
-        // one stops the agent it started).
-        {
+        // one stops the agent it started). Inputs that cannot be built stop
+        // the running agent, as a monitor period does (`recheck`): an error
+        // from start always means no agent runs.
+        let failed = {
             let running = read(&self.running);
-            if let Some(current) = running.as_ref() {
-                let inputs = make()?;
-                if unchanged(current, &inputs) {
-                    *lock(&current.make) = make;
-                    return status_of(current);
-                }
+            match running.as_ref() {
+                Some(current) => match make() {
+                    Ok(inputs) if unchanged(current, &inputs) => {
+                        *lock(&current.make) = make;
+                        return status_of(current);
+                    }
+                    Ok(_) => None,
+                    Err(error) => Some(error),
+                },
+                None => None,
             }
+        };
+        if let Some(error) = failed {
+            let old = write(&self.running).take();
+            drop(old);
+            return Err(error);
         }
         let mut running = write(&self.running);
-        ensure(&mut running, make)?;
+        if let Err(error) = ensure(&mut running, make) {
+            // `ensure` keeps the old agent when `make` fails; start does not.
+            let old = running.take();
+            drop(running);
+            drop(old);
+            return Err(error);
+        }
         let current = running.as_ref().ok_or("internal")?;
         let period = current.inputs.pricing_period;
         let status = status_of(current);
@@ -262,7 +279,15 @@ impl RemoteAgent {
             .spawn(move || loop {
                 thread::sleep(period);
                 match agent.upgrade() {
-                    Some(agent) => agent.tick(),
+                    // A panicking period (a `MakeInputs`, a restart) must not
+                    // end the monitor: later input changes still have to be
+                    // applied. Every lock here recovers from poisoning
+                    // (`read`, `write`, `lock`), so the next period and
+                    // every other caller go on.
+                    Some(agent) => {
+                        let _ =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| agent.tick()));
+                    }
                     None => break,
                 }
             });
@@ -776,20 +801,49 @@ fn fingerprint(key: &[u8; 32]) -> String {
     hex_encode(&Sha256::digest(key)[..8])
 }
 
-/// The general root variables the local pages may follow (`client` null).
-const GENERAL_ROOT_VARIABLES: [&str; 3] = ["HOME", "APPDATA", "LOCALAPPDATA"];
-
-/// `{client, variable}` for each root variable set (non-empty) in this
-/// process: [`GENERAL_ROOT_VARIABLES`] with `client` null, then each
-/// client's own root variables. The shared source reads none of them.
+/// The root variables of this process that make the local pages and the
+/// shared source see different directories ([`env_roots_from`]).
 fn env_roots() -> Vec<Value> {
+    env_roots_from(
+        &|var| std::env::var_os(var),
+        dirs::config_dir(),
+        dirs::data_local_dir(),
+    )
+}
+
+/// `{client, variable}` for each root variable the local report follows and
+/// sharing does not, as `get` reads them: `HOME` (`client` null) when set
+/// and non-empty; `APPDATA` / `LOCALAPPDATA` (`client` null) only when set,
+/// non-empty and different from the RoamingAppData / LocalAppData known
+/// folder (`config_dir` / `data_local_dir`; an unavailable known folder
+/// counts as different); then each client's own root variables when set and
+/// non-empty. The local report reads `APPDATA` and `LOCALAPPDATA` from the
+/// process environment for some clients (tokscale-core `source_context.rs`
+/// `resolve_source_environment_paths`) while sharing uses the known folders
+/// only, so only a value that differs changes what the two see; both are
+/// set in every Windows session, so listing them whenever set would always
+/// report a difference.
+fn env_roots_from(
+    get: &dyn Fn(&str) -> Option<OsString>,
+    config_dir: Option<PathBuf>,
+    data_local_dir: Option<PathBuf>,
+) -> Vec<Value> {
     use tokscale_core::PathRoot;
-    let set = |var: &str| std::env::var_os(var).is_some_and(|value| !value.is_empty());
-    let general = GENERAL_ROOT_VARIABLES
-        .into_iter()
-        .filter(|var| set(var))
-        .map(|var| json!({"client": null, "variable": var}));
-    let per_client = tokscale_core::ClientId::iter().flat_map(move |client| {
+    let value = |var: &str| get(var).filter(|value| !value.is_empty());
+    let differs = |var: &str, known: &Option<PathBuf>| {
+        value(var).is_some_and(|value| known.as_ref() != Some(&PathBuf::from(value)))
+    };
+    let mut roots = Vec::new();
+    for (var, listed) in [
+        ("HOME", value("HOME").is_some()),
+        ("APPDATA", differs("APPDATA", &config_dir)),
+        ("LOCALAPPDATA", differs("LOCALAPPDATA", &data_local_dir)),
+    ] {
+        if listed {
+            roots.push(json!({"client": null, "variable": var}));
+        }
+    }
+    for client in tokscale_core::ClientId::iter() {
         let variables: Vec<&'static str> = match client.data().root {
             PathRoot::EnvVar { var, .. } => vec![var],
             PathRoot::ReasonixHome => vec!["REASONIX_STATE_HOME", "REASONIX_HOME"],
@@ -797,12 +851,13 @@ fn env_roots() -> Vec<Value> {
             PathRoot::Config => vec!["TOKSCALE_CONFIG_DIR"],
             PathRoot::Home => vec![],
         };
-        variables
-            .into_iter()
-            .filter(move |var| set(var))
-            .map(move |var| json!({"client": client.as_str(), "variable": var}))
-    });
-    general.chain(per_client).collect()
+        for var in variables {
+            if value(var).is_some() {
+                roots.push(json!({"client": client.as_str(), "variable": var}));
+            }
+        }
+    }
+    roots
 }
 
 /// The receiver's effective now in milliseconds: the OS clock, never below
@@ -844,14 +899,15 @@ fn agent_class(error: AgentError) -> String {
 }
 
 /// `Stopped` (the in-process entry after the runtime stopped) is
-/// `notRunning`; `Command`, `Unavailable`, `Response` and the socket-only
-/// variants are `control`.
+/// `notRunning`; `Unsupported` is `unsupported`; everything else is
+/// `control`: `Command`, `Unavailable`, `Response`, and the socket-path
+/// variants (`PathTooLong`, `UnsafeSocket`, `Socket`, `NoReply`,
+/// `ServerProof`), which the in-process entry never returns on Windows (no
+/// socket) and which get no class of their own here.
 fn control_class(error: ControlError) -> String {
     match error {
         ControlError::Stopped => "notRunning",
         ControlError::Unsupported => "unsupported",
-        ControlError::PathTooLong => "pathTooLong",
-        ControlError::UnsafeSocket => "unsafeSocket",
         _ => "control",
     }
     .into()
@@ -1480,6 +1536,71 @@ mod tests {
         }
     }
 
+    /// A start whose inputs cannot be built stops the running agent: the
+    /// error comes back, no agent runs and its listener is closed.
+    #[test]
+    fn a_start_whose_inputs_fail_stops_the_running_agent() {
+        let clock = TestClock::new();
+        let home = TempHome::new();
+        let agent = Arc::new(RemoteAgent::default());
+        start(&agent, &home, &clock, ScannerSettings::default());
+        let port = free_port();
+        agent.listen_configure("127.0.0.1", port, None).unwrap();
+        assert!(listening(port), "control: the agent listens");
+        assert_eq!(
+            agent.start(Arc::new(|| Err("unsafeState".into()))),
+            Err("unsafeState".into())
+        );
+        assert_eq!(agent.status(), Ok(json!({"running": false})));
+        assert_eq!(agent.pending_list(), Err("notRunning".into()));
+        assert!(!listening(port), "the stopped agent still listens");
+    }
+
+    /// A monitor period that panics (here, in `MakeInputs`) does not end
+    /// the monitor: a later input change is still applied (new epoch).
+    #[test]
+    fn the_monitor_survives_a_panicking_period() {
+        let clock = TestClock::new();
+        let home = TempHome::new();
+        let settings = Arc::new(Mutex::new(ScannerSettings::default()));
+        let panic_once = Arc::new(AtomicBool::new(false));
+        let make: MakeInputs = {
+            let (path, clock, settings, panic_once) = (
+                home.0.clone(),
+                Arc::clone(&clock),
+                Arc::clone(&settings),
+                Arc::clone(&panic_once),
+            );
+            Arc::new(move || {
+                if panic_once.swap(false, Ordering::SeqCst) {
+                    panic!("a panicking monitor period");
+                }
+                Ok(inputs(&path, &clock, lock(&settings).clone()))
+            })
+        };
+        let agent = Arc::new(RemoteAgent::default());
+        agent.start(make).unwrap();
+        let before = epoch(&agent);
+        panic_once.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + PERIOD * 50;
+        while panic_once.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the monitor never ran");
+            thread::sleep(PERIOD / 4);
+        }
+        // Control: the panicking period changed nothing.
+        assert_eq!(epoch(&agent), before);
+        lock(&settings).excluded_scan_paths =
+            BTreeMap::from([("claude".to_string(), vec![home.0.join("excluded")])]);
+        let deadline = Instant::now() + PERIOD * 50;
+        while epoch(&agent) == before {
+            assert!(
+                Instant::now() < deadline,
+                "the monitor did not survive the panic"
+            );
+            thread::sleep(PERIOD / 4);
+        }
+    }
+
     /// R2: the disclosure's values are the agent's `scope_disclosure()`
     /// fields, compared one by one, and it carries `ownerInputsSha256`.
     #[test]
@@ -1544,20 +1665,85 @@ mod tests {
         );
     }
 
-    /// R20: `envRoots` names a general root variable set in this process
-    /// with `client` null. LOCALAPPDATA is set in every Windows session,
-    /// session 0 included.
+    /// R20: `APPDATA` / `LOCALAPPDATA` are listed only when they differ
+    /// from their known folder (or it is unavailable); `HOME` and the
+    /// per-client variables whenever set and non-empty. Injected lookups:
+    /// no test changes the process environment.
     #[test]
     fn env_roots_lists_the_general_root_variables_that_are_set() {
-        assert!(
-            std::env::var_os("LOCALAPPDATA").is_some_and(|v| !v.is_empty()),
-            "control: the variable is set here"
+        let config = PathBuf::from(r"C:\Users\u\AppData\Roaming");
+        let local = PathBuf::from(r"C:\Users\u\AppData\Local");
+        let roots = |env: &[(&str, &str)], config: Option<PathBuf>, local: Option<PathBuf>| {
+            let env: Vec<(String, String)> = env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            env_roots_from(
+                &move |var| {
+                    env.iter()
+                        .find(|(k, _)| k == var)
+                        .map(|(_, v)| OsString::from(v))
+                },
+                config,
+                local,
+            )
+        };
+        let general = |var: &str| json!({"client": null, "variable": var});
+        let known = [
+            ("APPDATA", config.to_str().unwrap()),
+            ("LOCALAPPDATA", local.to_str().unwrap()),
+        ];
+        // The known-folder values: nothing to report.
+        assert_eq!(
+            roots(&known, Some(config.clone()), Some(local.clone())),
+            Vec::<Value>::new()
         );
-        let roots = env_roots();
-        assert!(roots.contains(&json!({"client": null, "variable": "LOCALAPPDATA"})));
-        for root in &roots {
-            let variable = root["variable"].as_str().unwrap();
-            assert!(std::env::var_os(variable).is_some_and(|v| !v.is_empty()));
+        // Values that differ, and HOME: listed, in order.
+        assert_eq!(
+            roots(
+                &[
+                    ("HOME", r"C:\h"),
+                    ("APPDATA", r"D:\roaming"),
+                    ("LOCALAPPDATA", r"D:\local"),
+                ],
+                Some(config.clone()),
+                Some(local.clone())
+            ),
+            vec![general("HOME"), general("APPDATA"), general("LOCALAPPDATA")]
+        );
+        // Empty values: not listed.
+        assert_eq!(
+            roots(
+                &[("HOME", ""), ("APPDATA", ""), ("LOCALAPPDATA", "")],
+                None,
+                None
+            ),
+            Vec::<Value>::new()
+        );
+        // Known folders unavailable: a set variable is listed.
+        assert_eq!(
+            roots(&known, None, None),
+            vec![general("APPDATA"), general("LOCALAPPDATA")]
+        );
+        // A per-client variable carries its client.
+        let xdg = roots(
+            &[("XDG_DATA_HOME", r"D:\xdg")],
+            Some(config.clone()),
+            Some(local.clone()),
+        );
+        assert!(!xdg.is_empty());
+        assert!(xdg
+            .iter()
+            .all(|root| root["variable"] == "XDG_DATA_HOME" && root["client"].is_string()));
+        // This process: a variable equal to its known folder is not listed.
+        let process = env_roots();
+        for (var, folder) in [
+            ("APPDATA", dirs::config_dir()),
+            ("LOCALAPPDATA", dirs::data_local_dir()),
+        ] {
+            if std::env::var_os(var).map(PathBuf::from) == folder {
+                assert!(!process.contains(&general(var)), "{var} listed");
+            }
         }
     }
 
@@ -1606,6 +1792,8 @@ mod tests {
         assert_eq!(control_class(ControlError::Command), "control");
         assert_eq!(control_class(ControlError::Unavailable), "control");
         assert_eq!(control_class(ControlError::Response), "control");
+        assert_eq!(control_class(ControlError::PathTooLong), "control");
+        assert_eq!(control_class(ControlError::UnsafeSocket), "control");
     }
 
     /// Each `peers` row carries the record's `host` and `port`.
@@ -2121,8 +2309,11 @@ mod tests {
         use crate::remote_ffi as f;
         let clock = TestClock::new();
         let (global_home, other_home) = (TempHome::new(), TempHome::new());
+        // Only `ok` and `err` are compared, so a failing assertion never
+        // prints a whole reply (an offer-bearing one included).
         let fixed = |value: &Value, class: &str| {
-            assert_eq!(value, &json!({"ok": false, "err": class}));
+            assert_eq!(value["ok"], false);
+            assert_eq!(value["err"], class);
         };
 
         // Stopped: every call that needs an agent is `notRunning`.
@@ -2238,10 +2429,11 @@ mod tests {
         producer.sharing_set(true).unwrap();
         let offer = producer.offer_create(600).unwrap();
         let url = c(offer["pairUrl"].as_str().unwrap());
-        assert_eq!(
-            take(unsafe { f::tb_remote_pair_destination(url.as_ptr()) }),
-            json!({"ok": true, "data": {"host": "127.0.0.1", "port": producer_port}})
-        );
+        let destination = take(unsafe { f::tb_remote_pair_destination(url.as_ptr()) });
+        assert_eq!(destination["ok"], true);
+        assert_eq!(destination["err"], Value::Null);
+        assert_eq!(destination["data"]["host"], "127.0.0.1");
+        assert_eq!(destination["data"]["port"], producer_port);
         let garbage = c("not a pair url");
         fixed(
             &take(unsafe { f::tb_remote_pair_destination(garbage.as_ptr()) }),
