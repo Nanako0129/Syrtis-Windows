@@ -10,18 +10,59 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `e156d67caa9708458fd2030f379d3c2a77ff05bf` |
-| TokenBar alignment | macOS pins the same commit `e156d67c` (Nanako0129/syrtis #558), which carries engine #88 over `fc339e98` |
-| Engine alignment | `fc339e98237fcb71f32ab1208b61aa77c3c35c02` → `e156d67caa9708458fd2030f379d3c2a77ff05bf` (engine `main`; previous advance `15204f4e` → `fc339e98`) |
+| Reviewed pin | `51047602c7052f4c7a2ec0fc96967958e79aa829` |
+| TokenBar alignment | macOS pins the same commit `51047602` (Nanako0129/syrtis #574, #575), which carries engine #89 and #90 over `e156d67c` |
+| Engine alignment | `e156d67caa9708458fd2030f379d3c2a77ff05bf` → `51047602c7052f4c7a2ec0fc96967958e79aa829` (engine `main`; previous advance `fc339e98` → `e156d67c`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/e156d67caa9708458fd2030f379d3c2a77ff05bf/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/51047602c7052f4c7a2ec0fc96967958e79aa829/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `e156d67c`, engine PR #88 (Gemini report grouping)
+## Current pin: `51047602`, engine PRs #89 and #90 (remote report lane)
+
+`e156d67c` → `51047602` is two first-parent merges, PRs #89 and #90. The diff
+touches 5 files: `src/remote_report.rs`, `src/pricing/mod.rs`, `src/lib.rs`,
+`tests/remote_source_report.rs` and `UPSTREAM.md`. Every change is on the
+remote-report lane that the Syrtis agent's sharing feature uses:
+
+- #89: `aggregate_remote_usage_from_source_v1` folds with
+  `RemoteUsageFold::new_streaming`, which no longer refuses a share because the
+  owner's own history passes `MAX_MESSAGES` or `MAX_LABEL_BYTES`; it charges
+  each map's key-string bytes on first insert instead. The pure API
+  `aggregate_remote_usage_v1` keeps both input caps. In `src/lib.rs` only the
+  line that builds that fold changed.
+- #90: `RemotePricingSnapshot` prices with a price table older than an hour
+  instead of dropping it (cost was 0); `Missing` and `Corrupt` still price
+  nothing. Its decoder (`decode_fresh_dataset`, renamed `decode_dataset`) is
+  called only from `RemotePricingSnapshot::from_cache_root`, which nothing on
+  the local report path calls; local pricing still goes through
+  `pricing/cache.rs`.
+
+This app does not call the remote lane yet (the Devices port, SA-4, is the
+first consumer), so the local Graph, Models, Hourly and Agents reports should
+be the same as at `e156d67c`. Measured on the x64 test machine (2026-11-21):
+release DLLs of both pins, each run with a fresh `TOKSCALE_CONFIG_DIR` holding
+a copy of the live pricing files and `TOKSCALE_PRICING_CACHE_ONLY=1`, in the
+order old cold, new warm, new cold, old warm. All twelve outputs per run
+(`tb_refresh_graph`, `tb_model_report`, `tb_hourly_report`, `tb_agents_report`
+for all time, 2025 and 2026) are equal across all four runs once
+`generatedAt` is ignored and lists are compared as multisets: 31.1 billion
+tokens, $16,103.66, six clients with data (claude, codex, opencode, grok,
+antigravity-cli, dsh). The live tokscale and app directories were unchanged.
+Compared in list order, the rows inside a day's `clients` list and some rows
+of the model report come back in a different order from one run to the next,
+the old pin against itself included; that is existing behaviour, not this
+advance (the cause was not traced here).
+
+The advance exists so the vendored engine equals the revision the
+`syrtis-agent` crate pins, which the Devices port needs. No parser identity,
+`CACHE_FORMAT_VERSION`, `Cargo.toml` or `Cargo.lock` change, so nothing is
+re-parsed.
+
+## Previous pin: `e156d67c`, engine PR #88 (Gemini report grouping)
 
 `fc339e98` → `e156d67c` is 3 engine commits and one first-parent merge, PR #88.
 It extends `builtin_grouping` (`src/model_alias.rs`, the presentation-only seam
@@ -46,7 +87,7 @@ Consumer side, matching Syrtis #558:
   `CostPlausibility` is never merged. The Models lens and the Stats favourite
   model both read these rows (`DashboardView.SelectedModelEntries`).
 
-## Previous pin: `fc339e98`, the 2026-11 upstream sync (engine PRs #75 to #87)
+## Historical: `fc339e98`, the 2026-11 upstream sync (engine PRs #75 to #87)
 
 The reviewed pin is the merge commit of tokscale-core PR #87 on the engine's
 `main`, covering `15204f4e` → `fc339e98`: 13 first-parent merges, PRs #75 to
