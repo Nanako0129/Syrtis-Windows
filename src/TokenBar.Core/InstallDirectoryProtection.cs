@@ -5,7 +5,8 @@ using System.Security.Principal;
 namespace TokenBar.Core;
 
 /// <summary>
-/// Makes a Velopack install root writable only by the user who owns it.
+/// Makes a Velopack install root writable only by the current user, SYSTEM
+/// and Administrators.
 /// <para>
 /// Velopack sets no ACL: the root and everything below it inherit from
 /// <c>%LOCALAPPDATA%</c>. Any account granted write on the profile or on
@@ -37,6 +38,12 @@ namespace TokenBar.Core;
 /// owner too. The remedy is outside the app: remove the sandbox's write grant
 /// from the profile, or do not start the sandbox in the home directory.
 /// </para>
+/// <para>
+/// The reparse-point check and the write are both path-based, so an account
+/// that can write the root's parent could swap the root for a junction
+/// between them. Such an account can already rename the root away (the limit
+/// above), so this is not handled.
+/// </para>
 /// </summary>
 [SupportedOSPlatform("windows")]
 public static class InstallDirectoryProtection
@@ -53,26 +60,30 @@ public static class InstallDirectoryProtection
     private const InheritanceFlags BothInherit =
         InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
 
-    /// <summary>Applies the owner-only DACL to <paramref name="root"/>.
-    /// Never throws.</summary>
-    public static Result Apply(string root) => Apply(root, out _);
+    /// <summary>Applies the owner-only DACL to <paramref name="root"/>,
+    /// skipping the write when the whole tree already matches. Never
+    /// throws.</summary>
+    public static Result Apply(string root) => Apply(root, alwaysWrite: false, out _);
 
-    /// <summary>As <see cref="Apply(string)"/>; <paramref name="error"/> is
-    /// the exception behind a <see cref="Result.Failed"/>, null otherwise
-    /// (also null for a root that is a reparse point).</summary>
-    public static Result Apply(string root, out Exception? error) =>
-        ApplyForTesting(root, ownerAccepted: null, out error);
+    /// <summary>As <see cref="Apply(string)"/>. <paramref name="alwaysWrite"/>
+    /// skips the <see cref="Result.AlreadyProtected"/> check (the Velopack
+    /// hooks, which run right after Velopack created files under the root).
+    /// <paramref name="error"/> is the exception behind a
+    /// <see cref="Result.Failed"/>, null otherwise (also null for a root that
+    /// is a reparse point).</summary>
+    public static Result Apply(string root, bool alwaysWrite, out Exception? error) =>
+        ApplyForTesting(root, ownerAccepted: null, alwaysWrite, out error);
 
     /// <summary>Test seam: <paramref name="ownerAccepted"/> replaces the owner
     /// rule (current user or Administrators), because a root owned by anyone
     /// else cannot be built without admin rights.</summary>
     public static Result ApplyForTesting(
-        string root, Func<SecurityIdentifier, bool>? ownerAccepted, out Exception? error)
+        string root, Func<SecurityIdentifier, bool>? ownerAccepted, bool alwaysWrite, out Exception? error)
     {
         error = null;
         try
         {
-            return ApplyCore(root, ownerAccepted);
+            return ApplyCore(root, ownerAccepted, alwaysWrite);
         }
         catch (Exception ex)
         {
@@ -81,7 +92,7 @@ public static class InstallDirectoryProtection
         }
     }
 
-    private static Result ApplyCore(string root, Func<SecurityIdentifier, bool>? ownerAccepted)
+    private static Result ApplyCore(string root, Func<SecurityIdentifier, bool>? ownerAccepted, bool alwaysWrite)
     {
         var dir = new DirectoryInfo(root);
         if (!dir.Exists)
@@ -99,6 +110,14 @@ public static class InstallDirectoryProtection
             ?? throw new InvalidOperationException("No user SID.");
         var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
         var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+
+        // Running as SYSTEM is never the per-user install this protects, and
+        // the target set would name SYSTEM twice. Reported as not-owner.
+        if (user == system)
+        {
+            return Result.SkippedNotOwner;
+        }
+
         SecurityIdentifier[] targets = [user, system, admins];
 
         var current = dir.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
@@ -110,7 +129,7 @@ public static class InstallDirectoryProtection
             return Result.SkippedNotOwner;
         }
 
-        if (IsTarget(current, targets) && ChildrenInheritOnly(dir.FullName, targets))
+        if (!alwaysWrite && IsTarget(current, targets) && TreeInheritsOnly(dir, targets))
         {
             return Result.AlreadyProtected;
         }
@@ -150,20 +169,48 @@ public static class InstallDirectoryProtection
             && targets.All(t => rules.Any(r => r.IdentityReference == t));
     }
 
-    /// <summary>True when the children that matter carry no inherited ACE for
+    /// <summary>True when nothing under the root carries an inherited ACE for
     /// a SID outside <paramref name="targets"/>, so a propagation that stopped
-    /// partway is redone. Explicit child ACEs are not counted: rewriting the
-    /// root cannot remove them, so counting them would only rewrite it at
-    /// every start.</summary>
-    private static bool ChildrenInheritOnly(string root, SecurityIdentifier[] targets)
+    /// partway (or a file renamed in with its old inherited ACEs) is redone.
+    /// Explicit ACEs are not counted: rewriting the root cannot remove them.
+    /// Reparse points are neither read (a path-based read would follow them)
+    /// nor descended into.</summary>
+    private static bool TreeInheritsOnly(DirectoryInfo root, SecurityIdentifier[] targets)
     {
-        var updateExe = new FileInfo(Path.Combine(root, "Update.exe"));
-        var currentDir = new DirectoryInfo(Path.Combine(root, "current"));
-        var appExe = new FileInfo(Path.Combine(root, "current", "Syrtis.App.exe"));
+        var options = new EnumerationOptions
+        {
+            AttributesToSkip = 0,
+            IgnoreInaccessible = false,
+            RecurseSubdirectories = false,
+        };
+        var pending = new Stack<DirectoryInfo>();
+        pending.Push(root);
+        while (pending.TryPop(out var dir))
+        {
+            foreach (var entry in dir.EnumerateFileSystemInfos("*", options))
+            {
+                if (entry.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    continue;
+                }
 
-        return (!updateExe.Exists || InheritsOnly(updateExe.GetAccessControl(), targets))
-            && (!currentDir.Exists || InheritsOnly(currentDir.GetAccessControl(), targets))
-            && (!appExe.Exists || InheritsOnly(appExe.GetAccessControl(), targets));
+                if (entry is DirectoryInfo sub)
+                {
+                    if (!InheritsOnly(sub.GetAccessControl(AccessControlSections.Access), targets))
+                    {
+                        return false;
+                    }
+
+                    pending.Push(sub);
+                }
+                else if (!InheritsOnly(((FileInfo)entry).GetAccessControl(AccessControlSections.Access), targets))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     private static bool InheritsOnly(FileSystemSecurity security, SecurityIdentifier[] targets) =>

@@ -12,14 +12,16 @@ namespace TokenBar.Core.Tests;
 /// temp directory. The parent gets an explicit inheritable Modify ACE for
 /// BUILTIN\Users, standing in for a sandbox account granted write on the
 /// profile; every ACL this suite changes is on a directory it created.
-/// Windows only; elsewhere each test returns without asserting.
+/// Windows only; elsewhere each test returns without asserting. The suite
+/// also runs on macOS, so nothing here is a static field: a type initializer
+/// would call Windows-only APIs before any test's platform guard.
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class InstallDirectoryProtectionTests
 {
-    private static readonly SecurityIdentifier Users = new(WellKnownSidType.BuiltinUsersSid, null);
+    private static SecurityIdentifier Users => new(WellKnownSidType.BuiltinUsersSid, null);
 
-    private static readonly SecurityIdentifier[] Targets =
+    private static SecurityIdentifier[] Targets =>
     [
         WindowsIdentity.GetCurrent().User!,
         new(WellKnownSidType.LocalSystemSid, null),
@@ -57,6 +59,46 @@ public sealed class InstallDirectoryProtectionTests
         File.WriteAllText(later, "x");
         AssertInheritsOnlyTargets(FileAcl(later));
         Assert.Equal(Targets.Length, Rules(FileAcl(later)).Count);
+    }
+
+    /// <summary>A file renamed in from outside the root keeps the inherited
+    /// ACEs of the folder it came from, which stands in for a propagation that
+    /// stopped partway: the root is already right while a deep file still
+    /// carries the foreign grant. Startup must find it anywhere in the tree;
+    /// the hooks write without looking.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AStaleInheritedAceDeepInTheTreeIsRewritten(bool alwaysWrite)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var tree = new Tree();
+        Assert.Equal(Result.Applied, InstallDirectoryProtection.Apply(tree.Root));
+
+        var stage = Directory.CreateDirectory(Path.Combine(tree.Parent, "stage")).FullName;
+        var staged = Path.Combine(stage, "b.dll");
+        File.WriteAllText(staged, "x");
+        var deep = Path.Combine(tree.Current, "sub", "b.dll");
+        Directory.CreateDirectory(Path.GetDirectoryName(deep)!);
+        File.Move(staged, deep);
+
+        // Control: the moved file really carries the stale inherited grant,
+        // and the root itself is still exactly the target.
+        Assert.Contains(Rules(FileAcl(deep)), r => IsAddedUsersGrant(r, InheritanceFlags.None));
+        AssertExactlyTargets(DirAcl(tree.Root));
+
+        Assert.Equal(
+            Result.Applied,
+            InstallDirectoryProtection.Apply(tree.Root, alwaysWrite, out var error));
+        Assert.Null(error);
+
+        Assert.DoesNotContain(Rules(FileAcl(deep)), r => r.IdentityReference == Users);
+        AssertInheritsOnlyTargets(FileAcl(deep));
+        Assert.Equal(Result.AlreadyProtected, InstallDirectoryProtection.Apply(tree.Root));
     }
 
     [Fact]
@@ -107,7 +149,7 @@ public sealed class InstallDirectoryProtectionTests
         using var tree = new Tree();
         var before = DirAcl(tree.Root).GetSecurityDescriptorBinaryForm();
 
-        var result = InstallDirectoryProtection.ApplyForTesting(tree.Root, _ => false, out var error);
+        var result = InstallDirectoryProtection.ApplyForTesting(tree.Root, _ => false, alwaysWrite: false, out var error);
 
         Assert.Equal(Result.SkippedNotOwner, result);
         Assert.Null(error);
@@ -146,7 +188,7 @@ public sealed class InstallDirectoryProtectionTests
         Assert.True(new DirectoryInfo(link).Attributes.HasFlag(FileAttributes.ReparsePoint));
         var target = DirAcl(tree.Root).GetSecurityDescriptorBinaryForm();
 
-        var result = InstallDirectoryProtection.Apply(link, out var error);
+        var result = InstallDirectoryProtection.Apply(link, alwaysWrite: false, out var error);
 
         Assert.Equal(Result.Failed, result);
         Assert.Null(error);

@@ -59,6 +59,7 @@ public partial class App : Application
         }
 
         ProcessPower.EnsureNormalPriority();
+        Program.StartInstallDirectoryBackstop();
 
         // Before the graph coordinator: its scans, its snapshot id and the
         // shared quota fetch wait for this push of the saved extra Claude

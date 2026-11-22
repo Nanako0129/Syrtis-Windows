@@ -26,8 +26,10 @@ public static class Program
             // soon as the callback returns (install 30 s, update 15 s), so the
             // protection is applied synchronously here, never handed to a
             // background task. The install hook also runs on a repair install.
-            .OnAfterInstallFastCallback(_ => ProtectInstallDirectory("install"))
-            .OnAfterUpdateFastCallback(_ => ProtectInstallDirectory("update"))
+            // Always written, no already-protected shortcut: Velopack has just
+            // created the files below the root.
+            .OnAfterInstallFastCallback(_ => ProtectInstallDirectory("install", alwaysWrite: true))
+            .OnAfterUpdateFastCallback(_ => ProtectInstallDirectory("update", alwaysWrite: true))
             // Runs before the install directory is removed, with a 30 second
             // budget. Deleting our own Run value is a single registry
             // operation, so it comfortably fits.
@@ -49,15 +51,6 @@ public static class Program
             return;
         }
 
-        // Backstop for anything the hooks missed (a repair install recreates
-        // the root and it inherits again). Off the UI thread and never awaited,
-        // so the window does not wait on it. Scoop and dev builds are not
-        // Velopack-installed and are left alone.
-        if (VelopackLocator.Current.CurrentlyInstalledVersion is not null)
-        {
-            Task.Run(() => ProtectInstallDirectory("startup"));
-        }
-
         // Everything below mirrors the Main that Microsoft.UI.Xaml.Markup.Compiler
         // 3.0.0.2607 emits into App.g.i.cs for the pinned WindowsAppSDK
         // 1.8.260710003, action for action.
@@ -74,9 +67,23 @@ public static class Program
         });
     }
 
+    /// <summary>Backstop for what the hooks did not cover: a hook killed by
+    /// its timeout, or an install made before the hooks existed. Called by the
+    /// primary instance only, after it holds the single-instance mutex. Off
+    /// the UI thread and never awaited, so the window does not wait on it.
+    /// Scoop and dev builds are not Velopack-installed and are left
+    /// alone.</summary>
+    internal static void StartInstallDirectoryBackstop()
+    {
+        if (VelopackLocator.Current.CurrentlyInstalledVersion is not null)
+        {
+            Task.Run(() => ProtectInstallDirectory("startup", alwaysWrite: false));
+        }
+    }
+
     /// <summary>One DevLog line per call: the result name, and for a failure
     /// the exception type and HResult. Never a path or a SID.</summary>
-    private static void ProtectInstallDirectory(string when)
+    private static void ProtectInstallDirectory(string when, bool alwaysWrite)
     {
         // Set by VelopackApp.Run() before any hook runs; the hook process is
         // the new current\Syrtis.App.exe, so it resolves the same root.
@@ -87,7 +94,7 @@ public static class Program
             return;
         }
 
-        var result = InstallDirectoryProtection.Apply(root, out var error);
+        var result = InstallDirectoryProtection.Apply(root, alwaysWrite, out var error);
         DevLog.Write(error is null
             ? $"install-acl {when}: {result}"
             : $"install-acl {when}: {result} {error.GetType().Name} 0x{error.HResult:X8}");
