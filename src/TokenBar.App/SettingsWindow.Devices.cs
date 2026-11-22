@@ -23,6 +23,7 @@ public sealed partial class SettingsWindow
 
     /// <summary>Wide enough for an IPv4 or a short IPv6 address (macOS 230 pt).</summary>
     private const double DevicesAddressWidth = 230;
+    private const double DevicesPasteWidth = 290;
 
     /// <summary>How often the short status under a linked device is re-read:
     /// its text is in minutes (macOS statusTick, DSV :441).</summary>
@@ -119,7 +120,13 @@ public sealed partial class SettingsWindow
             // PasswordBox has no spell check or text prediction.
             PasswordRevealMode = PasswordRevealMode.Hidden,
             FontSize = 12,
-            MinWidth = 200,
+            // A fixed width: in the horizontal row an auto-sized box grows with
+            // the pasted invitation (hundreds of characters) and pushes Link off
+            // the page (188, 2026-11-23: a real Pair URL left Link offscreen).
+            // Observed on 188 (zh-Hant, 200% scale, default 900-wide window):
+            // 290 + 8 spacing + the Link button fit the 380 page. Not measured on
+            // a narrower window or larger text scaling.
+            Width = DevicesPasteWidth,
             PlaceholderText = DevicesCopy.PastePlaceholder.Localized(),
         };
         public Button Link { get; } = SmallButton(DevicesCopy.Link);
@@ -817,11 +824,12 @@ public sealed partial class SettingsWindow
                 CloseButtonText = DevicesCopy.Cancel.Localized(),
                 DefaultButton = ContentDialogButton.Close,
             };
-            // Destructive: the system critical color on the primary button.
+            // Destructive: red text on the default button face (the maintainer's
+            // choice, 2026-11-23). The critical fill as the background with
+            // white text read as disabled on 188 (pale pink, grey-looking text).
             var style = new Style(typeof(Button));
-            style.Setters.Add(new Setter(Control.BackgroundProperty,
+            style.Setters.Add(new Setter(Control.ForegroundProperty,
                 Application.Current.Resources["SystemFillColorCriticalBrush"]));
-            style.Setters.Add(new Setter(Control.ForegroundProperty, new SolidColorBrush(Microsoft.UI.Colors.White)));
             dialog.PrimaryButtonStyle = style;
             return await dialog.ShowAsync() == ContentDialogResult.Primary;
         }
