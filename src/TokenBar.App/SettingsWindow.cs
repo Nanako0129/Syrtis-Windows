@@ -44,7 +44,7 @@ public sealed partial class SettingsWindow : Window
     };
 
     // Sidebar (macOS SettingsPanel.Page): one NavigationView built once, its
-    // six items (Menu bar, Dashboard, Attribution, Accounts, General, About)
+    // seven items (Menu bar, Dashboard, Attribution, Accounts, Devices, General, About)
     // never rebuilt. Rebuild() only regenerates each page's
     // StackPanel and re-attaches whichever one matches _selectedTag — the
     // NavigationView's own SelectedItem is untouched by a rebuild, which is
@@ -85,6 +85,8 @@ public sealed partial class SettingsWindow : Window
         Content = SettingsCopy.AccountsPage.Localized(),
         Tag = "accounts",
     };
+    // SA-4f: after Accounts, as on macOS (SettingsPanel, SA-3c).
+    private readonly NavigationViewItem _devicesItem = new() { Content = DevicesCopy.Page.Localized(), Tag = "devices" };
     private readonly NavigationViewItem _generalItem = new() { Content = "General".Localized(), Tag = "general" };
     private readonly NavigationViewItem _aboutItem = new() { Content = "About".Localized(), Tag = "about" };
     private readonly Dictionary<string, StackPanel> _pages = new(StringComparer.Ordinal);
@@ -124,6 +126,7 @@ public sealed partial class SettingsWindow : Window
         _shared.Rebuild();
         _shared.AppWindow.Show();
         _shared.SyncPreviewTimer();
+        _shared.SyncDevicesPage();
         // Activate() alone cannot bring the window forward when the opener
         // has no foreground rights (tray/schtasks context, the flyout's old
         // lesson) — hoist it in z-order explicitly.
@@ -173,6 +176,7 @@ public sealed partial class SettingsWindow : Window
         _nav.MenuItems.Add(_dashboardItem);
         _nav.MenuItems.Add(_attributionItem);
         _nav.MenuItems.Add(_accountsItem);
+        _nav.MenuItems.Add(_devicesItem);
         _nav.MenuItems.Add(_generalItem);
         _nav.MenuItems.Add(_aboutItem);
         _nav.SelectedItem = _menuBarItem;
@@ -182,6 +186,7 @@ public sealed partial class SettingsWindow : Window
             {
                 _selectedTag = tag;
                 ShowPage(tag);
+                SyncDevicesPage();
             }
         };
         root.Children.Add(_nav);
@@ -215,6 +220,8 @@ public sealed partial class SettingsWindow : Window
             e.Cancel = true; // hide, macOS isReleasedWhenClosed=false parity
             AppWindow.Hide();
             SyncPreviewTimer();
+            // Stops the Devices poll and puts an open invitation away.
+            SyncDevicesPage();
             // Singleton across hide/show (see AttributionReportGate's own doc
             // comment): reset the fetch guard here so the next visit to the
             // attribution page refetches, instead of a provider first observed
@@ -449,6 +456,9 @@ public sealed partial class SettingsWindow : Window
         _pages["dashboard"] = BuildDashboardPage(store);
         _pages["attribution"] = BuildAttributionPage(store);
         _pages["accounts"] = BuildAccountsPage(store);
+        // Built once and kept: it holds what the user is typing, and its model
+        // a pairing wait (the model is the window's, never reset here).
+        _pages["devices"] = BuildDevicesPage();
         _pages["general"] = BuildGeneralPage(store);
         _pages["about"] = BuildAboutPage();
         ShowPage(_selectedTag);
