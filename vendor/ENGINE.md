@@ -32,8 +32,13 @@ the source-message cache shards its pruned scan maps to
 is the same. This app never takes that path: its one `modified_after` caller,
 the live-rate tail (`usage_tail.rs`), calls
 `parse_local_clients_with_source_context`, which opens the cache lazily
-(`open_from_root`, unchanged), and the window scan (`window_usage.rs`) sets no
-`modified_after`. So this advance changes no runtime path here.
+through `open_from_root`, and the window scan (`window_usage.rs`) sets no
+`modified_after`. The bounded loader is therefore never used here. One thing
+the app does run differently: the lazy path's per-shard read body was moved
+into a new `read_shard` (same admit rules and rewrite handling by reading the
+code), and the `get` lookups gained a debug-only assertion that is inert when
+no bounded load is active. The four reports go through that lazy read path,
+so the comparison below exercises it.
 
 This is the revision Syrtis-Agent `36ce3828` pins (that agent revision changes
 no agent source; it moves its engine pin and the records that cite it) and
