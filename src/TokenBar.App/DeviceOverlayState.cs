@@ -1104,9 +1104,9 @@ public sealed class DeviceOverlayState
     {
         if (_models is { Data: { } page } slot && slot.Key.Equals(KeyCore(DeviceOverlayKind.Models, year, null)))
         {
-            return (page.Payload, (string?)null);
+            return ((ModelReport?)page.Payload, (string?)null);
         }
-        return (null, DeviceOverlayCopy.ModelsHidden.Localized());
+        return ((ModelReport?)null, (string?)DeviceOverlayCopy.ModelsHidden.Localized());
     });
 
     /// <summary><see cref="UsageStats"/> for a client slice of the graph overlay
