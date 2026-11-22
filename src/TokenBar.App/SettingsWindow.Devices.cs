@@ -235,6 +235,7 @@ public sealed partial class SettingsWindow
             if (_devicesPage is { } page)
             {
                 page.Seeded = false;
+                page.HostSignature = ""; // re-seeded below: rebuild the menu once, drop-down closed
                 page.Addresses = ListenAddress.InterfaceAddresses();
             }
 
@@ -332,7 +333,7 @@ public sealed partial class SettingsWindow
         SetNotice(page.SharingError, model.SharingError);
 
         var offered = ListenAddress.Choices(page.Addresses, [status?.BindHost ?? "", page.HostValue]);
-        RenderHostChoices(page, offered);
+        RenderHostChoices(page, offered, status?.BindHost ?? "");
         page.Apply.IsEnabled = offered.Contains(page.HostValue);
         page.Unreachable.Visibility = Show(model.Unreachable);
         page.Public.Visibility = Show(ListenAddress.MayBePublic(page.HostValue));
@@ -349,11 +350,18 @@ public sealed partial class SettingsWindow
         RenderLink(page, model);
     }
 
-    private static void RenderHostChoices(DevicesPage page, IReadOnlyList<string> offered)
+    /// <summary>Rebuilds the menu only when the offered list or the stored
+    /// address changes, never for the user's own pick and never while the
+    /// drop-down is open: clearing a ComboBox's items around its selection
+    /// change crashed the app with E_UNEXPECTED in Microsoft.UI.Xaml (188,
+    /// 2026-11-23, picking a LAN address while "Choose an address" showed).
+    /// So "Choose an address" stays listed after a pick until the stored
+    /// address changes (Apply) or the page appears again.</summary>
+    private static void RenderHostChoices(DevicesPage page, IReadOnlyList<string> offered, string stored)
     {
         var current = page.HostValue;
-        var signature = string.Join('\n', offered) + "\n|" + current;
-        if (signature == page.HostSignature)
+        var signature = string.Join('\n', offered) + "\n|" + stored;
+        if (signature == page.HostSignature || page.Host.IsDropDownOpen)
         {
             return;
         }
