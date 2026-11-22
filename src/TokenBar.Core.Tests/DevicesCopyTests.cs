@@ -128,7 +128,9 @@ public class DevicesCopyTests : IDisposable
         Assert.Equal(C.StateActive, C.State("active"));
         Assert.Equal(C.StateRevoked, C.State("revoked"));
         Assert.Equal(C.StateExpired, C.State("expired"));
-        Assert.Equal("superseded", C.State("superseded"));
+        // A state this build does not know is never used as a key (R16, 4f A5).
+        Assert.Equal(C.StateUnknown, C.State("superseded"));
+        Assert.Equal(C.StateUnknown, C.State("{0}"));
     }
 
     [Fact] // :22836-22841

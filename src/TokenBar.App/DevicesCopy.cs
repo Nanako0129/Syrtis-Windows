@@ -119,6 +119,11 @@ internal static class DevicesCopy
     public const string StateRevoked = "Revoked";
     public const string StateExpired = "Expired";
 
+    /// <summary>The word for a state this build does not know. An existing key
+    /// ("Unknown" is shared with other pages), so the state the other device
+    /// sent is never looked up as a localization key.</summary>
+    public const string StateUnknown = "Unknown";
+
     public const string GenericFailure = "Something went wrong. Try again.";
 
     /// <summary>The info flyout of "Share this PC": macOS's two lines, then the
@@ -167,13 +172,15 @@ internal static class DevicesCopy
         _ => LinkFailed,
     };
 
-    /// <summary>A grant or peer state; an unknown one is shown as sent.</summary>
+    /// <summary>A grant or peer state as the fixed key to localize. The state
+    /// comes from another device, so one this build does not know maps to
+    /// <see cref="StateUnknown"/> instead of being used as a key itself.</summary>
     public static string State(string raw) => raw switch
     {
         "active" => StateActive,
         "revoked" => StateRevoked,
         "expired" => StateExpired,
-        _ => raw,
+        _ => StateUnknown,
     };
 
     public static readonly IReadOnlyList<string> All =
@@ -192,7 +199,7 @@ internal static class DevicesCopy
         LinkDestination, LinkDestinationHint,
         InvitationExpired, Declined, UnreachableDevice, IdentityChanged, InvalidInvitation,
         OwnInvitation, UnusableInvitation, LinkFailed, CancelledStillLinked, StateActive,
-        StateRevoked, StateExpired, GenericFailure,
+        StateRevoked, StateExpired, StateUnknown, GenericFailure,
         FirewallNote, FolderWritable, FolderReplaced, FolderRestored,
     ];
 }
