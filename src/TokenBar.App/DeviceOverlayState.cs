@@ -529,22 +529,50 @@ public sealed class DeviceOverlayState
         return _settings.GetString(key);
     }
 
+    [ThreadStatic] private static bool _flushing;
+
     /// <summary>One writer at a time, in queue order, so two threads cannot
-    /// reorder writes to one key; no overlay lock is held.</summary>
+    /// reorder writes to one key; no overlay lock is held. A thread that finds
+    /// the writer busy returns: the writer re-checks the queue after it lets go,
+    /// so the entry is written. (Waiting instead would deadlock a
+    /// SettingsStore.Changed subscriber that calls back into the model from
+    /// another thread and waits for it.) A subscriber on the writing thread
+    /// itself must not start a nested drain, which would write older entries
+    /// after newer ones.</summary>
     private static void FlushWrites()
     {
-        lock (WriteGate)
+        if (_flushing) { return; }
+        do
         {
-            (SettingsStore Store, string Key, string Value)[] batch;
-            lock (Gate) { batch = [.. PendingWrites]; }
-            if (batch.Length == 0) { return; }
-            foreach (var (store, key, value) in batch)
+            if (!Monitor.TryEnter(WriteGate)) { return; }
+            _flushing = true;
+            try
             {
-                // A throwing SettingsStore.Changed subscriber must not skip the rest.
-                try { store.SetString(key, value); } catch (Exception) { }
+                while (true)
+                {
+                    (SettingsStore Store, string Key, string Value)[] batch;
+                    lock (Gate) { batch = [.. PendingWrites]; }
+                    if (batch.Length == 0) { break; }
+                    foreach (var (store, key, value) in batch)
+                    {
+                        // A throwing SettingsStore.Changed subscriber must not skip the rest.
+                        try { store.SetString(key, value); } catch (Exception) { }
+                    }
+                    lock (Gate) { PendingWrites.RemoveRange(0, batch.Length); }
+                }
             }
-            lock (Gate) { PendingWrites.RemoveRange(0, batch.Length); }
+            finally
+            {
+                _flushing = false;
+                Monitor.Exit(WriteGate);
+            }
         }
+        while (WritesPendingNow());
+    }
+
+    private static bool WritesPendingNow()
+    {
+        lock (Gate) { return PendingWrites.Count > 0; }
     }
 
     private HashSet<string>? ReadSeen() =>

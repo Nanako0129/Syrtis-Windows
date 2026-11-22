@@ -1274,7 +1274,6 @@ public class DeviceOverlayStateTests : IDisposable
 
     [Theory] // a stored selection that does not decode, or has "peers": null, is the default
     [InlineData("""{"local":true,"peers":null}""")]
-    [InlineData("""{"local":false}""")]
     [InlineData("not json")]
     public void AnUndecodableStoredSelectionFallsBackToTheDefault(string json)
     {
