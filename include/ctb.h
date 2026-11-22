@@ -401,9 +401,13 @@ char *tb_remote_peer_remove(const char *producer_static);
 // (at least one source, at most 16 peers, none twice); timezone = IANA id of
 // the zone the local rows are computed in (this process's own zone; the core
 // cannot check it, and another zone would merge two zones' hour slots and
-// dates); mode = "cached" (no connection) or "refresh". Errors: invalid
-// (devices_json, timezone or mode malformed), sourceContextUnavailable,
-// panic, or the existing entry point's own error text. Data = the existing
+// dates; an id the engine's bundled tzdb does not accept is not an error:
+// ok:true, every producer row incompatible, nothing sent); mode = "cached"
+// (no connection) or "refresh". Errors: invalid (devices_json malformed, mode
+// not cached/refresh, timezone NULL or not UTF-8), sourceContextUnavailable
+// (only when local is selected; a producers-only call never captures the
+// local context), internal, panic, or the existing entry point's own error
+// text. Data = the existing
 // payload plus devices:[{id ("local" or the 16-hex fingerprint), label (a
 // producer's row: the name that producer sent, else its host:port; null on
 // the local row), state (local|fresh|lastGood|stale|unavailable|overLimit|

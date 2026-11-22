@@ -131,7 +131,7 @@
     ],
     "duplicateWarning": true,
     "meta": {
-      "costCoverage": "partial",
+      "costCoverage": "none",
       "dateRange": {
         "end": "2021-03-14",
         "start": "2021-03-10"

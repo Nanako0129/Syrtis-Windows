@@ -1606,15 +1606,18 @@ pub extern "C" fn tb_cursor_present() -> *mut c_char {
 /// `timezone` (an IANA identifier, which must be the zone the local rows are
 /// computed in, this process's own: it is not checked, because the IANA name
 /// of that zone is not known here; one the engine's bundled tzdb does not
-/// accept makes every producer `incompatible` and nothing is sent) and `mode`
+/// accept is not an error: `ok` with every producer row `incompatible`, and
+/// nothing is sent) and `mode`
 /// (`cached`: the local part and each producer's last good body, no
 /// connection; `refresh`: each selected producer is pulled). Success data is
 /// the existing payload plus `devices`, `duplicateWarning`, `saturated` and
 /// `remoteRangeLimited`. With only `local` selected the data is the existing
 /// entry point's, byte for byte, plus those four keys. Malformed
-/// `devices_json` or `mode`: `invalid`; no process source context:
-/// `sourceContextUnavailable`. A panic is `panic`. Blocking: a `refresh`
-/// waits for each selected producer's pull; call on a background thread.
+/// `devices_json` or `mode`, or a NULL / non-UTF-8 `timezone`: `invalid`;
+/// the local source selected and no process source context:
+/// `sourceContextUnavailable` (a producers-only page never captures it). A
+/// panic is `panic`. Blocking: a `refresh` waits for each selected
+/// producer's pull; call on a background thread.
 #[cfg(windows)]
 mod remote_pages_ffi {
     use super::{c_char, clients_from, year_from, CStr, LocalSourceContext};
@@ -1649,10 +1652,16 @@ mod remote_pages_ffi {
             let selection = parse_selection(unsafe { text(devices_json) }?)?;
             let timezone = unsafe { text(timezone) }?;
             let mode = parse_mode(unsafe { text(mode) }?)?;
-            let context = LocalSourceContext::process().map_err(|error| error.to_string())?;
+            // Only a page that selects the local source reads (and captures)
+            // the process source context: producers alone never need it.
+            let context = if selection.local {
+                Some(LocalSourceContext::process().map_err(|error| error.to_string())?)
+            } else {
+                None
+            };
             body(&Call {
                 agent: &AGENT,
-                context: &context,
+                context: context.as_ref(),
                 year: &year,
                 clients,
                 selection,

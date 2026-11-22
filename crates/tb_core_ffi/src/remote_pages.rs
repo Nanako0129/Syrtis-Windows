@@ -1289,7 +1289,9 @@ fn decorate(
 /// The arguments of one device-aware page call.
 pub(crate) struct Call<'a> {
     pub agent: &'a RemoteAgent,
-    pub context: &'a crate::LocalSourceContext,
+    /// The process source context: captured only when the local source is
+    /// selected (`None` otherwise), so a producers-only page never needs it.
+    pub context: Option<&'a crate::LocalSourceContext>,
     pub year: &'a str,
     pub clients: Option<Vec<String>>,
     pub selection: Selection,
@@ -1317,6 +1319,12 @@ impl Call<'_> {
             },
             limited,
         ))
+    }
+
+    /// The local source context; only the local branches read it.
+    fn context(&self) -> Result<&crate::LocalSourceContext, String> {
+        self.context
+            .ok_or_else(|| "sourceContextUnavailable".into())
     }
 
     fn sources(&self) -> usize {
@@ -1355,49 +1363,64 @@ impl Call<'_> {
 }
 
 /// The merged graph's `meta.pricingMode` and `meta.costCoverage` (Windows
-/// only; the macOS payload has no such fields to keep true).
+/// only; the macOS payload has no such fields to keep true). `local` is the
+/// local contract with the local part's per-client totals ([`graph_totals`],
+/// taken before the fold), when the local source is selected.
 ///
 /// - `pricingMode`: the local contract's when the local source is selected
 ///   (the local part is computed as `tb_graph` computes it,
 ///   `usage_graph::compute(…, false)`, so `bestEffort` in practice);
 ///   `bestEffort` when only producers are selected.
-/// - `costCoverage`: a fold over the sources that contributed records. The
-///   local contract's coverage takes part when the local source is selected.
-///   A producer takes part when its records were merged (its row has
-///   non-empty `totals`): `complete` when its `costIncomplete` is false,
-///   otherwise `partial` when it contributed any cost (a `costUsd` above
-///   zero), otherwise `none`. A producer that contributed nothing
-///   (unavailable, refused, left out, or an empty part) does not take part.
-///   All `complete` → `complete`; all `none` → `none`; anything else →
-///   `partial`; no source took part (only producers selected and none
-///   merged) → `complete`, as the engine's own fold answers for no messages.
+/// - `costCoverage`: a fold over the sources that contributed usage.
+///   - The local part takes part only when it has usage in the range (its
+///     totals are not empty); it then counts as the local contract's own
+///     coverage, which the engine computed.
+///   - A producer takes part only when its records were merged and one of
+///     its `totals` rows has tokens above zero. Over those rows: every one
+///     has `costUsd` above zero and the producer's `costIncomplete` is false
+///     → `complete`; none has `costUsd` above zero → `none`; otherwise
+///     `partial`. (A producer with a valid price table and an unpriced
+///     model sends `costIncomplete` false with a $0 row: `partial`.)
+///   - A source that contributed nothing (an empty local part; a producer
+///     unavailable, refused, left out, or with no tokens) takes no part.
+///   - All `complete` → `complete`; all `none` → `none`; anything else →
+///     `partial`; no source took part → `complete`, as the engine's own
+///     fold answers for no messages.
 pub(crate) fn merged_contract(
-    local: Option<GraphMetaContract>,
+    local: Option<(GraphMetaContract, &Value)>,
     devices: &[Value],
 ) -> GraphMetaContract {
+    let has_tokens = |total: &&Value| total["tokens"].as_i64().is_some_and(|tokens| tokens > 0);
+    let priced = |total: &Value| total["costUsd"].as_f64().is_some_and(|cost| cost > 0.0);
     let remote = devices.iter().filter_map(|row| {
-        let totals = row["totals"]
-            .as_array()
-            .filter(|totals| !totals.is_empty())?;
-        Some(if row["costIncomplete"] != Value::Bool(true) {
-            CostCoverage::Complete
-        } else if totals
+        let used: Vec<&Value> = row["totals"]
+            .as_array()?
             .iter()
-            .any(|total| total["costUsd"].as_f64().is_some_and(|cost| cost > 0.0))
-        {
-            CostCoverage::Partial
-        } else {
+            .filter(has_tokens)
+            .collect();
+        if used.is_empty() {
+            return None;
+        }
+        let priced = used.iter().filter(|total| priced(total)).count();
+        Some(if priced == 0 {
             CostCoverage::None
+        } else if priced == used.len() && row["costIncomplete"] != Value::Bool(true) {
+            CostCoverage::Complete
+        } else {
+            CostCoverage::Partial
         })
     });
-    let mut coverages = local.map(|c| c.cost_coverage).into_iter().chain(remote);
+    let local_part = local
+        .filter(|(_, totals)| totals.as_array().is_some_and(|totals| !totals.is_empty()))
+        .map(|(contract, _)| contract.cost_coverage);
+    let mut coverages = local_part.into_iter().chain(remote);
     let cost_coverage = match coverages.next() {
         None => CostCoverage::Complete,
         Some(first) if coverages.all(|c| c == first) => first,
         Some(_) => CostCoverage::Partial,
     };
     GraphMetaContract {
-        pricing_mode: local.map_or(GraphPricingMode::BestEffort, |c| c.pricing_mode),
+        pricing_mode: local.map_or(GraphPricingMode::BestEffort, |(c, _)| c.pricing_mode),
         cost_coverage,
     }
 }
@@ -1415,17 +1438,17 @@ pub(crate) fn graph_with(
 ) -> Result<Value, String> {
     if call.selection.peers.is_empty() {
         let data = match crate::graph_cached(
-            call.context,
+            call.context()?,
             call.year,
             Duration::from_secs(crate::ONESHOT_MAX_AGE_SECS),
         ) {
             Some(data) => data,
-            None => crate::graph_compute(call.context, call.year)?,
+            None => crate::graph_compute(call.context()?, call.year)?,
         };
         return call.local_only(data);
     }
     let (mut graph, local_contract) = if call.selection.local {
-        let (graph, contract) = crate::usage_graph::compute(call.context, call.year, false)?;
+        let (graph, contract) = crate::usage_graph::compute(call.context()?, call.year, false)?;
         (graph, Some(contract))
     } else {
         crate::usage_graph::normalize_year(call.year)?;
@@ -1437,7 +1460,7 @@ pub(crate) fn graph_with(
     if let Some(Records::Graph(records)) = &remote.records {
         fold_graph(&mut graph, records, &mut saturated);
     }
-    let contract = merged_contract(local_contract, &remote.devices);
+    let contract = merged_contract(local_contract.zip(local_totals.as_ref()), &remote.devices);
     let data = crate::usage_graph::to_payload(graph, contract)?;
     decorate(
         data,
@@ -1457,10 +1480,10 @@ pub(crate) fn models_with(
     source: impl FnOnce(&ReportQuery) -> Remote,
 ) -> Result<Value, String> {
     if call.selection.peers.is_empty() {
-        return call.local_only(crate::model_report::run(call.context, call.year)?);
+        return call.local_only(crate::model_report::run(call.context()?, call.year)?);
     }
     let mut report = if call.selection.local {
-        crate::model_report::compute(call.context, call.year)?
+        crate::model_report::compute(call.context()?, call.year)?
     } else {
         crate::usage_graph::normalize_year(call.year)?;
         tokscale_core::ModelReport {
@@ -1520,13 +1543,13 @@ pub(crate) fn hourly_with(
 ) -> Result<Value, String> {
     if call.selection.peers.is_empty() {
         return call.local_only(crate::hourly_report::run(
-            call.context,
+            call.context()?,
             call.year,
             call.clients.clone(),
         )?);
     }
     let mut report = if call.selection.local {
-        crate::hourly_report::compute(call.context, call.year, call.clients.clone())?
+        crate::hourly_report::compute(call.context()?, call.year, call.clients.clone())?
     } else {
         crate::usage_graph::normalize_year(call.year)?;
         tokscale_core::HourlyReport {
@@ -1561,13 +1584,13 @@ pub(crate) fn agents_with(
 ) -> Result<Value, String> {
     if call.selection.peers.is_empty() {
         return call.local_only(crate::agents_report::run(
-            call.context,
+            call.context()?,
             call.year,
             call.clients.clone(),
         )?);
     }
     let mut report = if call.selection.local {
-        crate::agents_report::compute(call.context, call.year, call.clients.clone())?
+        crate::agents_report::compute(call.context()?, call.year, call.clients.clone())?
     } else {
         crate::usage_graph::normalize_year(call.year)?;
         tokscale_core::AgentReport {
@@ -1785,7 +1808,7 @@ mod tests {
     ) -> Call<'a> {
         Call {
             agent,
-            context,
+            context: Some(context),
             year: YEAR,
             clients: None,
             selection: Selection {
@@ -2783,11 +2806,22 @@ mod tests {
         }
     }
 
-    /// A merged producer row as `assemble` writes it: `totals` with one
-    /// client of `cost`, and `costIncomplete`.
+    /// A merged producer row as `assemble` writes it: `costIncomplete` and
+    /// one `totals` entry per `(tokens, costUsd)`.
+    fn producer_row(incomplete: bool, totals: &[(i64, f64)]) -> Value {
+        let totals: Vec<Value> = totals
+            .iter()
+            .enumerate()
+            .map(|(at, (tokens, cost))| {
+                json!({"client": format!("c{at}"), "messages": 1, "tokens": tokens, "costUsd": cost})
+            })
+            .collect();
+        json!({"id": "x", "state": "fresh", "costIncomplete": incomplete, "totals": totals})
+    }
+
+    /// One client with tokens, of `cost`.
     fn merged_row(incomplete: bool, cost: f64) -> Value {
-        json!({"id": "x", "state": "fresh", "costIncomplete": incomplete,
-               "totals": [{"client": "claude", "messages": 1, "tokens": 1, "costUsd": cost}]})
+        producer_row(incomplete, &[(1, cost)])
     }
 
     /// The graph's `meta` contract, branch by branch ([`merged_contract`]).
@@ -2795,11 +2829,15 @@ mod tests {
     fn merged_graph_contract_folds_the_contributing_sources() {
         use CostCoverage::{Complete, None as NoCost, Partial};
         use GraphPricingMode::{BestEffort, LocalOnly};
-        let local = |coverage| Some(contract(BestEffort, coverage));
+        let used = json!([{"client": "claude", "messages": 1, "tokens": 5, "costUsd": 0.0}]);
+        let empty = json!([]);
+        let local = |coverage| Some((contract(BestEffort, coverage), &used));
+        let empty_local = |coverage| Some((contract(BestEffort, coverage), &empty));
         let not_merged = [
             json!({"id": "peers", "state": "unavailable", "totals": null}),
             json!({"id": "y", "state": "refused", "costIncomplete": false, "totals": null}),
             json!({"id": "z", "state": "fresh", "costIncomplete": true, "totals": []}),
+            producer_row(false, &[(0, 0.0)]),
         ];
         let coverage = |local, rows: &[Value]| merged_contract(local, rows).cost_coverage;
 
@@ -2810,63 +2848,104 @@ mod tests {
         );
         assert_eq!(merged_contract(None, &[]), contract(BestEffort, Complete));
         // The local contract's mode when local is selected (even `localOnly`,
-        // which the merged path never computes), `bestEffort` otherwise.
+        // which the merged path never computes; even an empty local part),
+        // `bestEffort` otherwise.
         assert_eq!(
-            merged_contract(Some(contract(LocalOnly, Complete)), &[]).pricing_mode,
+            merged_contract(Some((contract(LocalOnly, Complete), &empty)), &[]).pricing_mode,
             LocalOnly
         );
         assert_eq!(
-            merged_contract(None, &[merged_row(false, 0.0)]).pricing_mode,
+            merged_contract(None, &[merged_row(false, 1.0)]).pricing_mode,
             BestEffort
         );
-        // A producer's own coverage: complete / partial / none.
-        assert_eq!(coverage(None, &[merged_row(false, 0.0)]), Complete);
-        assert_eq!(coverage(None, &[merged_row(true, 0.5)]), Partial);
+        // A producer's own coverage, from its rows with tokens.
+        assert_eq!(coverage(None, &[merged_row(false, 1.0)]), Complete);
+        assert_eq!(coverage(None, &[merged_row(true, 0.5)]), Partial, "flagged");
         assert_eq!(coverage(None, &[merged_row(true, 0.0)]), NoCost);
+        assert_eq!(
+            coverage(None, &[merged_row(false, 0.0)]),
+            NoCost,
+            "all rows $0"
+        );
+        assert_eq!(
+            coverage(None, &[producer_row(false, &[(5, 1.0), (3, 0.0)])]),
+            Partial,
+            "a valid table and an unpriced model: one $0 row with tokens"
+        );
+        assert_eq!(
+            coverage(None, &[producer_row(false, &[(5, 1.0), (0, 0.0)])]),
+            Complete,
+            "a $0 row without tokens does not count"
+        );
         // Rows that merged nothing take no part.
         let mut rows = not_merged.to_vec();
         rows.push(merged_row(true, 0.0));
         assert_eq!(coverage(None, &rows), NoCost);
-        // The fold.
+        // An empty local part takes no part.
+        assert_eq!(
+            coverage(empty_local(Complete), &[merged_row(false, 0.0)]),
+            NoCost,
+            "empty local + a `none` producer"
+        );
+        assert_eq!(coverage(empty_local(Complete), &not_merged), Complete);
+        // The fold, with local usage.
         assert_eq!(
             coverage(local(Complete), &[merged_row(false, 1.0)]),
             Complete
         );
         assert_eq!(coverage(local(NoCost), &[merged_row(true, 0.0)]), NoCost);
         assert_eq!(coverage(local(Complete), &[merged_row(true, 0.0)]), Partial);
-        assert_eq!(coverage(local(NoCost), &[merged_row(false, 0.0)]), Partial);
+        assert_eq!(coverage(local(NoCost), &[merged_row(false, 1.0)]), Partial);
         assert_eq!(coverage(local(Partial), &[]), Partial);
         assert_eq!(coverage(local(NoCost), &not_merged), NoCost);
         assert_eq!(
-            coverage(None, &[merged_row(false, 0.0), merged_row(true, 0.0)]),
+            coverage(None, &[merged_row(false, 1.0), merged_row(true, 0.0)]),
             Partial
         );
     }
 
     /// Through the page: only producers, none merged (no agent runs, so the
-    /// store is unreadable) is `complete` and `bestEffort`.
+    /// store is unreadable) is `complete` and `bestEffort`, and needs no
+    /// local source context (none is given). Control: the local source
+    /// selected without a context is `sourceContextUnavailable`. The FFI
+    /// `page()` gate itself (capture only when local is selected) has no
+    /// test: a failing `LocalSourceContext::process` has no seam.
     #[test]
     fn a_graph_of_producers_with_nothing_merged_is_complete() {
         let receiver = RemoteAgent::default();
-        let context = unused_context();
-        let page = graph(&call(
-            &receiver,
-            &context,
-            false,
-            &[[0x11; 32]],
-            "UTC",
-            Mode::Cached,
-        ))
-        .unwrap();
+        let peer = [[0x11; 32]];
+        let without_context = |local: bool| Call {
+            agent: &receiver,
+            context: None,
+            year: YEAR,
+            clients: None,
+            selection: Selection {
+                local,
+                peers: peer.to_vec(),
+            },
+            timezone: "UTC",
+            mode: Mode::Cached,
+            today: NaiveDate::from_ymd_opt(2021, 6, 1).unwrap(),
+        };
+        let page = graph(&without_context(false)).unwrap();
         assert_eq!(
             states(&page),
             [
                 ("peers".into(), "unavailable".into()),
-                (fingerprint(&[0x11; 32]), "unavailable".into())
+                (fingerprint(&peer[0]), "unavailable".into())
             ]
         );
         assert_eq!(page["meta"]["pricingMode"], "bestEffort");
         assert_eq!(page["meta"]["costCoverage"], "complete");
+        for body in [models, hourly, agents] {
+            assert!(body(&without_context(false)).is_ok());
+        }
+        for body in [graph, models, hourly, agents] {
+            assert_eq!(
+                body(&without_context(true)),
+                Err("sourceContextUnavailable".into())
+            );
+        }
     }
 
     // ------------------------------------------------------ integration ---
@@ -4452,7 +4531,6 @@ mod tests {
         parts: impl FnOnce(Endpoint) -> Vec<Pulled>,
         endpoint: Endpoint,
     ) -> Value {
-        let context = unused_context();
         let agent = RemoteAgent::default();
         let pulled = parts(endpoint);
         let selection = Selection {
@@ -4461,7 +4539,7 @@ mod tests {
         };
         let call = Call {
             agent: &agent,
-            context: &context,
+            context: None,
             year,
             clients: None,
             selection,
@@ -4948,7 +5026,9 @@ mod tests {
 
         let mut out = out.into_inner();
         out.sort_by(|a, b| a.0.cmp(&b.0));
-        out.dedup_by(|a, b| a.0 == b.0);
+        for pair in out.windows(2) {
+            assert_ne!(pair[0].0, pair[1].0, "two fixtures share a name");
+        }
         for (name, value) in &mut out {
             assert!(
                 !name.contains(['/', '\\', ' ']),
