@@ -35,6 +35,9 @@
     <Compile Include="..\TokenBar.App\CostSurfaceProjection.cs" Link="CostSurfaceProjection.cs" />
     <Compile Include="..\TokenBar.App\ModelsLineage.cs" Link="ModelsLineage.cs" />
     <Compile Include="..\TokenBar.App\AppViews.cs" Link="AppViews.cs" />
+    <!-- The device overlay's request decisions (which pages a lens asks for,
+         the clients argument): pure, but they take the lens enum above. -->
+    <Compile Include="..\TokenBar.App\DeviceOverlayRequests.cs" Link="DeviceOverlayRequests.cs" />
     <!-- Settings copy shared word for word with macOS: SettingsWindow.cs
          compiles under no test project. -->
     <Compile Include="..\TokenBar.App\SettingsCopy.cs" Link="SettingsCopy.cs" />
