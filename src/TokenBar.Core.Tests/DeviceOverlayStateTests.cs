@@ -1009,7 +1009,8 @@ public class DeviceOverlayStateTests : IDisposable
         DeviceOverlayState.ResetSingleFlightForTesting();
         clock.Advance(DeviceOverlayState.RetryDelay);
         Assert.True(Pump(() => !overlay.RetryPendingForTesting));
-        SameList([C.BusyData.Localized(Name, Age)], overlay.StatusLines(AppView.Overview, null, null));
+        // the clock moved 65 s, so the age is read at its time
+        SameList([C.BusyData.Localized(Name, Format.RelativeTime((ulong)T0, clock.Now))], overlay.StatusLines(AppView.Overview, null, null));
     }
 
     // ---- DR2A review rounds ----------------------------------------------------
