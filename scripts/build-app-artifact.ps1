@@ -580,7 +580,11 @@ $publishZipBudgetByModeRid = @{
     # Lite arm64 43506642 (2026-08 baselines + ~5%).
     "Full|win-x64"   = [int64]84444771   # measured 80423591 + ~5%
     "Full|win-arm64" = [int64]80388965   # measured 76560919 + ~5%
-    "Lite|win-x64"   = [int64]48780726   # measured 46457834 + ~5%
+    # Lite|win-x64 re-baselined 2026-11-23 (PR #296, SA-4f Settings -> Devices
+    # page and agent lifecycle): main 867ef21c measured 48771452, 9 KB under
+    # the old budget after the SA-4 slices; this PR measured 48814758 (+43 KB).
+    # Previous: 48780726 (measured 46457834 + ~5%).
+    "Lite|win-x64"   = [int64]51255496   # measured 48814758 + ~5%
     "Lite|win-arm64" = [int64]46397643   # measured 44188231 + ~5%
 }
 $budgetKey = "{0}|{1}" -f $DeploymentMode, $Rid

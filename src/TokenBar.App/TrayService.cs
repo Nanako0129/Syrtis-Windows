@@ -122,6 +122,8 @@ public sealed class TrayService : IDisposable
             // Queue the clear and wait for it, at most 300 ms, before
             // teardown (macOS AppDelegate.swift :468-495).
             _discord.Quit(TimeSpan.FromMilliseconds(300));
+            // tb_remote_stop can take 15 s; exit waits at most StopBound.
+            RemoteAgentLifecycle.Shared?.Stop(RemoteAgentLifecycle.StopBound);
             Dispose();
             Microsoft.UI.Xaml.Application.Current.Exit();
         };

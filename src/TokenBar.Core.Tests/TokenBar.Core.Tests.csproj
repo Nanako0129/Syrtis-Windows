@@ -42,6 +42,12 @@
          UI-free, but it takes the lens enum above. Built only by tests until
          SA-4f/4g wire it. -->
     <Compile Include="..\TokenBar.App\DeviceOverlayState.cs" Link="DeviceOverlayState.cs" />
+    <!-- Settings → Devices (SA-4f): the page's model, its copy and the agent
+         lifecycle are UI-free; SettingsWindow.Devices.cs and the WinRT
+         clipboard adapter compile under no test project. -->
+    <Compile Include="..\TokenBar.App\DevicesModel.cs" Link="DevicesModel.cs" />
+    <Compile Include="..\TokenBar.App\DevicesCopy.cs" Link="DevicesCopy.cs" />
+    <Compile Include="..\TokenBar.App\RemoteAgentLifecycle.cs" Link="RemoteAgentLifecycle.cs" />
     <!-- Settings copy shared word for word with macOS: SettingsWindow.cs
          compiles under no test project. -->
     <Compile Include="..\TokenBar.App\SettingsCopy.cs" Link="SettingsCopy.cs" />
