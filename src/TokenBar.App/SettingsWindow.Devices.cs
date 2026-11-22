@@ -100,6 +100,12 @@ public sealed partial class SettingsWindow
         public string PeersSignature { get; set; } = "?";
         public List<(RemotePeer Peer, StackPanel Line)> StatusLines { get; } = [];
         public StackPanel LinkControls { get; } = new() { Spacing = 6 };
+        /// <summary>The paste box and Link button, built once and never
+        /// re-parented: moving the button that is raising Click (and the
+        /// focused box) to a new panel crashed the app in CoreMessagingXP
+        /// (188, 2026-11-23). Only its Visibility changes.</summary>
+        public StackPanel LinkRow { get; } = new() { Orientation = Orientation.Horizontal, Spacing = 8 };
+        public StackPanel LinkExtra { get; } = new() { Spacing = 6 };
         public DevicesPairing? LinkShown { get; set; }
         public PasswordBox Paste { get; } = new()
         {
@@ -185,7 +191,7 @@ public sealed partial class SettingsWindow
         body.Children.Add(page.ManageError);
         share.Children.Add(body);
         page.Root.Children.Add(InfoSection(
-            DevicesCopy.ShareSection, DevicesCopy.ShareSummary, DevicesCopy.ShareInfoRows, share));
+            DevicesCopy.ShareSection.Localized(), DevicesCopy.ShareSummary, DevicesCopy.ShareInfoRows, share));
 
         // ── (B) Scan scope ──────────────────────────────────────────────
         page.Scope.Children.Add(SectionHeader(DevicesCopy.ScopeSection.Localized()));
@@ -198,6 +204,10 @@ public sealed partial class SettingsWindow
         var linked = new StackPanel { Spacing = 6 };
         linked.Children.Add(page.PeerRows);
         linked.Children.Add(Caption(DevicesCopy.LinkAnother));
+        page.LinkRow.Children.Add(page.Paste);
+        page.LinkRow.Children.Add(page.Link);
+        page.LinkControls.Children.Add(page.LinkRow);
+        page.LinkControls.Children.Add(page.LinkExtra);
         linked.Children.Add(page.LinkControls);
         page.Link.Click += async (_, _) =>
         {
@@ -207,7 +217,7 @@ public sealed partial class SettingsWindow
         };
         page.Paste.PasswordChanged += (_, _) => page.Link.IsEnabled = page.Paste.Password.Length > 0;
         page.Linked.Children.Add(InfoSection(
-            DevicesCopy.LinkedSection, DevicesCopy.LinkedSummary, DevicesCopy.LinkedInfoRows, linked));
+            DevicesCopy.LinkedSection.Localized(), DevicesCopy.LinkedSummary, DevicesCopy.LinkedInfoRows, linked));
         page.Root.Children.Add(page.Linked);
 
         RenderDevices();
@@ -716,19 +726,9 @@ public sealed partial class SettingsWindow
         }
 
         page.LinkShown = pairing;
-        var into = page.LinkControls;
-        // The PasswordBox and Link button are kept controls: detach before clearing.
+        var into = page.LinkExtra;
         into.Children.Clear();
-        if (page.Paste.Parent is Panel old)
-        {
-            old.Children.Remove(page.Paste);
-        }
-
-        if (page.Link.Parent is Panel oldLink)
-        {
-            oldLink.Children.Remove(page.Link);
-        }
-
+        page.LinkRow.Visibility = Visibility.Collapsed; // shown again by the default branch
         switch (pairing.Kind)
         {
             case PairingKind.Waiting when pairing.Claim is { } claim:
@@ -764,11 +764,8 @@ public sealed partial class SettingsWindow
                 into.Children.Add(new ProgressRing { IsActive = true, Width = 16, Height = 16, HorizontalAlignment = HorizontalAlignment.Left });
                 break;
             default:
-                var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+                page.LinkRow.Visibility = Visibility.Visible;
                 page.Link.IsEnabled = page.Paste.Password.Length > 0;
-                row.Children.Add(page.Paste);
-                row.Children.Add(page.Link);
-                into.Children.Add(row);
                 if (pairing.Kind == PairingKind.Linked)
                 {
                     into.Children.Add(Hint(DevicesCopy.LinkedLine.Localized()));
