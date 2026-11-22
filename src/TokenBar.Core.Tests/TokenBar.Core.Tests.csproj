@@ -145,6 +145,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The 80 Rust-produced remote fixtures (bytes the shipping Rust wrote);
+         RemoteFixtureTests decodes every one and counts them. -->
+    <None Update="Fixtures\remote\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Include="..\..\crosscheck\fixtures\provider-quota-pace-v3.json"
           Link="Fixtures\provider-quota-pace-v3.json"
           CopyToOutputDirectory="PreserveNewest" />

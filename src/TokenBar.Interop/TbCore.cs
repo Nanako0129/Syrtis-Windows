@@ -12,7 +12,9 @@ public sealed class TbCoreException(string message) : Exception(message);
 /// exactly once, wrapped in the envelope {"ok":true,"data":…} /
 /// {"ok":false,"err":…} (tb_probe keeps its legacy top-level shape,
 /// {"ok":true,"messages":N,"opencodeDb":{…}}; see <see cref="OpenCodeDbReport"/>).
-/// All calls are blocking — invoke off the UI thread; AgentUsage() is also
+/// Errors are the Rust fixed class strings, plus the C#-only
+/// <c>timezoneUnavailable</c> from the four *Devices wrappers (even for a
+/// local-only selection). All calls are blocking — invoke off the UI thread; AgentUsage() is also
 /// network-bound (~30s worst case).
 /// </summary>
 public static class TbCore
@@ -279,6 +281,184 @@ public static class TbCore
     /// <summary>Whether Cursor desktop's state.vscdb exists (metadata only).</summary>
     public static bool CursorPresent() =>
         Unwrap<CursorPresence>(NativeMethods.tb_cursor_present()).Present;
+
+    // ---- Remote-usage agent (ctb.h). EVERY call below blocks: never call on
+    // the UI thread (RemotePairPoll up to 960 s, no cancellation). Errors
+    // throw TbCoreException whose Message is the fixed class string
+    // (notRunning, invalid, unsupported, sourceContextUnavailable, panic, ...).
+    // The *Devices wrappers add one C#-only class, timezoneUnavailable.
+
+    /// <summary>Start the agent on its real root (<c>home_override</c> is
+    /// always NULL; anything else is <c>unsupported</c>). Blocking.</summary>
+    public static RemoteAgentStatus RemoteStart() =>
+        Unwrap<RemoteAgentStatus>(NativeMethods.tb_remote_start(null));
+
+    /// <summary>Blocking.</summary>
+    public static RemoteAgentStatus RemoteStop() =>
+        Unwrap<RemoteAgentStatus>(NativeMethods.tb_remote_stop());
+
+    /// <summary>Blocking.</summary>
+    public static RemoteAgentStatus RemoteStatus() =>
+        Unwrap<RemoteAgentStatus>(NativeMethods.tb_remote_status());
+
+    /// <summary>Blocking.</summary>
+    public static void RemoteSetSharing(bool enabled) =>
+        Nothing(NativeMethods.tb_remote_sharing_set(enabled ? 1 : 0));
+
+    /// <summary>Blocking. <paramref name="nodeLabel"/> null = none.</summary>
+    public static RemoteAgentStatus RemoteListenConfigure(string host, int port, string? nodeLabel) =>
+        Unwrap<RemoteAgentStatus>(NativeMethods.tb_remote_listen_configure(host, port, nodeLabel));
+
+    /// <summary>Blocking.</summary>
+    public static RemoteScopeDisclosure RemoteScopeDisclosure() =>
+        Unwrap<RemoteScopeDisclosure>(NativeMethods.tb_remote_scope_disclosure());
+
+    /// <summary>Approve the scope the owner was shown. Pass the
+    /// <see cref="RemoteScopeDisclosure.OwnerInputsSha256"/> of that
+    /// disclosure, exactly: no default, no disclosure read here, no retry. A
+    /// mismatch throws <c>invalid</c> and writes nothing (R1/R4). Blocking.</summary>
+    public static void RemoteScopeApprove(string ownerInputsSha256) =>
+        Nothing(NativeMethods.tb_remote_scope_approve(ownerInputsSha256));
+
+    /// <summary>The result's <c>PairUrl</c> is a secret: never log it. Blocking.</summary>
+    public static RemoteOffer RemoteOfferCreate(long ttlSeconds) =>
+        Unwrap<RemoteOffer>(NativeMethods.tb_remote_offer_create(ttlSeconds));
+
+    /// <summary>Blocking.</summary>
+    public static void RemoteOfferCancel(string offerId) =>
+        Nothing(NativeMethods.tb_remote_offer_cancel(offerId));
+
+    /// <summary>Blocking.</summary>
+    public static IReadOnlyList<RemotePending> RemotePendingList() =>
+        Unwrap<IReadOnlyList<RemotePending>>(NativeMethods.tb_remote_pending_list());
+
+    /// <summary>By id, never by list index (R5); v1 of the protocol always
+    /// uses SAS generation 1. Blocking.</summary>
+    public static void RemoteApprove(string pendingId, long sasGeneration = 1) =>
+        Nothing(NativeMethods.tb_remote_approve(pendingId, sasGeneration));
+
+    /// <summary>By id, never by list index (R5). Blocking.</summary>
+    public static void RemoteReject(string pendingId, long sasGeneration = 1) =>
+        Nothing(NativeMethods.tb_remote_reject(pendingId, sasGeneration));
+
+    /// <summary>Blocking.</summary>
+    public static IReadOnlyList<RemoteGrant> RemoteGrants() =>
+        Unwrap<IReadOnlyList<RemoteGrant>>(NativeMethods.tb_remote_grants());
+
+    /// <summary>Blocking.</summary>
+    public static void RemoteRevoke(string grantId) =>
+        Nothing(NativeMethods.tb_remote_revoke(grantId));
+
+    /// <summary>Where <see cref="RemotePairClaim"/> would connect; parses
+    /// only. Blocking.</summary>
+    public static RemotePairDestination RemotePairDestination(string pairUrl) =>
+        Unwrap<RemotePairDestination>(NativeMethods.tb_remote_pair_destination(pairUrl));
+
+    /// <summary>Blocking (connects).</summary>
+    public static RemoteClaim RemotePairClaim(string pairUrl) =>
+        Unwrap<RemoteClaim>(NativeMethods.tb_remote_pair_claim(pairUrl));
+
+    /// <summary>Blocks up to 960 s waiting for the producer's approval, no
+    /// cancellation: never on the UI thread.</summary>
+    public static RemotePaired RemotePairPoll(long handle) =>
+        Unwrap<RemotePaired>(NativeMethods.tb_remote_pair_poll(handle));
+
+    /// <summary>Blocking.</summary>
+    public static IReadOnlyList<RemotePeer> RemotePeers() =>
+        Unwrap<IReadOnlyList<RemotePeer>>(NativeMethods.tb_remote_peers());
+
+    /// <summary>Blocking.</summary>
+    public static void RemotePeerRemove(string producerStatic) =>
+        Nothing(NativeMethods.tb_remote_peer_remove(producerStatic));
+
+    // ---- Device-aware pages. Blocking (Refresh pulls every selected
+    // producer). The timezone is always this process's, as an IANA id. Every
+    // *Devices wrapper can throw TbCoreException "timezoneUnavailable": a
+    // C#-only class (not from Rust), raised before the native call even for a
+    // local-only selection (see LocalIanaTimeZoneId).
+
+    public static DeviceAwarePayload<UsagePayload> GraphDevices(
+        string? year, DeviceSelection selection, DeviceFetchMode mode) =>
+        DecodeDevices<UsagePayload>(NativeMethods.tb_graph_devices(
+            year, SelectionJson(selection), LocalIanaTimeZoneId(), ModeString(mode)));
+
+    public static DeviceAwarePayload<ModelReport> ModelReportDevices(
+        string? year, DeviceSelection selection, DeviceFetchMode mode) =>
+        DecodeDevices<ModelReport>(NativeMethods.tb_model_report_devices(
+            year, SelectionJson(selection), LocalIanaTimeZoneId(), ModeString(mode)));
+
+    public static DeviceAwarePayload<HourlyReport> HourlyReportDevices(
+        string? year, IReadOnlyList<string>? clients, DeviceSelection selection, DeviceFetchMode mode) =>
+        DecodeDevices<HourlyReport>(NativeMethods.tb_hourly_report_devices(
+            year, JoinClients(clients), SelectionJson(selection), LocalIanaTimeZoneId(), ModeString(mode)));
+
+    public static DeviceAwarePayload<AgentsReport> AgentsReportDevices(
+        string? year, IReadOnlyList<string>? clients, DeviceSelection selection, DeviceFetchMode mode) =>
+        DecodeDevices<AgentsReport>(NativeMethods.tb_agents_report_devices(
+            year, JoinClients(clients), SelectionJson(selection), LocalIanaTimeZoneId(), ModeString(mode)));
+
+    /// <summary>The page body and the device keys, both read from the one
+    /// <c>data</c> object. Pure; split out for the fixture tests.</summary>
+    public static DeviceAwarePayload<T> DecodeDeviceEnvelope<T>(string json)
+    {
+        var data = DecodeEnvelope<JsonElement>(json);
+        var body = data.Deserialize<T>(JsonOpts)
+            ?? throw new TbCoreException("FFI envelope 'data' decoded to null");
+        var overlay = data.Deserialize<DeviceOverlay>(JsonOpts)
+            ?? throw new TbCoreException("FFI envelope 'data' decoded to null");
+        return new DeviceAwarePayload<T>(
+            body, overlay.Devices, overlay.DuplicateWarning, overlay.Saturated, overlay.RemoteRangeLimited);
+    }
+
+    private static DeviceAwarePayload<T> DecodeDevices<T>(nint ptr) => DecodeDeviceEnvelope<T>(TakeString(ptr));
+
+    private static string SelectionJson(DeviceSelection selection) =>
+        JsonSerializer.Serialize(selection, JsonOpts);
+
+    private static string ModeString(DeviceFetchMode mode) =>
+        mode == DeviceFetchMode.Cached ? "cached" : "refresh";
+
+    /// <summary>The IANA id of <paramref name="zone"/> (default: the local
+    /// zone), which Rust needs: a Windows id would make the core mark every
+    /// producer <c>incompatible</c>. An IANA-id zone is returned as is;
+    /// otherwise the Windows id is converted through ICU. When conversion is
+    /// impossible, or Windows DST adjustment is off for a zone whose IANA
+    /// counterpart observes DST, this THROWS <see cref="TbCoreException"/>
+    /// <c>timezoneUnavailable</c> rather than guess a zone (a wrong one would
+    /// merge two zones' hour slots).</summary>
+    public static string LocalIanaTimeZoneId(TimeZoneInfo? zone = null)
+    {
+        if (zone is null)
+        {
+            // TimeZoneInfo.Local is cached for the process; Rust reads the
+            // current system zone on every call, so re-read it here.
+            TimeZoneInfo.ClearCachedData();
+            zone = TimeZoneInfo.Local;
+        }
+
+        if (zone.HasIanaId)
+        {
+            return zone.Id;
+        }
+
+        if (TimeZoneInfo.TryConvertWindowsIdToIanaId(zone.Id, out var iana) && !string.IsNullOrEmpty(iana))
+        {
+            // "Adjust for daylight saving time" off: Windows runs the zone on
+            // standard time all year while the IANA zone would shift, so Rust
+            // would bucket hours differently from this PC. Refuse.
+            if (!zone.SupportsDaylightSavingTime &&
+                TimeZoneInfo.FindSystemTimeZoneById(iana).SupportsDaylightSavingTime)
+            {
+                throw new TbCoreException("timezoneUnavailable");
+            }
+
+            return iana;
+        }
+
+        throw new TbCoreException("timezoneUnavailable");
+    }
+
+    private static void Nothing(nint ptr) => Unwrap<JsonElement>(ptr);
 
     /// <summary>
     /// Decodes the standard FFI envelope, returning the payload or throwing

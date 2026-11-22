@@ -102,6 +102,76 @@ internal static partial class NativeMethods
     [LibraryImport(Lib)]
     internal static partial nint tb_cursor_present();
 
+    // Remote-usage agent and device-aware pages (ctb.h). All block.
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_remote_start(string? homeOverride);
+
+    [LibraryImport(Lib)]
+    internal static partial nint tb_remote_stop();
+
+    [LibraryImport(Lib)]
+    internal static partial nint tb_remote_status();
+
+    [LibraryImport(Lib)]
+    internal static partial nint tb_remote_sharing_set(int enabled);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_remote_listen_configure(string host, int port, string? nodeLabel);
+
+    [LibraryImport(Lib)]
+    internal static partial nint tb_remote_scope_disclosure();
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_remote_scope_approve(string ownerInputsSha256);
+
+    [LibraryImport(Lib)]
+    internal static partial nint tb_remote_offer_create(long ttlSeconds);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_remote_offer_cancel(string offerId);
+
+    [LibraryImport(Lib)]
+    internal static partial nint tb_remote_pending_list();
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_remote_approve(string pendingId, long sasGeneration);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_remote_reject(string pendingId, long sasGeneration);
+
+    [LibraryImport(Lib)]
+    internal static partial nint tb_remote_grants();
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_remote_revoke(string grantId);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_remote_pair_destination(string pairUrl);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_remote_pair_claim(string pairUrl);
+
+    [LibraryImport(Lib)]
+    internal static partial nint tb_remote_pair_poll(long handle);
+
+    [LibraryImport(Lib)]
+    internal static partial nint tb_remote_peers();
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_remote_peer_remove(string producerStatic);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_graph_devices(string? year, string devicesJson, string timezone, string mode);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_model_report_devices(string? year, string devicesJson, string timezone, string mode);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_hourly_report_devices(string? year, string? clients, string devicesJson, string timezone, string mode);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint tb_agents_report_devices(string? year, string? clients, string devicesJson, string timezone, string mode);
+
     [LibraryImport(Lib)]
     internal static partial void tb_free(nint ptr);
 }
