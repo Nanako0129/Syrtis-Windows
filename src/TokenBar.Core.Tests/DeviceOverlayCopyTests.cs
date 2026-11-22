@@ -93,6 +93,13 @@ public class DeviceOverlayStatusTests : IDisposable
             Line(Row("unavailable", null, data: false, id: "peers", label: null)));
     }
 
+    [Fact] // :24043-24044 pin: lastGood with no reason says "no new data" with the age, else the stale sentence
+    public void LastGoodSaysNoNewDataWithTheAgeElseFallsBackToStale()
+    {
+        Assert.Equal(C.LastGood.Localized(Name, Age), Line(Row("lastGood")));
+        Assert.Equal(C.Stale.Localized(Name), Line(Row("lastGood", data: false)));
+    }
+
     [Fact] // :24059
     public void UnavailableWithNoReasonIsNoDataYet() =>
         Assert.Equal(C.NoDataYet.Localized(Name), Line(Row("unavailable", null, data: false)));
@@ -188,6 +195,10 @@ public class DeviceOverlayStatusTests : IDisposable
             ("lastGood with time, no reason", SRow("lastGood"), true, false, C.ShortDot.Orange, C.ShortFrom.Localized(age)),
             ("fresh, older than ConnectedFor", SRow("fresh", null, T0 - 600), true, false, C.ShortDot.Grey,
                 C.ShortFrom.Localized(Format.RelativeTime((ulong)(T0 - 600), Now))),
+            ("fresh, exactly ConnectedFor old (not greater)", SRow("fresh", null, T0 - 300), true, false, C.ShortDot.Green,
+                C.ShortConnectedAt.Localized(Format.RelativeTime((ulong)(T0 - 300), Now))),
+            ("fresh, one second past ConnectedFor", SRow("fresh", null, T0 - 301), true, false, C.ShortDot.Grey,
+                C.ShortFrom.Localized(Format.RelativeTime((ulong)(T0 - 301), Now))),
             ("unavailable, no reason", SRow("unavailable", null, null), true, false, C.ShortDot.Orange, C.ShortNoData.Localized()),
             ("no row, selected", null, true, false, C.ShortDot.Orange, C.ShortNoData.Localized()),
             ("no row, in flight", null, true, true, C.ShortDot.Progress, C.ShortUpdating.Localized()),
@@ -228,6 +239,22 @@ public class DeviceOverlayStatusTests : IDisposable
         Assert.Equal(direct, snap.SettingsStatus(Peer(), Now));
         Assert.Equal(direct, Short(snap.Rows[1]));
         Assert.Equal(C.ShortUnreachable.Localized(C.TailFrom.Localized(Age)), direct.Text);
+    }
+
+    [Fact] // macOS Equatable: equal contents are equal, a changed row is not
+    public void SnapshotsCompareByContent()
+    {
+        DeviceOverlaySnapshot Make(string state) => new(
+            [SRow(state)], new Dictionary<string, bool> { [Fp] = true }, false,
+            new Dictionary<string, string> { [Fp] = "n" });
+        var a = Make("fresh");
+        var b = Make("fresh");
+        Assert.Equal(a, b);
+        Assert.Equal(a.GetHashCode(), b.GetHashCode());
+        Assert.NotEqual(a, Make("stale"));
+        Assert.NotEqual(a, a with { InFlight = true });
+        Assert.NotEqual(a, a with { Selection = new Dictionary<string, bool> { [Fp] = false } });
+        Assert.NotEqual(a, a with { Names = new Dictionary<string, string>() });
     }
 
     [Fact] // :24189-24195
@@ -475,42 +502,42 @@ public class DeviceOverlayCopyTableTests : IDisposable
 
     public void Dispose() => Load("en");
 
-    private sealed record Lit(string Key, string Arg0, string? Arg1, string En, string Hant);
+    private sealed record Lit(string Key, string Arg0, string? Arg1, string En, string Hant, string Hans);
 
     // Fixed name "Studio" and fixed time "5m ago" (count 3 for the two count
     // keys); one row for every key with a placeholder, expected strings typed
     // out in full.
     private static readonly Lit[] Literals =
     [
-        new(DeviceOverlayCopy.DeviceCount, "3", null, "3 devices", "3 台裝置"),
-        new(DeviceOverlayCopy.LastGood, "Studio", "5m ago", "Studio: no new data this time. Showing older data (last updated 5m ago).", "Studio：這次沒有取得新資料，顯示的是舊資料（上次更新：5m ago）。"),
-        new(DeviceOverlayCopy.Stale, "Studio", null, "Studio: showing older data. The time of its last update isn't known.", "Studio：顯示的是舊資料，不知道上次更新的時間。"),
-        new(DeviceOverlayCopy.Unavailable, "Studio", null, "Studio has no data to show.", "Studio 沒有可顯示的資料。"),
-        new(DeviceOverlayCopy.OverLimit, "Studio", null, "Studio has too much data to include.", "Studio 的資料量太大，無法納入。"),
-        new(DeviceOverlayCopy.Refused, "Studio", null, "Studio refused the request. Check Devices in Settings.", "Studio 拒絕了這個請求。請到「設定」的「裝置」查看。"),
-        new(DeviceOverlayCopy.InvalidReply, "Studio", null, "Studio sent a reply Syrtis couldn't use.", "Studio 回傳的內容 Syrtis 無法使用。"),
-        new(DeviceOverlayCopy.Incompatible, "Studio", null, "Studio can't answer this request. It may need an update.", "Studio 無法回應這個請求，可能需要更新。"),
-        new(DeviceOverlayCopy.GettingUsage, "Studio", null, "◌ Getting usage from Studio…", "◌ 正在向 Studio 取得用量…"),
-        new(DeviceOverlayCopy.GettingUsageFirstScan, "Studio", null, "◌ Getting usage from Studio… The first time needs to scan its records, about 1 minute", "◌ 正在向 Studio 取得用量…首次需要掃描紀錄，約 1 分鐘"),
-        new(DeviceOverlayCopy.CostIncomplete, "Studio", null, "The cost for Studio may be incomplete (its price data is incomplete). Tokens and message counts are included in the totals.", "Studio 的費用可能不完整（那台的價格資料不齊）。token 與訊息數已合計。"),
-        new(DeviceOverlayCopy.UnreachableData, "Studio", "5m ago", "Can't reach Studio. Make sure it has Syrtis open and is on the same network. Showing data from 5m ago.", "連不上 Studio。請確認那台有開 Syrtis 而且在同一個網路。顯示的是 5m ago的資料。"),
-        new(DeviceOverlayCopy.UnreachableNoData, "Studio", null, "No data from Studio yet. Can't reach it. Make sure it has Syrtis open and is on the same network.", "還沒有 Studio 的資料。連不上那台，請確認它有開 Syrtis 而且在同一個網路。"),
-        new(DeviceOverlayCopy.BusyData, "Studio", "5m ago", "Studio is busy for now. Showing data from 5m ago.", "Studio 暫時忙碌。顯示的是 5m ago的資料。"),
-        new(DeviceOverlayCopy.BusyDataRetry, "Studio", "5m ago", "Studio is busy for now and will be retried in 1 minute. Showing data from 5m ago.", "Studio 暫時忙碌，1 分鐘後自動再試。顯示的是 5m ago的資料。"),
-        new(DeviceOverlayCopy.BusyNoData, "Studio", null, "No data from Studio yet. It is busy for now.", "還沒有 Studio 的資料。那台暫時忙碌。"),
-        new(DeviceOverlayCopy.BusyNoDataRetry, "Studio", null, "No data from Studio yet. It is busy for now and will be retried in 1 minute.", "還沒有 Studio 的資料。那台暫時忙碌，1 分鐘後自動再試。"),
-        new(DeviceOverlayCopy.Stopped, "Studio", null, "Studio stopped sharing. Reconnect it in Settings → Devices.", "Studio 已停止分享。到「設定 → 裝置」重新連結。"),
-        new(DeviceOverlayCopy.ErrorData, "Studio", "5m ago", "Studio couldn't answer this request. Showing data from 5m ago.", "Studio 無法回應這次請求。顯示的是 5m ago的資料。"),
-        new(DeviceOverlayCopy.ErrorNoData, "Studio", null, "No data from Studio yet. It couldn't answer this request.", "還沒有 Studio 的資料。那台無法回應這次請求。"),
-        new(DeviceOverlayCopy.NoDataYet, "Studio", null, "No data from Studio yet.", "還沒有 Studio 的資料。"),
-        new(DeviceOverlayCopy.Combined, "3", null, "3 devices combined", "3 台裝置合計"),
-        new(DeviceOverlayCopy.UpdatedAt, "Studio", null, "Updated Studio", "更新於 Studio"),
-        new(DeviceOverlayCopy.ShortConnectedAt, "Studio", null, "Connected · updated Studio", "已連線 · Studio更新"),
-        new(DeviceOverlayCopy.ShortUnreachable, "Studio", null, "Can't reach · Studio", "連不上 · Studio"),
-        new(DeviceOverlayCopy.ShortBusy, "Studio", null, "Busy for now · Studio", "暫時忙碌 · Studio"),
-        new(DeviceOverlayCopy.ShortError, "Studio", null, "Can't answer · Studio", "無法回應 · Studio"),
-        new(DeviceOverlayCopy.ShortFrom, "Studio", null, "Showing data from Studio", "顯示 Studio的資料"),
-        new(DeviceOverlayCopy.TailFrom, "Studio", null, "showing data from Studio", "顯示 Studio的資料"),
+        new(DeviceOverlayCopy.DeviceCount, "3", null, "3 devices", "3 台裝置", "3 台设备"),
+        new(DeviceOverlayCopy.LastGood, "Studio", "5m ago", "Studio: no new data this time. Showing older data (last updated 5m ago).", "Studio：這次沒有取得新資料，顯示的是舊資料（上次更新：5m ago）。", "Studio：这次没有取得新数据，显示的是旧数据（上次更新：5m ago）。"),
+        new(DeviceOverlayCopy.Stale, "Studio", null, "Studio: showing older data. The time of its last update isn't known.", "Studio：顯示的是舊資料，不知道上次更新的時間。", "Studio：显示的是旧数据，不知道上次更新的时间。"),
+        new(DeviceOverlayCopy.Unavailable, "Studio", null, "Studio has no data to show.", "Studio 沒有可顯示的資料。", "Studio 没有可显示的数据。"),
+        new(DeviceOverlayCopy.OverLimit, "Studio", null, "Studio has too much data to include.", "Studio 的資料量太大，無法納入。", "Studio 的数据量太大，无法纳入。"),
+        new(DeviceOverlayCopy.Refused, "Studio", null, "Studio refused the request. Check Devices in Settings.", "Studio 拒絕了這個請求。請到「設定」的「裝置」查看。", "Studio 拒绝了这个请求。请到“设置”的“设备”查看。"),
+        new(DeviceOverlayCopy.InvalidReply, "Studio", null, "Studio sent a reply Syrtis couldn't use.", "Studio 回傳的內容 Syrtis 無法使用。", "Studio 返回的内容 Syrtis 无法使用。"),
+        new(DeviceOverlayCopy.Incompatible, "Studio", null, "Studio can't answer this request. It may need an update.", "Studio 無法回應這個請求，可能需要更新。", "Studio 无法响应这个请求，可能需要更新。"),
+        new(DeviceOverlayCopy.GettingUsage, "Studio", null, "◌ Getting usage from Studio…", "◌ 正在向 Studio 取得用量…", "◌ 正在向 Studio 获取用量…"),
+        new(DeviceOverlayCopy.GettingUsageFirstScan, "Studio", null, "◌ Getting usage from Studio… The first time needs to scan its records, about 1 minute", "◌ 正在向 Studio 取得用量…首次需要掃描紀錄，約 1 分鐘", "◌ 正在向 Studio 获取用量…首次需要扫描记录，约 1 分钟"),
+        new(DeviceOverlayCopy.CostIncomplete, "Studio", null, "The cost for Studio may be incomplete (its price data is incomplete). Tokens and message counts are included in the totals.", "Studio 的費用可能不完整（那台的價格資料不齊）。token 與訊息數已合計。", "Studio 的费用可能不完整（那台设备的价格数据不全）。token 数与消息数已合计。"),
+        new(DeviceOverlayCopy.UnreachableData, "Studio", "5m ago", "Can't reach Studio. Make sure it has Syrtis open and is on the same network. Showing data from 5m ago.", "連不上 Studio。請確認那台有開 Syrtis 而且在同一個網路。顯示的是 5m ago的資料。", "连不上 Studio。请确认那台设备已打开 Syrtis，并且在同一个网络。显示的是 5m ago的数据。"),
+        new(DeviceOverlayCopy.UnreachableNoData, "Studio", null, "No data from Studio yet. Can't reach it. Make sure it has Syrtis open and is on the same network.", "還沒有 Studio 的資料。連不上那台，請確認它有開 Syrtis 而且在同一個網路。", "还没有 Studio 的数据。连不上那台设备，请确认它已打开 Syrtis，并且在同一个网络。"),
+        new(DeviceOverlayCopy.BusyData, "Studio", "5m ago", "Studio is busy for now. Showing data from 5m ago.", "Studio 暫時忙碌。顯示的是 5m ago的資料。", "Studio 暂时忙碌。显示的是 5m ago的数据。"),
+        new(DeviceOverlayCopy.BusyDataRetry, "Studio", "5m ago", "Studio is busy for now and will be retried in 1 minute. Showing data from 5m ago.", "Studio 暫時忙碌，1 分鐘後自動再試。顯示的是 5m ago的資料。", "Studio 暂时忙碌，1 分钟后自动再试。显示的是 5m ago的数据。"),
+        new(DeviceOverlayCopy.BusyNoData, "Studio", null, "No data from Studio yet. It is busy for now.", "還沒有 Studio 的資料。那台暫時忙碌。", "还没有 Studio 的数据。那台设备暂时忙碌。"),
+        new(DeviceOverlayCopy.BusyNoDataRetry, "Studio", null, "No data from Studio yet. It is busy for now and will be retried in 1 minute.", "還沒有 Studio 的資料。那台暫時忙碌，1 分鐘後自動再試。", "还没有 Studio 的数据。那台设备暂时忙碌，1 分钟后自动再试。"),
+        new(DeviceOverlayCopy.Stopped, "Studio", null, "Studio stopped sharing. Reconnect it in Settings → Devices.", "Studio 已停止分享。到「設定 → 裝置」重新連結。", "Studio 已停止分享。到“设置 → 设备”重新连接。"),
+        new(DeviceOverlayCopy.ErrorData, "Studio", "5m ago", "Studio couldn't answer this request. Showing data from 5m ago.", "Studio 無法回應這次請求。顯示的是 5m ago的資料。", "Studio 无法响应这次请求。显示的是 5m ago的数据。"),
+        new(DeviceOverlayCopy.ErrorNoData, "Studio", null, "No data from Studio yet. It couldn't answer this request.", "還沒有 Studio 的資料。那台無法回應這次請求。", "还没有 Studio 的数据。那台设备无法响应这次请求。"),
+        new(DeviceOverlayCopy.NoDataYet, "Studio", null, "No data from Studio yet.", "還沒有 Studio 的資料。", "还没有 Studio 的数据。"),
+        new(DeviceOverlayCopy.Combined, "3", null, "3 devices combined", "3 台裝置合計", "3 台设备合计"),
+        new(DeviceOverlayCopy.UpdatedAt, "Studio", null, "Updated Studio", "更新於 Studio", "更新于 Studio"),
+        new(DeviceOverlayCopy.ShortConnectedAt, "Studio", null, "Connected · updated Studio", "已連線 · Studio更新", "已连接 · Studio更新"),
+        new(DeviceOverlayCopy.ShortUnreachable, "Studio", null, "Can't reach · Studio", "連不上 · Studio", "连不上 · Studio"),
+        new(DeviceOverlayCopy.ShortBusy, "Studio", null, "Busy for now · Studio", "暫時忙碌 · Studio", "暂时繁忙 · Studio"),
+        new(DeviceOverlayCopy.ShortError, "Studio", null, "Can't answer · Studio", "無法回應 · Studio", "无法响应 · Studio"),
+        new(DeviceOverlayCopy.ShortFrom, "Studio", null, "Showing data from Studio", "顯示 Studio的資料", "显示 Studio的数据"),
+        new(DeviceOverlayCopy.TailFrom, "Studio", null, "showing data from Studio", "顯示 Studio的資料", "显示 Studio的数据"),
     ];
 
     private static string Fill(string key, Lit lit) =>
@@ -533,6 +560,19 @@ public class DeviceOverlayCopyTableTests : IDisposable
         {
             Assert.Equal(lit.Hant, Fill(lit.Key, lit));
         }
+    }
+
+    [Fact] // two-argument keys prove the {0}/{1} order under the zh-Hans table too
+    public void EveryFormattedKeyFamilyFillsItsPlaceholdersInZhHans()
+    {
+        Load("zh-Hans");
+        foreach (var lit in Literals)
+        {
+            Assert.Equal(lit.Hans, Fill(lit.Key, lit));
+        }
+        Assert.Equal(
+            "连不上 Studio。请确认那台设备已打开 Syrtis，并且在同一个网络。显示的是 5m ago的数据。",
+            C.UnreachableData.Localized("Studio", "5m ago"));
     }
 
     [Fact]
@@ -562,6 +602,10 @@ public class DeviceOverlayCopyTableTests : IDisposable
             foreach (var key in new[] { C.UnreachableData, C.BusyData, C.BusyDataRetry, C.ErrorData })
             {
                 if (table[key].Contains("{1} ")) { spaced.Add($"{tag} {key[..20]}"); }
+            }
+            foreach (var key in new[] { C.ShortConnectedAt, C.ShortFrom, C.TailFrom })
+            {
+                if (table[key].Contains("{0} ")) { spaced.Add($"{tag} {key[..10]}"); }
             }
         }
         Assert.Empty(spaced);

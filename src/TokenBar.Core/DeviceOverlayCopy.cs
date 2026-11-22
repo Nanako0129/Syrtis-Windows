@@ -366,6 +366,21 @@ public sealed record DeviceOverlaySnapshot(
     bool InFlight,
     IReadOnlyDictionary<string, string> Names)
 {
+    // macOS compares snapshots by value (Equatable); a record would compare
+    // the collections by reference. ponytail: RemoteDevice.Totals inside a row
+    // is still compared by reference, rows hold none that differ in practice.
+    public bool Equals(DeviceOverlaySnapshot? other) =>
+        other is not null
+        && InFlight == other.InFlight
+        && Rows.SequenceEqual(other.Rows)
+        && Selection.Count == other.Selection.Count
+        && Selection.All(p => other.Selection.TryGetValue(p.Key, out var v) && v == p.Value)
+        && Names.Count == other.Names.Count
+        && Names.All(p => other.Names.TryGetValue(p.Key, out var v) && v == p.Value);
+
+    public override int GetHashCode() =>
+        HashCode.Combine(InFlight, Rows.Count, Selection.Count, Names.Count);
+
     public static DeviceOverlaySnapshot Empty { get; } = new(
         [], new Dictionary<string, bool>(), false, new Dictionary<string, string>());
 
