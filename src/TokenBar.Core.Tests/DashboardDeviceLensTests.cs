@@ -183,6 +183,13 @@ public class DashboardDeviceLensTests : IDisposable
         Assert.True(Idle(overlay));
         sync.Closed();
         Assert.False(sync.Sync(AppView.Daily, null, null, "")); // closed: nothing is asked
+        // Closed told the overlay nothing is on screen: a poll or a manual refresh
+        // that still arrives makes no device call.
+        var before = source.Calls.Count;
+        overlay.PollOnce();
+        overlay.ManualRefresh();
+        Quiet();
+        Assert.Equal(before, source.Calls.Count);
         clock.Advance(DeviceOverlayState.FreshWindow);
         sync.Opened();
         Assert.True(sync.Sync(AppView.Daily, null, null, ""));
@@ -344,6 +351,117 @@ public class DashboardDeviceLensTests : IDisposable
             Assert.Contains(FakeDeviceSource.RemoteClient, choice.Graph!.Summary.Clients);
             Assert.True(HoldsNoRemote(local)); // and the local object is untouched
         }
+    }
+
+    // ---- review round 1 -------------------------------------------------------------
+
+    private static UsagePayload Priced(PricingMode mode, CostCoverage coverage) =>
+        LocalPayload() with { Meta = LocalPayload().Meta with { PricingMode = mode, CostCoverage = coverage } };
+
+    [Fact] // the per-device card's cost is behind the cost gate like every other cost
+    public void ThePerDeviceCostIsBehindTheCostGate()
+    {
+        var row = new DeviceTotalsRow("d", "name", false, 3, 1_000, 1.5, null);
+        Assert.Equal(CostSurfaceProjection.Checking, DashboardDeviceLens.DeviceCostText(row, authoritative: false));
+        Assert.Equal(Format.Money(1_000, 1.5), DashboardDeviceLens.DeviceCostText(row, authoritative: true));
+        Assert.Equal("—", DashboardDeviceLens.DeviceCostText(row with { Cost = null }, authoritative: false));
+        Assert.NotEqual(Format.Usd(1.5), DashboardDeviceLens.DeviceCostText(row, authoritative: false));
+    }
+
+    [Fact] // authority is read from a graph page's pricing meta, never defaulted to true
+    public void CostAuthorityComesFromAGraphPageAndNeverDefaultsToTrue()
+    {
+        var best = Priced(PricingMode.BestEffort, CostCoverage.Complete);
+        var none = Priced(PricingMode.BestEffort, CostCoverage.None);
+        var local = Priced(PricingMode.LocalOnly, CostCoverage.Complete);
+        Assert.True(DashboardDeviceLens.Authoritative(best, null, null, localAuthoritative: false));
+        Assert.False(DashboardDeviceLens.Authoritative(none, null, null, localAuthoritative: true));
+        Assert.False(DashboardDeviceLens.Authoritative(local, null, null, localAuthoritative: true));
+
+        // A lens without a graph (Models, Hourly, Agents) reads the graph page the
+        // overlay holds for the same selection; the fake's pages are LocalOnly.
+        var (overlay, _, _, sync) = Open();
+        Assert.True(sync.Sync(AppView.Daily, null, null, ""));
+        Assert.True(Idle(overlay));
+        Assert.False(DashboardDeviceLens.Authoritative(null, overlay, null, localAuthoritative: true));
+        // Another year has no held page: this PC's answer, whichever it is.
+        Assert.False(DashboardDeviceLens.Authoritative(null, overlay, "1990", localAuthoritative: false));
+        Assert.True(DashboardDeviceLens.Authoritative(null, overlay, "1990", localAuthoritative: true));
+        Assert.False(DashboardDeviceLens.Authoritative(null, null, null, localAuthoritative: false));
+    }
+
+    [Fact] // a scan-roots change is a new key and asks again inside the 60 s window
+    public void ARootsGenerationChangeEnsuresAgainAndRefreshesInsideTheFreshWindow()
+    {
+        var (overlay, source, _, sync) = Open();
+        Assert.True(sync.Sync(AppView.Daily, null, null, "", rootsGeneration: 0));
+        Assert.True(Pump(() => source.Refreshes.Count == 1) && Idle(overlay));
+        Assert.False(sync.Sync(AppView.Daily, null, null, "", rootsGeneration: 0)); // same generation: deduplicated
+        Assert.True(sync.Sync(AppView.Daily, null, null, "", rootsGeneration: 1));
+        Assert.True(Pump(() => source.Refreshes.Count == 2) && Idle(overlay)); // no clock advance: not the 60 s window
+        Assert.Equal(2, sync.EnsureCalls);
+    }
+
+    [Fact] // a failed models fetch with no models page keeps nothing: no "last data" line
+    public void StatsWithAFailedModelsFetchAndNoModelsPageDoesNotClaimToShowLastData()
+    {
+        var (overlay, source, clock, sync) = Open();
+        source.Set(s => s.FailModels = true);
+        Assert.True(sync.Sync(AppView.Stats, null, null, ""));
+        Assert.True(Pump(() => overlay.Models?.Failed == true) && Idle(overlay));
+        var local = LocalPayload();
+        var choice = DashboardDeviceLens.Choose(
+            local, AppView.Stats, overlay, null, null, "", "", () => new ModelColorMap((ModelReport?)null));
+        Assert.Equal(LensSource.Overlay, choice.Source);
+        Assert.NotNull(choice.ModelsNote); // the fixed "model details aren't available" line instead
+        Assert.DoesNotContain(C.KeptLast.Localized(), choice.NoteLines);
+
+        // With a models page held and a later models refresh failing, it is kept data.
+        source.Set(s => s.FailModels = false);
+        clock.Advance(DeviceOverlayState.FreshWindow);
+        overlay.ManualRefresh();
+        Assert.True(Pump(() => overlay.Models?.Data is not null) && Idle(overlay));
+        source.Set(s => s.FailModels = true);
+        overlay.ManualRefresh();
+        Assert.True(Pump(() => overlay.Models?.Failed == true) && Idle(overlay));
+        Assert.NotNull(overlay.Models!.Data);
+        choice = DashboardDeviceLens.Choose(
+            local, AppView.Stats, overlay, null, null, "", "", () => new ModelColorMap((ModelReport?)null));
+        Assert.Contains(C.KeptLast.Localized(), choice.NoteLines);
+    }
+
+    [Fact] // a graph still loading beside a failed models fetch is Loading, not "couldn't load"
+    public void StatsWithTheGraphStillLoadingAndModelsFailedIsLoading()
+    {
+        var (overlay, source, _, sync) = Open();
+        source.Set(s => s.FailModels = true);
+        Assert.True(sync.Sync(AppView.Models, null, null, "")); // the models slot fails for this key
+        Assert.True(Pump(() => overlay.Models?.Failed == true) && Idle(overlay));
+        source.Set(s => s.HoldCached = true); // the graph's first answer is held back
+        Assert.True(sync.Sync(AppView.Stats, null, null, ""));
+        Assert.True(Pump(() => source.Calls.Any(c => c.Kind == "graph")));
+        var choice = DashboardDeviceLens.Choose(
+            LocalPayload(), AppView.Stats, overlay, null, null, "", "", () => new ModelColorMap((ModelReport?)null));
+        Assert.Equal(LensSource.Loading, choice.Source);
+    }
+
+    [Fact] // one model, one colour: the overlay's own map is what the lens is given
+    public void TheOverlaysColoursReachTheLensAndTheMergeFallsBackToThisPcsOnlyWithoutAModelsPage()
+    {
+        var (overlay, _, _, sync) = Open();
+        var localColors = new ModelColorMap((ModelReport?)null);
+        Assert.True(sync.Sync(AppView.Models, null, null, ""));
+        Assert.True(Pump(() => overlay.Models?.Data is not null) && Idle(overlay));
+        var models = DashboardDeviceLens.Choose(
+            LocalPayload(), AppView.Models, overlay, null, null, "", "", () => localColors);
+        Assert.Same(overlay.ModelsColors, models.Colors);
+        Assert.NotSame(localColors, models.Colors);
+
+        var held = overlay.OverviewMergeFor(null, null, "", "", localColors)!;
+        Assert.Same(overlay.ModelsColors, held.Colors);
+        Assert.True(sync.Sync(AppView.Overview, "1990", null, "")); // a key with no models page yet
+        var missing = overlay.OverviewMergeFor("1990", null, "", "", localColors)!;
+        Assert.Same(localColors, missing.Colors);
     }
 
     // ---- remote strings (R16) -------------------------------------------------------
