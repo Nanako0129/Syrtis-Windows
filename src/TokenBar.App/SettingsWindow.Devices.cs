@@ -822,11 +822,12 @@ public sealed partial class SettingsWindow
                 CloseButtonText = DevicesCopy.Cancel.Localized(),
                 DefaultButton = ContentDialogButton.Close,
             };
-            // Destructive: the system critical color on the primary button.
+            // Destructive: red text on the default button face (the maintainer's
+            // choice, 2026-11-23). The critical fill as the background with
+            // white text read as disabled on 188 (pale pink, grey-looking text).
             var style = new Style(typeof(Button));
-            style.Setters.Add(new Setter(Control.BackgroundProperty,
+            style.Setters.Add(new Setter(Control.ForegroundProperty,
                 Application.Current.Resources["SystemFillColorCriticalBrush"]));
-            style.Setters.Add(new Setter(Control.ForegroundProperty, new SolidColorBrush(Microsoft.UI.Colors.White)));
             dialog.PrimaryButtonStyle = style;
             return await dialog.ShowAsync() == ContentDialogResult.Primary;
         }
