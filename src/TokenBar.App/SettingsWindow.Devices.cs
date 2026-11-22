@@ -123,7 +123,9 @@ public sealed partial class SettingsWindow
             // A fixed width: in the horizontal row an auto-sized box grows with
             // the pasted invitation (hundreds of characters) and pushes Link off
             // the page (188, 2026-11-23: a real Pair URL left Link offscreen).
-            // 290 + 8 spacing + the Link button stay inside the 380 page.
+            // Observed on 188 (zh-Hant, 200% scale, default 900-wide window):
+            // 290 + 8 spacing + the Link button fit the 380 page. Not measured on
+            // a narrower window or larger text scaling.
             Width = DevicesPasteWidth,
             PlaceholderText = DevicesCopy.PastePlaceholder.Localized(),
         };
