@@ -74,6 +74,9 @@ public sealed partial class SettingsWindow
         public ComboBox Host { get; } = new() { MaxWidth = DevicesAddressWidth, MinWidth = 120, FontSize = 12 };
         public bool SyncingHost { get; set; }
         public string HostSignature { get; set; } = "";
+        /// <summary>The user picked an address not yet applied: no menu
+        /// rebuild until Apply or the next appear.</summary>
+        public bool HostPicked { get; set; }
         public string HostValue { get; set; } = "";
         public IReadOnlyList<string> Addresses { get; set; } = [];
         public TextBox Port { get; } = new() { Width = DevicesFieldWidth, FontSize = 12 };
@@ -101,9 +104,12 @@ public sealed partial class SettingsWindow
         public List<(RemotePeer Peer, StackPanel Line)> StatusLines { get; } = [];
         public StackPanel LinkControls { get; } = new() { Spacing = 6 };
         /// <summary>The paste box and Link button, built once and never
-        /// re-parented: moving the button that is raising Click (and the
-        /// focused box) to a new panel crashed the app in CoreMessagingXP
-        /// (188, 2026-11-23). Only its Visibility changes.</summary>
+        /// re-parented; only the row's Visibility changes. Observed on 188
+        /// (2026-11-23, build 1ac63b98): pressing Link when the render moved
+        /// these two controls into a new row ended the app in CoreMessagingXP;
+        /// on 203dfee8 (this layout) the same press did not. Buttons that are
+        /// only removed after their click (Create, Copy, Cancel invitation)
+        /// were pressed on 188 without a crash.</summary>
         public StackPanel LinkRow { get; } = new() { Orientation = Orientation.Horizontal, Spacing = 8 };
         public StackPanel LinkExtra { get; } = new() { Spacing = 6 };
         public DevicesPairing? LinkShown { get; set; }
@@ -160,8 +166,9 @@ public sealed partial class SettingsWindow
             if (!page.SyncingHost && page.Host.SelectedItem is ComboBoxItem { Tag: string host })
             {
                 page.HostValue = host;
-                // Deferred: the render may rebuild this ComboBox's items,
-                // which WinUI does not allow inside its own SelectionChanged.
+                // Rendered after this handler returns; it never rebuilds the
+                // items while HostPicked holds (see RenderHostChoices).
+                page.HostPicked = true;
                 _ = DispatcherQueue.TryEnqueue(RenderDevices);
             }
         };
@@ -171,6 +178,7 @@ public sealed partial class SettingsWindow
         body.Children.Add(Ui.Row(RowLabel(DevicesCopy.Port), page.Port));
         page.Apply.Click += async (_, _) =>
         {
+            page.HostPicked = false; // the menu may follow the stored address again
             var host = page.HostValue;
             var port = int.TryParse(page.Port.Text.Trim(), out var parsed) ? parsed : 0;
             var typed = page.Name.Text;
@@ -245,7 +253,6 @@ public sealed partial class SettingsWindow
             if (_devicesPage is { } page)
             {
                 page.Seeded = false;
-                page.HostSignature = ""; // re-seeded below: rebuild the menu once, drop-down closed
                 page.Addresses = ListenAddress.InterfaceAddresses();
             }
 
@@ -323,6 +330,8 @@ public sealed partial class SettingsWindow
         {
             // Fields are filled from the first running status, once per appear.
             page.HostValue = status.BindHost ?? "";
+            page.HostPicked = false;
+            page.HostSignature = ""; // rebuild once with the seeded selection
             page.Port.Text = status.BindPort?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "";
             page.Name.Text = status.NodeLabel ?? "";
             page.Seeded = true;
@@ -360,18 +369,19 @@ public sealed partial class SettingsWindow
         RenderLink(page, model);
     }
 
-    /// <summary>Rebuilds the menu only when the offered list or the stored
-    /// address changes, never for the user's own pick and never while the
-    /// drop-down is open: clearing a ComboBox's items around its selection
-    /// change crashed the app with E_UNEXPECTED in Microsoft.UI.Xaml (188,
-    /// 2026-11-23, picking a LAN address while "Choose an address" showed).
-    /// So "Choose an address" stays listed after a pick until the stored
-    /// address changes (Apply) or the page appears again.</summary>
+    /// <summary>Rebuilds the menu when the offered list or the stored
+    /// address changes, but never while the drop-down is open and never
+    /// between a pick and the next Apply or appear (HostPicked); a change
+    /// skipped then is picked up by a later render. Observed on 188
+    /// (2026-11-23, build 69585e59): picking a LAN address while "Choose an
+    /// address" showed, which rebuilt the items in the render queued by that
+    /// pick, ended the app with E_UNEXPECTED in Microsoft.UI.Xaml; the same
+    /// pick on 1ac63b98, which skips that rebuild, did not.</summary>
     private static void RenderHostChoices(DevicesPage page, IReadOnlyList<string> offered, string stored)
     {
         var current = page.HostValue;
         var signature = string.Join('\n', offered) + "\n|" + stored;
-        if (signature == page.HostSignature || page.Host.IsDropDownOpen)
+        if (signature == page.HostSignature || page.Host.IsDropDownOpen || page.HostPicked)
         {
             return;
         }
@@ -725,6 +735,7 @@ public sealed partial class SettingsWindow
             return;
         }
 
+        var wasBusy = page.LinkShown is { Kind: PairingKind.Previewing or PairingKind.Claiming };
         page.LinkShown = pairing;
         var into = page.LinkExtra;
         into.Children.Clear();
@@ -766,6 +777,10 @@ public sealed partial class SettingsWindow
             default:
                 page.LinkRow.Visibility = Visibility.Visible;
                 page.Link.IsEnabled = page.Paste.Password.Length > 0;
+                if (wasBusy)
+                {
+                    _ = page.Paste.Focus(FocusState.Programmatic);
+                }
                 if (pairing.Kind == PairingKind.Linked)
                 {
                     into.Children.Add(Hint(DevicesCopy.LinkedLine.Localized()));
