@@ -17,7 +17,9 @@ public enum DeviceFetchMode
 /// <summary>One <c>devices</c> row. Producer strings (Label, client names)
 /// are the owner's free text: show as plain text only. Defaults as macOS: a
 /// row without <c>costIncomplete</c> is false, without <c>everAnswered</c>
-/// true (the local row carries neither).</summary>
+/// true (the local row carries neither). <c>EverAnswered</c> is meaningful
+/// only for producer rows: the local row and the synthetic <c>peers</c> row
+/// carry no key and read the default.</summary>
 public sealed record RemoteDevice(
     string Id,
     string State,

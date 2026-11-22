@@ -93,10 +93,12 @@ public class RemoteFixtureTests
     {
         var states = new HashSet<string>();
         var reasons = new HashSet<string>();
-        foreach (var name in Names().Where(n => n.StartsWith("models-") || n.StartsWith("graph-")))
+        foreach (var name in Names().Where(n => n.StartsWith("models-") || n.StartsWith("graph-")
+            || n.StartsWith("hourly-") || n.StartsWith("agents-")))
         {
-            var p = name.StartsWith("models-")
-                ? TbCore.DecodeDeviceEnvelope<ModelReport>(Read(name)).Devices
+            var p = name.StartsWith("models-") ? TbCore.DecodeDeviceEnvelope<ModelReport>(Read(name)).Devices
+                : name.StartsWith("hourly-") ? TbCore.DecodeDeviceEnvelope<HourlyReport>(Read(name)).Devices
+                : name.StartsWith("agents-") ? TbCore.DecodeDeviceEnvelope<AgentsReport>(Read(name)).Devices
                 : TbCore.DecodeDeviceEnvelope<UsagePayload>(Read(name)).Devices;
             foreach (var d in p)
             {
@@ -205,14 +207,35 @@ public class RemoteFixtureTests
     [Fact]
     public void LocalZoneIsIanaOrThrowsFixedClass()
     {
+        string id;
         try
         {
-            var id = TbCore.LocalIanaTimeZoneId();
-            Assert.False(string.IsNullOrEmpty(id));
+            id = TbCore.LocalIanaTimeZoneId();
         }
         catch (TbCoreException ex)
         {
             Assert.Equal("timezoneUnavailable", ex.Message);
+            return;
         }
+
+        // A Windows id ("Taipei Standard Time") must fail here.
+        Assert.True(id.Contains('/') || id == "UTC" || id.StartsWith("Etc/"), id);
+        Assert.True(TimeZoneInfo.TryConvertIanaIdToWindowsId(id, out _) || id == "UTC" || id.StartsWith("Etc/"), id);
+    }
+
+    [Fact]
+    public void DstAdjustmentOffForADstZoneThrows()
+    {
+        // A Windows-style id whose zone has no adjustment rules, as when
+        // "Adjust for daylight saving time" is off; its IANA zone observes DST.
+        var noDst = TimeZoneInfo.CreateCustomTimeZone(
+            "Pacific Standard Time", TimeSpan.FromHours(-8), "x", "x");
+        Assert.False(noDst.SupportsDaylightSavingTime);
+        Assert.Equal("timezoneUnavailable",
+            Assert.Throws<TbCoreException>(() => TbCore.LocalIanaTimeZoneId(noDst)).Message);
+
+        // Control: a no-DST zone with a no-DST IANA counterpart still maps.
+        var tokyo = TimeZoneInfo.CreateCustomTimeZone("Tokyo Standard Time", TimeSpan.FromHours(9), "x", "x");
+        Assert.Equal("Asia/Tokyo", TbCore.LocalIanaTimeZoneId(tokyo));
     }
 }

@@ -12,7 +12,9 @@ public sealed class TbCoreException(string message) : Exception(message);
 /// exactly once, wrapped in the envelope {"ok":true,"data":…} /
 /// {"ok":false,"err":…} (tb_probe keeps its legacy top-level shape,
 /// {"ok":true,"messages":N,"opencodeDb":{…}}; see <see cref="OpenCodeDbReport"/>).
-/// All calls are blocking — invoke off the UI thread; AgentUsage() is also
+/// Errors are the Rust fixed class strings, plus the C#-only
+/// <c>timezoneUnavailable</c> from the four *Devices wrappers (even for a
+/// local-only selection). All calls are blocking — invoke off the UI thread; AgentUsage() is also
 /// network-bound (~30s worst case).
 /// </summary>
 public static class TbCore
@@ -284,6 +286,7 @@ public static class TbCore
     // the UI thread (RemotePairPoll up to 960 s, no cancellation). Errors
     // throw TbCoreException whose Message is the fixed class string
     // (notRunning, invalid, unsupported, sourceContextUnavailable, panic, ...).
+    // The *Devices wrappers add one C#-only class, timezoneUnavailable.
 
     /// <summary>Start the agent on its real root (<c>home_override</c> is
     /// always NULL; anything else is <c>unsupported</c>). Blocking.</summary>
@@ -369,7 +372,10 @@ public static class TbCore
         Nothing(NativeMethods.tb_remote_peer_remove(producerStatic));
 
     // ---- Device-aware pages. Blocking (Refresh pulls every selected
-    // producer). The timezone is always this process's, as an IANA id.
+    // producer). The timezone is always this process's, as an IANA id. Every
+    // *Devices wrapper can throw TbCoreException "timezoneUnavailable": a
+    // C#-only class (not from Rust), raised before the native call even for a
+    // local-only selection (see LocalIanaTimeZoneId).
 
     public static DeviceAwarePayload<UsagePayload> GraphDevices(
         string? year, DeviceSelection selection, DeviceFetchMode mode) =>
@@ -416,12 +422,20 @@ public static class TbCore
     /// zone), which Rust needs: a Windows id would make the core mark every
     /// producer <c>incompatible</c>. An IANA-id zone is returned as is;
     /// otherwise the Windows id is converted through ICU. When conversion is
-    /// impossible this THROWS <see cref="TbCoreException"/>
+    /// impossible, or Windows DST adjustment is off for a zone whose IANA
+    /// counterpart observes DST, this THROWS <see cref="TbCoreException"/>
     /// <c>timezoneUnavailable</c> rather than guess a zone (a wrong one would
     /// merge two zones' hour slots).</summary>
     public static string LocalIanaTimeZoneId(TimeZoneInfo? zone = null)
     {
-        zone ??= TimeZoneInfo.Local;
+        if (zone is null)
+        {
+            // TimeZoneInfo.Local is cached for the process; Rust reads the
+            // current system zone on every call, so re-read it here.
+            TimeZoneInfo.ClearCachedData();
+            zone = TimeZoneInfo.Local;
+        }
+
         if (zone.HasIanaId)
         {
             return zone.Id;
@@ -429,6 +443,15 @@ public static class TbCore
 
         if (TimeZoneInfo.TryConvertWindowsIdToIanaId(zone.Id, out var iana) && !string.IsNullOrEmpty(iana))
         {
+            // "Adjust for daylight saving time" off: Windows runs the zone on
+            // standard time all year while the IANA zone would shift, so Rust
+            // would bucket hours differently from this PC. Refuse.
+            if (!zone.SupportsDaylightSavingTime &&
+                TimeZoneInfo.FindSystemTimeZoneById(iana).SupportsDaylightSavingTime)
+            {
+                throw new TbCoreException("timezoneUnavailable");
+            }
+
             return iana;
         }
 
