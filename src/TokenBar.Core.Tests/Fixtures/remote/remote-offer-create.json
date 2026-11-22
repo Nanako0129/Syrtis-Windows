@@ -1,0 +1,8 @@
+{
+  "data": {
+    "expiresAt": 1622548800,
+    "offerId": "00000000000000000000000000000001",
+    "pairUrl": "syrtis://pair?offer=TEST-FIXTURE-NOT-A-REAL-OFFER"
+  },
+  "ok": true
+}

@@ -1,0 +1,19 @@
+{
+  "data": {
+    "activeGrantCount": 0,
+    "activeOfferCount": 0,
+    "bindHost": null,
+    "bindPort": 40001,
+    "identityFingerprint": "0000000000000001",
+    "lastScanAt": null,
+    "listening": false,
+    "nodeLabel": null,
+    "pendingCount": 0,
+    "running": true,
+    "scanStatus": "never",
+    "scopeApproved": false,
+    "sharingEnabled": false,
+    "sourceFamilies": []
+  },
+  "ok": true
+}

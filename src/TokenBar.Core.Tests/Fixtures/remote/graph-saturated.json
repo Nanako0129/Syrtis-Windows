@@ -1,0 +1,100 @@
+{
+  "data": {
+    "contributions": [
+      {
+        "clients": [
+          {
+            "client": "claude",
+            "cost": 0.0,
+            "messages": 1,
+            "modelId": "m",
+            "providerId": "p",
+            "tokens": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "input": 9223372036854775807,
+              "output": 0,
+              "reasoning": 0
+            }
+          }
+        ],
+        "date": "2021-03-10",
+        "intensity": 0,
+        "tokenBreakdown": {
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "input": 9223372036854775807,
+          "output": 0,
+          "reasoning": 0
+        },
+        "totals": {
+          "cost": 0.0,
+          "messages": 1,
+          "tokens": 9223372036854775807
+        },
+        "turnsByClient": {
+          "claude": 1
+        }
+      }
+    ],
+    "devices": [
+      {
+        "address": "10.0.0.1:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000001",
+        "label": "10.0.0.1:40001",
+        "lastSuccessAt": 1622548800,
+        "reason": null,
+        "state": "fresh",
+        "totals": [
+          {
+            "client": "claude",
+            "costUsd": 0.0,
+            "messages": 1,
+            "tokens": 9223372036854775807
+          }
+        ]
+      }
+    ],
+    "duplicateWarning": false,
+    "meta": {
+      "costCoverage": "none",
+      "dateRange": {
+        "end": "2021-03-10",
+        "start": "2021-03-10"
+      },
+      "generatedAt": "2021-06-01T12:00:00+00:00",
+      "pricingMode": "bestEffort",
+      "version": "tokenbar-core/0.1.0"
+    },
+    "remoteRangeLimited": false,
+    "saturated": true,
+    "summary": {
+      "activeDays": 1,
+      "averagePerDay": 0.0,
+      "clients": [
+        "claude"
+      ],
+      "maxCostInSingleDay": 0.0,
+      "models": [
+        "m"
+      ],
+      "totalCost": 0.0,
+      "totalDays": 1,
+      "totalTokens": 9223372036854775807
+    },
+    "years": [
+      {
+        "range": {
+          "end": "2021-03-10",
+          "start": "2021-03-10"
+        },
+        "totalCost": 0.0,
+        "totalTokens": 9223372036854775807,
+        "year": "2021"
+      }
+    ]
+  },
+  "ok": true
+}

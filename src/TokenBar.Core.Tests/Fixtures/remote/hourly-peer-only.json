@@ -1,0 +1,78 @@
+{
+  "data": {
+    "devices": [
+      {
+        "address": "127.0.0.1:40001",
+        "costIncomplete": true,
+        "everAnswered": true,
+        "id": "0000000000000001",
+        "label": "desk",
+        "lastSuccessAt": 1622548800,
+        "reason": null,
+        "state": "fresh",
+        "totals": null
+      }
+    ],
+    "duplicateWarning": false,
+    "entries": [
+      {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "clients": [
+          "claude"
+        ],
+        "cost": 0.0,
+        "hour": "2021-03-10 12:00",
+        "input": 7,
+        "messageCount": 1,
+        "models": [
+          "claude-3-5-sonnet"
+        ],
+        "output": 3,
+        "reasoning": 0,
+        "total": 10,
+        "turnCount": 0
+      },
+      {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "clients": [
+          "claude"
+        ],
+        "cost": 0.0,
+        "hour": "2021-03-12 12:00",
+        "input": 11,
+        "messageCount": 1,
+        "models": [
+          "claude-3-opus"
+        ],
+        "output": 1,
+        "reasoning": 0,
+        "total": 12,
+        "turnCount": 0
+      },
+      {
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "clients": [
+          "claude"
+        ],
+        "cost": 0.0,
+        "hour": "2021-03-14 12:00",
+        "input": 13,
+        "messageCount": 1,
+        "models": [
+          "claude-3-haiku"
+        ],
+        "output": 2,
+        "reasoning": 0,
+        "total": 15,
+        "turnCount": 0
+      }
+    ],
+    "remoteRangeLimited": false,
+    "saturated": false,
+    "totalCost": 0.0
+  },
+  "ok": true
+}

@@ -1,0 +1,25 @@
+{
+  "data": [
+    {
+      "createdAt": 1622548800,
+      "expiresAt": 1622548800,
+      "fingerprint": "0000000000000001",
+      "host": "127.0.0.1",
+      "nodeLabel": "desk",
+      "port": 40001,
+      "producerStatic": "0000000000000000000000000000000000000000000000000000000000000002",
+      "state": "active"
+    },
+    {
+      "createdAt": 1622548800,
+      "expiresAt": 1622548800,
+      "fingerprint": "0000000000000003",
+      "host": "127.0.0.1",
+      "nodeLabel": null,
+      "port": 40002,
+      "producerStatic": "0000000000000000000000000000000000000000000000000000000000000004",
+      "state": "revoked"
+    }
+  ],
+  "ok": true
+}

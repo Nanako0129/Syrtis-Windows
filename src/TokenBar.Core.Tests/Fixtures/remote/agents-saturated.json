@@ -1,0 +1,39 @@
+{
+  "data": {
+    "devices": [
+      {
+        "address": "10.0.0.1:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000001",
+        "label": "10.0.0.1:40001",
+        "lastSuccessAt": 1622548800,
+        "reason": null,
+        "state": "fresh",
+        "totals": null
+      }
+    ],
+    "duplicateWarning": false,
+    "entries": [
+      {
+        "agent": "Main",
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "clients": [
+          "claude"
+        ],
+        "cost": 0.0,
+        "input": 9223372036854775807,
+        "messages": 1,
+        "output": 0,
+        "reasoning": 0,
+        "total": 9223372036854775807
+      }
+    ],
+    "remoteRangeLimited": false,
+    "saturated": true,
+    "totalCost": 0.0,
+    "totalMessages": 1
+  },
+  "ok": true
+}

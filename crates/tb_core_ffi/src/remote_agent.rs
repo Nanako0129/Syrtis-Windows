@@ -22,7 +22,7 @@
 //! [`RemoteAgent`]; tests build their own instances.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     ffi::{c_char, OsString},
     fs,
     io::Write,
@@ -39,11 +39,13 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use syrtis_agent::{
     agent::{Agent, AgentConfig, AgentError, ScanRoots, ScannerSettings},
+    cache_store::CachedBody,
     control::{self, Command, ControlError},
     noise::StaticKey,
-    pairing::{ClaimAttempts, Claimed, ClientError, Clock, PairingClient, PeerCode},
+    pairing::{ClaimAttempts, Claimed, ClientError, Clock, GrantStatus, PairingClient, PeerCode},
     peer_store::{PeerRecord, PeerState},
-    runtime::{Options, RuntimeError},
+    report_peer::{FetchError, Fetched, ReportQuery},
+    runtime::{Options, PullError, RuntimeError},
     secure_fs::StorageError,
     security::{
         clock_status, decode_fixed_hex, hex_encode, parse_pair_url, GrantState, MemoryLedger,
@@ -112,10 +114,14 @@ struct Claims {
 /// thread (started with the first agent, ended when this is dropped).
 #[derive(Default)]
 pub(crate) struct RemoteAgent {
-    /// Read: every call that uses the running agent. Write: only what
-    /// replaces or removes the agent (a start or monitor period whose inputs
-    /// changed, `stop`). No call takes a second read guard while it holds
-    /// one.
+    /// Read: every call that uses the running agent, including a producer
+    /// pull for `remote_pages`, which holds it for the whole fetch. Write:
+    /// only what replaces or removes the agent (a start or monitor period
+    /// whose inputs changed, `stop`). A pull begun on one agent therefore
+    /// ends before that agent is replaced, so it never writes into the next
+    /// one; the cost is that a restart or stop waits for an in-flight fetch
+    /// (at most `FETCH_DEADLINE`), and calls made while it waits queue behind
+    /// it. No call takes a second read guard while it holds one.
     running: RwLock<Option<Running>>,
     /// Serializes `listen_configure`, which sends the frozen listen command,
     /// reads the stored address back and writes it again with the label.
@@ -124,6 +130,10 @@ pub(crate) struct RemoteAgent {
     configuring: Mutex<()>,
     claims: Mutex<Claims>,
     monitor: AtomicBool,
+    /// Unix seconds of the last fresh pull, by producer and query
+    /// ([`last_success_key`]). This process only: after a restart of the
+    /// process a cached body has no known age.
+    last_success: Mutex<HashMap<String, i64>>,
     /// Test seam: the next monitor spawn fails as if the OS refused a thread.
     #[cfg(test)]
     fail_monitor_spawn: AtomicBool,
@@ -132,6 +142,11 @@ pub(crate) struct RemoteAgent {
     /// closes.
     #[cfg(test)]
     listen_pause: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Test seam: runs after every `Runtime::pull` in [`Self::pull_peer`]
+    /// (counts the pulls; can revoke the grant between a code-2 refusal and
+    /// its Grant status).
+    #[cfg(test)]
+    pub(crate) after_pull: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// The process's agent, behind the `tb_remote_*` entry points.
@@ -730,6 +745,174 @@ impl RemoteAgent {
             .as_ref()
             .map(|current| body(&current.agent))
     }
+
+    // ------------------------------------------- for `remote_pages` ---
+
+    /// Receiver: every record of `peers.json`. `notRunning`, or the storage
+    /// class when the file cannot be read.
+    pub(crate) fn peer_records(&self) -> Result<Vec<PeerRecord>, String> {
+        self.with(|current| {
+            current
+                .agent
+                .runtime()
+                .peers()
+                .peers()
+                .map_err(storage_class)
+        })
+    }
+
+    /// `Runtime::pull` of one producer, under the agent's read lock for the
+    /// whole fetch: other calls go on beside it, and a restart (write lock)
+    /// waits until it ends, so it never writes into a newer agent. A fresh
+    /// pull stamps [`Self::last_success_at`]. A refusal with error code 2
+    /// (`CheckGrantStatus`) asks Grant status once and stores the answer
+    /// ([`check_grant`]). Only when that answer was `active` and stored
+    /// (`PeerStore::update_grant` succeeded) is the pull retried, once, with
+    /// the refreshed record, under the same read lock; the retry's result is
+    /// returned, a second code 2 included, as is. A code-2 refusal takes no
+    /// token from the producer's per-grant limit (`spec/report-peer-v1.md`,
+    /// "Limits"), so the retry is not refused as `busy` for it. `None`: no
+    /// agent runs.
+    pub(crate) fn pull_peer(
+        &self,
+        producer: &[u8; 32],
+        query: &ReportQuery,
+    ) -> Option<Result<Fetched, PullError>> {
+        let running = read(&self.running);
+        let current = running.as_ref()?;
+        let runtime = current.agent.runtime();
+        let pull = || {
+            let result = runtime.pull(producer, query);
+            #[cfg(test)]
+            {
+                let hook = lock(&self.after_pull).clone();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            result
+        };
+        let mut result = pull();
+        if matches!(result, Err(PullError::Fetch(FetchError::CheckGrantStatus)))
+            && check_grant(current, producer)
+        {
+            result = pull();
+        }
+        if result.is_ok() {
+            if let Ok(now) = current.inputs.clock.os_now_seconds() {
+                lock(&self.last_success).insert(last_success_key(producer, query), now);
+            }
+        }
+        Some(result)
+    }
+
+    /// `Runtime::last_good` of one producer; `None` for no agent, no body or
+    /// a storage error.
+    pub(crate) fn last_good_peer(
+        &self,
+        producer: &[u8; 32],
+        query: &ReportQuery,
+    ) -> Option<CachedBody> {
+        let running = read(&self.running);
+        let current = running.as_ref()?;
+        current
+            .agent
+            .runtime()
+            .last_good(producer, query)
+            .ok()
+            .flatten()
+    }
+
+    /// `Runtime::ever_answered`: the producer ever gave this receiver a body
+    /// (`false` too when no agent runs).
+    pub(crate) fn ever_answered(&self, producer: &[u8; 32]) -> bool {
+        read(&self.running)
+            .as_ref()
+            .is_some_and(|current| current.agent.runtime().ever_answered(producer))
+    }
+
+    /// The Unix seconds of the last fresh [`Self::pull_peer`] of this query
+    /// from this producer in this process.
+    pub(crate) fn last_success_at(&self, producer: &[u8; 32], query: &ReportQuery) -> Option<i64> {
+        lock(&self.last_success)
+            .get(&last_success_key(producer, query))
+            .copied()
+    }
+}
+
+fn last_success_key(producer: &[u8; 32], query: &ReportQuery) -> String {
+    format!(
+        "{}\0{}\0{}\0{}\0{}\0{}",
+        hex_encode(producer),
+        u16::from(query.endpoint),
+        query.start_date,
+        query.end_date_exclusive,
+        query.timezone,
+        query.clients.join("\0")
+    )
+}
+
+/// One Grant status request for the producer's record, built from that
+/// record (host, port, responder static), and the answer stored. Any failure
+/// changes nothing. True only when the answer was `active` and `update_grant`
+/// stored it: the record now carries the grant's current `authEpoch`, so a
+/// pull is worth retrying.
+fn check_grant(current: &Running, producer: &[u8; 32]) -> bool {
+    let runtime = current.agent.runtime();
+    let Some(record) = runtime.peers().peers().ok().and_then(|peers| {
+        peers
+            .into_iter()
+            .find(|peer| peer.responder_static == *producer)
+    }) else {
+        return false;
+    };
+    let Ok(identity) = runtime
+        .store()
+        .state()
+        .and_then(|state| StaticKey::from_state(&state))
+    else {
+        return false;
+    };
+    let ledger = MemoryLedger::default();
+    let client = PairingClient {
+        identity: &identity,
+        ledger: &ledger,
+        clock: &*current.inputs.clock,
+    };
+    // Grant status reads only the host, port and responder static.
+    let claimed = Claimed {
+        offer_id: [0; 16],
+        responder_static: record.responder_static,
+        host: record.host.clone(),
+        port: record.port,
+        pending_id: record.pending_id,
+        sas: String::new(),
+        expires_at_ms: record.expires_at_ms,
+        claimed_at: Duration::ZERO,
+    };
+    let Ok(answer) = client.grant_status(&claimed, record.grant_id) else {
+        return false;
+    };
+    let peers = runtime.peers();
+    match answer.state {
+        GrantStatus::Revoked => {
+            let _ = peers.set_state(producer, &record.grant_id, PeerState::Revoked);
+            false
+        }
+        GrantStatus::Expired => {
+            let _ = peers.set_state(producer, &record.grant_id, PeerState::Expired);
+            false
+        }
+        GrantStatus::Active => peers
+            .update_grant(
+                producer,
+                &record.grant_id,
+                answer.auth_epoch,
+                answer.source_scope_generation,
+                answer.expires_at_ms,
+            )
+            .is_ok(),
+    }
 }
 
 fn start_agent(inputs: &Inputs) -> Result<Agent, String> {
@@ -1040,7 +1223,7 @@ fn product_roots() -> Result<(PathBuf, ScanRoots), String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! Every agent here lives in a temp home below the temp directory (its
     //! long, non-verbatim form, as the agent's own `tests/support` makes
     //! one) that the test creates, with a protected owner-only DACL
@@ -1066,13 +1249,13 @@ mod tests {
 
     /// Injected time from the real wall clock; `sleep` advances it, so the
     /// receiver's poll and the grant's rate tokens do not wait.
-    struct TestClock {
+    pub(crate) struct TestClock {
         os: AtomicI64,
         mono: Mutex<Duration>,
     }
 
     impl TestClock {
-        fn new() -> Arc<Self> {
+        pub(crate) fn new() -> Arc<Self> {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -1083,7 +1266,7 @@ mod tests {
             })
         }
 
-        fn advance(&self, seconds: u64) {
+        pub(crate) fn advance(&self, seconds: u64) {
             *lock(&self.mono) += Duration::from_secs(seconds);
             self.os.fetch_add(seconds as i64, Ordering::SeqCst);
         }
@@ -1102,10 +1285,10 @@ mod tests {
     }
 
     /// A fresh temp home `<temp>\sa4c2-<pid>-<n>`; only it is removed.
-    struct TempHome(PathBuf);
+    pub(crate) struct TempHome(pub(crate) PathBuf);
 
     impl TempHome {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
             let path = temp_base().join(format!(
                 "sa4c2-{}-{}",
@@ -1214,10 +1397,10 @@ mod tests {
         }
     }
 
-    const PERIOD: Duration = Duration::from_millis(100);
+    pub(crate) const PERIOD: Duration = Duration::from_millis(100);
 
     /// The four scan roots, all inside `home`.
-    fn roots(home: &Path) -> ScanRoots {
+    pub(crate) fn roots(home: &Path) -> ScanRoots {
         let profile = home.join("profile");
         ScanRoots {
             xdg_data_home: profile.join(".local").join("share"),
@@ -1227,7 +1410,7 @@ mod tests {
         }
     }
 
-    fn inputs(home: &Path, clock: &Arc<TestClock>, settings: ScannerSettings) -> Inputs {
+    pub(crate) fn inputs(home: &Path, clock: &Arc<TestClock>, settings: ScannerSettings) -> Inputs {
         inputs_with(home, Arc::clone(clock) as Arc<dyn Clock>, settings)
     }
 
@@ -1244,7 +1427,7 @@ mod tests {
     }
 
     /// Starts `agent` over fixed inputs below `home`.
-    fn start_at(
+    pub(crate) fn start_at(
         agent: &Arc<RemoteAgent>,
         home: &Path,
         clock: &Arc<TestClock>,
@@ -1267,7 +1450,7 @@ mod tests {
         start_at(agent, &home.0, clock, settings)
     }
 
-    fn free_port() -> u16 {
+    pub(crate) fn free_port() -> u16 {
         TcpListener::bind(("127.0.0.1", 0))
             .unwrap()
             .local_addr()
@@ -1320,7 +1503,7 @@ mod tests {
         }
     }
 
-    fn digest(agent: &RemoteAgent) -> String {
+    pub(crate) fn digest(agent: &RemoteAgent) -> String {
         agent.scope_disclosure().unwrap()["ownerInputsSha256"]
             .as_str()
             .unwrap()
@@ -2018,7 +2201,7 @@ mod tests {
     /// A producer with an approved scope, sharing on and listening on
     /// loopback, paired to `receiver` through offer, claim, approve and
     /// poll. Returns the producer's static key.
-    fn pair_two(producer: &RemoteAgent, receiver: &RemoteAgent) -> [u8; 32] {
+    pub(crate) fn pair_two(producer: &RemoteAgent, receiver: &RemoteAgent) -> [u8; 32] {
         producer
             .listen_configure("127.0.0.1", free_port(), None)
             .unwrap();

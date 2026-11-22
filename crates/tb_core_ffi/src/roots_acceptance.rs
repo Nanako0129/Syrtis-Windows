@@ -42,6 +42,12 @@ fn run_in_child(test: &str, label: &str) {
 
 /// [`run_in_child`] for a test anywhere in the crate, by its full path.
 pub(crate) fn run_in_child_at(test_path: &str, label: &str) {
+    run_in_child_with(test_path, label, &[]);
+}
+
+/// [`run_in_child_at`] with extra test-harness arguments (`--ignored` runs an
+/// ignored test); returns the child's stdout.
+pub(crate) fn run_in_child_with(test_path: &str, label: &str, extra: &[&str]) -> String {
     let test = test_path;
     let root = fresh_root(label);
     let mut command = std::process::Command::new(std::env::current_exe().unwrap());
@@ -49,6 +55,7 @@ pub(crate) fn run_in_child_at(test_path: &str, label: &str) {
         .arg(test_path)
         .arg("--exact")
         .arg("--nocapture")
+        .args(extra)
         .env_clear()
         .env(CHILD_ROOT, &root)
         .env("HOME", &root)
@@ -77,6 +84,7 @@ pub(crate) fn run_in_child_at(test_path: &str, label: &str) {
         stdout.contains("test result: ok. 1 passed"),
         "child {test} did not run its body:\n{stdout}"
     );
+    stdout.into_owned()
 }
 
 pub(crate) fn child_root() -> Option<PathBuf> {

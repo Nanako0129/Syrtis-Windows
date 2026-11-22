@@ -1,0 +1,53 @@
+{
+  "data": {
+    "devices": [
+      {
+        "address": "127.0.0.1:40001",
+        "costIncomplete": true,
+        "everAnswered": true,
+        "id": "0000000000000001",
+        "label": "desk",
+        "lastSuccessAt": 1622548800,
+        "reason": "unreachable",
+        "state": "lastGood",
+        "totals": null
+      }
+    ],
+    "duplicateWarning": false,
+    "entries": [
+      {
+        "agent": "Main",
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "clients": [
+          "claude"
+        ],
+        "cost": 0.0,
+        "input": 18,
+        "messages": 2,
+        "output": 4,
+        "reasoning": 0,
+        "total": 22
+      },
+      {
+        "agent": "Claude Code Subagent",
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "clients": [
+          "claude"
+        ],
+        "cost": 0.0,
+        "input": 13,
+        "messages": 1,
+        "output": 2,
+        "reasoning": 0,
+        "total": 15
+      }
+    ],
+    "remoteRangeLimited": false,
+    "saturated": false,
+    "totalCost": 0.0,
+    "totalMessages": 3
+  },
+  "ok": true
+}

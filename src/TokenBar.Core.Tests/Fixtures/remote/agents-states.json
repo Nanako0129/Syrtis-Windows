@@ -1,0 +1,94 @@
+{
+  "data": {
+    "devices": [
+      {
+        "address": "10.0.0.1:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000001",
+        "label": "10.0.0.1:40001",
+        "lastSuccessAt": null,
+        "reason": null,
+        "state": "stale",
+        "totals": null
+      },
+      {
+        "address": "10.0.0.2:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000002",
+        "label": "10.0.0.2:40001",
+        "lastSuccessAt": 1622548800,
+        "reason": null,
+        "state": "stale",
+        "totals": null
+      },
+      {
+        "address": "10.0.0.3:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000003",
+        "label": "10.0.0.3:40001",
+        "lastSuccessAt": null,
+        "reason": null,
+        "state": "unavailable",
+        "totals": null
+      },
+      {
+        "address": "10.0.0.4:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000004",
+        "label": "10.0.0.4:40001",
+        "lastSuccessAt": 1622548800,
+        "reason": null,
+        "state": "overLimit",
+        "totals": null
+      },
+      {
+        "address": "10.0.0.5:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000005",
+        "label": "10.0.0.5:40001",
+        "lastSuccessAt": 1622548800,
+        "reason": null,
+        "state": "invalidReply",
+        "totals": null
+      },
+      {
+        "address": "10.0.0.6:40001",
+        "costIncomplete": false,
+        "everAnswered": true,
+        "id": "0000000000000006",
+        "label": "10.0.0.6:40001",
+        "lastSuccessAt": null,
+        "reason": null,
+        "state": "incompatible",
+        "totals": null
+      }
+    ],
+    "duplicateWarning": true,
+    "entries": [
+      {
+        "agent": "Main",
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "clients": [
+          "claude"
+        ],
+        "cost": 0.001,
+        "input": 5,
+        "messages": 1,
+        "output": 0,
+        "reasoning": 0,
+        "total": 5
+      }
+    ],
+    "remoteRangeLimited": false,
+    "saturated": false,
+    "totalCost": 0.001,
+    "totalMessages": 1
+  },
+  "ok": true
+}
