@@ -25,12 +25,17 @@ namespace TokenBar.Core;
 /// someone put on a child, and anything that is not a Velopack root.
 /// </para>
 /// <para>
-/// Known limit, measured with a write-restricted token against a test tree:
-/// an account whose grant on the root's parent includes FILE_DELETE_CHILD can
-/// still rename the whole protected root away while nothing inside it is
-/// open, and plant a new folder in its place. A file held open inside the
-/// root without delete sharing (the running app) makes that rename fail, for
-/// the owner too.
+/// Known limit, measured on 2026-11-21 with a write-restricted token of the
+/// current user against a test tree (the shape of a sandbox that runs as the
+/// user): this stops creating or overwriting files inside the root, but not
+/// deleting them, and not renaming the whole root away and planting a new
+/// folder in its place whenever the restricting SID may write to the root's
+/// parent — with or without FILE_DELETE_CHILD on that parent, because a
+/// write-restricted token checks its restricting SIDs only for write rights,
+/// and DELETE is granted through the user. A file held open inside the root
+/// without delete sharing (the running app) makes that rename fail, for the
+/// owner too. The remedy is outside the app: remove the sandbox's write grant
+/// from the profile, or do not start the sandbox in the home directory.
 /// </para>
 /// </summary>
 [SupportedOSPlatform("windows")]
