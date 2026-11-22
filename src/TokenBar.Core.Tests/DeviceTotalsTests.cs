@@ -110,7 +110,7 @@ public class DeviceTotalsTests : IDisposable
         Assert.Equal("12 msgs · 1.5K tokens · Updated 5m ago", DeviceTotals.Detail(row, Now));
         Assert.Equal("12 msgs · 1.5K tokens", DeviceTotals.Detail(row, Now, showsUpdated: false));
         Load("zh-Hant");
-        Assert.Equal("12 則訊息 · 1.5K tokens · 更新於 5m ago", DeviceTotals.Detail(row, Now));
+        Assert.Equal("12 則訊息 · 1.5K tokens · 更新於 5 分鐘前", DeviceTotals.Detail(row, Now));
     }
 
     [Fact] // :115-129 the dash branch; this PC has no update time (:24605)
