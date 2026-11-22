@@ -40,6 +40,11 @@ public sealed partial class DashboardView : UserControl
     private IReadOnlyList<string> SliceClients => _frame?.Clients ?? _selectedClients;
     private HashSet<string> SliceSet => _frame?.Set ?? _selectedSet;
     private UsageStats? SliceStats => _frame is { } frame ? frame.Stats : _selectedStats;
+
+    // One model, one colour: an overlay lens colours with the overlay's own map
+    // when it has one (Models, Stats, Overview's combined cards), else this PC's.
+    private ModelColorMap SliceColors(DashboardModel.Snapshot snapshot) =>
+        _frame?.Colors ?? new ModelColorMap(snapshot.Models, snapshot.ModelsRankByCost);
     private string _activeClientTab = ClientRegistry.OverviewTab;
     private string _clientTabsSignature = "";
     private string? _expandedDay; // Daily drill-down state
@@ -626,10 +631,10 @@ public sealed partial class DashboardView : UserControl
         }
     }
 
-    /// <summary>macOS tints the glyph orange in this state; one brush, made
-    /// once.</summary>
     private const double RefreshGlyphOpacity = 0.75; // the XAML's own value
 
+    /// <summary>macOS tints the glyph orange in this state; one brush, made
+    /// once.</summary>
     private static readonly SolidColorBrush StaleRestoreBrush =
         new(Microsoft.UI.Colors.Orange);
 
@@ -1345,6 +1350,7 @@ public sealed partial class DashboardView : UserControl
             };
         content = WithDeviceHeader(content);
         ContentHost.Content = content;
+        _overlayRenderSignature = OverlayRenderSignature();
         SyncGraph3DActivity();
         if (animated)
         {
@@ -1471,7 +1477,8 @@ public sealed partial class DashboardView : UserControl
         if (_overviewMerge is { } merged
             && DashboardDeviceLens.OverviewDevicesPage(_overlay, _model?.Year) is { } devices)
         {
-            stack.Children.Add(BuildDeviceCard(devices.Devices, merged.ClientIds));
+            stack.Children.Add(BuildDeviceCard(
+                devices.Devices, merged.ClientIds, CostSurfaceProjection.IsAuthoritative(devices.Payload)));
         }
 
         return stack;
@@ -1599,7 +1606,7 @@ public sealed partial class DashboardView : UserControl
             return holder;
         }
 
-        var colors = new ModelColorMap(snapshot.Models, snapshot.ModelsRankByCost);
+        var colors = SliceColors(snapshot);
         var metric = _chartMetric;
         var stats = SliceStats ?? new UsageStats(snapshot.Graph, SliceSet);
         var bars = DayBars.Build(
@@ -2484,8 +2491,7 @@ public sealed partial class DashboardView : UserControl
             return panel;
         }
 
-        var colors = new ModelColorMap(
-            snapshot.Models, snapshot.ModelsRankByCost);
+        var colors = SliceColors(snapshot);
         // From every row, not only the shown ones (macOS ModelBreakdownCard):
         // a collapsed card still labels a row whose other provider row is hidden.
         var repeated = listed.RepeatedModels();
@@ -2780,8 +2786,7 @@ public sealed partial class DashboardView : UserControl
     private UIElement BuildDaily(DashboardModel.Snapshot snapshot)
     {
         var panel = new StackPanel { Spacing = 6 };
-        var colors = new ModelColorMap(
-            snapshot.Models, snapshot.ModelsRankByCost);
+        var colors = SliceColors(snapshot);
         var days = DailyRows.Build(snapshot.Graph, SliceClients);
         if (days.Count == 0)
         {
@@ -2844,7 +2849,7 @@ public sealed partial class DashboardView : UserControl
     private UIElement BuildMonthly(DashboardModel.Snapshot snapshot)
     {
         var panel = new StackPanel { Spacing = 6 };
-        var colors = new ModelColorMap(snapshot.Models, snapshot.ModelsRankByCost);
+        var colors = SliceColors(snapshot);
         var months = MonthlyRows.Build(snapshot.Graph, SliceClients);
         if (months.Count == 0)
         {
@@ -3095,7 +3100,7 @@ public sealed partial class DashboardView : UserControl
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             name.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var disc = Ui.Disc(
-                new ModelColorMap(snapshot.Models, snapshot.ModelsRankByCost).Color(favorite.Provider, favorite.Model), 7);
+                SliceColors(snapshot).Color(favorite.Provider, favorite.Model), 7);
             disc.VerticalAlignment = VerticalAlignment.Center;
             name.Children.Add(disc);
             var text = Ui.MiddleText(favorite.Model, 11);

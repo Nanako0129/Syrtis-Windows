@@ -143,7 +143,9 @@ public static class DashboardDeviceLens
                     : (null, false);
                 if (page is null)
                 {
-                    return Missing<TLocal>(failed || modelsFailed);
+                    // The graph page decides: a failed models fetch beside a graph
+                    // that is still loading is Loading, not "couldn't load".
+                    return Missing<TLocal>(failed);
                 }
 
                 var ids = Ids(DeviceOverlayKind.Graph);
@@ -159,7 +161,10 @@ public static class DashboardDeviceLens
                     Models: part.Report, ModelsNote: part.Note,
                     Colors: part.Report is null ? null : overlay.ModelsColors,
                     Devices: page.Devices, PerDeviceCard: !stats,
-                    Notes: Lines(failed || modelsFailed, Note(page), Note(modelsPage)), DeviceCount: count);
+                    // "Showing the last data received" only for a page that is held:
+                    // a failed models fetch with no models page keeps nothing.
+                    Notes: Lines(failed || (modelsFailed && modelsPage is not null), Note(page), Note(modelsPage)),
+                    DeviceCount: count);
             }
         }
     }
@@ -179,6 +184,25 @@ public static class DashboardDeviceLens
 
     private static PageNote? Note<T>(DeviceAwarePayload<T>? page) =>
         page is null ? null : new(page.Devices, page.DuplicateWarning, page.Saturated, page.RemoteRangeLimited);
+
+    /// <summary>Whether costs the overlay shows may be stated. Read from the pricing
+    /// meta of the graph page: the lens's own, else the one the overlay holds for
+    /// the same selection and year (the Models, Hourly and Agents lenses fetch no
+    /// graph), else this PC's. Never assumed true: with pricing unavailable the
+    /// combined card says "Checking", and so must every surface beside it.</summary>
+    public static bool Authoritative(
+        UsagePayload? pageGraph, DeviceOverlayState? overlay, string? year, bool localAuthoritative)
+    {
+        if (pageGraph is not null) { return CostSurfaceProjection.IsAuthoritative(pageGraph); }
+        var held = overlay?.Visible(overlay.Graph, DeviceOverlayKind.Graph, year, null).Page;
+        return held is not null ? CostSurfaceProjection.IsAuthoritative(held.Payload) : localAuthoritative;
+    }
+
+    /// <summary>A per-device card row's cost, behind the same gate as every other
+    /// cost: a dash for a device with no part in the page, "Checking" while
+    /// costs may not be stated, else the money text of its tokens and cost.</summary>
+    public static string DeviceCostText(DeviceTotalsRow row, bool authoritative) =>
+        row.Cost is { } cost ? CostSurfaceProjection.CostText(row.Tokens ?? 0, cost, authoritative) : "—";
 
     /// <summary>Overview's per-device card reads the graph page's devices.</summary>
     public static DeviceAwarePayload<UsagePayload>? OverviewDevicesPage(DeviceOverlayState? overlay, string? year) =>
@@ -319,17 +343,20 @@ public sealed class DeviceOverlaySync
         if (_open) { _overlay.RefreshPeers(); }
     }
 
-    /// <summary>Ensures when the key (lens, year, clients argument, selection)
-    /// differs from the last one ensured. Returns whether it did.</summary>
-    public bool Sync(AppView view, string? year, string? singleClient, string hiddenRaw)
+    /// <summary>Ensures when the key (lens, year, clients argument, selection,
+    /// scan-roots generation) differs from the last one ensured. Returns whether
+    /// it did. <paramref name="rootsGeneration"/> (DashboardModel.RootsGeneration)
+    /// changes when this PC's scan roots changed, which makes this PC's share of
+    /// every page stale: the overlay then asks again whatever its 60 s window says.</summary>
+    public bool Sync(AppView view, string? year, string? singleClient, string hiddenRaw, int rootsGeneration = 0)
     {
         if (!_open) { return false; }
         var clients = DashboardDeviceLens.Clients(singleClient, hiddenRaw);
-        var key = $"{view}|{year}|{(clients is null ? "-" : string.Join(',', clients))}|{_overlay.Signature}";
+        var key = $"{view}|{year}|{(clients is null ? "-" : string.Join(',', clients))}|{_overlay.Signature}|{rootsGeneration}";
         if (key == _lastKey) { return false; }
         _lastKey = key;
         EnsureCalls++;
-        _overlay.Ensure(view, year, clients);
+        _overlay.Ensure(view, year, clients, rootsGeneration);
         return true;
     }
 }

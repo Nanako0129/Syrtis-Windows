@@ -29,7 +29,8 @@ public sealed partial class DashboardView
         IReadOnlyList<string> Clients,
         HashSet<string> Set,
         UsageStats? Stats,
-        string? ModelsNote = null);
+        string? ModelsNote = null,
+        ModelColorMap? Colors = null);
 
     private DeviceOverlayState? _overlay;
     private DeviceOverlaySync? _sync;
@@ -106,7 +107,7 @@ public sealed partial class DashboardView
     private void SyncOverlay() =>
         _ = _sync?.Sync(
             _view, _model?.Year, OverviewScope.SingleClient(_activeClientTab),
-            DashboardDeviceLens.HiddenRaw(AppSettings.Store));
+            DashboardDeviceLens.HiddenRaw(AppSettings.Store), _model?.RootsGeneration ?? 0);
 
     /// <summary>The queued handler of every overlay change.</summary>
     private void OnOverlayChanged()
@@ -125,15 +126,22 @@ public sealed partial class DashboardView
             return;
         }
 
-        var signature = DashboardDeviceLens.RenderSignature(
-            overlay, _view, _model?.Year, OverviewScope.SingleClient(_activeClientTab),
-            DashboardDeviceLens.HiddenRaw(AppSettings.Store));
-        if (signature != _overlayRenderSignature)
+        // RenderContent records the signature it drew, so a render for another
+        // reason (a lens switch) is not followed by a second one here, and a
+        // change that arrived since the last draw is not skipped.
+        if (OverlayRenderSignature() != _overlayRenderSignature)
         {
-            _overlayRenderSignature = signature;
             RenderContent(animated: false);
         }
     }
+
+    /// <summary>What the overlay contributes to the content on screen, or "" without one.</summary>
+    private string OverlayRenderSignature() =>
+        _overlay is { } overlay
+            ? DashboardDeviceLens.RenderSignature(
+                overlay, _view, _model?.Year, OverviewScope.SingleClient(_activeClientTab),
+                DashboardDeviceLens.HiddenRaw(AppSettings.Store))
+            : "";
 
     private void UpdateRateCaption() =>
         RateCaption.Text = "tok/min".Localized() + DashboardDeviceLens.LiveRateSuffix(_overlay);
@@ -288,15 +296,14 @@ public sealed partial class DashboardView
     }
 
     /// <summary>A throwaway copy of this PC's snapshot carrying the overlay's
-    /// pages. Cost authority follows the overlay's graph (its own pricing
-    /// meta); pages without a graph have none to read and state their costs.
-    /// <paramref name="replaceModels"/>: Models is the overlay's (possibly
+    /// pages. <paramref name="authoritative"/> comes from
+    /// <see cref="DashboardDeviceLens.Authoritative"/> (the overlay graph's own
+    /// pricing meta, never assumed). <paramref name="replaceModels"/>: Models is the overlay's (possibly
     /// absent) report; otherwise this PC's stays, for colours only.</summary>
     private static DashboardModel.Snapshot OverlaySnapshot(
         DashboardModel.Snapshot local, UsagePayload? graph, ModelReport? models, bool replaceModels,
-        HourlyReport? hourly = null, AgentsReport? agents = null)
+        bool authoritative, HourlyReport? hourly = null, AgentsReport? agents = null)
     {
-        var authoritative = graph is null || CostSurfaceProjection.IsAuthoritative(graph);
         var id = local.RequestId ?? default;
         var snapshot = local with
         {
@@ -338,12 +345,14 @@ public sealed partial class DashboardView
                     : DeviceOverlayCopy.Loading).Localized());
         }
 
+        var authoritative = DashboardDeviceLens.Authoritative(
+            choice.Graph, _overlay, _model?.Year, local.CostAuthoritative);
         var snapshot = OverlaySnapshot(
             local, choice.Graph, choice.Models, replaceModels: _view is AppView.Models or AppView.Stats,
-            choice.Hourly, choice.Agents);
+            authoritative, choice.Hourly, choice.Agents);
         var ids = choice.ClientIdList;
         var frame = new LensFrame(
-            snapshot, ids, ids.ToHashSet(StringComparer.Ordinal), choice.Stats, choice.ModelsNote);
+            snapshot, ids, ids.ToHashSet(StringComparer.Ordinal), choice.Stats, choice.ModelsNote, choice.Colors);
         var lens = WithFrame(frame, () => _view switch
         {
             AppView.Models => BuildModels(snapshot),
@@ -365,7 +374,7 @@ public sealed partial class DashboardView
         stack.Children.Add(lens);
         if (choice.PerDeviceCard && choice.Devices is { } devices)
         {
-            stack.Children.Add(BuildDeviceCard(devices, ids));
+            stack.Children.Add(BuildDeviceCard(devices, ids, authoritative));
         }
 
         return stack;
@@ -378,8 +387,12 @@ public sealed partial class DashboardView
         UIElement body;
         if (merge.Graph is { } graph)
         {
-            var snapshot = OverlaySnapshot(local, graph.Payload, merge.Models ?? local.Models, replaceModels: true);
-            var frame = new LensFrame(snapshot, merge.ClientIds, merge.ClientIds.ToHashSet(StringComparer.Ordinal), graph.Stats);
+            var snapshot = OverlaySnapshot(
+                local, graph.Payload, merge.Models ?? local.Models, replaceModels: true,
+                CostSurfaceProjection.IsAuthoritative(graph.Payload));
+            var frame = new LensFrame(
+                snapshot, merge.ClientIds, merge.ClientIds.ToHashSet(StringComparer.Ordinal), graph.Stats,
+                Colors: merge.Colors);
             body = WithFrame(frame, () => BuildUsageChartCard(snapshot));
         }
         else
@@ -397,9 +410,13 @@ public sealed partial class DashboardView
         switch (OverviewMerge.ModelsCard(merge.Models is not null, merge.ModelsFailed))
         {
             case OverviewMerge.ModelsCardState.Card:
-                var snapshot = OverlaySnapshot(local, merge.Graph?.Payload, merge.Models, replaceModels: true);
+                var snapshot = OverlaySnapshot(
+                    local, merge.Graph?.Payload, merge.Models, replaceModels: true,
+                    DashboardDeviceLens.Authoritative(
+                        merge.Graph?.Payload, _overlay, _model?.Year, local.CostAuthoritative));
                 var frame = new LensFrame(
-                    snapshot, merge.ModelClientIds, merge.ModelClientIds.ToHashSet(StringComparer.Ordinal), null);
+                    snapshot, merge.ModelClientIds, merge.ModelClientIds.ToHashSet(StringComparer.Ordinal), null,
+                    Colors: merge.Colors);
                 body = Ui.Card(title, WithFrame(frame, () => BuildModelRows(snapshot, collapsible: true)));
                 break;
             case OverviewMerge.ModelsCardState.Failed:
@@ -418,8 +435,12 @@ public sealed partial class DashboardView
         UIElement body;
         if (merge.Graph is { } graph)
         {
-            var snapshot = OverlaySnapshot(local, graph.Payload, merge.Models ?? local.Models, replaceModels: true);
-            var frame = new LensFrame(snapshot, merge.ClientIds, merge.ClientIds.ToHashSet(StringComparer.Ordinal), graph.Stats);
+            var snapshot = OverlaySnapshot(
+                local, graph.Payload, merge.Models ?? local.Models, replaceModels: true,
+                CostSurfaceProjection.IsAuthoritative(graph.Payload));
+            var frame = new LensFrame(
+                snapshot, merge.ClientIds, merge.ClientIds.ToHashSet(StringComparer.Ordinal), graph.Stats,
+                Colors: merge.Colors);
             body = Ui.Card("Streaks".Localized(), WithFrame(frame, () => BuildStreaks(snapshot)));
         }
         else
@@ -477,7 +498,8 @@ public sealed partial class DashboardView
     /// <summary>The "Per device" card: name, messages and tokens, time (this
     /// PC), the short status (other devices), cost. Remote names and figures
     /// are only text.</summary>
-    private UIElement BuildDeviceCard(IReadOnlyList<RemoteDevice> devices, IReadOnlyList<string> clientIds)
+    private UIElement BuildDeviceCard(
+        IReadOnlyList<RemoteDevice> devices, IReadOnlyList<string> clientIds, bool authoritative)
     {
         var rows = DeviceTotals.Rows(devices, clientIds, _overlay?.LearnedNames);
         var statusRows = _overlay?.Snapshot.Rows ?? devices;
@@ -496,7 +518,8 @@ public sealed partial class DashboardView
                     DeviceOverlayCopy.WorstRow(row.Id, statusRows), selected: true, inFlight, now)));
             }
 
-            var cost = Ui.Text(row.Cost is { } usd ? Format.Usd(usd) : "—", 11);
+            // Behind the cost gate like the combined card above it.
+            var cost = Ui.Text(DashboardDeviceLens.DeviceCostText(row, authoritative), 11);
             cost.VerticalAlignment = VerticalAlignment.Top;
             panel.Children.Add(Ui.Row(left, cost));
         }

@@ -280,6 +280,7 @@ public sealed class DashboardModel
     /// does, forced so an in-flight scan of the old roots cannot absorb it.</summary>
     private void OnCursorSyncDataChanged() => _dispatcher.TryEnqueue(() =>
     {
+        Interlocked.Increment(ref _rootsGeneration);
         Volatile.Write(ref _forceRequested, 1);
         RefreshSlow();
         RequestLazyRefresh();
@@ -309,6 +310,7 @@ public sealed class DashboardModel
 
         _dispatcher.TryEnqueue(() =>
         {
+            Interlocked.Increment(ref _rootsGeneration);
             Volatile.Write(ref _forceRequested, 1);
             RefreshSlow();
             RefreshQuota();
@@ -319,6 +321,15 @@ public sealed class DashboardModel
     public Snapshot? Current { get; private set; }
 
     public event Action? Updated;
+
+    private int _rootsGeneration;
+
+    /// <summary>Counts the changes of what this PC scans that force a graph
+    /// refresh (the extra Claude roots pushed, a Cursor takeover re-query). The
+    /// dashboard passes it to the device overlay, whose pages carry this PC's
+    /// share and are stale after one; the overlay holds nothing else of the
+    /// model.</summary>
+    public int RootsGeneration => Volatile.Read(ref _rootsGeneration);
 
     /// <summary>The 60 s slow tick fired (UI thread). The dashboard re-reads
     /// the linked-device list on it; nothing of the device overlay is held
