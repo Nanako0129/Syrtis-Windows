@@ -38,7 +38,20 @@ only its engine pin), and the revision macOS pins (syrtis #590). No
 `Cargo.toml`, parser identity, `CACHE_FORMAT_VERSION` or
 `RESOLVER_CONTRACT_VERSION` change, so nothing is re-parsed.
 
-MEASUREMENT_PLACEHOLDER
+Measured on the x64 test machine (2026-11-22) with the SA-4a method: release
+DLLs built from Syrtis-Windows `ba67ecd4` (engine `2378f31a`) and from this
+change (engine `d7a14751`), each run with a fresh `TOKSCALE_CONFIG_DIR`
+holding a copy of the live pricing files and `TOKSCALE_PRICING_CACHE_ONLY=1`,
+in the order old cold, new warm, new cold, old warm. All twelve outputs per
+run (`tb_refresh_graph`, `tb_model_report`, `tb_hourly_report`,
+`tb_agents_report` for all time, 2025 and 2026) are equal across all four
+runs once `generatedAt` is ignored and lists are compared as multisets: 31.1
+billion tokens, $16,103.66, six clients with data. A copy with one output
+token changed is reported as a difference. The live tokscale and app
+directories were unchanged. The live-rate tail and the window scan, the two
+callers that set `modified_after`, are not part of this comparison; they are
+covered by the engine's bounded-load tests and this repository's
+`usage_tail` and `window_usage` tests.
 
 ## Previous pin: `2378f31a`, engine PR #91 (remote scan roots on Windows)
 
