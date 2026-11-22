@@ -10,18 +10,57 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `2378f31a258b4875349a2d857338e3ed63fa60d8` |
-| TokenBar alignment | macOS pins `51047602` (Nanako0129/syrtis #574 moved it to `b0e2e5f4`, #575 to `51047602`). This pin is one engine PR ahead, #91, which only adds remote-scan entry points; macOS callers of the existing ones are unaffected |
-| Engine alignment | `51047602c7052f4c7a2ec0fc96967958e79aa829` → `2378f31a258b4875349a2d857338e3ed63fa60d8` (engine `main`; previous advance `e156d67c` → `51047602`) |
+| Reviewed pin | `d7a147512c3e404fa45f7e6783932fe42759e01c` |
+| TokenBar alignment | macOS pins the same commit `d7a14751` (Nanako0129/syrtis #590) |
+| Engine alignment | `2378f31a258b4875349a2d857338e3ed63fa60d8` → `d7a147512c3e404fa45f7e6783932fe42759e01c` (engine `main`; previous advance `51047602` → `2378f31a`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/2378f31a258b4875349a2d857338e3ed63fa60d8/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/d7a147512c3e404fa45f7e6783932fe42759e01c/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `2378f31a`, engine PR #91 (remote scan roots on Windows)
+## Current pin: `d7a14751`, engine PR #92 (bounded shard load, context-less parse)
+
+`2378f31a` → `d7a14751` is one first-parent merge, PR #92. The diff touches
+`src/lib.rs`, `src/message_cache.rs` and `UPSTREAM.md`. Inside
+`parse_all_messages_with_pricing_with_env_strategy` (the parse path that runs
+without a source context), a call that sets `modified_after` now loads only
+the source-message cache shards its pruned scan maps to
+(`SourceMessageCache::load_for_sources`) instead of every shard; parse output
+is the same. This app never takes that path: its one `modified_after` caller,
+the live-rate tail (`usage_tail.rs`), calls
+`parse_local_clients_with_source_context`, which opens the cache lazily
+through `open_from_root`, and the window scan (`window_usage.rs`) sets no
+`modified_after`. The bounded loader is therefore never used here. One thing
+the app does run differently: the lazy path's per-shard read body was moved
+into a new `read_shard` (same admit rules and rewrite handling by reading the
+code), and the `get` lookups gained a debug-only assertion that is inert when
+no bounded load is active. The four reports go through that lazy read path,
+so the comparison below exercises it.
+
+This is the revision Syrtis-Agent `36ce3828` pins (that agent revision changes
+no agent source; it moves its engine pin and the records that cite it) and
+the revision macOS pins (syrtis #590). No engine `Cargo.toml` or `Cargo.lock`,
+parser identity, `CACHE_FORMAT_VERSION` or `RESOLVER_CONTRACT_VERSION` change,
+so nothing is re-parsed.
+
+Measured on the x64 test machine (2026-11-22) with the SA-4a method: release
+DLLs built from Syrtis-Windows `ba67ecd4` (engine `2378f31a`) and from this
+change (engine `d7a14751`), each run with a fresh `TOKSCALE_CONFIG_DIR`
+holding a copy of the live pricing files and `TOKSCALE_PRICING_CACHE_ONLY=1`,
+in the order old cold, new warm, new cold, old warm. All twelve outputs per
+run (`tb_refresh_graph`, `tb_model_report`, `tb_hourly_report`,
+`tb_agents_report` for all time, 2025 and 2026) are equal across all four
+runs once `generatedAt` is ignored and lists are compared as multisets: 31.1
+billion tokens, $16,103.66, six clients with data. A copy with one output
+token changed is reported as a difference. The live tokscale and app
+directories were unchanged. The bounded loader itself is not reached from
+this app, so no test here exercises it; the engine's own bounded-load tests
+cover it.
+
+## Previous pin: `2378f31a`, engine PR #91 (remote scan roots on Windows)
 
 `51047602` → `2378f31a` is one first-parent merge, PR #91. The diff touches 3
 files: `src/source_context.rs`, `tests/remote_source_report.rs` and
@@ -58,7 +97,7 @@ codex, opencode, grok, antigravity-cli, dsh). A copy with one output token
 changed is reported as a difference. The live tokscale and app directories
 were unchanged.
 
-## Previous pin: `51047602`, engine PRs #89 and #90 (remote report lane)
+## Historical: `51047602`, engine PRs #89 and #90 (remote report lane)
 
 `e156d67c` → `51047602` is two first-parent merges, PRs #89 and #90. The diff
 touches 5 files: `src/remote_report.rs`, `src/pricing/mod.rs`, `src/lib.rs`,
