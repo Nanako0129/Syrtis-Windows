@@ -76,6 +76,11 @@ public partial class App : Application
         AppSettings.KeychainConsent.InstallComposedIfAnyGranted();
         StartCursorSync();
 
+        // The remote-usage agent, so sharing resumes after every restart. After
+        // StartClaudeExtraRoots: its start waits (off this thread) for that
+        // launch push, as macOS starts the agent after ExtraScanRoots.apply.
+        StartRemoteAgent();
+
         // And still the RunBeforeFirstFetch hook, so a stored "yes" is in the
         // core before the first agent-usage fetch too, whichever surface starts
         // it (the hook re-installs the same composed payload; idempotent).
@@ -755,14 +760,38 @@ public partial class App : Application
     /// before this, and TokenBar.Smoke never constructs a controller.</summary>
     private static void StartCursorSync()
     {
+        // An accepted configuration push changes what sharing scans
+        // (macOS CursorSync.swift :144); a refused one throws before this.
+        var io = Core.CursorSyncController.Native with
+        {
+            SetConfig = json =>
+            {
+                var config = Interop.TbCore.SetCursorSync(json);
+                RemoteAgentLifecycle.Shared?.InputsChanged();
+                return config;
+            },
+        };
         var controller = new Core.CursorSyncController(
-            Core.CursorSyncController.Native,
+            io,
             AppSettings.Store,
             Environment.GetCommandLineArgs(),
             DevLog.Write);
         Core.CursorSyncController.Shared = controller;
         controller.Reconfigure(refresh: false);
         _ = controller.ProbeCursorPresent();
+    }
+
+    /// <summary>Starts the embedded remote-usage agent on the thread pool
+    /// (<see cref="RemoteAgentLifecycle"/>); a failure is logged as its class
+    /// string only. Owner-input pushes restart it through
+    /// <see cref="RemoteAgentLifecycle.InputsChanged"/>; TrayService.QuitApp
+    /// stops it with a bound.</summary>
+    private static void StartRemoteAgent()
+    {
+        var agent = new RemoteAgentLifecycle(
+            Interop.TbCore.RemoteStart, Interop.TbCore.RemoteStop, DevLog.Write);
+        RemoteAgentLifecycle.Shared = agent;
+        agent.Launch(Core.ClaudeExtraRoots.AwaitLaunch);
     }
 
     private static void StartClaudeExtraRoots()
@@ -775,6 +804,9 @@ public partial class App : Application
             Interop.TbCore.SetExtraClaudeScanPaths,
             DevLog.Write);
         Core.ClaudeExtraRoots.Shared = pusher;
+        // A push that reached both setters changed what sharing scans
+        // (macOS ClaudeExtraRoots.swift :588).
+        pusher.Pushed += _ => RemoteAgentLifecycle.Shared?.InputsChanged();
         if (Core.ClaudeExtraRoots.Load(store).Count > 0)
         {
             Core.ClaudeExtraRoots.StartLaunch(pusher);
