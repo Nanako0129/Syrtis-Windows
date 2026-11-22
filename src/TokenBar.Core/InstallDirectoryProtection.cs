@@ -31,11 +31,12 @@ namespace TokenBar.Core;
 /// user): this stops creating or overwriting files inside the root, but not
 /// deleting them, and not renaming the whole root away and planting a new
 /// folder in its place whenever the restricting SID may write to the root's
-/// parent — with or without FILE_DELETE_CHILD on that parent, because a
-/// write-restricted token checks its restricting SIDs only for write rights,
-/// and DELETE is granted through the user. A file held open inside the root
-/// without delete sharing (the running app) makes that rename fail, for the
-/// owner too. The remedy is outside the app: remove the sandbox's write grant
+/// parent — with or without FILE_DELETE_CHILD on that parent. (Inferred, not
+/// measured separately: a write-restricted token checks its restricting SIDs
+/// only for write rights, and DELETE is granted through the user.) A data
+/// file held open inside the root without delete sharing made that rename
+/// fail, for the owner too; whether the running app's own open files do the
+/// same was not measured. The remedy is outside the app: remove the sandbox's write grant
 /// from the profile, or do not start the sandbox in the home directory.
 /// </para>
 /// <para>
