@@ -38,6 +38,10 @@
     <!-- The device overlay's request decisions (which pages a lens asks for,
          the clients argument): pure, but they take the lens enum above. -->
     <Compile Include="..\TokenBar.App\DeviceOverlayRequests.cs" Link="DeviceOverlayRequests.cs" />
+    <!-- The stateful device overlay (selection, polling, retry, single flight):
+         UI-free, but it takes the lens enum above. Built only by tests until
+         SA-4f/4g wire it. -->
+    <Compile Include="..\TokenBar.App\DeviceOverlayState.cs" Link="DeviceOverlayState.cs" />
     <!-- Settings copy shared word for word with macOS: SettingsWindow.cs
          compiles under no test project. -->
     <Compile Include="..\TokenBar.App\SettingsCopy.cs" Link="SettingsCopy.cs" />
