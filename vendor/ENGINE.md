@@ -21,22 +21,25 @@ app consumer advances its reviewed pin.
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `d7a14751`, engine PR #92 (bounded shard load for `modified_after`)
+## Current pin: `d7a14751`, engine PR #92 (bounded shard load, context-less parse)
 
 `2378f31a` → `d7a14751` is one first-parent merge, PR #92. The diff touches
-`src/lib.rs`, `src/message_cache.rs` and `UPSTREAM.md`. A parse that sets
-`LocalParseOptions.modified_after` now loads only the source-message cache
-shards its pruned scan maps to (`SourceMessageCache::load_for_sources`)
-instead of every shard; without `modified_after` nothing changes, and parse
-output is the same either way. In this app `modified_after` is set by the
-live-rate tail (`usage_tail.rs`) and the window scan (`window_usage.rs`), so
-those reads touch fewer shards; the Graph, Models, Hourly and Agents reports
-do not set it.
+`src/lib.rs`, `src/message_cache.rs` and `UPSTREAM.md`. Inside
+`parse_all_messages_with_pricing_with_env_strategy` (the parse path that runs
+without a source context), a call that sets `modified_after` now loads only
+the source-message cache shards its pruned scan maps to
+(`SourceMessageCache::load_for_sources`) instead of every shard; parse output
+is the same. This app never takes that path: its one `modified_after` caller,
+the live-rate tail (`usage_tail.rs`), calls
+`parse_local_clients_with_source_context`, which opens the cache lazily
+(`open_from_root`, unchanged), and the window scan (`window_usage.rs`) sets no
+`modified_after`. So this advance changes no runtime path here.
 
 This is the revision Syrtis-Agent `36ce3828` pins (that agent revision changes
-only its engine pin), and the revision macOS pins (syrtis #590). No
-`Cargo.toml`, parser identity, `CACHE_FORMAT_VERSION` or
-`RESOLVER_CONTRACT_VERSION` change, so nothing is re-parsed.
+no agent source; it moves its engine pin and the records that cite it) and
+the revision macOS pins (syrtis #590). No engine `Cargo.toml` or `Cargo.lock`,
+parser identity, `CACHE_FORMAT_VERSION` or `RESOLVER_CONTRACT_VERSION` change,
+so nothing is re-parsed.
 
 Measured on the x64 test machine (2026-11-22) with the SA-4a method: release
 DLLs built from Syrtis-Windows `ba67ecd4` (engine `2378f31a`) and from this
@@ -48,10 +51,9 @@ run (`tb_refresh_graph`, `tb_model_report`, `tb_hourly_report`,
 runs once `generatedAt` is ignored and lists are compared as multisets: 31.1
 billion tokens, $16,103.66, six clients with data. A copy with one output
 token changed is reported as a difference. The live tokscale and app
-directories were unchanged. The live-rate tail and the window scan, the two
-callers that set `modified_after`, are not part of this comparison; they are
-covered by the engine's bounded-load tests and this repository's
-`usage_tail` and `window_usage` tests.
+directories were unchanged. The bounded loader itself is not reached from
+this app, so no test here exercises it; the engine's own bounded-load tests
+cover it.
 
 ## Previous pin: `2378f31a`, engine PR #91 (remote scan roots on Windows)
 
