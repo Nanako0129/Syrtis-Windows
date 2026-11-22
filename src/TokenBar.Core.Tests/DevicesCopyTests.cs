@@ -216,18 +216,23 @@ public class DevicesCopyTests : IDisposable
         public int Stops;
         public readonly List<string> Log = [];
         public ManualResetEventSlim StopGate { get; } = new(true);
+        public ManualResetEventSlim StartGate { get; } = new(true);
+        public readonly List<string> Order = [];
         public string? StartError;
 
         public RemoteAgentLifecycle Make() => new(
             () =>
             {
                 Interlocked.Increment(ref Starts);
+                StartGate.Wait();
+                lock (Order) { Order.Add("start"); }
                 if (StartError is { } e) { throw new TbCoreException(e); }
                 return new RemoteAgentStatus(true);
             },
             () =>
             {
                 Interlocked.Increment(ref Stops);
+                lock (Order) { Order.Add("stop"); }
                 StopGate.Wait();
                 return new RemoteAgentStatus(false);
             },
@@ -279,6 +284,21 @@ public class DevicesCopyTests : IDisposable
         Assert.False(lifecycle.Stop(TimeSpan.FromMilliseconds(200)));
         Assert.InRange(watch.ElapsedMilliseconds, 150, 3000);
         agent.StopGate.Set();
+    }
+
+    [Fact] // review of #296: a stop during a running start runs after it, so the start cannot leave the agent up
+    public void AStopDuringAStartRunsAfterIt()
+    {
+        var agent = new Agent();
+        agent.StartGate.Reset();
+        var lifecycle = agent.Make();
+        lifecycle.Launch();
+        Assert.True(Eventually(() => Volatile.Read(ref agent.Starts) == 1));
+        Assert.False(lifecycle.Stop(TimeSpan.FromMilliseconds(100)));
+        Assert.Equal(0, Volatile.Read(ref agent.Stops));
+        agent.StartGate.Set();
+        Assert.True(Eventually(() => Volatile.Read(ref agent.Stops) == 1));
+        lock (agent.Order) { Assert.Equal(["start", "stop"], agent.Order); }
     }
 
     [Fact] // a start failure logs its class string only

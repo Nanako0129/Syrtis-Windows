@@ -392,6 +392,19 @@ public class DevicesModelTests
         model.PageDisappeared();
     }
 
+    [Fact] // review of #296: a write the clipboard refused does not show "Copied"
+    public async Task ARefusedClipboardWriteIsNotCopied()
+    {
+        var model = await WithOffer();
+        _board.Refuses = true;
+        model.CopyOffer();
+        Assert.False(model.Copied);
+        _board.Refuses = false;
+        model.CopyOffer();
+        Assert.True(model.Copied); // control
+        model.PageDisappeared();
+    }
+
     [Fact] // :23038-23044
     public async Task OnExpiryTheOfferAndAnUnchangedClipboardAreCleared()
     {

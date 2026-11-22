@@ -154,7 +154,9 @@ public sealed partial class SettingsWindow
             if (!page.SyncingHost && page.Host.SelectedItem is ComboBoxItem { Tag: string host })
             {
                 page.HostValue = host;
-                RenderDevices();
+                // Deferred: the render may rebuild this ComboBox's items,
+                // which WinUI does not allow inside its own SelectionChanged.
+                _ = DispatcherQueue.TryEnqueue(RenderDevices);
             }
         };
         body.Children.Add(Ui.Row(RowLabel(DevicesCopy.ListenOn), page.Host));

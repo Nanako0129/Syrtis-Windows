@@ -62,23 +62,26 @@ public sealed class RemoteAgentLifecycle(
     /// whether it finished in time.</summary>
     public bool Stop(TimeSpan bound)
     {
+        Task stopping;
         lock (_gate)
         {
             if (_stopped) { return true; }
             _stopped = true;
+            // After any start already running, so it cannot finish after the
+            // stop and leave the agent up; a start not yet begun sees _stopped.
+            stopping = _chain.ContinueWith(_ =>
+            {
+                try
+                {
+                    stop();
+                }
+                catch (Exception ex)
+                {
+                    log($"remote-agent: stop failed {Describe(ex)}");
+                }
+            }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
         }
 
-        var stopping = Task.Run(() =>
-        {
-            try
-            {
-                stop();
-            }
-            catch (Exception ex)
-            {
-                log($"remote-agent: stop failed {Describe(ex)}");
-            }
-        });
         var finished = stopping.Wait(bound);
         if (!finished)
         {

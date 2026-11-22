@@ -88,8 +88,9 @@ public interface IDevicesClipboard
 {
     uint SequenceNumber { get; }
 
-    /// <summary>Writes the request; returns the sequence number right after.</summary>
-    uint Write(ClipboardWriteRequest request);
+    /// <summary>Writes the request; returns the sequence number right after,
+    /// or null when the clipboard refused the write.</summary>
+    uint? Write(ClipboardWriteRequest request);
 
     void Clear();
 }
@@ -468,7 +469,13 @@ public sealed class DevicesModel
         if (token.IsCancellationRequested) { return; }
         if (!result.Ok)
         {
-            Set(() => _status = null);
+            Set(() =>
+            {
+                _status = null;
+                _pending = [];
+                _grants = [];
+                _peers = [];
+            });
             return;
         }
 
@@ -641,6 +648,7 @@ public sealed class DevicesModel
         var offer = Offer;
         if (offer is null) { return; }
         var sequence = _clipboard.Write(new ClipboardWriteRequest(offer.PairUrl, AllowHistory: false, Roamable: false));
+        if (sequence is null) { return; }
         Set(() =>
         {
             _copiedSequence = sequence;

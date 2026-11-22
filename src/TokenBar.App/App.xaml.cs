@@ -788,6 +788,14 @@ public partial class App : Application
     /// stops it with a bound.</summary>
     private static void StartRemoteAgent()
     {
+        // Never in a test run (startup smoke, icon dump, 3D harnesses): it
+        // would bind the listener and answer linked devices from a test
+        // process. Shared stays null, so QuitApp has nothing to stop.
+        if (!OnboardingSetup.IsUserRuntime(Environment.GetCommandLineArgs()))
+        {
+            return;
+        }
+
         var agent = new RemoteAgentLifecycle(
             Interop.TbCore.RemoteStart, Interop.TbCore.RemoteStop, DevLog.Write);
         RemoteAgentLifecycle.Shared = agent;

@@ -254,10 +254,13 @@ internal sealed class FakeDevicesClipboard : IDevicesClipboard
 
     public uint SequenceNumber { get { lock (_gate) { return _sequence; } } }
 
-    public uint Write(ClipboardWriteRequest request)
+    public bool Refuses { get; set; }
+
+    public uint? Write(ClipboardWriteRequest request)
     {
         lock (_gate)
         {
+            if (Refuses) { return null; }
             _sequence++;
             Text = request.Text;
             LastRequest = request;

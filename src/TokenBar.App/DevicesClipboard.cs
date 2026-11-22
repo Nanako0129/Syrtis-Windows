@@ -15,16 +15,16 @@ internal sealed class DevicesClipboard(DispatcherQueue ui) : IDevicesClipboard
     public uint SequenceNumber => GetClipboardSequenceNumber();
 
     /// <summary>UI thread: the clipboard belongs to it.</summary>
-    public uint Write(ClipboardWriteRequest request)
+    public uint? Write(ClipboardWriteRequest request)
     {
         var package = new DataPackage();
         package.SetText(request.Text);
-        Clipboard.SetContentWithOptions(package, new ClipboardContentOptions
+        var written = Clipboard.SetContentWithOptions(package, new ClipboardContentOptions
         {
             IsAllowedInHistory = request.AllowHistory,
             IsRoamable = request.Roamable,
         });
-        return GetClipboardSequenceNumber();
+        return written ? GetClipboardSequenceNumber() : null;
     }
 
     /// <summary>From any thread (the invitation can expire inside the poll
