@@ -360,7 +360,7 @@ public class DeviceOverlayStatusTests : IDisposable
     [Fact] // :24505-24514
     public void AHostileNameAppearsLiterallyEverywhere()
     {
-        const string hostile = "A%@ %d %lld{0}‮B";
+        const string hostile = "A%@ %d %lld{0}\u202EB";
         string[] lines =
         [
             C.StatusLine(Row("lastGood", "unreachable", label: hostile),
