@@ -22,7 +22,7 @@ public sealed partial class FlyoutWindow : Window
 
     private readonly DashboardModel _model;
 
-    public FlyoutWindow(GraphRequestCoordinator graphCoordinator)
+    public FlyoutWindow(GraphRequestCoordinator graphCoordinator, DeviceOverlayState? deviceOverlay = null)
     {
         InitializeComponent();
 
@@ -30,6 +30,11 @@ public sealed partial class FlyoutWindow : Window
         Closed += (_, _) => _model.Dispose();
         _model.Updated += RenderSnapshot;
         Dashboard.Bind(_model);
+        if (deviceOverlay is not null)
+        {
+            Dashboard.BindOverlay(deviceOverlay);
+        }
+
         Dashboard.HideRequested += HideFlyout;
         WireResizeGrip();
         AppSettings.Store.Changed += key =>

@@ -49,8 +49,10 @@ public sealed class TrayService : IDisposable
     private TrayReadyGate? _readyGate;
     private bool _trayCreationFailed;
 
-    public TrayService(FlyoutWindow flyout, GraphRequestCoordinator graphCoordinator)
+    public TrayService(
+        FlyoutWindow flyout, GraphRequestCoordinator graphCoordinator, DeviceOverlayState? deviceOverlay = null)
     {
+        _deviceOverlay = deviceOverlay;
         _icon = new TaskbarIcon
         {
             ToolTipText = ProductIdentity.Name,
@@ -186,19 +188,26 @@ public sealed class TrayService : IDisposable
     /// so this is where the view layer looks for it.</summary>
     internal static Func<Task<UpdateCheckResult>>? CheckForUpdates { get; set; }
 
+    // The process's one device overlay (null in test runs), given to Settings
+    // so its Devices page reads the same state the dashboard does.
+    private readonly DeviceOverlayState? _deviceOverlay;
+
     public void ShowSettings() => SettingsWindow.Present(
-        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace);
+        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, deviceOverlay: _deviceOverlay);
 
     internal void ShowAttributionSettings() => SettingsWindow.Present(
-        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showAttribution: true);
+        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showAttribution: true,
+        deviceOverlay: _deviceOverlay);
 
     internal void ShowDashboardSettings() => SettingsWindow.Present(
-        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showDashboard: true);
+        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showDashboard: true,
+        deviceOverlay: _deviceOverlay);
 
     /// <summary>The Discord setup card's "Set up in Settings…": navigation to
     /// the Discord section, never a write.</summary>
     internal void ShowDiscordSettings() => SettingsWindow.Present(
-        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showDiscord: true);
+        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showDiscord: true,
+        deviceOverlay: _deviceOverlay);
 
     internal bool CanHandoff => !Volatile.Read(ref _disposed);
 

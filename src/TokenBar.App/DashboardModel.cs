@@ -320,6 +320,11 @@ public sealed class DashboardModel
 
     public event Action? Updated;
 
+    /// <summary>The 60 s slow tick fired (UI thread). The dashboard re-reads
+    /// the linked-device list on it; nothing of the device overlay is held
+    /// here.</summary>
+    public event Action? SlowTicked;
+
     public sealed record Snapshot(
         UsagePayload Graph,
         ModelReport? Models,
@@ -824,6 +829,7 @@ public sealed class DashboardModel
             {
                 RefreshSlow();
                 RefreshQuota();
+                SlowTicked?.Invoke();
             };
             _fastTimer = _dispatcher.CreateTimer();
             _fastTimer.Interval = TimeSpan.FromSeconds(10);

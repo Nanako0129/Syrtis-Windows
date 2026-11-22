@@ -32,6 +32,14 @@ public sealed partial class DashboardView : UserControl
     private IReadOnlyList<string> _selectedClients = [];
     private HashSet<string> _selectedSet = new(StringComparer.Ordinal);
     private UsageStats? _selectedStats;
+
+    // The client slice the usage surfaces being built read: this PC's selection
+    // above, or the device overlay's own slice while WithFrame builds an
+    // overlay lens (DashboardView.Devices.cs). The _selected* fields stay this
+    // PC's; header, quota and trace read them directly.
+    private IReadOnlyList<string> SliceClients => _frame?.Clients ?? _selectedClients;
+    private HashSet<string> SliceSet => _frame?.Set ?? _selectedSet;
+    private UsageStats? SliceStats => _frame is { } frame ? frame.Stats : _selectedStats;
     private string _activeClientTab = ClientRegistry.OverviewTab;
     private string _clientTabsSignature = "";
     private string? _expandedDay; // Daily drill-down state
@@ -119,6 +127,8 @@ public sealed partial class DashboardView : UserControl
         RateCaption.Text = "tok/min".Localized();
         YearButton.Content = "All".Localized();
         QuitButton.Content = "Quit".Localized();
+
+        InitDeviceMenu();
 
         RefreshButton.Click += (_, _) => TryRefresh();
         HoverTip.Attach(RefreshButton, () => RefreshTip.Text(_model?.Current?.RestoredAt, DateTimeOffset.Now));
@@ -318,11 +328,18 @@ public sealed partial class DashboardView : UserControl
         _flyoutVisible = true;
         SyncGraph3DActivity();
         SetLiveRate(_ledRate); // the render just before ran while still hidden
+        // The peer list is read on every open, next to the first ensure.
+        _sync?.Opened();
+        SyncOverlay();
+        UpdateDeviceMenu();
+        UpdateRateCaption();
     }
 
     public void OnFlyoutHidden()
     {
         _flyoutVisible = false;
+        _sync?.Closed();
+        DeviceButton.Flyout?.Hide();
         LimitsDrag.CancelActive();
         _ledTimer?.Stop(); // Hide() does not unload, so Unloaded never fires
         _graph3d?.Release();
@@ -354,6 +371,23 @@ public sealed partial class DashboardView : UserControl
             return;
         }
 
+        // An overlay chart on screen owns the panel: its own frame, not this
+        // PC's snapshot (a theme change or a local render must not put this
+        // PC's days back into a combined chart).
+        if (_threeDFrame is { } frame)
+        {
+            var panel = _graph3d;
+            _ = WithFrame(frame, () =>
+            {
+                panel.SetData(
+                    CurrentGrid(frame.Snapshot),
+                    ActualTheme == ElementTheme.Dark,
+                    frame.Snapshot.CostAuthoritative);
+                return 0;
+            });
+            return;
+        }
+
         _graph3d.SetData(
             CurrentGrid(snapshot),
             ActualTheme == ElementTheme.Dark,
@@ -377,7 +411,7 @@ public sealed partial class DashboardView : UserControl
     /// flat heatmap both read it, so they cannot show different data.</summary>
     private TokenBar.Core.GridLayout CurrentGrid(DashboardModel.Snapshot snapshot)
     {
-        var stats = _selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet);
+        var stats = SliceStats ?? new UsageStats(snapshot.Graph, SliceSet);
         return TokenBar.Core.Grid.Build(GridYear, stats.PerDayMap);
     }
 
@@ -558,6 +592,8 @@ public sealed partial class DashboardView : UserControl
         }
 
         _model.RefreshForce();
+        // The other devices are asked too, never waited for.
+        _overlay?.ManualRefresh();
         UpdateRefreshControl(loading: _model.Current is null);
     }
 
@@ -566,10 +602,15 @@ public sealed partial class DashboardView : UserControl
     /// tinted when restored data is on screen and its refresh failed.</summary>
     private void UpdateRefreshControl(bool loading = false)
     {
-        var spinning = RefreshTip.Busy(
+        var localBusy = RefreshTip.Busy(
             loading, _model?.Refreshing == true, _model?.GraphInFlight == true);
-        RefreshButton.Visibility = spinning ? Visibility.Collapsed : Visibility.Visible;
-        RefreshButton.IsEnabled = !spinning;
+        // A local refresh collapses and disables the button; the overlay's
+        // fetch alone only spins it (the glyph hides under the spinner and the
+        // button stays clickable).
+        var (spinning, enabled) = DashboardDeviceLens.RefreshControl(localBusy, _overlay?.Fetching == true);
+        RefreshButton.Visibility = localBusy ? Visibility.Collapsed : Visibility.Visible;
+        RefreshButton.IsEnabled = enabled;
+        RefreshGlyph.Opacity = spinning ? 0 : RefreshGlyphOpacity;
         RefreshSpinner.Visibility = spinning ? Visibility.Visible : Visibility.Collapsed;
         RefreshSpinner.IsActive = spinning;
         var current = _model?.Current;
@@ -587,6 +628,8 @@ public sealed partial class DashboardView : UserControl
 
     /// <summary>macOS tints the glyph orange in this state; one brush, made
     /// once.</summary>
+    private const double RefreshGlyphOpacity = 0.75; // the XAML's own value
+
     private static readonly SolidColorBrush StaleRestoreBrush =
         new(Microsoft.UI.Colors.Orange);
 
@@ -600,6 +643,8 @@ public sealed partial class DashboardView : UserControl
     public void Bind(DashboardModel model)
     {
         _model = model;
+        // The 60 s slow tick re-reads the peer list while the flyout is open.
+        model.SlowTicked += () => _sync?.SlowTick();
         model.SetActiveView(_view);
     }
 
@@ -626,6 +671,8 @@ public sealed partial class DashboardView : UserControl
 
         _view = view;
         _model?.SetActiveView(view);
+        SyncOverlay();
+        UpdateDeviceMenu();
 
         UpdateTabChrome();
         RenderContent(animated: true);
@@ -646,6 +693,8 @@ public sealed partial class DashboardView : UserControl
         snapshot = ApplyClientSelection(snapshot);
         RenderHeader(snapshot);
         UpdateYearPicker();
+        SyncOverlay();
+        UpdateDeviceMenu();
         UpdateGraph3DData(snapshot);
         RenderContent(animated: false);
     }
@@ -689,6 +738,8 @@ public sealed partial class DashboardView : UserControl
         snapshot = ApplyClientSelection(snapshot);
         RenderHeader(snapshot);
         UpdateYearPicker();
+        SyncOverlay();
+        UpdateDeviceMenu();
         UpdateGraph3DData(snapshot);
         RenderContent(animated);
     }
@@ -850,6 +901,7 @@ public sealed partial class DashboardView : UserControl
         {
             model.SetYear(value);
             UpdateYearPicker(); // reflect the pick before the new slice lands
+            SyncOverlay(); // the other devices' pages follow the year at once
         };
         flyout.Items.Add(item);
     }
@@ -1265,21 +1317,33 @@ public sealed partial class DashboardView : UserControl
 
         DetachGraph3DContentHost();
         _heatmapScroll = null;
+        _threeDFrame = null;
+        var local = _snapshot;
         // The footer names the lens on screen, as macOS's footer shows
         // effectiveView.label. Data freshness is the refresh button's job
         // (its tooltip), not the footer's.
         FooterText.Text = AppViews.Label(AppViews.Effective(_view, AppSettings.Store));
-        UIElement content = _view switch
-        {
-            AppView.Quota => BuildQuota(_snapshot),
-            AppView.Models => BuildModels(_snapshot),
-            AppView.Monthly => BuildMonthly(_snapshot),
-            AppView.Daily => BuildDaily(_snapshot),
-            AppView.Hourly => BuildHourly(_snapshot),
-            AppView.Stats => BuildStats(_snapshot),
-            AppView.Agents => BuildAgents(_snapshot),
-            _ => BuildOverview(_snapshot),
-        };
+        // What this lens shows: this PC's snapshot, or the selected devices'
+        // page held beside it (never inside it).
+        var choice = DashboardDeviceLens.Choose<DashboardModel.Snapshot>(
+            _snapshot, _view, _overlay, _model?.Year, OverviewScope.SingleClient(_activeClientTab),
+            DashboardDeviceLens.HiddenRaw(AppSettings.Store), DashboardDeviceLens.OrderRaw(AppSettings.Store),
+            () => new ModelColorMap(local.Models, local.ModelsRankByCost));
+        _overviewMerge = choice.Merge;
+        UIElement content = choice.Source != LensSource.Local
+            ? BuildOverlayLens(choice, _snapshot)
+            : _view switch
+            {
+                AppView.Quota => BuildQuota(_snapshot),
+                AppView.Models => BuildModels(_snapshot),
+                AppView.Monthly => BuildMonthly(_snapshot),
+                AppView.Daily => BuildDaily(_snapshot),
+                AppView.Hourly => BuildHourly(_snapshot),
+                AppView.Stats => BuildStats(_snapshot),
+                AppView.Agents => BuildAgents(_snapshot),
+                _ => BuildOverview(_snapshot),
+            };
+        content = WithDeviceHeader(content);
         ContentHost.Content = content;
         SyncGraph3DActivity();
         if (animated)
@@ -1334,6 +1398,12 @@ public sealed partial class DashboardView : UserControl
             }
         }
 
+        // Combined pages: the lines above them (capped totals, kept-last).
+        if (_overviewMerge is { } mergeNotes && mergeNotes.NoteLines.Count > 0)
+        {
+            stack.Children.Add(DeviceNoteLines(mergeNotes.NoteLines));
+        }
+
         // Order comes from OverviewCards.RenderOrder, not from the sequence of
         // these calls, so a test can see it. macOS got this same sequence wrong
         // once and its pinned order is what caught it; this arrived at the same
@@ -1344,10 +1414,13 @@ public sealed partial class DashboardView : UserControl
             var element = card switch
             {
                 OverviewCard.QuotaSummary => OverviewScope.ShowsQuotaSummary(singleClient)
-                    ? BuildQuotaSummary(snapshot)
+                    ? WithQuotaNote(BuildQuotaSummary(snapshot))
                     : null,
                 // A client tab whose client has no local records gets a line
                 // saying so, not an empty chart (OverviewView.swift:101-107).
+                OverviewCard.Chart when _overviewMerge is { } merge => BuildMergedChart(merge, snapshot),
+                OverviewCard.Models when _overviewMerge is { } merge => BuildMergedModels(merge, snapshot, singleClient),
+                OverviewCard.Streaks when _overviewMerge is { } merge => BuildMergedStreaks(merge, snapshot),
                 OverviewCard.Chart => OverviewScope.HasNoLocalUsage(
                         singleClient, _selectedClients, (_selectedStats
                             ?? new UsageStats(snapshot.Graph, _selectedSet)).PresentClients)
@@ -1394,6 +1467,13 @@ public sealed partial class DashboardView : UserControl
             }
         }
 
+        // The per-device card closes Overview (macOS PopoverView :900-907).
+        if (_overviewMerge is { } merged
+            && DashboardDeviceLens.OverviewDevicesPage(_overlay, _model?.Year) is { } devices)
+        {
+            stack.Children.Add(BuildDeviceCard(devices.Devices, merged.ClientIds));
+        }
+
         return stack;
     }
 
@@ -1433,7 +1513,7 @@ public sealed partial class DashboardView : UserControl
 
     private FrameworkElement BuildChart(DashboardModel.Snapshot snapshot)
     {
-        if (_selectedClients.Count == 0)
+        if (SliceClients.Count == 0)
         {
             return Ui.Dim("No visible client usage.".Localized());
         }
@@ -1521,10 +1601,10 @@ public sealed partial class DashboardView : UserControl
 
         var colors = new ModelColorMap(snapshot.Models, snapshot.ModelsRankByCost);
         var metric = _chartMetric;
-        var stats = _selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet);
+        var stats = SliceStats ?? new UsageStats(snapshot.Graph, SliceSet);
         var bars = DayBars.Build(
             snapshot.Graph,
-            _selectedClients,
+            SliceClients,
             _chartStackBy,
             metric,
             colors,
@@ -1775,6 +1855,9 @@ public sealed partial class DashboardView : UserControl
         const double chartHeight = 196;
         var root = new Grid { Height = chartHeight };
         var panel = EnsureGraph3D();
+        // Null for this PC's own chart; an overlay chart's frame keeps the
+        // panel on the overlay's days across theme changes and local renders.
+        _threeDFrame = _frame;
         UpdateGraph3DData(snapshot);
 
         // --graph3d owns the panel through the fixed Gate 0 host. In normal
@@ -1838,6 +1921,7 @@ public sealed partial class DashboardView : UserControl
         var allHidden = QuotaResolver.ExcludedAllCandidates(
             snapshot.Quota, QuotaResolver.Auto, excluding);
 
+        _quotaSummaryHasToday = false;
         var stack = new StackPanel { Spacing = 7 };
         switch (QuotaSummaryText.State(summary, outcome, allHidden))
         {
@@ -1847,6 +1931,7 @@ public sealed partial class DashboardView : UserControl
                 return new StackPanel();
             case QuotaSummaryState.Ready:
                 BuildQuotaSummaryReady(stack, summary!, snapshot, now);
+                _quotaSummaryHasToday = true; // its last row is "Today"
                 break;
             case QuotaSummaryState.NoWindowReporting:
                 stack.Children.Add(Ui.Dim(QuotaSummaryText.NoWindowReporting()));
@@ -2307,7 +2392,7 @@ public sealed partial class DashboardView : UserControl
 
     private FrameworkElement BuildStreaks(DashboardModel.Snapshot snapshot)
     {
-        var stats = _selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet);
+        var stats = SliceStats ?? new UsageStats(snapshot.Graph, SliceSet);
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 24 };
         row.Children.Add(Metric("{0}d".Localized(stats.Streaks.Current), "current".Localized()));
         row.Children.Add(Metric("{0}d".Localized(stats.Streaks.Longest), "longest".Localized()));
@@ -2374,7 +2459,7 @@ public sealed partial class DashboardView : UserControl
     /// One model can therefore be on several rows, so counts, the favorite and
     /// the provider label go through <see cref="ModelRows"/>.</summary>
     private List<ModelReportEntry> SelectedModelEntries(DashboardModel.Snapshot snapshot) =>
-        [.. snapshot.Models?.TabEntries(_selectedSet) ?? []];
+        [.. snapshot.Models?.TabEntries(SliceSet) ?? []];
 
     /// <summary>The model rows. <paramref name="collapsible"/> (the Overview
     /// card) caps them at <see cref="OverviewScope.ModelRowCap"/> behind a
@@ -2697,12 +2782,12 @@ public sealed partial class DashboardView : UserControl
         var panel = new StackPanel { Spacing = 6 };
         var colors = new ModelColorMap(
             snapshot.Models, snapshot.ModelsRankByCost);
-        var days = DailyRows.Build(snapshot.Graph, _selectedClients);
+        var days = DailyRows.Build(snapshot.Graph, SliceClients);
         if (days.Count == 0)
         {
             panel.Children.Add(Ui.Dim("No usage in this range.".Localized()));
         }
-        else if (DrillDownSummary.ScopeLine(DailyRows.TurnScope(_selectedClients)) is { } scope)
+        else if (DrillDownSummary.ScopeLine(DailyRows.TurnScope(SliceClients)) is { } scope)
         {
             panel.Children.Add(Ui.Dim(scope));
         }
@@ -2760,12 +2845,12 @@ public sealed partial class DashboardView : UserControl
     {
         var panel = new StackPanel { Spacing = 6 };
         var colors = new ModelColorMap(snapshot.Models, snapshot.ModelsRankByCost);
-        var months = MonthlyRows.Build(snapshot.Graph, _selectedClients);
+        var months = MonthlyRows.Build(snapshot.Graph, SliceClients);
         if (months.Count == 0)
         {
             panel.Children.Add(Ui.Dim("No usage in this range.".Localized()));
         }
-        else if (DrillDownSummary.ScopeLine(DailyRows.TurnScope(_selectedClients)) is { } scope)
+        else if (DrillDownSummary.ScopeLine(DailyRows.TurnScope(SliceClients)) is { } scope)
         {
             panel.Children.Add(Ui.Dim(scope));
         }
@@ -2949,7 +3034,7 @@ public sealed partial class DashboardView : UserControl
         var stack = new StackPanel { Spacing = 10 };
         stack.Children.Add(BuildUsageChartCard(snapshot));
 
-        var stats = _selectedStats ?? new UsageStats(snapshot.Graph, _selectedSet);
+        var stats = SliceStats ?? new UsageStats(snapshot.Graph, SliceSet);
         var authoritative = snapshot.CostAuthoritative;
         var summary = new StackPanel { Spacing = 12 };
         var sentence = new TextBlock { FontSize = 14, TextWrapping = TextWrapping.Wrap };
@@ -3043,7 +3128,11 @@ public sealed partial class DashboardView : UserControl
         // macOS places the attribution card directly after the summary
         // (StatsView.swift:34-45). Streaks are two of the summary's cells, so
         // Stats has no Streaks card.
-        stack.Children.Add(BuildAttributionCard(snapshot));
+        // The selected devices' model report has not arrived: a fixed line, and
+        // never this PC's own report in its place (macOS StatsView).
+        stack.Children.Add(_frame?.ModelsNote is { } modelsNote
+            ? Ui.Dim(modelsNote)
+            : BuildAttributionCard(snapshot));
         return stack;
     }
 
@@ -3070,7 +3159,7 @@ public sealed partial class DashboardView : UserControl
         // previous generation's report; its rows are kept, not re-fetched yet.
         var rows = report is null
             ? null
-            : UsageAttributionBreakdown.Rows(report.Entries, _selectedClients, confirmed);
+            : UsageAttributionBreakdown.Rows(report.Entries, SliceClients, confirmed);
 
         var range = string.IsNullOrEmpty(_model?.Year) ? "All years".Localized() : _model!.Year;
         var singleClient = OverviewScope.SingleClient(_activeClientTab);

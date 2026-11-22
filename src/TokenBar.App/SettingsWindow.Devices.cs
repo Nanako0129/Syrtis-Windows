@@ -33,6 +33,11 @@ public sealed partial class SettingsWindow
     /// monospaced, one step above the captions around it (DSV :18).</summary>
     private static readonly FontFamily DevicesSasFont = new("Consolas, Cascadia Mono, monospace");
 
+    /// <summary>The process's one device overlay (null in test runs), the same
+    /// the dashboard uses: this page reads its snapshot for the short status and
+    /// its learned names, and tells it when the linked devices changed.</summary>
+    private readonly DeviceOverlayState? _deviceOverlay;
+
     private DevicesModel? _devicesModel;
     private DevicesPage? _devicesPage;
     private bool _devicesShown;
@@ -42,16 +47,26 @@ public sealed partial class SettingsWindow
     private DispatcherTimer? _devicesStatusTimer;
 
     /// <summary>The one model, created with the window's dispatcher (the
-    /// clipboard adapter needs it). The short-status provider is null until
-    /// SA-4g wires the dashboard overlay: the line stays hidden.</summary>
+    /// clipboard adapter needs it). With the overlay the short status under
+    /// each linked device appears; without one (a test run) it stays hidden.</summary>
     private DevicesModel Devices
     {
         get
         {
             if (_devicesModel is null)
             {
-                _devicesModel = new DevicesModel(new TbDevicesClient(), new DevicesClipboard(DispatcherQueue));
+                var overlay = _deviceOverlay;
+                _devicesModel = new DevicesModel(
+                    new TbDevicesClient(), new DevicesClipboard(DispatcherQueue),
+                    overlay: overlay is null ? null : () => (overlay.Snapshot, overlay.LearnedNames));
                 _devicesModel.Changed += QueueDevicesRender;
+                // A link or a removal: the dashboard's menu follows (the
+                // overlay's read is thread-safe, called from wherever this is
+                // raised).
+                if (overlay is not null)
+                {
+                    _devicesModel.PeersChanged += overlay.RefreshPeers;
+                }
             }
 
             return _devicesModel;
@@ -719,20 +734,9 @@ public sealed partial class SettingsWindow
             }
 
             line.Visibility = Visibility.Visible;
-            line.Children.Add(Ui.Disc(ShortDotColor(status.Dot), 7));
-            line.Children.Add(Ui.Text(status.Text, 10, 0.6));
+            line.Children.Add(DeviceStatusView.Make(status));
         }
     }
-
-    /// <summary>Dot colors (4e1 ShortDot): green connected, the pace orange
-    /// for trouble, grey otherwise. ponytail: a filled grey dot for both
-    /// "not included" and "updating"; SA-4g draws the dashboard's own dots.</summary>
-    private static string ShortDotColor(DeviceOverlayCopy.ShortDot dot) => dot switch
-    {
-        DeviceOverlayCopy.ShortDot.Green => "#34C759",
-        DeviceOverlayCopy.ShortDot.Orange => DashboardView.PaceOrange,
-        _ => "#8E8E93",
-    };
 
     private void RenderLink(DevicesPage page, DevicesModel model)
     {

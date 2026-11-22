@@ -83,6 +83,39 @@
                     Orientation="Horizontal"
                     Spacing="6"
                     HorizontalAlignment="Right">
+                    <!-- Device menu (SA-4g), left of the year button: shown only
+                         while a linked device can be chosen. The title is one
+                         TextBlock whose Text changes in place; the flyout
+                         content is built in code (DashboardView.Devices.cs)
+                         and never re-parented from inside its own click. -->
+                    <StackPanel
+                        x:Name="DeviceMenuHost"
+                        Orientation="Horizontal"
+                        Spacing="2"
+                        Visibility="Collapsed">
+                        <DropDownButton
+                            x:Name="DeviceButton"
+                            FontSize="11"
+                            Padding="9,3,9,4">
+                            <TextBlock
+                                x:Name="DeviceTitle"
+                                FontSize="11"
+                                MaxWidth="120"
+                                TextWrapping="NoWrap"
+                                TextTrimming="CharacterEllipsis" />
+                        </DropDownButton>
+                        <Button
+                            x:Name="DeviceInfoButton"
+                            Visibility="Collapsed"
+                            Padding="0"
+                            Width="24"
+                            Height="26"
+                            VerticalAlignment="Center"
+                            Background="Transparent"
+                            BorderThickness="0">
+                            <FontIcon Glyph="&#xE946;" FontSize="12" Opacity="0.7" />
+                        </Button>
+                    </StackPanel>
                     <!-- Year filter, macOS PopoverView yearMenu parity: hidden
                          until the first payload reports which years exist. -->
                     <DropDownButton
@@ -110,6 +143,7 @@
                             Width="15"
                             Height="15"
                             IsActive="False"
+                            IsHitTestVisible="False"
                             Visibility="Collapsed" />
                     </Grid>
                 </StackPanel>

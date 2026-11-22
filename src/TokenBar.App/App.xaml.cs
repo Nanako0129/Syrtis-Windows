@@ -93,10 +93,17 @@ public partial class App : Application
             DevLog.Write("launch: creating graph coordinator");
             _graphCoordinator = GraphRequestCoordinator.CreateForApp(
                 boost: ProcessPower.Boost);
+            // The one device overlay of the process, handed to the dashboard and
+            // to Settings. Never built in a test run (startup smoke, icon dump,
+            // 3D harnesses), as StartRemoteAgent: it reads the peer list and
+            // would fetch from linked devices.
+            DeviceOverlayState? deviceOverlay = OnboardingSetup.IsUserRuntime(Environment.GetCommandLineArgs())
+                ? new DeviceOverlayState(new TbDeviceSource(), AppSettings.Store)
+                : null;
             DevLog.Write("launch: creating flyout");
-            _flyout = new FlyoutWindow(_graphCoordinator);
+            _flyout = new FlyoutWindow(_graphCoordinator, deviceOverlay);
             DevLog.Write("launch: creating tray");
-            _tray = new TrayService(_flyout, _graphCoordinator);
+            _tray = new TrayService(_flyout, _graphCoordinator, deviceOverlay);
             DevLog.Write("launch: tray up");
 
             // Debug flag, macOS --settings parity.

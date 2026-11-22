@@ -102,9 +102,10 @@ public sealed partial class SettingsWindow : Window
     public static void Present(
         Func<AgentUsagePayload?> quota, Func<UsagePayload?> graph,
         Func<IReadOnlyList<TraceBucket>> trace, bool showDiscord = false,
-        bool showAttribution = false, bool showDashboard = false)
+        bool showAttribution = false, bool showDashboard = false,
+        DeviceOverlayState? deviceOverlay = null)
     {
-        _shared ??= new SettingsWindow(quota, graph, trace);
+        _shared ??= new SettingsWindow(quota, graph, trace, deviceOverlay);
         if (showDashboard)
         {
             _shared._selectedTag = "dashboard";
@@ -149,8 +150,9 @@ public sealed partial class SettingsWindow : Window
 
     private SettingsWindow(
         Func<AgentUsagePayload?> quota, Func<UsagePayload?> graph,
-        Func<IReadOnlyList<TraceBucket>> trace)
+        Func<IReadOnlyList<TraceBucket>> trace, DeviceOverlayState? deviceOverlay)
     {
+        _deviceOverlay = deviceOverlay;
         _quota = quota;
         _graph = graph;
         _trace = trace;

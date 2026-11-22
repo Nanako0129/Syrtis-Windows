@@ -6,9 +6,10 @@ namespace TokenBar.App;
 
 // The stateful device overlay of the dashboard (SA-4e2), ported from macOS
 // DeviceOverlayState (DashboardModel.swift :2914-3801, Syrtis f8a1a0ae). No UI
-// and no call site: SA-4f/4g construct it (DashboardModel.Start -> Ensure and
-// PollLoopAsync, DashboardModel.Stop -> PopoverClosed, a link or removal in
-// Settings -> RefreshPeers). Until then it is built only by tests.
+// in this file. SA-4g wires it: App builds the one instance of the process,
+// DashboardView ensures through DeviceOverlaySync (once per key, a poll while
+// the flyout is open, PopoverClosed on hide) and Settings → Devices passes a
+// link or removal to RefreshPeers.
 
 /// <summary>The device-aware pages and the peer list. Every member BLOCKS (a
 /// Refresh pulls each selected producer, up to one fetch deadline each), so the
