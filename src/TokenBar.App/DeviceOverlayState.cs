@@ -351,7 +351,7 @@ public sealed class DeviceOverlayState
 
     /// <summary>Test seam: runs after a snapshot got its number and before it is
     /// delivered, so a test can hold one delivery while another overtakes it.</summary>
-    internal Action<long>? BeforeSnapshotDeliveryForTesting;
+    internal Action<long>? BeforeSnapshotDeliveryForTesting { get; set; }
 
     private static void Locked(Action body) => Locked(() => { body(); return 0; });
 
