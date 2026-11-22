@@ -43,6 +43,9 @@ public class DeviceOverlayStateTests : IDisposable
             s.Release(50);
             s.ReleaseCached(50);
         }
+        // Nothing may still be running when the process-wide guard is reset.
+        Pump(() => !DeviceOverlayState.RefreshInFlightForTesting && !DeviceOverlayState.WritesPendingForTesting
+            && _made.All(o => !o.Fetching));
         DeviceOverlayState.ResetSingleFlightForTesting();
         Load("en");
         try { Directory.Delete(_dir, recursive: true); } catch (IOException) { }
@@ -62,8 +65,11 @@ public class DeviceOverlayStateTests : IDisposable
     }
 
     /// <summary>The state a "nothing happens" check waits out: long enough for a
-    /// call that was going to start to have started.</summary>
-    private static void Quiet() => Thread.Sleep(40);
+    /// call that was going to start to have started (150 ms; a pool thread picks
+    /// a queued call up within a few ms). Where a deterministic signal exists
+    /// (a cancelled delay leaves the clock with none pending) the test asserts
+    /// it as well.</summary>
+    private static void Quiet() => Thread.Sleep(150);
 
     private static bool Settled() => Pump(() => !DeviceOverlayState.RefreshInFlightForTesting);
 
@@ -121,14 +127,22 @@ public class DeviceOverlayStateTests : IDisposable
     }
 
     private static StoredDeviceSelection? Persisted(SettingsStore store) =>
-        store.GetString(DeviceOverlayState.SelectionKey) is { } json
+        Flushed(store).GetString(DeviceOverlayState.SelectionKey) is { } json
             ? JsonSerializer.Deserialize<StoredDeviceSelection>(json, new JsonSerializerOptions(JsonSerializerDefaults.Web))
             : null;
 
     private static HashSet<string>? Seen(SettingsStore store) =>
-        store.GetString(DeviceOverlayState.SeenPeersKey) is { } json
+        Flushed(store).GetString(DeviceOverlayState.SeenPeersKey) is { } json
             ? [.. JsonSerializer.Deserialize<List<string>>(json)!]
             : null;
+
+    /// <summary>Settings writes are performed just after the state they record is
+    /// visible, so a test that reads the store waits for them.</summary>
+    private static SettingsStore Flushed(SettingsStore store)
+    {
+        Assert.True(Pump(() => !DeviceOverlayState.WritesPendingForTesting));
+        return store;
+    }
 
     private static void SameSet(IEnumerable<string> expected, HashSet<string>? actual)
     {
@@ -338,6 +352,7 @@ public class DeviceOverlayStateTests : IDisposable
         overlay.ManualRefresh();
         Assert.True(Pump(() => source.RefreshStarted == 1) && Settled()); // a manual refresh runs
         overlay.PopoverClosed();
+        Assert.Equal(0, clock.PendingCount); // deterministic: the cancelled delay is gone
         clock.Advance(TimeSpan.FromMinutes(5));
         Quiet();
         Assert.Equal(1, source.RefreshStarted);
@@ -367,6 +382,7 @@ public class DeviceOverlayStateTests : IDisposable
         overlay.ManualRefresh();
         Assert.True(Pump(() => source.RefreshStarted == 2) && Settled());
         Assert.True(Pump(() => !overlay.RetryPendingForTesting));
+        Assert.Equal(0, clock.PendingCount); // deterministic: the cancelled delay is gone
         clock.Advance(TimeSpan.FromMinutes(5));
         Quiet();
         Assert.Equal(2, source.RefreshStarted); // and no call is made when the delay passes
@@ -1179,5 +1195,99 @@ public class DeviceOverlayStateTests : IDisposable
         await loop.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.True(loop.IsCompletedSuccessfully);
         Assert.Equal(0, clock.PendingCount);
+    }
+
+    // ---- review fixes ---------------------------------------------------------
+
+    [Fact] // snapshots are delivered in order: a newer one is never followed by an older one
+    public void ANewerSnapshotIsNeverFollowedByAnOlderOne()
+    {
+        var source = NewSource(Peer(PeerA));
+        var overlay = NewOverlay(source, NewStore());
+        ReadPeers(overlay);
+        var delivered = new List<DeviceOverlaySnapshot>();
+        overlay.SnapshotChanged += s => { lock (delivered) { delivered.Add(s); } };
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        // Hold the first publish between "numbered under the lock" and "delivered".
+        overlay.BeforeSnapshotDeliveryForTesting = seq =>
+        {
+            if (seq != 1) { return; }
+            entered.Set();
+            release.Wait(TimeSpan.FromSeconds(10));
+        };
+        var first = Task.Run(() => overlay.TogglePeer(PeerA)); // snapshot 1: the device selected
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+        overlay.TogglePeer(PeerA); // snapshot 2 (unselected) overtakes it
+        release.Set();
+        first.Wait(TimeSpan.FromSeconds(5));
+        lock (delivered)
+        {
+            var only = Assert.Single(delivered); // snapshot 1 is dropped, not delivered after 2
+            Assert.False(only.Selection[Fp]);
+        }
+    }
+
+    [Fact] // settings I/O and SettingsStore.Changed run after the lock, once the state is applied
+    public void ASettingsChangedHandlerThatCallsBackRunsAfterTheStateIsAppliedAndDoesNotDeadlock()
+    {
+        var store = NewStore();
+        var source = NewSource(Peer(PeerA));
+        var overlay = NewOverlay(source, store);
+        ReadPeers(overlay);
+        var seen = new List<(bool Done, bool Chosen)>();
+        store.Changed += key =>
+        {
+            if (key != DeviceOverlayState.SelectionKey) { return; }
+            // From another thread, so a lock still held by the writer would block it.
+            var done = Task.Run(() => { _ = overlay.Snapshot; overlay.RefreshPeers(); return overlay.Stored.Peers.Contains(PeerA); })
+                .Wait(TimeSpan.FromSeconds(5));
+            seen.Add((done, overlay.Stored.Peers.Contains(PeerA)));
+        };
+        overlay.TogglePeer(PeerA);
+        var one = Assert.Single(seen);
+        Assert.True(one.Done);
+        Assert.True(one.Chosen); // the overlay state was already fully applied
+    }
+
+    [Fact] // one throwing subscriber stops neither the page fetches nor the poll loop
+    public async Task AThrowingHandlerDoesNotStopTheFetchesOrThePollLoop()
+    {
+        var (overlay, source, clock, _) = Chosen();
+        var other = 0;
+        overlay.Changed += () => throw new InvalidOperationException("subscriber");
+        overlay.SnapshotChanged += _ => throw new InvalidOperationException("subscriber");
+        overlay.Changed += () => Interlocked.Increment(ref other); // a later subscriber of the same event still runs
+        overlay.Ensure(AppView.Stats, null, null);
+        Assert.True(Pump(() => source.Refreshes.Count == 2) && Idle(overlay)); // both pages, not just the first
+        Assert.NotNull(overlay.Graph?.Data);
+        Assert.NotNull(overlay.Models?.Data);
+        Assert.True(Volatile.Read(ref other) > 0);
+        using var cts = new CancellationTokenSource();
+        var loop = overlay.PollLoopAsync(cts.Token);
+        clock.Advance(DeviceOverlayState.RemotePoll);
+        Assert.True(Pump(() => source.Refreshes.Count == 4) && Settled());
+        Assert.True(Pump(() => clock.Requested.Count(d => d == DeviceOverlayState.RemotePoll) == 2)); // the loop is alive
+        cts.Cancel();
+        await loop.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Theory] // a stored selection that does not decode, or has "peers": null, is the default
+    [InlineData("""{"local":true,"peers":null}""")]
+    [InlineData("""{"local":false}""")]
+    [InlineData("not json")]
+    public void AnUndecodableStoredSelectionFallsBackToTheDefault(string json)
+    {
+        var store = NewStore();
+        store.SetString(DeviceOverlayState.SelectionKey, json);
+        var overlay = NewOverlay(NewSource(Peer(PeerA)), store);
+        Assert.Equal(new StoredDeviceSelection(), overlay.Stored);
+        // and on the peers path, where the persisted copy is read again
+        var other = NewStore();
+        other.SetString(DeviceOverlayState.SelectionKey, json);
+        var third = NewOverlay(NewSource(), other);
+        third.DeliverPeersForTesting([Peer(PeerA)], third.BeginPeersReadForTesting());
+        Assert.Single(third.SelectablePeers);
+        Assert.Equal(new StoredDeviceSelection(), third.Stored);
     }
 }

@@ -202,7 +202,7 @@ public sealed class DeviceOverlayState
     // One refresh at a time in the whole process: a refresh can hold the
     // agent's read lock for up to 145 s per producer. A trigger during a
     // refresh keeps only the newest request and runs it once afterwards.
-    private sealed record PendingRefresh(DeviceOverlayState Owner, List<DeviceOverlayKey> Keys, bool IsRetry);
+    private sealed record PendingRefresh(WeakReference<DeviceOverlayState> Owner, List<DeviceOverlayKey> Keys, bool IsRetry);
 
     private static bool _refreshInFlight;
     private static PendingRefresh? _pendingRefresh;
@@ -254,16 +254,20 @@ public sealed class DeviceOverlayState
         _source = source;
         _settings = settings;
         _clock = clock ?? new SystemDeviceClock();
-        var storedJson = settings.GetString(SelectionKey);
-        _stored = Decode<StoredDeviceSelection>(storedJson) ?? new StoredDeviceSelection();
-        if (ReadSeen() is { } seen)
+        // Under the lock: a write queued by another instance is not on disk yet.
+        lock (Gate)
         {
-            _seenPeers = seen;
-        }
-        else if (storedJson is null)
-        {
-            // Nothing chosen before: every device that appears is new.
-            _seenPeers = [];
+            var storedJson = StoredValue(SelectionKey);
+            _stored = DecodeSelection(storedJson) ?? new StoredDeviceSelection();
+            if (ReadSeen() is { } seen)
+            {
+                _seenPeers = seen;
+            }
+            else if (storedJson is null)
+            {
+                // Nothing chosen before: every device that appears is new.
+                _seenPeers = [];
+            }
         }
         // else: a selection from before the seen set existed. The first
         // successful list marks its devices seen without checking them.
@@ -285,7 +289,7 @@ public sealed class DeviceOverlayState
     private static T Locked<T>(Func<T> body)
     {
         T result;
-        List<(DeviceOverlayState Owner, DeviceOverlaySnapshot? Snapshot)> notify = [];
+        List<(DeviceOverlayState Owner, DeviceOverlaySnapshot? Snapshot, long Seq)> notify = [];
         lock (Gate)
         {
             result = body();
@@ -299,19 +303,55 @@ public sealed class DeviceOverlayState
                     {
                         owner._lastPublished = current;
                         snapshot = current;
+                        owner._snapshotSeq++;
                     }
                 }
-                notify.Add((owner, snapshot));
+                notify.Add((owner, snapshot, owner._snapshotSeq));
             }
             Touched.Clear();
         }
-        foreach (var (owner, snapshot) in notify)
+        FlushWrites();
+        foreach (var (owner, snapshot, seq) in notify)
         {
-            owner.Changed?.Invoke();
-            if (snapshot is not null) { owner.SnapshotChanged?.Invoke(snapshot); }
+            if (owner.Changed is { } changed) { foreach (Action handler in changed.GetInvocationList()) { Raise(handler); } }
+            if (snapshot is not null) { owner.Deliver(snapshot, seq); }
         }
         return result;
     }
+
+    /// <summary>One throwing subscriber must not skip the other owners, abort a
+    /// refresh's remaining keys or end the poll loop. ponytail: swallowed, this
+    /// layer has no log; the type is not recorded.</summary>
+    private static void Raise(Action handler)
+    {
+        try { handler(); } catch (Exception) { }
+    }
+
+    /// <summary>Two completions can reach here out of order (the newer snapshot
+    /// first). Each snapshot carries the sequence number it got under the lock,
+    /// and anything older than the last one delivered is dropped, under a lock
+    /// of its own so deliveries cannot interleave.</summary>
+    private void Deliver(DeviceOverlaySnapshot snapshot, long seq)
+    {
+        BeforeSnapshotDeliveryForTesting?.Invoke(seq);
+        lock (_deliverGate)
+        {
+            if (seq <= _lastDeliveredSeq) { return; }
+            _lastDeliveredSeq = seq;
+            if (SnapshotChanged is { } changed)
+            {
+                foreach (Action<DeviceOverlaySnapshot> handler in changed.GetInvocationList()) { Raise(() => handler(snapshot)); }
+            }
+        }
+    }
+
+    private readonly object _deliverGate = new();
+    private long _snapshotSeq;
+    private long _lastDeliveredSeq;
+
+    /// <summary>Test seam: runs after a snapshot got its number and before it is
+    /// delivered, so a test can hold one delivery while another overtakes it.</summary>
+    internal Action<long>? BeforeSnapshotDeliveryForTesting;
 
     private static void Locked(Action body) => Locked(() => { body(); return 0; });
 
@@ -466,17 +506,58 @@ public sealed class DeviceOverlayState
         catch (JsonException) { return null; }
     }
 
+    /// <summary>A stored selection that does not decode, or decodes with
+    /// <c>"peers": null</c>, is the default selection (null here).</summary>
+    private static StoredDeviceSelection? DecodeSelection(string? json) =>
+        Decode<StoredDeviceSelection>(json) is { } d && (object?)d.Peers is not null ? d : null;
+
+    // Settings writes are file I/O and raise SettingsStore.Changed synchronously,
+    // so they are queued under the lock and performed after it is released (see
+    // Locked). Until written an entry stays in the list, and reads see it first,
+    // so a read never returns older than the state the lock last published.
+    private static readonly object WriteGate = new();
+    private static readonly List<(SettingsStore Store, string Key, string Value)> PendingWrites = [];
+
+    private void QueueWrite(string key, string value) => PendingWrites.Add((_settings, key, value));
+
+    private string? StoredValue(string key)
+    {
+        for (var i = PendingWrites.Count - 1; i >= 0; i--)
+        {
+            if (PendingWrites[i].Store == _settings && PendingWrites[i].Key == key) { return PendingWrites[i].Value; }
+        }
+        return _settings.GetString(key);
+    }
+
+    /// <summary>One writer at a time, in queue order, so two threads cannot
+    /// reorder writes to one key; no overlay lock is held.</summary>
+    private static void FlushWrites()
+    {
+        lock (WriteGate)
+        {
+            (SettingsStore Store, string Key, string Value)[] batch;
+            lock (Gate) { batch = [.. PendingWrites]; }
+            if (batch.Length == 0) { return; }
+            foreach (var (store, key, value) in batch)
+            {
+                // A throwing SettingsStore.Changed subscriber must not skip the rest.
+                try { store.SetString(key, value); } catch (Exception) { }
+            }
+            lock (Gate) { PendingWrites.RemoveRange(0, batch.Length); }
+        }
+    }
+
     private HashSet<string>? ReadSeen() =>
-        Decode<List<string>>(_settings.GetString(SeenPeersKey)) is { } list ? [.. list] : null;
+        Decode<List<string>>(StoredValue(SeenPeersKey)) is { } list ? [.. list] : null;
 
     private void PersistSeen(HashSet<string> seen)
     {
         _seenPeers = seen;
-        _settings.SetString(SeenPeersKey, JsonSerializer.Serialize(seen.Order(StringComparer.Ordinal), JsonOpts));
+        QueueWrite(SeenPeersKey, JsonSerializer.Serialize(seen.Order(StringComparer.Ordinal), JsonOpts));
     }
 
     private void PersistSelection() =>
-        _settings.SetString(SelectionKey, JsonSerializer.Serialize(_stored, JsonOpts));
+        QueueWrite(SelectionKey, JsonSerializer.Serialize(_stored, JsonOpts));
 
     /// <summary>Back to this PC alone: every overlay goes, and a response still
     /// in flight finds nothing wanted.</summary>
@@ -537,7 +618,7 @@ public sealed class DeviceOverlayState
             // persisted, not from this instance's copy: another instance (the
             // Settings window's) may have unchecked a device since this one was
             // loaded, and that device must stay seen.
-            var persisted = Decode<StoredDeviceSelection>(_settings.GetString(SelectionKey));
+            var persisted = DecodeSelection(StoredValue(SelectionKey));
             var dropped = (persisted ?? _stored).Peers.Where(p => !known.Contains(p)).ToList();
             if (ReadSeen() is { } onDisk) { _seenPeers = onDisk; }
             // A device never offered before is checked on arrival, once; the
@@ -716,6 +797,9 @@ public sealed class DeviceOverlayState
         }
     }
 
+    /// <summary>Test seam: settings writes queued and not yet performed.</summary>
+    internal static bool WritesPendingForTesting { get { lock (Gate) { return PendingWrites.Count > 0; } } }
+
     /// <summary>Test seam: whether a refresh is running anywhere in the process.</summary>
     internal static bool RefreshInFlightForTesting { get { lock (Gate) { return _refreshInFlight; } } }
 
@@ -740,8 +824,8 @@ public sealed class DeviceOverlayState
         {
             // A retry never replaces a pending request of the user's.
             if (isRetry && _pendingRefresh is { IsRetry: false }) { return; }
-            if (_pendingRefresh is { } old) { old.Owner._queuedRefresh = false; old.Owner.Touch(); }
-            _pendingRefresh = new PendingRefresh(this, keys, isRetry);
+            if (_pendingRefresh is { } old && old.Owner.TryGetTarget(out var oldOwner)) { oldOwner._queuedRefresh = false; oldOwner.Touch(); }
+            _pendingRefresh = new PendingRefresh(new WeakReference<DeviceOverlayState>(this), keys, isRetry);
             _queuedRefresh = true;
             Touch();
             return;
@@ -817,21 +901,23 @@ public sealed class DeviceOverlayState
         // Asked for here, under the lock, so a clock that counts delays sees it
         // registered before the caller can look.
         var delay = _clock.Delay(RetryDelay, cts.Token);
+        var weak = new WeakReference<DeviceOverlayState>(this); // as macOS [weak self]
         _ = Task.Run(async () =>
         {
             try { await delay.ConfigureAwait(false); }
             catch (OperationCanceledException) { return; }
+            if (!weak.TryGetTarget(out var self)) { return; }
             Locked(() =>
             {
                 if (cts.IsCancellationRequested) { return; }
                 // Armed no longer, whether or not it still runs: a retry voided
                 // by the process-wide reset must not keep the sentence up.
-                _retryCts = null;
-                _retryKeys = [];
-                Touch();
+                self._retryCts = null;
+                self._retryKeys = [];
+                self.Touch();
                 if (epoch != _retryEpoch) { return; }
-                if (!keys.All(IsWanted)) { return; }
-                ScheduleRefreshCore(keys, isRetry: true);
+                if (!keys.All(self.IsWanted)) { return; }
+                self.ScheduleRefreshCore(keys, isRetry: true);
             });
         });
     }
@@ -841,11 +927,13 @@ public sealed class DeviceOverlayState
         _refreshInFlight = false;
         if (_pendingRefresh is not { } next) { return; }
         _pendingRefresh = null;
-        next.Owner._queuedRefresh = false;
-        next.Owner.Touch();
-        if (next.Keys.All(next.Owner.IsWanted))
+        // Weak, as macOS `weak var owner`: a model that went away has nothing to run.
+        if (!next.Owner.TryGetTarget(out var owner)) { return; }
+        owner._queuedRefresh = false;
+        owner.Touch();
+        if (next.Keys.All(owner.IsWanted))
         {
-            next.Owner.StartRefreshCore(next.Keys, armsRetry: !next.IsRetry, isRetry: next.IsRetry);
+            owner.StartRefreshCore(next.Keys, armsRetry: !next.IsRetry, isRetry: next.IsRetry);
         }
     }
 
