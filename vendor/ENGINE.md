@@ -10,18 +10,37 @@ app consumer advances its reviewed pin.
 |---|---|
 | Path | `vendor/tokscale-core` |
 | Repository | `https://github.com/Nanako0129/tokscale-core.git` |
-| Reviewed pin | `2378f31a258b4875349a2d857338e3ed63fa60d8` |
-| TokenBar alignment | macOS pins `51047602` (Nanako0129/syrtis #574 moved it to `b0e2e5f4`, #575 to `51047602`). This pin is one engine PR ahead, #91, which only adds remote-scan entry points; macOS callers of the existing ones are unaffected |
-| Engine alignment | `51047602c7052f4c7a2ec0fc96967958e79aa829` → `2378f31a258b4875349a2d857338e3ed63fa60d8` (engine `main`; previous advance `e156d67c` → `51047602`) |
+| Reviewed pin | `d7a147512c3e404fa45f7e6783932fe42759e01c` |
+| TokenBar alignment | macOS pins the same commit `d7a14751` (Nanako0129/syrtis #590) |
+| Engine alignment | `2378f31a258b4875349a2d857338e3ed63fa60d8` → `d7a147512c3e404fa45f7e6783932fe42759e01c` (engine `main`; previous advance `51047602` → `2378f31a`) |
 | Native consumer baseline | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` |
 | Windows pre-migration baseline | `68e2541c5e9adb14a47433f8b25e26b0be84d1fc` |
-| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/2378f31a258b4875349a2d857338e3ed63fa60d8/UPSTREAM.md) |
+| Upstream and local-patch ledger | Immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/d7a147512c3e404fa45f7e6783932fe42759e01c/UPSTREAM.md) |
 
 > **Warning:** Do not edit shared source on a consumer branch. Engine changes
 > must pass review in `tokscale-core`; this repository then advances only the
 > reviewed gitlink and runs the Windows consumer gates.
 
-## Current pin: `2378f31a`, engine PR #91 (remote scan roots on Windows)
+## Current pin: `d7a14751`, engine PR #92 (bounded shard load for `modified_after`)
+
+`2378f31a` → `d7a14751` is one first-parent merge, PR #92. The diff touches
+`src/lib.rs`, `src/message_cache.rs` and `UPSTREAM.md`. A parse that sets
+`LocalParseOptions.modified_after` now loads only the source-message cache
+shards its pruned scan maps to (`SourceMessageCache::load_for_sources`)
+instead of every shard; without `modified_after` nothing changes, and parse
+output is the same either way. In this app `modified_after` is set by the
+live-rate tail (`usage_tail.rs`) and the window scan (`window_usage.rs`), so
+those reads touch fewer shards; the Graph, Models, Hourly and Agents reports
+do not set it.
+
+This is the revision Syrtis-Agent `36ce3828` pins (that agent revision changes
+only its engine pin), and the revision macOS pins (syrtis #590). No
+`Cargo.toml`, parser identity, `CACHE_FORMAT_VERSION` or
+`RESOLVER_CONTRACT_VERSION` change, so nothing is re-parsed.
+
+MEASUREMENT_PLACEHOLDER
+
+## Previous pin: `2378f31a`, engine PR #91 (remote scan roots on Windows)
 
 `51047602` → `2378f31a` is one first-parent merge, PR #91. The diff touches 3
 files: `src/source_context.rs`, `tests/remote_source_report.rs` and
@@ -58,7 +77,7 @@ codex, opencode, grok, antigravity-cli, dsh). A copy with one output token
 changed is reported as a difference. The live tokscale and app directories
 were unchanged.
 
-## Previous pin: `51047602`, engine PRs #89 and #90 (remote report lane)
+## Historical: `51047602`, engine PRs #89 and #90 (remote report lane)
 
 `e156d67c` → `51047602` is two first-parent merges, PRs #89 and #90. The diff
 touches 5 files: `src/remote_report.rs`, `src/pricing/mod.rs`, `src/lib.rs`,
