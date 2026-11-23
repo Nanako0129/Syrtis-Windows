@@ -732,6 +732,19 @@ public sealed class DiscordDevicesTests : IDisposable
         Assert.Equal(
             [DeviceFetchMode.Refresh, DeviceFetchMode.Cached, DeviceFetchMode.Cached],
             rig.Source.Calls.Select(c => c.Mode));
+
+        // The injected flyout reaches the decision: due, but open, is cached;
+        // closed again, the same moment refreshes.
+        rig.FlyoutOpen = true;
+        rig.Now = T0.AddSeconds(400);
+        rig.Controller.OnGraph(LocalTick());
+        await rig.CallDone();
+        rig.FlyoutOpen = false;
+        rig.Controller.OnGraph(LocalTick());
+        await rig.CallDone();
+        Assert.Equal(
+            [DeviceFetchMode.Cached, DeviceFetchMode.Refresh],
+            rig.Source.Calls.Skip(3).Select(c => c.Mode));
     }
 
     [Fact]
