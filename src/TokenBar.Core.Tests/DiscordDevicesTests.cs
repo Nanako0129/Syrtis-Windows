@@ -20,7 +20,10 @@ public sealed class DiscordDevicesTests : IDisposable
     private const string Today = "2026-09-25";
     private static readonly string PeerA = new('a', 64);
     private static readonly string PeerB = new('b', 64);
-    private static readonly DateTimeOffset T0 = DateTimeOffset.FromUnixTimeSeconds(1_800_000_000);
+    // The monotonic clock the cadence runs on (any origin).
+    private static readonly TimeSpan T0 = TimeSpan.FromSeconds(1_000);
+
+    private static TimeSpan At(double seconds) => T0 + TimeSpan.FromSeconds(seconds);
 
     // Local: claude 1,000 today. Merged: the same plus 7,000,000 on another
     // device under a registered client id (SelfTest.swift :12095-12103).
@@ -67,6 +70,8 @@ public sealed class DiscordDevicesTests : IDisposable
     {
         private readonly object _lock = new();
         private readonly List<(DeviceSelection Selection, DeviceFetchMode Mode)> _calls = [];
+        private readonly List<string?> _years = [];
+        private bool _holdTimedOut;
 
         public FakeSource(UsagePayload body) => Body = body;
 
@@ -80,14 +85,31 @@ public sealed class DiscordDevicesTests : IDisposable
             get { lock (_lock) { return [.. _calls]; } }
         }
 
+        /// <summary>Every year argument received. Recorded, not asserted here:
+        /// this runs inside the controller's worker, whose catch would swallow
+        /// a failed assertion.</summary>
+        public IReadOnlyList<string?> Years
+        {
+            get { lock (_lock) { return [.. _years]; } }
+        }
+
+        public bool HoldTimedOut
+        {
+            get { lock (_lock) { return _holdTimedOut; } }
+        }
+
         public DeviceAwarePayload<UsagePayload> GraphDevices(string? year, DeviceSelection selection, DeviceFetchMode mode)
         {
-            Assert.Null(year);
-            lock (_lock) { _calls.Add((selection, mode)); }
-            Entered.TrySetResult();
-            if (Hold is { } hold)
+            lock (_lock)
             {
-                Assert.True(hold.Wait(TimeSpan.FromSeconds(10)), "held call never released");
+                _calls.Add((selection, mode));
+                _years.Add(year);
+            }
+
+            Entered.TrySetResult();
+            if (Hold is { } hold && !hold.Wait(TimeSpan.FromSeconds(10)))
+            {
+                lock (_lock) { _holdTimedOut = true; }
             }
 
             if (Fail)
@@ -120,7 +142,7 @@ public sealed class DiscordDevicesTests : IDisposable
     private static M.Decision Decide(
         M.State state, bool on = true, bool discord = true, bool connect = true,
         IReadOnlyList<string>? peers = null, bool flyout = false, double at = 0) =>
-        M.Decide(Local, state, on, discord, connect, peers ?? [PeerA], flyout, T0.AddSeconds(at));
+        M.Decide(Local, state, on, discord, connect, peers ?? [PeerA], flyout, At(at));
 
     /// <summary>Carries a call out against the fake, as the controller does:
     /// a throw is a failed call, and only the UsagePayload is kept.</summary>
@@ -198,7 +220,7 @@ public sealed class DiscordDevicesTests : IDisposable
     public void RefreshOnlyWithTheFlyoutClosedAndOncePerInterval()
     {
         // D1 (3), SelfTest.swift :12159-12172. Adapted: macOS's 299 s tick is
-        // 289 s here, the last offset still inside the window once the 10 s
+        // 269 s here, the last offset still inside the window once the 30 s
         // DueMargin applies (299 s is due on Windows by design, see below).
         var fake = new FakeSource(Merged);
         var state = new M.State();
@@ -226,13 +248,14 @@ public sealed class DiscordDevicesTests : IDisposable
     [Fact]
     public void ClosedFlyoutTicksSlightlyUnder300SecondsApartEachRefresh()
     {
-        // Windows (c): TrayFeed's 300 s timer plus fetch jitter can land a tick
-        // a few seconds short; each still refreshes. Control: 60 s is cached.
+        // Windows (c): TrayFeed's 300 s timer plus fetch time (a forced full
+        // reread takes about 25 s) can land a tick up to ~25 s short; each
+        // still refreshes. Control: 60 s later is cached.
         Assert.InRange(M.DueMargin.TotalSeconds, 5, 30);
         var fake = new FakeSource(Merged);
         var state = new M.State();
         List<DeviceFetchMode> modes = [];
-        foreach (var offset in new double[] { 0, 297, 594, 891 })
+        foreach (var offset in new double[] { 0, 297, 572, 847 })
         {
             var decision = Decide(state, at: offset);
             modes.Add(decision.Call!.Mode);
@@ -240,7 +263,18 @@ public sealed class DiscordDevicesTests : IDisposable
         }
 
         Assert.All(modes, mode => Assert.Equal(DeviceFetchMode.Refresh, mode));
-        Assert.Equal(DeviceFetchMode.Cached, Decide(state, at: 891 + 60).Call!.Mode);
+        Assert.Equal(DeviceFetchMode.Cached, Decide(state, at: 847 + 60).Call!.Mode);
+    }
+
+    [Fact]
+    public void TheDueBoundaryIsIntervalMinusMarginOnTheMonotonicClock()
+    {
+        // Review round 1 (3): 269 s cached, 270 s refresh (300 - 30 margin).
+        var fake = new FakeSource(Merged);
+        var started = Run(Decide(new M.State()), fake);
+        var edge = 300 - M.DueMargin.TotalSeconds;
+        Assert.Equal(DeviceFetchMode.Cached, Decide(started, at: edge - 1).Call!.Mode);
+        Assert.Equal(DeviceFetchMode.Refresh, Decide(started, at: edge).Call!.Mode);
     }
 
     [Fact]
@@ -484,7 +518,7 @@ public sealed class DiscordDevicesTests : IDisposable
         public required FakeSource Source { get; init; }
         public required SettingsStore Store { get; init; }
         public readonly List<(DiscordPresence.Payload? Payload, VisibilityChange Change)> Published = [];
-        public DateTimeOffset Now = T0;
+        public TimeSpan Now = T0;
         public bool FlyoutOpen;
         public int FlyoutReads;
 
@@ -502,7 +536,18 @@ public sealed class DiscordDevicesTests : IDisposable
         {
             Assert.NotNull(Controller.MergeCallForTesting);
             await Controller.MergeCallForTesting!.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.All(Source.Years, Assert.Null);
+            Assert.False(Source.HoldTimedOut, "a held call was never released");
         }
+
+        /// <summary>The payloads published after the first
+        /// <paramref name="count"/>, in order.</summary>
+        public IReadOnlyList<DiscordPresence.Payload?> Since(int count)
+        {
+            lock (Published) { return [.. Published.Skip(count).Select(p => p.Payload)]; }
+        }
+
+        public string Today = DiscordDevicesTests.Today;
 
         public void Write(string key, Action<SettingsStore> write)
         {
@@ -537,7 +582,7 @@ public sealed class DiscordDevicesTests : IDisposable
                 new DiscordIpcClient.Timing(
                     TimeSpan.Zero, TimeSpan.FromMilliseconds(10), TimeSpan.FromSeconds(5),
                     TimeSpan.FromMilliseconds(500), TimeSpan.FromSeconds(2))),
-            () => Today, source,
+            () => rig!.Today, source,
             () =>
             {
                 rig!.FlyoutReads++;
@@ -583,11 +628,13 @@ public sealed class DiscordDevicesTests : IDisposable
     {
         // D1 (2) through the controller: this PC's graph at once, the merged
         // one when the call lands, as an addition (no retire).
+        // The worker can publish before OnGraph's own publish is read, so the
+        // order is asserted after the call has landed.
         var rig = NewRig(Merged);
+        var before = rig.Count;
         rig.Controller.OnGraph(LocalTick());
-        Assert.Equal(Pay(Local), rig.Last.Payload);
         await rig.CallDone();
-        Assert.Equal(Pay(Merged), rig.Last.Payload);
+        Assert.Equal([Pay(Local), Pay(Merged)], rig.Since(before));
         Assert.False(rig.Last.Change.Retires);
         var (selection, mode) = Assert.Single(rig.Source.Calls);
         Assert.True(selection.Local);
@@ -658,7 +705,7 @@ public sealed class DiscordDevicesTests : IDisposable
         await rig.Source.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
         // A tick while it is held is skipped, and this PC's graph publishes.
-        rig.Now = T0.AddSeconds(400);
+        rig.Now = At(400);
         var inFlight = rig.Controller.MergeCallForTesting;
         rig.Controller.OnGraph(LocalTick());
         Assert.Same(inFlight, rig.Controller.MergeCallForTesting);
@@ -679,7 +726,7 @@ public sealed class DiscordDevicesTests : IDisposable
         Assert.Single(rig.Source.Calls);
         // Control: no longer in flight, the next tick calls again.
         rig.Source.Hold = null;
-        rig.Now = T0.AddSeconds(401);
+        rig.Now = At(401);
         rig.Controller.OnGraph(LocalTick());
         await rig.CallDone();
         Assert.Equal(2, rig.Source.Calls.Count);
@@ -692,12 +739,12 @@ public sealed class DiscordDevicesTests : IDisposable
         // F2: caught, in flight cleared, last result kept, nothing unobserved.
         var rig = await MergedRig();
         rig.Source.Fail = true;
-        rig.Now = T0.AddSeconds(300);
+        rig.Now = At(300);
         rig.Controller.OnGraph(LocalTick());
         await rig.CallDone(); // would rethrow an uncaught exception
         Assert.Equal(Pay(Merged), rig.Last.Payload);
         rig.Source.Fail = false;
-        rig.Now = T0.AddSeconds(360);
+        rig.Now = At(360);
         rig.Controller.OnGraph(LocalTick());
         await rig.CallDone();
         Assert.Equal(3, rig.Source.Calls.Count);
@@ -724,7 +771,7 @@ public sealed class DiscordDevicesTests : IDisposable
         var rig = NewRig(Merged);
         foreach (var at in new double[] { 0, 5, 10 })
         {
-            rig.Now = T0.AddSeconds(at);
+            rig.Now = At(at);
             rig.Controller.OnGraph(LocalTick());
             await rig.CallDone();
         }
@@ -736,7 +783,7 @@ public sealed class DiscordDevicesTests : IDisposable
         // The injected flyout reaches the decision: due, but open, is cached;
         // closed again, the same moment refreshes.
         rig.FlyoutOpen = true;
-        rig.Now = T0.AddSeconds(400);
+        rig.Now = At(400);
         rig.Controller.OnGraph(LocalTick());
         await rig.CallDone();
         rig.FlyoutOpen = false;
@@ -755,19 +802,103 @@ public sealed class DiscordDevicesTests : IDisposable
         rig.Write(DiscordPresence.EnabledKey, s => s.SetBool(DiscordPresence.EnabledKey, false));
         rig.Write(DiscordPresence.EnabledKey, s => s.SetBool(DiscordPresence.EnabledKey, true));
         Assert.Equal(Pay(Local), rig.Last.Payload);
-        rig.Now = T0.AddSeconds(60);
+        rig.Now = At(60);
+        var before = rig.Count;
         rig.Controller.OnGraph(LocalTick());
-        Assert.Equal(Pay(Local), rig.Last.Payload);
         await rig.CallDone();
-        Assert.Equal(Pay(Merged), rig.Last.Payload);
+        Assert.Equal([Pay(Local), Pay(Merged)], rig.Since(before));
+    }
+
+    [Fact]
+    public async Task ACallCompletingAfterQuitNeitherPublishesNorStartsAnother()
+    {
+        // Review round 1 (1): Quit is terminal.
+        var rig = NewRig(Merged);
+        using var hold = new SemaphoreSlim(0);
+        rig.Source.Hold = hold;
+        rig.Controller.OnGraph(LocalTick());
+        await rig.Source.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        rig.Controller.Quit(TimeSpan.FromMilliseconds(300));
+        var atQuit = rig.Count;
+
+        hold.Release();
+        await rig.CallDone();
+        rig.Source.Hold = null;
+        rig.Now = At(600);
+        rig.Controller.OnGraph(LocalTick());
+        rig.Write(DiscordPresence.WholeDollarsKey, s => s.SetBool(DiscordPresence.WholeDollarsKey, true));
+        rig.Controller.OnPeersChanged();
+
+        Assert.Empty(rig.Since(atQuit));
+        Assert.Single(rig.Source.Calls);
+
+        // Control: an ordinary off/on (no Quit) still publishes again.
+        var control = await MergedRig();
+        control.Write(DiscordPresence.EnabledKey, s => s.SetBool(DiscordPresence.EnabledKey, false));
+        var off = control.Count;
+        control.Write(DiscordPresence.EnabledKey, s => s.SetBool(DiscordPresence.EnabledKey, true));
+        Assert.Equal([Pay(Local)], control.Since(off));
+    }
+
+    [Fact]
+    public async Task AnUnpricedLocalGraphStillLetsTheMergeAskForItsOwnGraph()
+    {
+        // Review round 1 (2): this PC's graph has no priced message
+        // (CostCoverage.None), the merged answer is Partial: the merged
+        // payload publishes; this PC's never does on its own.
+        var unpriced = WithMeta(LocalTick(), PricingMode.BestEffort, CostCoverage.None);
+        var partial = WithMeta(Merged, PricingMode.BestEffort, CostCoverage.Partial);
+        var rig = NewRig(partial);
+        rig.Controller.OnGraph(unpriced);
+        await rig.CallDone();
+        Assert.NotNull(Pay(partial));
+        Assert.Equal([Pay(partial)], rig.Since(0));
+
+        // The same instance again (a trace tick) asks for nothing.
+        var call = rig.Controller.MergeCallForTesting;
+        rig.Controller.OnGraph(unpriced);
+        Assert.Same(call, rig.Controller.MergeCallForTesting);
+        Assert.Single(rig.Source.Calls);
+
+        // Control: merge off, nothing is published and nothing is called.
+        var control = NewRig(partial, includeDevices: false);
+        control.Controller.OnGraph(WithMeta(LocalTick(), PricingMode.BestEffort, CostCoverage.None));
+        Assert.Equal(0, control.Count);
+        Assert.Empty(control.Source.Calls);
+    }
+
+    [Fact]
+    public async Task TheCadenceIgnoresTheCalendarClock()
+    {
+        // Review round 1 (3): the interval runs on the monotonic seam only.
+        // A calendar day moved back (clock set back) or forward neither makes
+        // a tick due nor stops a due one.
+        var rig = await MergedRig();
+        Assert.Equal(DeviceFetchMode.Refresh, rig.Source.Calls[0].Mode);
+        foreach (var (today, at, expected) in new (string, double, DeviceFetchMode)[]
+                 {
+                     ("2026-09-24", 60, DeviceFetchMode.Cached), // set back a day
+                     ("2026-12-31", 120, DeviceFetchMode.Cached), // set forward
+                     ("2025-01-01", 300, DeviceFetchMode.Refresh), // back, yet due
+                 })
+        {
+            rig.Today = today;
+            rig.Now = At(at);
+            rig.Controller.OnGraph(LocalTick());
+            await rig.CallDone();
+            Assert.Equal(expected, rig.Source.Calls[^1].Mode);
+        }
+
+        Assert.Equal(4, rig.Source.Calls.Count);
     }
 
     [Fact]
     public async Task NothingButDiscordCanReceiveTheMergedGraph()
     {
-        // D1 (8)'s "no tray graph in the output": the controller exposes no
-        // member that yields a UsagePayload, so the merged graph has no way
-        // out but the Discord payload; the graph handed in is left as it was.
+        // D1 (8)'s "no tray graph in the output". The reflection half is a
+        // shape check, not a guarantee: it sees members typed UsagePayload, not
+        // a Task<UsagePayload>, a delegate or an event that could carry one.
+        // The graph handed in is left as it was.
         var given = LocalTick();
         var rig = NewRig(Merged);
         rig.Controller.OnGraph(given);

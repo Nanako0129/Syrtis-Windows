@@ -99,16 +99,16 @@ public sealed class TrayService : IDisposable
             SettingsWindow.OnQuotaMaybeChanged();
             // Every accepted, cost-authoritative graph republishes (macOS
             // AppDelegate.swift :573-576). Changed also fires for trace/quota
-            // ticks (same graph instance) and for LocalFirst graphs (unpriced);
-            // the controller ignores both, judging authority from the graph
-            // itself.
+            // ticks (same graph instance, ignored) and for LocalFirst graphs
+            // (unpriced, judged from the graph itself): never published, they
+            // only let the device merge ask for its own graph.
             _discord.OnGraph(_feed.Graph);
         };
         _onStoreChanged = key =>
         {
             // Synchronously on the writing thread, before any later write can
             // land: a hide must retire queued payloads at once. The controller
-            // is value-gated and ignores every key but its five.
+            // is value-gated and ignores every key outside WatchedKeys.
             _discord.OnSettingChanged(key);
             if (IconKeys.Contains(key))
             {
