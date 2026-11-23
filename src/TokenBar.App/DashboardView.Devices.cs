@@ -159,19 +159,20 @@ public sealed partial class DashboardView
 
         DeviceMenuHost.Visibility = Visibility.Visible;
         DeviceTitle.Text = menu.Title;
-        if (menu.Structure != _deviceMenuStructure)
+        if (menu.Structure != _deviceMenuStructure && !_deviceFlyoutOpen)
         {
-            if (_deviceFlyoutOpen)
-            {
-                _deviceMenuDirty = true;
-            }
-            else
-            {
-                RebuildDeviceMenu(menu);
-            }
+            RebuildDeviceMenu(menu);
         }
         else
         {
+            // Open with changed rows: the rebuild waits for the close (nothing is
+            // cleared or re-parented while open), but the rows that survive keep
+            // their checked, enabled and status current meanwhile.
+            if (menu.Structure != _deviceMenuStructure)
+            {
+                _deviceMenuDirty = true;
+            }
+
             UpdateDeviceRows(menu);
         }
 
@@ -259,17 +260,20 @@ public sealed partial class DashboardView
         UpdateDeviceRows(menu);
     }
 
-    /// <summary>Checked, enabled and status of the existing controls.</summary>
+    /// <summary>Checked, enabled and status of the existing controls, each
+    /// matched to its menu row by device (this PC by a null peer), not by
+    /// position. A control whose device is gone is left as it is until the
+    /// rebuild; a device with no control yet waits for it.</summary>
     private void UpdateDeviceRows(DeviceMenuState menu)
     {
-        if (menu.Rows.Count != _deviceRows.Count)
+        foreach (var controls in _deviceRows)
         {
-            return;
-        }
+            var row = menu.Rows.FirstOrDefault(r => r.Peer == controls.Peer);
+            if (row is null)
+            {
+                continue;
+            }
 
-        for (var i = 0; i < menu.Rows.Count; i++)
-        {
-            var (row, controls) = (menu.Rows[i], _deviceRows[i]);
             controls.Check.IsChecked = row.Checked;
             controls.Check.IsEnabled = row.CanToggle;
             if (controls.Status is not null && row.Status is { } status)

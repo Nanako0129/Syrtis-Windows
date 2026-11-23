@@ -1320,6 +1320,10 @@ public sealed partial class DashboardView : UserControl
             return;
         }
 
+        // Captured before the overlay is read for this draw: a result that lands
+        // while the content is being built then differs from it, and
+        // OnOverlayChanged draws again instead of finding the signatures equal.
+        var drawnSignature = OverlayRenderSignature();
         DetachGraph3DContentHost();
         _heatmapScroll = null;
         _threeDFrame = null;
@@ -1350,7 +1354,7 @@ public sealed partial class DashboardView : UserControl
             };
         content = WithDeviceHeader(content);
         ContentHost.Content = content;
-        _overlayRenderSignature = OverlayRenderSignature();
+        _overlayRenderSignature = drawnSignature;
         SyncGraph3DActivity();
         if (animated)
         {
