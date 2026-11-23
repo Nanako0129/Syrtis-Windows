@@ -99,13 +99,16 @@ public sealed partial class SettingsWindow : Window
     /// Discord section — the setup card's "Set up in Settings…" (macOS
     /// <c>show(scrollingTo: .discord)</c>). Navigation only; it writes
     /// nothing.</param>
+    /// <param name="peersChanged">Raised with DevicesModel.PeersChanged (a
+    /// device linked, removed or re-paired here). Kept from the call that
+    /// creates the window.</param>
     public static void Present(
         Func<AgentUsagePayload?> quota, Func<UsagePayload?> graph,
         Func<IReadOnlyList<TraceBucket>> trace, bool showDiscord = false,
         bool showAttribution = false, bool showDashboard = false,
-        DeviceOverlayState? deviceOverlay = null)
+        DeviceOverlayState? deviceOverlay = null, Action? peersChanged = null)
     {
-        _shared ??= new SettingsWindow(quota, graph, trace, deviceOverlay);
+        _shared ??= new SettingsWindow(quota, graph, trace, deviceOverlay, peersChanged);
         if (showDashboard)
         {
             _shared._selectedTag = "dashboard";
@@ -150,9 +153,10 @@ public sealed partial class SettingsWindow : Window
 
     private SettingsWindow(
         Func<AgentUsagePayload?> quota, Func<UsagePayload?> graph,
-        Func<IReadOnlyList<TraceBucket>> trace, DeviceOverlayState? deviceOverlay)
+        Func<IReadOnlyList<TraceBucket>> trace, DeviceOverlayState? deviceOverlay, Action? peersChanged)
     {
         _deviceOverlay = deviceOverlay;
+        _peersChanged = peersChanged;
         _quota = quota;
         _graph = graph;
         _trace = trace;
@@ -1307,6 +1311,18 @@ public sealed partial class SettingsWindow : Window
         }
 
         body.Children.Add(Hint(DiscordCopy.UntickHint.Localized()));
+
+        // macOS SettingsPanel.swift :1019-1020: always enabled; the strict
+        // reader is the answer, as for the switches above.
+        var includeDevices = new ToggleSwitch
+        {
+            IsOn = DiscordPresence.IncludeDevices(store),
+            OnContent = null,
+            OffContent = null,
+        };
+        includeDevices.Toggled += (_, _) => store.SetBool(DiscordPresence.IncludeDevicesKey, includeDevices.IsOn);
+        body.Children.Add(ToggleRow(DiscordCopy.IncludeDevices.Localized(), includeDevices));
+        body.Children.Add(Hint(DiscordCopy.IncludeDevicesHint.Localized()));
 
         // The ANSWER comes from the strict reader: a malformed stored value
         // ticks nothing, which is honest — nothing is published then.

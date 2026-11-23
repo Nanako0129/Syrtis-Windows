@@ -84,7 +84,12 @@ public sealed class TrayService : IDisposable
         _discord = new DiscordPresenceController(
             AppSettings.Store,
             Environment.GetCommandLineArgs(),
-            () => new DiscordIpcClient(DiscordIpc.ProductionConnector));
+            () => new DiscordIpcClient(DiscordIpc.ProductionConnector),
+            // The device merge (opt-in, default off) is inert without the
+            // process's overlay. The flyout is read inside OnGraph, on this
+            // (UI) thread: a refresh pulls devices only while it is closed.
+            devices: deviceOverlay is null ? null : new TbDeviceSource(),
+            flyoutOpen: () => _flyout.IsFlyoutVisible);
         _feed.Changed += () =>
         {
             UpdateIcon();
@@ -193,21 +198,22 @@ public sealed class TrayService : IDisposable
     private readonly DeviceOverlayState? _deviceOverlay;
 
     public void ShowSettings() => SettingsWindow.Present(
-        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, deviceOverlay: _deviceOverlay);
+        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace,
+        deviceOverlay: _deviceOverlay, peersChanged: _discord.OnPeersChanged);
 
     internal void ShowAttributionSettings() => SettingsWindow.Present(
         () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showAttribution: true,
-        deviceOverlay: _deviceOverlay);
+        deviceOverlay: _deviceOverlay, peersChanged: _discord.OnPeersChanged);
 
     internal void ShowDashboardSettings() => SettingsWindow.Present(
         () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showDashboard: true,
-        deviceOverlay: _deviceOverlay);
+        deviceOverlay: _deviceOverlay, peersChanged: _discord.OnPeersChanged);
 
     /// <summary>The Discord setup card's "Set up in Settings…": navigation to
     /// the Discord section, never a write.</summary>
     internal void ShowDiscordSettings() => SettingsWindow.Present(
         () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showDiscord: true,
-        deviceOverlay: _deviceOverlay);
+        deviceOverlay: _deviceOverlay, peersChanged: _discord.OnPeersChanged);
 
     internal bool CanHandoff => !Volatile.Read(ref _disposed);
 
