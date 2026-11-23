@@ -2247,6 +2247,14 @@ public sealed partial class SettingsWindow : Window
         var text = Ui.Text(label, 12);
         text.VerticalAlignment = VerticalAlignment.Center;
         row.Children.Add(text);
+        // The label is a sibling TextBlock, so the switch itself had no name:
+        // a screen reader announced "toggle switch, off" with nothing to say
+        // which one. Named after its label unless the caller already named it.
+        if (string.IsNullOrEmpty(Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(toggle)))
+        {
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(toggle, label);
+        }
+
         toggle.HorizontalAlignment = HorizontalAlignment.Right;
         toggle.MinWidth = 0; // drop the content-label reserve
         toggle.Margin = new Thickness(0, -4, 0, -4);
