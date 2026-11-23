@@ -42,6 +42,11 @@
          UI-free, but it takes the lens enum above. Built only by tests until
          SA-4f/4g wire it. -->
     <Compile Include="..\TokenBar.App\DeviceOverlayState.cs" Link="DeviceOverlayState.cs" />
+    <!-- SA-4g: what each dashboard lens shows while other devices are chosen,
+         the device menu's rows, the refresh control's rule and the once-per-key
+         ensure. DashboardView compiles under no test project, so every decision
+         is in this UI-free file. -->
+    <Compile Include="..\TokenBar.App\DashboardDeviceLens.cs" Link="DashboardDeviceLens.cs" />
     <!-- Settings → Devices (SA-4f): the page's model, its copy and the agent
          lifecycle are UI-free; SettingsWindow.Devices.cs and the WinRT
          clipboard adapter compile under no test project. -->

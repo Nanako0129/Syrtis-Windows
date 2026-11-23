@@ -298,14 +298,24 @@ public sealed class DevicesModel
     private string? _heldPairUrl;
     private int _previewGeneration;
 
+    /// <param name="overlay">Reads the dashboard overlay's snapshot and learned names
+    /// (the short status under a linked device, the name line).</param>
+    /// <param name="watchOverlay">Subscribes the given callback to the overlay's
+    /// <c>SnapshotChanged</c>. The status line reads a snapshot this page never
+    /// polls for itself (the dashboard fetches it), so without this the line
+    /// would show a result only at the next 30 s tick or the next change of
+    /// this model. The callback raises <see cref="Changed"/>; it may arrive on
+    /// any thread.</param>
     public DevicesModel(
         IDevicesRemoteClient client, IDevicesClipboard clipboard, IDeviceClock? clock = null,
-        Func<(DeviceOverlaySnapshot Snapshot, IReadOnlyDictionary<string, string> LearnedNames)>? overlay = null)
+        Func<(DeviceOverlaySnapshot Snapshot, IReadOnlyDictionary<string, string> LearnedNames)>? overlay = null,
+        Action<Action>? watchOverlay = null)
     {
         _client = client;
         _clipboard = clipboard;
         _clock = clock ?? new SystemDeviceClock();
         _overlay = overlay;
+        watchOverlay?.Invoke(Notify);
     }
 
     /// <summary>Any state changed. Fires outside the lock, on the thread that

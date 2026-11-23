@@ -927,7 +927,10 @@ public class DeviceOverlayStateTests : IDisposable
         Assert.Equal(2, early.DeviceCount);
         source.Set(s => s.HoldCached = false);
         source.ReleaseCached(2);
-        Assert.True(Pump(() => overlay.Graph?.Data is not null && overlay.Models?.Data is not null) && Settled());
+        // The four calls, not idle: between the cached load ending and the refresh
+        // being scheduled the overlay is briefly idle with two calls made.
+        Assert.True(Pump(() => source.Calls.Count == 4) && Settled());
+        Assert.True(Pump(() => overlay.Graph?.Data is not null && overlay.Models?.Data is not null));
         SameList(["graph-cached", "models-cached", "graph-refresh", "models-refresh"], source.Calls.Select(c => c.Tag));
         var full = Merge();
         Assert.Equal(FakeDeviceSource.OverlayGeneratedAt, full!.Graph!.Value.Payload.Meta.GeneratedAt);
