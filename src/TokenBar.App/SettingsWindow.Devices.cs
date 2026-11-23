@@ -58,7 +58,11 @@ public sealed partial class SettingsWindow
                 var overlay = _deviceOverlay;
                 _devicesModel = new DevicesModel(
                     new TbDevicesClient(), new DevicesClipboard(DispatcherQueue),
-                    overlay: overlay is null ? null : () => (overlay.Snapshot, overlay.LearnedNames));
+                    overlay: overlay is null ? null : () => (overlay.Snapshot, overlay.LearnedNames),
+                    // The overlay's results arrive when the dashboard fetches, not
+                    // when this page polls: its changes re-render the status lines
+                    // (queued to this window's dispatcher by QueueDevicesRender).
+                    watchOverlay: overlay is null ? null : handler => overlay.SnapshotChanged += _ => handler());
                 _devicesModel.Changed += QueueDevicesRender;
                 // A link or a removal: the dashboard's menu follows (the
                 // overlay's read is thread-safe, called from wherever this is
