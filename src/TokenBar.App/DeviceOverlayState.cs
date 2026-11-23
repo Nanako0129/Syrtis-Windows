@@ -176,11 +176,15 @@ public sealed class DeviceOverlayState
 
     /// <summary>A key refreshed this recently is not asked for again when a lens
     /// comes on screen: a producer grants a burst of 2 and refills one per 60 s.
-    /// A manual refresh, a poll and a retry still ask.</summary>
+    /// A lens asks for its own page(s) plus the header's graph page, so a lens
+    /// with one page of its own uses the whole burst. A manual refresh, a poll
+    /// and a retry still ask.</summary>
     public static readonly TimeSpan FreshWindow = TimeSpan.FromSeconds(60);
 
     /// <summary>How often the lens on screen is refreshed (a producer refills one
-    /// request per 60 s and Stats asks for two pages per refresh).</summary>
+    /// request per 60 s and a refresh asks for the lens's page(s) plus the
+    /// header's graph page: two requests on Overview, Stats, Models, Hourly
+    /// and Agents, one on Daily, Monthly and Quota).</summary>
     public static readonly TimeSpan RemotePoll = TimeSpan.FromSeconds(300);
 
     /// <summary>One delayed retry after a refresh that left a selected device
@@ -474,7 +478,7 @@ public sealed class DeviceOverlayState
     // ---- snapshot ---------------------------------------------------------
 
     /// <summary>What the three short-status places read: the rows of the pages
-    /// held for the lens on screen (every held page while none is wanted, as
+    /// held for the lens on screen, which include the header's graph page (every held page while none is wanted, as
     /// when the flyout is closed), who is selected, and whether a refresh is
     /// running.</summary>
     public DeviceOverlaySnapshot Snapshot => Read(BuildSnapshot);
@@ -719,12 +723,25 @@ public sealed class DeviceOverlayState
         Touch();
     }
 
-    private List<DeviceOverlayKey> WantedKeys() =>
-        [.. Order.Where(_wanted.ContainsKey).Select(k => _wanted[k])];
+    /// <summary>True while the graph page is wanted only for the header (the
+    /// lens has no graph page of its own): it is then issued after the lens's
+    /// own pages, so with one producer token left the lens gets it.</summary>
+    private bool _graphForHeaderOnly;
+
+    private List<DeviceOverlayKey> OrderedKeys(Dictionary<DeviceOverlayKind, DeviceOverlayKey> wanted)
+    {
+        var kinds = Order.Where(wanted.ContainsKey).ToList();
+        if (_graphForHeaderOnly && kinds.Remove(DeviceOverlayKind.Graph)) { kinds.Add(DeviceOverlayKind.Graph); }
+        return [.. kinds.Select(k => wanted[k])];
+    }
+
+    private List<DeviceOverlayKey> WantedKeys() => OrderedKeys(_wanted);
 
     /// <summary>Declares what the lens on screen needs and starts the loads: for
     /// each page without an overlay for its key, one <c>cached</c> call (shown
-    /// at once), then a <c>refresh</c>. Quota needs none. Safe to call on every
+    /// at once), then a <c>refresh</c>. With <paramref name="withGraph"/> (the
+    /// dashboard header) the graph page is wanted on every lens, Quota included,
+    /// after the lens's own pages. Safe to call on every
     /// change of lens, year, client slice or selection.
     /// <paramref name="rootsGeneration"/>: the scan-roots generation the caller
     /// is on. When it changed since the last call, this PC's share of every page
@@ -747,13 +764,14 @@ public sealed class DeviceOverlayState
             // withGraph: the dashboard header shows the combined totals on every
             // lens, so the graph page is wanted beside the lens's own pages.
             var kinds = DeviceOverlayRequests.KindsFor(view);
-            if (withGraph && !kinds.Contains(DeviceOverlayKind.Graph)) { kinds = [.. kinds, DeviceOverlayKind.Graph]; }
+            _graphForHeaderOnly = withGraph && !kinds.Contains(DeviceOverlayKind.Graph);
+            if (_graphForHeaderOnly) { kinds = [.. kinds, DeviceOverlayKind.Graph]; }
             foreach (var kind in kinds)
             {
                 if (KeyCore(kind, year, clients) is { } key) { next[kind] = key; }
             }
             SetWanted(next);
-            var keys = Order.Where(next.ContainsKey).Select(k => next[k]).ToList();
+            var keys = OrderedKeys(next);
             if (keys.Count == 0) { return; }
             var missing = keys.Where(k => !k.Equals(CurrentKey(k.Kind))).ToList();
             if (missing.Count == 0)
@@ -800,6 +818,7 @@ public sealed class DeviceOverlayState
     public void PopoverClosed() => Locked(() =>
     {
         SetWanted([]);
+        _graphForHeaderOnly = false;
         CancelRetryCore();
         Touch();
     });

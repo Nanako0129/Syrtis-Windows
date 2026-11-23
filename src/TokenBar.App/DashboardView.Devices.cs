@@ -102,7 +102,8 @@ public sealed partial class DashboardView
 
     // ---- wiring -----------------------------------------------------------
 
-    /// <summary>Asks for the lens on screen's pages when the key changed. A
+    /// <summary>Asks for the lens on screen's pages, plus the graph page the
+    /// header's combined totals read on every lens, when the key changed. A
     /// no-op while the flyout is closed or nothing but this PC is chosen.</summary>
     private void SyncOverlay() =>
         _ = _sync?.Sync(
