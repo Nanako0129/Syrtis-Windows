@@ -448,7 +448,7 @@ public class DashboardDeviceLensTests : IDisposable
     [Fact] // one model, one colour: the overlay's own map is what the lens is given
     public void TheOverlaysColoursReachTheLensAndTheMergeFallsBackToThisPcsOnlyWithoutAModelsPage()
     {
-        var (overlay, _, _, sync) = Open();
+        var (overlay, source, _, sync) = Open();
         var localColors = new ModelColorMap((ModelReport?)null);
         Assert.True(sync.Sync(AppView.Models, null, null, ""));
         Assert.True(Pump(() => overlay.Models?.Data is not null) && Idle(overlay));
@@ -459,9 +459,15 @@ public class DashboardDeviceLensTests : IDisposable
 
         var held = overlay.OverviewMergeFor(null, null, "", "", localColors)!;
         Assert.Same(overlay.ModelsColors, held.Colors);
-        Assert.True(sync.Sync(AppView.Overview, "1990", null, "")); // a key with no models page yet
+        // A key with no models page yet: its cached load is held back so the page
+        // cannot land before the assertion.
+        source.Set(s => s.HoldCached = true);
+        Assert.True(sync.Sync(AppView.Overview, "1990", null, ""));
         var missing = overlay.OverviewMergeFor("1990", null, "", "", localColors)!;
         Assert.Same(localColors, missing.Colors);
+        source.Set(s => s.HoldCached = false);
+        source.ReleaseCached(50);
+        Assert.True(Idle(overlay));
     }
 
     [Fact] // Settings → Devices reads the same snapshot the dashboard draws
