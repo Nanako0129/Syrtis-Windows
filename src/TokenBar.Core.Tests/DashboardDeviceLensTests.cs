@@ -464,6 +464,53 @@ public class DashboardDeviceLensTests : IDisposable
         Assert.Same(localColors, missing.Colors);
     }
 
+    [Fact] // Settings → Devices reads the same snapshot the dashboard draws
+    public void TheSettingsPageShowsTheStatusTheFlyoutShows()
+    {
+        var (overlay, source, clock, sync) = Open();
+        var peer = Peer();
+        var model = new DevicesModel(
+            new FakeDevicesClient(), new FakeDevicesClipboard(), clock,
+            () => (overlay.Snapshot, overlay.LearnedNames));
+        // Nothing fetched yet for the lens on screen: the page makes none up.
+        Assert.True(sync.Sync(AppView.Overview, null, null, ""));
+        Assert.True(Pump(() => overlay.Graph?.Data is not null && overlay.Models?.Data is not null) && Idle(overlay));
+        var menu = DashboardDeviceLens.Menu(overlay, clock.Now)!;
+        var shown = menu.Rows[1].Status!;
+        Assert.Equal(C.ShortDot.Green, shown.Dot);
+        var settings = model.ShortStatus(peer);
+        Assert.NotNull(settings);
+        Assert.Equal(shown, settings);
+        // The flyout closing (Settings took the focus) changes nothing.
+        sync.Closed();
+        Assert.Equal(shown, model.ShortStatus(peer));
+    }
+
+    [Fact] // the page is told when the overlay learns something: it polls nothing itself
+    public void TheSettingsPageIsToldWhenTheOverlayGetsAResult()
+    {
+        var (overlay, source, clock, sync) = Open();
+        var peer = Peer();
+        var model = new DevicesModel(
+            new FakeDevicesClient(), new FakeDevicesClipboard(), clock,
+            () => (overlay.Snapshot, overlay.LearnedNames),
+            handler => overlay.SnapshotChanged += _ => handler());
+        var changed = 0;
+        model.Changed += () => Interlocked.Increment(ref changed);
+        Assert.Null(model.ShortStatus(peer)); // chosen, no result yet: nothing made up
+        Assert.True(sync.Sync(AppView.Overview, null, null, ""));
+        Assert.True(Pump(() => Volatile.Read(ref changed) > 0)); // told, without any other event
+        Assert.True(Idle(overlay));
+        Assert.Equal(C.ShortDot.Green, model.ShortStatus(peer)!.Dot);
+        // And again when a later result changes it.
+        var seen = Volatile.Read(ref changed);
+        source.Set(s => s.RemoteState = "lastGood");
+        overlay.ManualRefresh();
+        Assert.True(Pump(() => Volatile.Read(ref changed) > seen));
+        Assert.True(Idle(overlay));
+        Assert.Equal(C.ShortDot.Orange, model.ShortStatus(peer)!.Dot);
+    }
+
     // ---- remote strings (R16) -------------------------------------------------------
 
     [Fact] // a label with U+202E, a placeholder and a newline arrives unchanged everywhere, and nothing throws
