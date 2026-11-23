@@ -64,6 +64,9 @@ public sealed record DeviceMenuRow(
 /// closed; everything else is updated on the controls in place.</summary>
 public sealed record DeviceMenuState(string Title, IReadOnlyList<DeviceMenuRow> Rows, string Structure);
 
+/// <summary>The header's three texts (see <see cref="DashboardDeviceLens.Header"/>).</summary>
+public sealed record HeaderTotals(string Today, string Total, string CostLine);
+
 public static class DashboardDeviceLens
 {
     public static string HiddenRaw(SettingsStore store) => store.GetString(ClientRegistry.TabHiddenKey) ?? "";
@@ -196,6 +199,28 @@ public static class DashboardDeviceLens
         if (pageGraph is not null) { return CostSurfaceProjection.IsAuthoritative(pageGraph); }
         var held = overlay?.Visible(overlay.Graph, DeviceOverlayKind.Graph, year, null).Page;
         return held is not null ? CostSurfaceProjection.IsAuthoritative(held.Payload) : localAuthoritative;
+    }
+
+    /// <summary>The header's today / total / cost line while a device other than
+    /// this PC is selected, from the overlay's merged graph (the very stats the
+    /// Overview cards use); null means "show this PC's own numbers". While the
+    /// merged page has not arrived the values are dashes and "Checking": this
+    /// PC's own numbers are never the stand-in. The live rate is not part of it.</summary>
+    public static HeaderTotals? Header(
+        DeviceOverlayState? overlay, string? year, string? singleClient, string hiddenRaw, string orderRaw)
+    {
+        if (overlay is not { IncludesRemote: true }) { return null; }
+        var merge = overlay.OverviewMergeFor(
+            year, singleClient, hiddenRaw, orderRaw, new ModelColorMap((ModelReport?)null));
+        if (merge?.Graph is not var (payload, stats))
+        {
+            return new("—", "—", CostSurfaceProjection.Checking);
+        }
+
+        stats.PerDayMap.TryGetValue(Format.TodayKey(), out var today);
+        return new(
+            Format.CompactTokens(today?.Tokens ?? 0), Format.CompactTokens(stats.TotalTokens),
+            CostSurfaceProjection.HeaderCostLine(today?.Cost ?? 0, stats, CostSurfaceProjection.IsAuthoritative(payload)));
     }
 
     /// <summary>A per-device card row's cost, behind the same gate as every other
@@ -348,15 +373,16 @@ public sealed class DeviceOverlaySync
     /// it did. <paramref name="rootsGeneration"/> (DashboardModel.RootsGeneration)
     /// changes when this PC's scan roots changed, which makes this PC's share of
     /// every page stale: the overlay then asks again whatever its 60 s window says.</summary>
-    public bool Sync(AppView view, string? year, string? singleClient, string hiddenRaw, int rootsGeneration = 0)
+    public bool Sync(
+        AppView view, string? year, string? singleClient, string hiddenRaw, int rootsGeneration = 0, bool withGraph = false)
     {
         if (!_open) { return false; }
         var clients = DashboardDeviceLens.Clients(singleClient, hiddenRaw);
-        var key = $"{view}|{year}|{(clients is null ? "-" : string.Join(',', clients))}|{_overlay.Signature}|{rootsGeneration}";
+        var key = $"{view}|{year}|{(clients is null ? "-" : string.Join(',', clients))}|{_overlay.Signature}|{rootsGeneration}|{withGraph}";
         if (key == _lastKey) { return false; }
         _lastKey = key;
         EnsureCalls++;
-        _overlay.Ensure(view, year, clients, rootsGeneration);
+        _overlay.Ensure(view, year, clients, rootsGeneration, withGraph);
         return true;
     }
 }

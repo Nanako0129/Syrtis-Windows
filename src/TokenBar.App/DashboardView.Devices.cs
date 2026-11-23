@@ -107,7 +107,7 @@ public sealed partial class DashboardView
     private void SyncOverlay() =>
         _ = _sync?.Sync(
             _view, _model?.Year, OverviewScope.SingleClient(_activeClientTab),
-            DashboardDeviceLens.HiddenRaw(AppSettings.Store), _model?.RootsGeneration ?? 0);
+            DashboardDeviceLens.HiddenRaw(AppSettings.Store), _model?.RootsGeneration ?? 0, withGraph: true);
 
     /// <summary>The queued handler of every overlay change.</summary>
     private void OnOverlayChanged()
@@ -125,6 +125,10 @@ public sealed partial class DashboardView
         {
             return;
         }
+
+        // The header follows the overlay on every lens, not only those whose
+        // content signature changed.
+        RenderHeader(_snapshot);
 
         // RenderContent records the signature it drew, so a render for another
         // reason (a lens switch) is not followed by a second one here, and a

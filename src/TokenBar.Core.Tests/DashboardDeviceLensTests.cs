@@ -470,6 +470,62 @@ public class DashboardDeviceLensTests : IDisposable
         Assert.True(Idle(overlay));
     }
 
+    // ---- the header's combined totals ---------------------------------------
+
+    [Fact] // only this PC (or no overlay): null, so the view keeps its own numbers
+    public void TheHeaderIsThisPcsWithoutARemoteSelection()
+    {
+        Assert.Null(DashboardDeviceLens.Header(null, null, null, "", ""));
+        var (overlay, _, _) = New(true, Peer()); // listed, not chosen
+        Assert.Null(DashboardDeviceLens.Header(overlay, null, null, "", ""));
+    }
+
+    [Fact] // remote chosen, page not arrived: dashes and Checking, never this PC's numbers
+    public void TheHeaderIsAPlaceholderWhileTheMergedPageIsMissing()
+    {
+        var (overlay, source, _, sync) = Open();
+        source.Set(s => s.HoldCached = true);
+        Assert.True(sync.Sync(AppView.Quota, null, null, "", withGraph: true));
+        Assert.True(Pump(() => source.Calls.Any(c => c.Kind == "graph")));
+        var header = DashboardDeviceLens.Header(overlay, null, null, "", "")!;
+        Assert.Equal(("—", "—"), (header.Today, header.Total));
+        Assert.Equal(CostSurfaceProjection.Checking, header.CostLine);
+        source.Set(s => s.HoldCached = false);
+        source.ReleaseCached(50);
+        Assert.True(Idle(overlay));
+    }
+
+    [Fact] // the merged page is on every lens when asked for, and its stats are the header's
+    public void TheHeaderShowsTheMergedTotalsEvenOnALensWithoutAGraphPage()
+    {
+        var (overlay, source, _, sync) = Open();
+        Assert.True(sync.Sync(AppView.Models, null, null, "", withGraph: true));
+        Assert.True(Pump(() => overlay.Graph?.Data is not null) && Idle(overlay));
+        var merged = overlay.OverviewMergeFor(null, null, "", "", new ModelColorMap((ModelReport?)null))!.Graph!.Value.Stats;
+        var local = new UsageStats(LocalPayload(), new HashSet<string> { "claude" });
+        Assert.NotEqual(local.TotalTokens, merged.TotalTokens); // a header built from this PC's stats fails here
+        var header = DashboardDeviceLens.Header(overlay, null, null, "", "")!;
+        Assert.Equal(Format.CompactTokens(merged.TotalTokens), header.Total);
+        Assert.Equal(Format.CompactTokens(0), header.Today); // the fake's days are never today
+        Assert.Contains($"{merged.ActiveDays} active days", header.CostLine);
+        Assert.Contains(source.Calls, c => c.Kind == "graph");
+    }
+
+    [Theory] // costs are stated only when the merged payload's pricing says so
+    [InlineData(PricingMode.LocalOnly, false)]
+    [InlineData(PricingMode.BestEffort, true)]
+    public void TheHeaderCostLineFollowsTheMergedPayloadsPricing(PricingMode pricing, bool stated)
+    {
+        var (overlay, source, _, sync) = Open();
+        source.Set(s => s.Pricing = pricing);
+        Assert.True(sync.Sync(AppView.Overview, null, null, ""));
+        Assert.True(Pump(() => overlay.Graph?.Data is not null) && Idle(overlay));
+        var merged = overlay.OverviewMergeFor(null, null, "", "", new ModelColorMap((ModelReport?)null))!.Graph!.Value.Stats;
+        var line = DashboardDeviceLens.Header(overlay, null, null, "", "")!.CostLine;
+        Assert.Equal(stated, line.Contains(Format.Usd(merged.TotalCost)));
+        Assert.Equal(!stated, line.Contains(CostSurfaceProjection.Checking));
+    }
+
     [Fact] // Settings → Devices reads the same snapshot the dashboard draws
     public void TheSettingsPageShowsTheStatusTheFlyoutShows()
     {

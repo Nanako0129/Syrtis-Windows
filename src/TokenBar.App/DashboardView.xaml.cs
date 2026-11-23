@@ -807,11 +807,14 @@ public sealed partial class DashboardView : UserControl
         stats.PerDayMap.TryGetValue(Format.TodayKey(), out var today);
         var rate = TraceCollapse.FilterByClients(snapshot.Trace, _selectedSet)
             .Sum(b => b.TokensPerMin);
-        TodayValue.Text = Format.CompactTokens(today?.Tokens ?? 0);
-        TotalValue.Text = Format.CompactTokens(stats.TotalTokens);
+        var combined = DashboardDeviceLens.Header(
+            _overlay, _model?.Year, OverviewScope.SingleClient(_activeClientTab),
+            DashboardDeviceLens.HiddenRaw(AppSettings.Store), DashboardDeviceLens.OrderRaw(AppSettings.Store));
+        TodayValue.Text = combined?.Today ?? Format.CompactTokens(today?.Tokens ?? 0);
+        TotalValue.Text = combined?.Total ?? Format.CompactTokens(stats.TotalTokens);
         RateValue.Text = Format.CompactTokens((long)rate);
         SetLiveRate(rate);
-        CostLine.Text = CostSurfaceProjection.HeaderCostLine(
+        CostLine.Text = combined?.CostLine ?? CostSurfaceProjection.HeaderCostLine(
             today?.Cost ?? 0, stats, snapshot.CostAuthoritative);
     }
 

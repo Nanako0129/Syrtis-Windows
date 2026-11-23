@@ -92,6 +92,7 @@ internal sealed class FakeDeviceSource : IDeviceSource
         public bool RemoteCostIncomplete;
         public bool RemoteEverAnswered = true;
         public bool Saturated;
+        public PricingMode Pricing = PricingMode.LocalOnly;
         public Dictionary<string, string> RemoteStateByKind = [];
     }
 
@@ -187,7 +188,7 @@ internal sealed class FakeDeviceSource : IDeviceSource
             new YearMeta(y, 10, 2.0, new DateRange($"{y}-01-01", $"{y}-12-31"))).ToList();
         return Page("graph", new UsagePayload(
             new UsageMeta(OverlayGeneratedAt, "test", new DateRange("1999-01-01", "2099-01-01"),
-                PricingMode.LocalOnly, CostCoverage.Complete),
+                Get(s => s.Pricing), CostCoverage.Complete),
             new UsageSummary(20, 4.0, 2, 2, 2.0, 2.0, clients, [tag]),
             years, days));
     }

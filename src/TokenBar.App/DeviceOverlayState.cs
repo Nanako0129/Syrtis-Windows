@@ -730,7 +730,8 @@ public sealed class DeviceOverlayState
     /// is on. When it changed since the last call, this PC's share of every page
     /// is stale, so the visible keys are asked again whatever the 60 s window
     /// says.</summary>
-    public void Ensure(AppView view, string? year, IReadOnlyList<string>? clients, int? rootsGeneration = null) =>
+    public void Ensure(
+        AppView view, string? year, IReadOnlyList<string>? clients, int? rootsGeneration = null, bool withGraph = false) =>
         Locked(() =>
         {
             if (rootsGeneration is { } generation)
@@ -743,7 +744,11 @@ public sealed class DeviceOverlayState
                 _lastRootsGeneration = generation;
             }
             var next = new Dictionary<DeviceOverlayKind, DeviceOverlayKey>();
-            foreach (var kind in DeviceOverlayRequests.KindsFor(view))
+            // withGraph: the dashboard header shows the combined totals on every
+            // lens, so the graph page is wanted beside the lens's own pages.
+            var kinds = DeviceOverlayRequests.KindsFor(view);
+            if (withGraph && !kinds.Contains(DeviceOverlayKind.Graph)) { kinds = [.. kinds, DeviceOverlayKind.Graph]; }
+            foreach (var kind in kinds)
             {
                 if (KeyCore(kind, year, clients) is { } key) { next[kind] = key; }
             }
