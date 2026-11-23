@@ -470,6 +470,138 @@ public class DashboardDeviceLensTests : IDisposable
         Assert.True(Idle(overlay));
     }
 
+    private static ModelColorMap NoColors => new((ModelReport?)null);
+
+    [Fact] // the producer's last token goes to the lens's own page, the header's graph page follows
+    public void AGraphWantedOnlyForTheHeaderIsAskedAfterTheLensOwnPages()
+    {
+        var (overlay, source, _, sync) = Open();
+        Assert.True(sync.Sync(AppView.Models, null, null, "", withGraph: true));
+        Assert.True(Pump(() => source.Calls.Count == 4) && Idle(overlay));
+        Assert.Equal(["models-cached", "graph-cached", "models-refresh", "graph-refresh"], source.Calls.Select(c => c.Tag));
+        source.Set(s => s.Calls = []);
+        overlay.ManualRefresh();
+        Assert.True(Pump(() => source.Calls.Count == 2) && Idle(overlay));
+        Assert.Equal(["models-refresh", "graph-refresh"], source.Calls.Select(c => c.Tag));
+    }
+
+    [Fact] // Quota shows nothing from the overlay: a fetch starting or finishing does not change its signature
+    public void TheQuotaSignatureDoesNotChangeAcrossAFetch()
+    {
+        var (overlay, source, _, sync) = Open();
+        source.Set(s => s.HoldCached = true);
+        Assert.True(sync.Sync(AppView.Quota, null, null, "", withGraph: true));
+        Assert.True(Pump(() => overlay.Fetching));
+        var during = DashboardDeviceLens.RenderSignature(overlay, AppView.Quota, null, null, "");
+        source.Set(s => s.HoldCached = false);
+        source.ReleaseCached(50);
+        Assert.True(Idle(overlay));
+        Assert.Equal(during, DashboardDeviceLens.RenderSignature(overlay, AppView.Quota, null, null, ""));
+    }
+
+    [Fact] // an older lens's cached load finishing late must not replace the newer lens's queued refresh
+    public void AnOlderLensCachedLoadDoesNotReplaceTheNewerLensQueuedRefresh()
+    {
+        var (overlay, source, _, sync) = Open();
+        source.Set(s => s.HoldCached = true);
+        Assert.True(sync.Sync(AppView.Quota, null, null, "", withGraph: true)); // [Graph], its cached call held
+        Assert.True(Pump(() => source.Calls.Any(c => c.Tag == "graph-cached")));
+        source.Set(s => { s.HoldCached = false; s.HoldRefresh = true; });
+        Assert.True(sync.Sync(AppView.Daily, null, null, "", withGraph: true)); // [Graph] refresh goes in flight, held
+        Assert.True(Pump(() => source.RefreshStarted >= 1));
+        Assert.True(sync.Sync(AppView.Models, null, null, "", withGraph: true)); // [Models, Graph] queues behind it
+        Assert.True(Pump(() => overlay.QueuedRefresh));
+        source.ReleaseCached(1); // Quota's load completes now, after Models is the lens on screen
+        Assert.True(Pump(() => overlay.CachedLoads == 0));
+        source.Set(s => s.HoldRefresh = false);
+        source.Release(50);
+        Assert.True(Idle(overlay));
+        Assert.Contains(source.Calls, c => c.Tag == "models-refresh");
+    }
+
+    // ---- the header's combined totals ---------------------------------------
+
+    [Fact] // only this PC (or no overlay): null, so the view keeps its own numbers
+    public void TheHeaderIsThisPcsWithoutARemoteSelection()
+    {
+        Assert.Null(DashboardDeviceLens.Header(null, null, null, "", ""));
+        var (overlay, _, _) = New(true, Peer()); // listed, not chosen
+        Assert.Null(DashboardDeviceLens.Header(overlay, null, null, "", ""));
+    }
+
+    [Fact] // remote chosen, page not arrived: dashes and Checking, never this PC's numbers
+    public void TheHeaderIsAPlaceholderWhileTheMergedPageIsMissing()
+    {
+        var (overlay, source, _, sync) = Open();
+        source.Set(s => s.HoldCached = true);
+        Assert.True(sync.Sync(AppView.Quota, null, null, "", withGraph: true));
+        Assert.True(Pump(() => source.Calls.Any(c => c.Kind == "graph")));
+        var header = DashboardDeviceLens.Header(overlay, null, null, "", "")!;
+        Assert.Equal(("—", "—"), (header.Today, header.Total));
+        Assert.Equal(CostSurfaceProjection.Checking, header.CostLine);
+        source.Set(s => s.HoldCached = false);
+        source.ReleaseCached(50);
+        Assert.True(Idle(overlay));
+    }
+
+    [Fact] // the merged page is on every lens when asked for, and its stats are the header's
+    public void TheHeaderShowsTheMergedTotalsEvenOnALensWithoutAGraphPage()
+    {
+        var (overlay, source, _, sync) = Open();
+        Assert.True(sync.Sync(AppView.Models, null, null, "", withGraph: true));
+        Assert.True(Pump(() => overlay.Graph?.Data is not null) && Idle(overlay));
+        var merged = overlay.OverviewMergeFor(null, null, "", "", new ModelColorMap((ModelReport?)null))!.Graph!.Value.Stats;
+        var local = new UsageStats(LocalPayload(), new HashSet<string> { "claude" });
+        Assert.NotEqual(local.TotalTokens, merged.TotalTokens); // a header built from this PC's stats fails here
+        var header = DashboardDeviceLens.Header(overlay, null, null, "", "")!;
+        Assert.Equal(Format.CompactTokens(merged.TotalTokens), header.Total);
+        Assert.Equal(Format.CompactTokens(0), header.Today); // the fake's days are never today
+        Assert.Contains($"{merged.ActiveDays} active days", header.CostLine);
+        Assert.Contains(source.Calls, c => c.Kind == "graph");
+    }
+
+    [Fact] // today comes from the merged stats, for the tab's own slice and for the year asked
+    public void TheHeaderReadsTodayFromTheMergedStatsOfTheTabAndYearOnScreen()
+    {
+        var (overlay, source, _, sync) = Open();
+        source.Set(s => { s.TodayDay = true; s.Pricing = PricingMode.BestEffort; });
+        Assert.True(sync.Sync(AppView.Overview, null, null, ""));
+        Assert.True(Pump(() => overlay.Graph?.Data is not null) && Idle(overlay));
+        var all = DashboardDeviceLens.Header(overlay, null, null, "", "")!;
+        var mergedAll = overlay.OverviewMergeFor(null, null, "", "", NoColors)!.Graph!.Value.Stats;
+        var today = mergedAll.PerDayMap[Format.TodayKey()];
+        Assert.True(today.Tokens > 0 && today.Cost > 0);
+        Assert.Equal(Format.CompactTokens(today.Tokens), all.Today);
+        Assert.Contains(Format.Usd(today.Cost), all.CostLine);
+
+        // The single-client tab is a slice of the same page: fewer tokens.
+        var one = DashboardDeviceLens.Header(overlay, null, "claude", "", "")!;
+        var mergedOne = overlay.OverviewMergeFor(null, "claude", "", "", NoColors)!.Graph!.Value.Stats;
+        Assert.True(mergedOne.TotalTokens < mergedAll.TotalTokens);
+        Assert.Equal(Format.CompactTokens(mergedOne.TotalTokens), one.Total);
+        Assert.NotEqual(all.Total, one.Total);
+
+        // A year whose page is not held is the placeholder, not the held year's totals.
+        var other = DashboardDeviceLens.Header(overlay, "1990", null, "", "")!;
+        Assert.Equal(("—", "—"), (other.Today, other.Total));
+        Assert.Equal(CostSurfaceProjection.Checking, other.CostLine);
+    }
+
+    [Theory] // costs are stated only when the merged payload's pricing says so
+    [InlineData(PricingMode.LocalOnly, false)]
+    [InlineData(PricingMode.BestEffort, true)]
+    public void TheHeaderCostLineFollowsTheMergedPayloadsPricing(PricingMode pricing, bool stated)
+    {
+        var (overlay, source, _, sync) = Open();
+        source.Set(s => s.Pricing = pricing);
+        Assert.True(sync.Sync(AppView.Overview, null, null, ""));
+        Assert.True(Pump(() => overlay.Graph?.Data is not null) && Idle(overlay));
+        var merged = overlay.OverviewMergeFor(null, null, "", "", new ModelColorMap((ModelReport?)null))!.Graph!.Value.Stats;
+        var line = DashboardDeviceLens.Header(overlay, null, null, "", "")!.CostLine;
+        Assert.Equal(stated, line.Contains(Format.Usd(merged.TotalCost)));
+        Assert.Equal(!stated, line.Contains(CostSurfaceProjection.Checking));
+    }
+
     [Fact] // Settings → Devices reads the same snapshot the dashboard draws
     public void TheSettingsPageShowsTheStatusTheFlyoutShows()
     {

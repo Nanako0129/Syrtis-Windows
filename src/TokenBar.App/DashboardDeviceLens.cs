@@ -64,6 +64,9 @@ public sealed record DeviceMenuRow(
 /// closed; everything else is updated on the controls in place.</summary>
 public sealed record DeviceMenuState(string Title, IReadOnlyList<DeviceMenuRow> Rows, string Structure);
 
+/// <summary>The header's three texts (see <see cref="DashboardDeviceLens.Header"/>).</summary>
+public sealed record HeaderTotals(string Today, string Total, string CostLine);
+
 public static class DashboardDeviceLens
 {
     public static string HiddenRaw(SettingsStore store) => store.GetString(ClientRegistry.TabHiddenKey) ?? "";
@@ -187,8 +190,8 @@ public static class DashboardDeviceLens
 
     /// <summary>Whether costs the overlay shows may be stated. Read from the pricing
     /// meta of the graph page: the lens's own, else the one the overlay holds for
-    /// the same selection and year (the Models, Hourly and Agents lenses fetch no
-    /// graph), else this PC's. Never assumed true: with pricing unavailable the
+    /// the same selection and year (the Models, Hourly and Agents lenses carry none
+    /// in their own page; the one held there is the header's), else this PC's. Never assumed true: with pricing unavailable the
     /// combined card says "Checking", and so must every surface beside it.</summary>
     public static bool Authoritative(
         UsagePayload? pageGraph, DeviceOverlayState? overlay, string? year, bool localAuthoritative)
@@ -196,6 +199,32 @@ public static class DashboardDeviceLens
         if (pageGraph is not null) { return CostSurfaceProjection.IsAuthoritative(pageGraph); }
         var held = overlay?.Visible(overlay.Graph, DeviceOverlayKind.Graph, year, null).Page;
         return held is not null ? CostSurfaceProjection.IsAuthoritative(held.Payload) : localAuthoritative;
+    }
+
+    /// <summary>The header's today / total / cost line while a device other than
+    /// this PC is selected, from the overlay's merged graph (the very stats the
+    /// Overview cards use); null means "show this PC's own numbers". While the
+    /// merged page has not arrived the values are dashes and "Checking": this
+    /// PC's own numbers are never the stand-in. The live rate is not part of it.</summary>
+    public static HeaderTotals? Header(
+        DeviceOverlayState? overlay, string? year, string? singleClient, string hiddenRaw, string orderRaw)
+    {
+        // One read: null means no remote is selected (OverviewMergeFor's own test).
+        if (overlay?.OverviewMergeFor(
+            year, singleClient, hiddenRaw, orderRaw, new ModelColorMap((ModelReport?)null)) is not { } merge)
+        {
+            return null;
+        }
+
+        if (merge.Graph is not var (payload, stats))
+        {
+            return new("—", "—", CostSurfaceProjection.Checking);
+        }
+
+        stats.PerDayMap.TryGetValue(Format.TodayKey(), out var today);
+        return new(
+            Format.CompactTokens(today?.Tokens ?? 0), Format.CompactTokens(stats.TotalTokens),
+            CostSurfaceProjection.HeaderCostLine(today?.Cost ?? 0, stats, CostSurfaceProjection.IsAuthoritative(payload)));
     }
 
     /// <summary>A per-device card row's cost, behind the same gate as every other
@@ -271,8 +300,12 @@ public static class DashboardDeviceLens
         DeviceOverlayState overlay, AppView view, string? year, string? singleClient, string hiddenRaw)
     {
         var clients = Clients(singleClient, hiddenRaw);
-        var parts = new List<string> { overlay.Signature, overlay.Fetching.ToString(), overlay.RetryArmed.ToString() };
-        foreach (var kind in DeviceOverlayRequests.KindsFor(view))
+        // Fetching and RetryArmed only matter to a lens that shows overlay pages;
+        // Quota shows nothing from them (the header is drawn by OnOverlayChanged).
+        var kinds = DeviceOverlayRequests.KindsFor(view);
+        var parts = new List<string> { overlay.Signature };
+        if (kinds.Count > 0) { parts.AddRange([overlay.Fetching.ToString(), overlay.RetryArmed.ToString()]); }
+        foreach (var kind in kinds)
         {
             switch (kind)
             {
@@ -344,19 +377,20 @@ public sealed class DeviceOverlaySync
     }
 
     /// <summary>Ensures when the key (lens, year, clients argument, selection,
-    /// scan-roots generation) differs from the last one ensured. Returns whether
+    /// scan-roots generation, withGraph) differs from the last one ensured. Returns whether
     /// it did. <paramref name="rootsGeneration"/> (DashboardModel.RootsGeneration)
     /// changes when this PC's scan roots changed, which makes this PC's share of
     /// every page stale: the overlay then asks again whatever its 60 s window says.</summary>
-    public bool Sync(AppView view, string? year, string? singleClient, string hiddenRaw, int rootsGeneration = 0)
+    public bool Sync(
+        AppView view, string? year, string? singleClient, string hiddenRaw, int rootsGeneration = 0, bool withGraph = false)
     {
         if (!_open) { return false; }
         var clients = DashboardDeviceLens.Clients(singleClient, hiddenRaw);
-        var key = $"{view}|{year}|{(clients is null ? "-" : string.Join(',', clients))}|{_overlay.Signature}|{rootsGeneration}";
+        var key = $"{view}|{year}|{(clients is null ? "-" : string.Join(',', clients))}|{_overlay.Signature}|{rootsGeneration}|{withGraph}";
         if (key == _lastKey) { return false; }
         _lastKey = key;
         EnsureCalls++;
-        _overlay.Ensure(view, year, clients, rootsGeneration);
+        _overlay.Ensure(view, year, clients, rootsGeneration, withGraph);
         return true;
     }
 }

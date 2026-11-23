@@ -92,6 +92,9 @@ internal sealed class FakeDeviceSource : IDeviceSource
         public bool RemoteCostIncomplete;
         public bool RemoteEverAnswered = true;
         public bool Saturated;
+        public PricingMode Pricing = PricingMode.LocalOnly;
+        /// <summary>A graph day at today's key, so today's numbers are non-zero.</summary>
+        public bool TodayDay;
         public Dictionary<string, string> RemoteStateByKind = [];
     }
 
@@ -183,11 +186,17 @@ internal sealed class FakeDeviceSource : IDeviceSource
             new Contribution(
                 $"{y}-01-02", new ContributionTotals(10, 2.0, 2), 1, One,
                 [.. clients.Select(c => new ContributionClient(c, tag, "test", One, 1.0, 1))])).ToList();
+        if (Get(s => s.TodayDay))
+        {
+            days.Add(new Contribution(
+                Format.TodayKey(), new ContributionTotals(10, 3.0, 2), 1, One,
+                [.. clients.Select(c => new ContributionClient(c, tag, "test", One, 1.5, 1))]));
+        }
         var years = days.Select(d => d.Date[..4]).Distinct().Select(y =>
             new YearMeta(y, 10, 2.0, new DateRange($"{y}-01-01", $"{y}-12-31"))).ToList();
         return Page("graph", new UsagePayload(
             new UsageMeta(OverlayGeneratedAt, "test", new DateRange("1999-01-01", "2099-01-01"),
-                PricingMode.LocalOnly, CostCoverage.Complete),
+                Get(s => s.Pricing), CostCoverage.Complete),
             new UsageSummary(20, 4.0, 2, 2, 2.0, 2.0, clients, [tag]),
             years, days));
     }
