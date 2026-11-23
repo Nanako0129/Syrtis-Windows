@@ -38,6 +38,10 @@ public sealed partial class SettingsWindow
     /// its learned names, and tells it when the linked devices changed.</summary>
     private readonly DeviceOverlayState? _deviceOverlay;
 
+    /// <summary>Told when a linked device was linked, removed or re-paired here
+    /// (the Discord presence drops a merged result that may count it).</summary>
+    private readonly Action? _peersChanged;
+
     private DevicesModel? _devicesModel;
     private DevicesPage? _devicesPage;
     private bool _devicesShown;
@@ -70,6 +74,14 @@ public sealed partial class SettingsWindow
                 if (overlay is not null)
                 {
                     _devicesModel.PeersChanged += overlay.RefreshPeers;
+                }
+
+                // Never DeviceOverlayState.Changed: it fires on every slot,
+                // refresh and selection change, and would void every merged
+                // result.
+                if (_peersChanged is { } peersChanged)
+                {
+                    _devicesModel.PeersChanged += peersChanged;
                 }
             }
 

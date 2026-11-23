@@ -422,6 +422,8 @@
   "Include the client name": "包含用戶端名稱",
   "Include cost": "包含花費",
   "Untick everything and nothing is published at all.": "全部取消勾選就完全不發布任何內容。",
+  "Include other devices selected in the dashboard": "計入儀表板選的其他裝置",
+  "Other devices' usage for today updates about every 5 minutes.": "其他裝置的今日用量約每 5 分鐘更新一次。",
   "Show cost as a figure instead of a range": "以金額而非級距顯示花費",
   "A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend.": "級距讓你和同一區間裡的其他人混在一起。金額會取整到整數美元、不含分位，但仍然每天多透露一些。若上方指定了單一用戶端，它就等於那個工具的每日花費。",
   "Whichever client you used most": "用量最高的用戶端",

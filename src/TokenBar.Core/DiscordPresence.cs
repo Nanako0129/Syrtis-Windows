@@ -69,6 +69,10 @@ public static class DiscordPresence
 
     public const string SelectionKey = "tokenbar.discord.client";
 
+    /// <summary>Opt-in: also count the other devices selected in the
+    /// dashboard. Default off (DiscordPresence.swift :131-137).</summary>
+    public const string IncludeDevicesKey = "tokenbar.discord.includeDevices";
+
     /// <summary>The arguments under which this process must never connect,
     /// whatever the settings say — every non-user run mode App.xaml.cs knows:
     /// the startup probe, the icon dump, the synthetic update dialog and the
@@ -85,6 +89,9 @@ public static class DiscordPresence
     /// accepts nothing but the two JSON literals), so a string "true" or a
     /// number 1 reads as off (DiscordPresence.swift :106-117, :265-282).</summary>
     public static bool Enabled(SettingsStore store) => store.GetBool(EnabledKey, false);
+
+    /// <summary>The device switch, strict like <see cref="Enabled"/>.</summary>
+    public static bool IncludeDevices(SettingsStore store) => store.GetBool(IncludeDevicesKey, false);
 
     /// <summary>The single authoritative read of the cost-display switch.
     /// Everything below <see cref="Build"/> takes the style as a

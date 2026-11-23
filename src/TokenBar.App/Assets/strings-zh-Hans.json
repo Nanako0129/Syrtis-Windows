@@ -422,6 +422,8 @@
   "Include the client name": "包含客户端名称",
   "Include cost": "包含费用",
   "Untick everything and nothing is published at all.": "取消全部勾选后不会发布任何内容。",
+  "Include other devices selected in the dashboard": "计入仪表板所选的其他设备",
+  "Other devices' usage for today updates about every 5 minutes.": "其他设备的今日用量约每 5 分钟更新一次。",
   "Show cost as a figure instead of a range": "用具体金额而非区间显示费用",
   "A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend.": "区间会将你和该范围内的其他人归为一组。具体金额会取整到美元，不显示美分，但仍会每天透露更多信息。若上方指定一个客户端，该金额就是该工具的每日费用。",
   "Whichever client you used most": "用量最多的客户端",

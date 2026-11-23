@@ -84,7 +84,12 @@ public sealed class TrayService : IDisposable
         _discord = new DiscordPresenceController(
             AppSettings.Store,
             Environment.GetCommandLineArgs(),
-            () => new DiscordIpcClient(DiscordIpc.ProductionConnector));
+            () => new DiscordIpcClient(DiscordIpc.ProductionConnector),
+            // The device merge (opt-in, default off) is inert without the
+            // process's overlay. The flyout is read inside OnGraph, on this
+            // (UI) thread: a refresh pulls devices only while it is closed.
+            devices: deviceOverlay is null ? null : new TbDeviceSource(),
+            flyoutOpen: () => _flyout.IsFlyoutVisible);
         _feed.Changed += () =>
         {
             UpdateIcon();
@@ -94,16 +99,16 @@ public sealed class TrayService : IDisposable
             SettingsWindow.OnQuotaMaybeChanged();
             // Every accepted, cost-authoritative graph republishes (macOS
             // AppDelegate.swift :573-576). Changed also fires for trace/quota
-            // ticks (same graph instance) and for LocalFirst graphs (unpriced);
-            // the controller ignores both, judging authority from the graph
-            // itself.
+            // ticks (same graph instance, ignored) and for LocalFirst graphs
+            // (unpriced, judged from the graph itself): never published, they
+            // only let the device merge ask for its own graph.
             _discord.OnGraph(_feed.Graph);
         };
         _onStoreChanged = key =>
         {
             // Synchronously on the writing thread, before any later write can
             // land: a hide must retire queued payloads at once. The controller
-            // is value-gated and ignores every key but its five.
+            // is value-gated and ignores every key outside WatchedKeys.
             _discord.OnSettingChanged(key);
             if (IconKeys.Contains(key))
             {
@@ -193,21 +198,22 @@ public sealed class TrayService : IDisposable
     private readonly DeviceOverlayState? _deviceOverlay;
 
     public void ShowSettings() => SettingsWindow.Present(
-        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, deviceOverlay: _deviceOverlay);
+        () => _feed.Quota, () => _feed.Graph, () => _feed.Trace,
+        deviceOverlay: _deviceOverlay, peersChanged: _discord.OnPeersChanged);
 
     internal void ShowAttributionSettings() => SettingsWindow.Present(
         () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showAttribution: true,
-        deviceOverlay: _deviceOverlay);
+        deviceOverlay: _deviceOverlay, peersChanged: _discord.OnPeersChanged);
 
     internal void ShowDashboardSettings() => SettingsWindow.Present(
         () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showDashboard: true,
-        deviceOverlay: _deviceOverlay);
+        deviceOverlay: _deviceOverlay, peersChanged: _discord.OnPeersChanged);
 
     /// <summary>The Discord setup card's "Set up in Settings…": navigation to
     /// the Discord section, never a write.</summary>
     internal void ShowDiscordSettings() => SettingsWindow.Present(
         () => _feed.Quota, () => _feed.Graph, () => _feed.Trace, showDiscord: true,
-        deviceOverlay: _deviceOverlay);
+        deviceOverlay: _deviceOverlay, peersChanged: _discord.OnPeersChanged);
 
     internal bool CanHandoff => !Volatile.Read(ref _disposed);
 

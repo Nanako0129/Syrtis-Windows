@@ -1,3 +1,4 @@
+using System.Text.Json;
 using TokenBar.Core;
 using TokenBar.Interop;
 using Component = TokenBar.Core.DiscordPresence.Component;
@@ -118,6 +119,193 @@ internal static class DiscordClassifiers
     }
 }
 
+/// <summary>Which graph Discord is built from, and when to ask the core for a
+/// graph merged with the dashboard's selected devices. Pure; the controller
+/// carries the decisions out. Port of macOS <c>DiscordPresence.DeviceMerge</c>
+/// (DiscordPresence.swift :139-295, Syrtis 161f7c23).
+///
+/// Merging this PC with other devices happens ONLY in the core
+/// (<see cref="IDeviceSource.GraphDevices"/>); nothing here adds or splices
+/// numbers. The tray title, client trays and every other consumer of the local
+/// graph never see the merged one.</summary>
+internal static class DiscordDeviceMerge
+{
+    /// <summary>Same value as <see cref="DeviceOverlayState.RemotePoll"/>, for
+    /// the same reason: a producer grants a burst of 2 and refills one per
+    /// 60 s.</summary>
+    internal static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(300);
+
+    /// <summary>How much earlier than <see cref="RefreshInterval"/> a tick
+    /// counts as due. Windows: Decide runs in OnGraph, after TrayFeed's fixed
+    /// 300 s timer has fetched and accepted a graph, so consecutive calls are
+    /// 300 s apart plus the difference of two graph-fetch durations (macOS
+    /// sleeps 300 s AFTER its work, so it is never short). A forced full
+    /// reread can take about 25 s, so two ticks can reach Decide about 275 s
+    /// apart; without enough margin that tick would be cached and the next
+    /// refresh would wait a whole extra tick (~600 s). 30 s covers it while
+    /// keeping two refreshes at least 270 s apart, inside a producer's
+    /// 2-burst/60 s refill. Resulting cadence with the flyout closed: one
+    /// refresh per slow tick (~300 s).</summary>
+    internal static readonly TimeSpan DueMargin = TimeSpan.FromSeconds(30);
+
+    internal sealed record State
+    {
+        /// <summary>The merged <see cref="UsagePayload"/> only. The per-device
+        /// rows are dropped: their label and address are the other owner's
+        /// free text.</summary>
+        public UsagePayload? Merged { get; init; }
+
+        /// <summary>The peers <see cref="Merged"/> was fetched for.</summary>
+        public IReadOnlyList<string> MergedPeers { get; init; } = [];
+
+        public ulong Generation { get; init; }
+        /// <summary>On the monotonic clock, never the calendar: setting the
+        /// system clock must not change the cadence.</summary>
+        public TimeSpan? LastRefresh { get; init; }
+        public bool InFlight { get; init; }
+
+        // The inputs last seen, so any change bumps Generation.
+        public bool IncludeDevices { get; init; }
+        public bool DiscordOn { get; init; }
+        public IReadOnlyList<string> Peers { get; init; } = [];
+    }
+
+    /// <param name="Selection">Always <c>Local: true</c>, whatever the
+    /// dashboard's own tick says.</param>
+    internal sealed record Call(DeviceFetchMode Mode, DeviceSelection Selection, ulong Generation);
+
+    /// <param name="Graph">What Discord is built from this moment (never the
+    /// tray's input).</param>
+    internal sealed record Decision(UsagePayload? Graph, Call? Call, State State);
+
+    /// <summary>The peers the dashboard has selected
+    /// (<see cref="DeviceOverlayState.SelectionKey"/>, the
+    /// <see cref="StoredDeviceSelection"/> shape it writes): deduplicated,
+    /// sorted, at most <see cref="DeviceOverlayState.MaxSelectedPeers"/>.
+    /// Missing or undecodable means none, as DeviceOverlayState decodes it.
+    /// <c>Local</c> is ignored on purpose: Discord always counts this PC.</summary>
+    internal static IReadOnlyList<string> SelectedPeers(SettingsStore store)
+    {
+        if (store.GetString(DeviceOverlayState.SelectionKey) is not { } json)
+        {
+            return [];
+        }
+
+        StoredDeviceSelection? stored;
+        try
+        {
+            stored = JsonSerializer.Deserialize<StoredDeviceSelection>(json, SelectionJson);
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+
+        return stored?.Peers is { } peers
+            ? [.. peers.OfType<string>().Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)
+                .Take(DeviceOverlayState.MaxSelectedPeers)]
+            : [];
+    }
+
+    // DeviceOverlayState's options (JsonSerializerDefaults.Web), so the
+    // lower-case keys it writes decode the same.
+    private static readonly JsonSerializerOptions SelectionJson = new(JsonSerializerDefaults.Web);
+
+    private static bool Same(IReadOnlyList<string> a, IReadOnlyList<string> b) =>
+        a.SequenceEqual(b, StringComparer.Ordinal);
+
+    /// <summary>Merge is wanted: switched on, this process may connect (the
+    /// <see cref="DiscordPresence.MayConnect"/> gate) and at least one other
+    /// device is selected.</summary>
+    internal static bool Active(bool includeDevices, bool canConnect, IReadOnlyList<string> peers) =>
+        includeDevices && canConnect && peers.Count > 0;
+
+    /// <summary>The inputs moved: a new generation, and the old result goes
+    /// now.</summary>
+    internal static State Observe(State state, bool includeDevices, bool discordOn, IReadOnlyList<string> peers)
+    {
+        var changed = includeDevices != state.IncludeDevices || discordOn != state.DiscordOn
+            || !Same(peers, state.Peers);
+        var next = changed ? Invalidate(state) : state;
+        return next with { IncludeDevices = includeDevices, DiscordOn = discordOn, Peers = peers };
+    }
+
+    /// <summary>A linked device was removed or re-paired: drop the result at
+    /// once.</summary>
+    internal static State Invalidate(State state) =>
+        state with { Generation = unchecked(state.Generation + 1), Merged = null, MergedPeers = [] };
+
+    /// <summary>The graph to publish from, re-checked against the conditions
+    /// of the moment of publishing. Windows also re-checks cost authority, the
+    /// gate the controller applies to this PC's graph.</summary>
+    internal static UsagePayload? Graph(
+        UsagePayload? local, State state, bool includeDevices, bool canConnect, IReadOnlyList<string> peers) =>
+        Active(includeDevices, canConnect, peers) && state.Merged is { } merged
+        && Same(state.MergedPeers, peers) && CostSurfaceProjection.IsAuthoritative(merged)
+            ? merged
+            : local;
+
+    internal static Decision Decide(
+        UsagePayload? local, State state, bool includeDevices, bool discordOn, bool canConnect,
+        IReadOnlyList<string> peers, bool flyoutOpen, TimeSpan now)
+    {
+        var next = Observe(state, includeDevices, discordOn, peers);
+        var wanted = Active(includeDevices, canConnect, peers);
+        if (!wanted)
+        {
+            next = next with { Merged = null, MergedPeers = [] };
+        }
+
+        var used = Graph(local, next, includeDevices, canConnect, peers);
+        // One call at a time; a tick that finds one running is skipped.
+        if (!wanted || next.InFlight)
+        {
+            return new Decision(used, null, next);
+        }
+
+        // Refresh pulls every device and blocks: only while the flyout is
+        // closed (the dashboard keeps last-good fresh while it is open) and at
+        // most once per interval. Otherwise cached: this PC recomputed, each
+        // device's last good, no connection. LastRefresh is stamped when the
+        // refresh is issued, not when it succeeds: a failed or busy refresh is
+        // never retried before the next due tick.
+        var due = next.LastRefresh is not { } last || now - last >= RefreshInterval - DueMargin;
+        var mode = !flyoutOpen && due ? DeviceFetchMode.Refresh : DeviceFetchMode.Cached;
+        if (mode == DeviceFetchMode.Refresh)
+        {
+            next = next with { LastRefresh = now };
+        }
+
+        next = next with { InFlight = true };
+        return new Decision(used, new Call(mode, new DeviceSelection(true, peers), next.Generation), next);
+    }
+
+    /// <summary>A call came back. A result from an older generation is
+    /// dropped; a failure keeps whatever was there. A merged answer that is
+    /// not cost-authoritative counts as a failure (its cost would publish a
+    /// made-up "&lt;$10" or "$0").</summary>
+    internal static State Arrived(State state, Call call, UsagePayload? payload)
+    {
+        var next = state with { InFlight = false };
+        return payload is not null && call.Generation == state.Generation
+            && CostSurfaceProjection.IsAuthoritative(payload)
+            ? next with { Merged = payload, MergedPeers = call.Selection.Peers }
+            : next;
+    }
+
+    /// <summary>Which direction the set of other devices on the profile moved.
+    /// Removing one retires earlier queued work (it counted a device that is
+    /// no longer wanted); adding one does not.</summary>
+    internal static VisibilityChange Visibility(
+        bool previousActive, IReadOnlyList<string> previousPeers, bool currentActive, IReadOnlyList<string> currentPeers)
+    {
+        IReadOnlyList<string> before = previousActive ? previousPeers : [];
+        IReadOnlyList<string> current = currentActive ? currentPeers : [];
+        var after = new HashSet<string>(current, StringComparer.Ordinal);
+        return before.All(after.Contains) ? VisibilityChange.None : VisibilityChange.Reducing;
+    }
+}
+
 /// <summary>Reconciles the presence with the settings and the latest accepted
 /// graph. Start, stop and publish all run through <see cref="Apply"/>, so
 /// there is a single gated path and every entry point is only a trigger
@@ -125,11 +313,13 @@ internal static class DiscordClassifiers
 /// writing thread, graphs on the UI thread.</summary>
 internal sealed class DiscordPresenceController
 {
-    /// <summary>The five values whose change re-publishes immediately
-    /// (AppDelegate.swift :397-442). The hidden set is the TRAY's
+    /// <summary>The values whose change re-publishes immediately
+    /// (AppDelegate.swift :397-442, :540-600). The hidden set is the TRAY's
     /// (<see cref="ClientRegistry.TabHiddenKey"/>, read through
     /// <see cref="ClientRegistry.HiddenTabClients(SettingsStore)"/> exactly as
-    /// TrayFeed does), not the limits or quota exclusions.</summary>
+    /// TrayFeed does), not the limits or quota exclusions. The device switch
+    /// and the dashboard's device selection are merge inputs: a change drops
+    /// the merged result at once.</summary>
     internal static readonly IReadOnlySet<string> WatchedKeys = new HashSet<string>(StringComparer.Ordinal)
     {
         ClientRegistry.TabHiddenKey,
@@ -137,6 +327,8 @@ internal sealed class DiscordPresenceController
         DiscordPresence.WholeDollarsKey,
         DiscordPresence.ComponentsKey,
         DiscordPresence.SelectionKey,
+        DiscordPresence.IncludeDevicesKey,
+        DeviceOverlayState.SelectionKey,
     };
 
     private readonly object _gate = new();
@@ -144,6 +336,16 @@ internal sealed class DiscordPresenceController
     private readonly IReadOnlyList<string> _arguments;
     private readonly Func<DiscordIpcClient> _makeClient;
     private readonly Func<string> _today;
+    // Null: the device merge is inert (no overlay in this process).
+    private readonly IDeviceSource? _devices;
+    private readonly Func<bool> _flyoutOpen;
+    // Monotonic: the refresh interval only. "Today" is _today's calendar.
+    private readonly Func<TimeSpan> _monotonic;
+    // Terminal, under _gate: after Quit nothing starts, calls or publishes.
+    private bool _quit;
+    // Under _gate. Only DiscordDeviceMerge.Graph reads its result, and only
+    // for Discord.
+    private DiscordDeviceMerge.State _merge = new();
     private DiscordIpcClient? _client;
     // True once Stop() has been sent for the current off period, so repeated
     // triggers while off (every graph, every watched write) do not each queue
@@ -152,11 +354,15 @@ internal sealed class DiscordPresenceController
     // The latest graph that was cost-authoritative when it arrived. Never a
     // LocalFirst (unpriced) graph; see OnGraph.
     private UsagePayload? _graph;
+    // The last graph instance OnGraph was handed, priced or not, so a trace or
+    // quota tick re-raising the same instance triggers nothing.
+    private UsagePayload? _lastSeen;
     private Snapshot _last;
 
     private sealed record Snapshot(
         string HiddenRaw, bool Enabled, CostStyle CostStyle, string ComponentsRaw,
-        IReadOnlySet<Component> Components, Selection Selection)
+        IReadOnlySet<Component> Components, Selection Selection,
+        bool IncludeDevices, IReadOnlyList<string> SelectedPeers)
     {
         public static Snapshot Read(SettingsStore store)
         {
@@ -169,27 +375,50 @@ internal sealed class DiscordPresenceController
                 // is not read as a change to what gets published.
                 DiscordPresence.RawComponents(components),
                 components,
-                DiscordPresence.ReadSelection(store));
+                DiscordPresence.ReadSelection(store),
+                DiscordPresence.IncludeDevices(store),
+                DiscordDeviceMerge.SelectedPeers(store));
         }
 
+        // SequenceEqual, not ==: == on two lists compares references, and
+        // every read builds a new one.
         public bool SameAs(Snapshot other) =>
             HiddenRaw == other.HiddenRaw && Enabled == other.Enabled && CostStyle == other.CostStyle
-            && ComponentsRaw == other.ComponentsRaw && Selection == other.Selection;
+            && ComponentsRaw == other.ComponentsRaw && Selection == other.Selection
+            && IncludeDevices == other.IncludeDevices
+            && SelectedPeers.SequenceEqual(other.SelectedPeers, StringComparer.Ordinal);
     }
 
     /// <param name="makeClient">Called at most once, and only after
     /// <see cref="DiscordPresence.MayConnect"/> said yes — the one place a
     /// connection can come into existence.</param>
+    /// <param name="devices">The device source for the merged graph; null
+    /// makes the device merge inert.</param>
+    /// <param name="flyoutOpen">Read inside <see cref="OnGraph"/> only, on the
+    /// thread that calls it (the UI thread in the app).</param>
     internal DiscordPresenceController(
         SettingsStore store, IReadOnlyList<string> arguments,
-        Func<DiscordIpcClient> makeClient, Func<string>? today = null)
+        Func<DiscordIpcClient> makeClient, Func<string>? today = null,
+        IDeviceSource? devices = null, Func<bool>? flyoutOpen = null, Func<TimeSpan>? monotonic = null)
     {
         _store = store;
         _arguments = arguments;
         _makeClient = makeClient;
         _today = today ?? (() => Format.TodayKey());
+        _devices = devices;
+        _flyoutOpen = flyoutOpen ?? (() => false);
+        _monotonic = monotonic ?? (() => TimeSpan.FromMilliseconds(Environment.TickCount64));
         _last = Snapshot.Read(store);
+        _merge = DiscordDeviceMerge.Observe(_merge, _last.IncludeDevices, _last.Enabled, _last.SelectedPeers);
     }
+
+    /// <summary>The last device call started, for tests to await.</summary>
+    internal Task? MergeCallForTesting { get; private set; }
+
+    /// <summary>Sees every payload handed to the client, under the lock, with
+    /// its change, so a test can read what was published without a
+    /// pipe.</summary>
+    internal Action<DiscordPresence.Payload?, VisibilityChange>? PublishedForTesting { get; set; }
 
     /// <summary>Launch: if enabled, start the worker so the connection is up
     /// when the first graph lands (AppDelegate.swift :150-154). Nothing is
@@ -220,8 +449,9 @@ internal sealed class DiscordPresenceController
     /// graph. A LocalFirst graph skips
     /// pricing on purpose (TbCore.GraphLocalFirst), so its cost would publish a
     /// fabricated "&lt;$10" or "$0" to a public profile until the Richer graph
-    /// corrected it a floor later. Such a graph is ignored ALTOGETHER — not
-    /// just its cost — so the payload never mixes two stages; the controller
+    /// corrected it a floor later. Such a graph is never published — not
+    /// just its cost — so the payload never mixes two stages (it only lets the
+    /// device merge ask for its own, separately gated graph); the controller
     /// keeps the latest authoritative graph, which settings-triggered
     /// republishes also use, and the next authoritative graph publishes as
     /// usual. A profile whose Richer graph has no priced message at all
@@ -229,25 +459,107 @@ internal sealed class DiscordPresenceController
     /// state in which the tray reads "Checking".</summary>
     internal void OnGraph(UsagePayload? graph)
     {
-        if (graph is null || !CostSurfaceProjection.IsAuthoritative(graph))
+        if (graph is null)
         {
             return;
         }
 
         lock (_gate)
         {
-            if (ReferenceEquals(graph, _graph))
+            if (ReferenceEquals(graph, _lastSeen))
             {
                 return;
             }
 
-            _graph = graph;
+            _lastSeen = graph;
+            var authoritative = CostSurfaceProjection.IsAuthoritative(graph);
+            if (authoritative)
+            {
+                _graph = graph;
+            }
+
+            // The periodic entry of the device merge (macOS runDiscordMerge,
+            // AppDelegate.swift :743-749): after the local path, so the local
+            // graph never waits on a device. Also for an unpriced local graph:
+            // the merged answer can be authoritative on its own, and its own
+            // gate (Arrived, Graph) decides whether it publishes.
+            DecideMerge();
+            if (!authoritative)
+            {
+                return; // this PC's unpriced graph never publishes on its own
+            }
+
             Apply(VisibilityChange.None);
         }
     }
 
+    /// <summary>Under <see cref="_gate"/>, from <see cref="OnGraph"/> only.
+    /// Decides and, when the decision is a call, runs it on the thread pool
+    /// with no lock held. Its completion re-enters under <see cref="_gate"/>
+    /// once and, in that single critical section, stores the answer
+    /// (<see cref="DiscordDeviceMerge.Arrived"/>: generation and cost
+    /// authority) and republishes, so a late answer cannot be published after
+    /// a reduction that dropped it.</summary>
+    private void DecideMerge()
+    {
+        if (_quit || _devices is not { } source)
+        {
+            return;
+        }
+
+        var enabled = DiscordPresence.Enabled(_store);
+        var decision = DiscordDeviceMerge.Decide(
+            _graph, _merge, DiscordPresence.IncludeDevices(_store), enabled,
+            DiscordPresence.MayConnect(_arguments, enabled), DiscordDeviceMerge.SelectedPeers(_store),
+            _flyoutOpen(), _monotonic());
+        _merge = decision.State;
+        if (decision.Call is not { } call)
+        {
+            return;
+        }
+
+        MergeCallForTesting = Task.Run(() =>
+        {
+            UsagePayload? payload;
+            try
+            {
+                // Only the UsagePayload: the device rows are the other owner's
+                // text and are dropped here.
+                payload = source.GraphDevices(null, call.Selection, call.Mode).Payload;
+            }
+            catch (Exception)
+            {
+                // Logged nowhere: a message could carry a peer or a figure. A
+                // failure keeps the last result.
+                payload = null;
+            }
+
+            lock (_gate)
+            {
+                _merge = DiscordDeviceMerge.Arrived(_merge, call, payload);
+                // An addition: no retire. Coalesced when nothing changed.
+                Apply(VisibilityChange.None);
+            }
+        });
+    }
+
+    /// <summary>A linked device was removed or re-paired (Settings → Devices,
+    /// DevicesModel.PeersChanged): the merged result may count it, so it goes
+    /// now and what replaces it retires queued work — also with no merged
+    /// result yet, since a call started before the removal would otherwise
+    /// come back under the same generation (AppDelegate.swift :205-216).</summary>
+    internal void OnPeersChanged()
+    {
+        lock (_gate)
+        {
+            _merge = DiscordDeviceMerge.Invalidate(_merge);
+            Apply(VisibilityChange.Reducing);
+        }
+    }
+
     /// <summary>A settings write. Value-gated: only a real change to one of
-    /// the five watched values re-publishes, classified, immediately.</summary>
+    /// the watched values re-publishes, classified, immediately. Never starts
+    /// a device call and never reads the flyout (only OnGraph does).</summary>
     internal void OnSettingChanged(string key)
     {
         if (!WatchedKeys.Contains(key))
@@ -265,10 +577,28 @@ internal sealed class DiscordPresenceController
             }
 
             _last = next;
+            // Every change reaches the merge's inputs: a new generation drops
+            // the merged result at once (AppDelegate.swift :540-552).
+            var previousMerge = _merge;
+            var wasMergeActive = previousMerge.IncludeDevices && previousMerge.DiscordOn
+                && previousMerge.Peers.Count > 0;
+            var mergeActive = next.IncludeDevices && next.Enabled && next.SelectedPeers.Count > 0;
+            _merge = DiscordDeviceMerge.Observe(previousMerge, next.IncludeDevices, next.Enabled, next.SelectedPeers);
             // Today's actual contributors, so hiding a client with no usage
-            // today is not mistaken for taking something down. Null (no graph
-            // yet) means do not narrow.
-            var contributors = _graph is null ? null : TodayContributors(_graph, _today());
+            // today is not mistaken for taking something down. From the graph
+            // published before this pass AND the one in use now: a client with
+            // usage only on another device is in no local graph, and Observe
+            // may already have dropped the merged result (AppDelegate.swift
+            // :563-579). Null (no graph yet) means do not narrow.
+            var outgoing = wasMergeActive ? (previousMerge.Merged ?? _graph) : _graph;
+            var current = DiscordDeviceMerge.Graph(
+                _graph, _merge, next.IncludeDevices, DiscordPresence.MayConnect(_arguments, next.Enabled),
+                next.SelectedPeers);
+            IReadOnlySet<string>? contributors = outgoing is null && current is null
+                ? null
+                : new[] { outgoing, current }.OfType<UsagePayload>()
+                    .SelectMany(graph => TodayContributors(graph, _today()))
+                    .ToHashSet(StringComparer.Ordinal);
             var change = DiscordClassifiers.Visibility(
                     previous.HiddenRaw, next.HiddenRaw, previous.Selection, next.Selection, contributors)
                 .Combined(DiscordClassifiers.CostStyleChange(
@@ -277,7 +607,9 @@ internal sealed class DiscordPresenceController
                 .Combined(DiscordClassifiers.ComponentsChange(previous.Components, next.Components))
                 .Combined(DiscordClassifiers.SelectionChange(
                     previous.Selection, next.Selection,
-                    ClientRegistry.HiddenTabClients(ClientRegistry.ParseIdSet(next.HiddenRaw))));
+                    ClientRegistry.HiddenTabClients(ClientRegistry.ParseIdSet(next.HiddenRaw))))
+                .Combined(DiscordDeviceMerge.Visibility(
+                    wasMergeActive, previousMerge.Peers, mergeActive, next.SelectedPeers));
             Apply(change);
         }
     }
@@ -302,6 +634,9 @@ internal sealed class DiscordPresenceController
         DiscordIpcClient? client;
         lock (_gate)
         {
+            // Before the client is stopped: a device call completing later
+            // must not start it again or publish while the process exits.
+            _quit = true;
             client = _client;
         }
 
@@ -323,6 +658,11 @@ internal sealed class DiscordPresenceController
 
     private void Apply(VisibilityChange change)
     {
+        if (_quit)
+        {
+            return;
+        }
+
         if (!DiscordPresence.MayConnect(_arguments, DiscordPresence.Enabled(_store)))
         {
             // The client is kept, not dropped: Stop() only QUEUES the clear,
@@ -340,20 +680,25 @@ internal sealed class DiscordPresenceController
         _client ??= _makeClient();
         _stopped = false;
         _client.Start();
-        if (_graph is null)
+        // The merged graph only while every condition still holds at this
+        // moment (read from the store now), else this PC's.
+        var graph = DiscordDeviceMerge.Graph(
+            _graph, _merge, DiscordPresence.IncludeDevices(_store), canConnect: true,
+            DiscordDeviceMerge.SelectedPeers(_store));
+        if (graph is null)
         {
             return; // nothing publishes before the first accepted graph
         }
 
-        _client.Publish(
-            DiscordPresence.Build(
-                _graph,
-                ClientRegistry.HiddenTabClients(_store),
-                _today(),
-                DiscordPresence.ReadCostStyle(_store),
-                DiscordPresence.Components(_store),
-                DiscordPresence.ReadSelection(_store)),
-            change);
+        var payload = DiscordPresence.Build(
+            graph,
+            ClientRegistry.HiddenTabClients(_store),
+            _today(),
+            DiscordPresence.ReadCostStyle(_store),
+            DiscordPresence.Components(_store),
+            DiscordPresence.ReadSelection(_store));
+        PublishedForTesting?.Invoke(payload, change);
+        _client.Publish(payload, change);
     }
 }
 
@@ -388,6 +733,12 @@ internal static class DiscordCopy
         "Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones Syrtis does not recognise. The cost becomes that one tool's daily spend rather than the whole day's.";
 
     internal const string WholeDollars = "Show cost as a figure instead of a range";
+
+    // macOS SettingsPanel.swift :1019-1020; zh from Localizable.strings
+    // zh-Hant :275-276, zh-Hans :274-275.
+    internal const string IncludeDevices = "Include other devices selected in the dashboard";
+
+    internal const string IncludeDevicesHint = "Other devices' usage for today updates about every 5 minutes.";
 
     internal const string WholeDollarsHint =
         "A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend.";
