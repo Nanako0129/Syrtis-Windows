@@ -787,13 +787,16 @@ public sealed class DeviceOverlayState
                 try
                 {
                     foreach (var key in missing) { await RunOnce(key, DeviceFetchMode.Cached).ConfigureAwait(false); }
-                    // Only while these are still the keys on screen: a stale
+                    // Only while these are exactly the keys on screen: a stale
                     // request would replace a newer pending one, which
                     // FinishRefresh then drops, leaving the newest lens without
-                    // its refresh.
+                    // its refresh. "Each key still wanted" is not enough: the
+                    // header's graph page is wanted on every lens, so an older
+                    // lens's [Graph] would pass while the newer one wants
+                    // [Models, Graph].
                     Locked(() =>
                     {
-                        if (keys.All(IsWanted)) { ScheduleRefreshCore(NotRecentlyRefreshed(keys)); }
+                        if (WantedKeys().SequenceEqual(keys)) { ScheduleRefreshCore(NotRecentlyRefreshed(keys)); }
                     });
                 }
                 finally

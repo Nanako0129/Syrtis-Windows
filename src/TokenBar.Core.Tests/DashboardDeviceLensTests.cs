@@ -499,6 +499,26 @@ public class DashboardDeviceLensTests : IDisposable
         Assert.Equal(during, DashboardDeviceLens.RenderSignature(overlay, AppView.Quota, null, null, ""));
     }
 
+    [Fact] // an older lens's cached load finishing late must not replace the newer lens's queued refresh
+    public void AnOlderLensCachedLoadDoesNotReplaceTheNewerLensQueuedRefresh()
+    {
+        var (overlay, source, _, sync) = Open();
+        source.Set(s => s.HoldCached = true);
+        Assert.True(sync.Sync(AppView.Quota, null, null, "", withGraph: true)); // [Graph], its cached call held
+        Assert.True(Pump(() => source.Calls.Any(c => c.Tag == "graph-cached")));
+        source.Set(s => { s.HoldCached = false; s.HoldRefresh = true; });
+        Assert.True(sync.Sync(AppView.Daily, null, null, "", withGraph: true)); // [Graph] refresh goes in flight, held
+        Assert.True(Pump(() => source.RefreshStarted >= 1));
+        Assert.True(sync.Sync(AppView.Models, null, null, "", withGraph: true)); // [Models, Graph] queues behind it
+        Assert.True(Pump(() => overlay.QueuedRefresh));
+        source.ReleaseCached(1); // Quota's load completes now, after Models is the lens on screen
+        Assert.True(Pump(() => overlay.CachedLoads == 0));
+        source.Set(s => s.HoldRefresh = false);
+        source.Release(50);
+        Assert.True(Idle(overlay));
+        Assert.Contains(source.Calls, c => c.Tag == "models-refresh");
+    }
+
     // ---- the header's combined totals ---------------------------------------
 
     [Fact] // only this PC (or no overlay): null, so the view keeps its own numbers
