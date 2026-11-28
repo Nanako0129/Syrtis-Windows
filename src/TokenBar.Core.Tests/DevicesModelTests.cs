@@ -520,6 +520,16 @@ public class DevicesModelTests
     }
 
     [Fact]
+    public async Task LinkedStaysWhenTheListDoesNotHaveTheDevice()
+    {
+        var model = await Linked();
+        _fake.Set(s => { s.PeerState = "revoked"; s.Peers.Clear(); });
+        await model.RefreshAsync();
+        Assert.Empty(model.Peers);
+        Assert.Equal(PairingKind.Linked, model.Pairing.Kind);
+    }
+
+    [Fact]
     public async Task RemovingTheDeviceJustLinkedClearsLinked()
     {
         var model = await Linked();
