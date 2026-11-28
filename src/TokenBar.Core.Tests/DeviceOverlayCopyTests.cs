@@ -520,14 +520,14 @@ public class DeviceOverlayCopyTableTests : IDisposable
         new(DeviceOverlayCopy.GettingUsage, "Studio", null, "◌ Getting usage from Studio…", "◌ 正在向 Studio 取得用量…", "◌ 正在向 Studio 获取用量…"),
         new(DeviceOverlayCopy.GettingUsageFirstScan, "Studio", null, "◌ Getting usage from Studio… The first time needs to scan its records, about 1 minute", "◌ 正在向 Studio 取得用量…首次需要掃描紀錄，約 1 分鐘", "◌ 正在向 Studio 获取用量…首次需要扫描记录，约 1 分钟"),
         new(DeviceOverlayCopy.CostIncomplete, "Studio", null, "The cost for Studio may be incomplete (its price data is incomplete). Tokens and message counts are included in the totals.", "Studio 的費用可能不完整（那台的價格資料不齊）。token 與訊息數已合計。", "Studio 的费用可能不完整（那台设备的价格数据不全）。token 数与消息数已合计。"),
-        new(DeviceOverlayCopy.UnreachableData, "Studio", "5m ago", "Can't reach Studio. Make sure it has Syrtis open and is on the same network. Showing data from 5m ago.", "連不上 Studio。請確認那台有開 Syrtis 而且在同一個網路。顯示的是 5m ago的資料。", "连不上 Studio。请确认那台设备已打开 Syrtis，并且在同一个网络。显示的是 5m ago的数据。"),
+        new(DeviceOverlayCopy.UnreachableData, "Studio", "5m ago", "Can't reach Studio. Make sure it has Syrtis open and is on the same network. Showing data from 5m ago.", "連不上 Studio。請確認那台有開 Syrtis 而且在同一個網路。顯示的是5m ago的資料。", "连不上 Studio。请确认那台设备已打开 Syrtis，并且在同一个网络。显示的是5m ago的数据。"),
         new(DeviceOverlayCopy.UnreachableNoData, "Studio", null, "No data from Studio yet. Can't reach it. Make sure it has Syrtis open and is on the same network.", "還沒有 Studio 的資料。連不上那台，請確認它有開 Syrtis 而且在同一個網路。", "还没有 Studio 的数据。连不上那台设备，请确认它已打开 Syrtis，并且在同一个网络。"),
-        new(DeviceOverlayCopy.BusyData, "Studio", "5m ago", "Studio is busy for now. Showing data from 5m ago.", "Studio 暫時忙碌。顯示的是 5m ago的資料。", "Studio 暂时忙碌。显示的是 5m ago的数据。"),
-        new(DeviceOverlayCopy.BusyDataRetry, "Studio", "5m ago", "Studio is busy for now and will be retried in 1 minute. Showing data from 5m ago.", "Studio 暫時忙碌，1 分鐘後自動再試。顯示的是 5m ago的資料。", "Studio 暂时忙碌，1 分钟后自动再试。显示的是 5m ago的数据。"),
+        new(DeviceOverlayCopy.BusyData, "Studio", "5m ago", "Studio is busy for now. Showing data from 5m ago.", "Studio 暫時忙碌。顯示的是5m ago的資料。", "Studio 暂时忙碌。显示的是5m ago的数据。"),
+        new(DeviceOverlayCopy.BusyDataRetry, "Studio", "5m ago", "Studio is busy for now and will be retried in 1 minute. Showing data from 5m ago.", "Studio 暫時忙碌，1 分鐘後自動再試。顯示的是5m ago的資料。", "Studio 暂时忙碌，1 分钟后自动再试。显示的是5m ago的数据。"),
         new(DeviceOverlayCopy.BusyNoData, "Studio", null, "No data from Studio yet. It is busy for now.", "還沒有 Studio 的資料。那台暫時忙碌。", "还没有 Studio 的数据。那台设备暂时忙碌。"),
         new(DeviceOverlayCopy.BusyNoDataRetry, "Studio", null, "No data from Studio yet. It is busy for now and will be retried in 1 minute.", "還沒有 Studio 的資料。那台暫時忙碌，1 分鐘後自動再試。", "还没有 Studio 的数据。那台设备暂时忙碌，1 分钟后自动再试。"),
         new(DeviceOverlayCopy.Stopped, "Studio", null, "Studio stopped sharing. Reconnect it in Settings → Devices.", "Studio 已停止分享。到「設定 → 裝置」重新連結。", "Studio 已停止分享。到“设置 → 设备”重新连接。"),
-        new(DeviceOverlayCopy.ErrorData, "Studio", "5m ago", "Studio couldn't answer this request. Showing data from 5m ago.", "Studio 無法回應這次請求。顯示的是 5m ago的資料。", "Studio 无法响应这次请求。显示的是 5m ago的数据。"),
+        new(DeviceOverlayCopy.ErrorData, "Studio", "5m ago", "Studio couldn't answer this request. Showing data from 5m ago.", "Studio 無法回應這次請求。顯示的是5m ago的資料。", "Studio 无法响应这次请求。显示的是5m ago的数据。"),
         new(DeviceOverlayCopy.ErrorNoData, "Studio", null, "No data from Studio yet. It couldn't answer this request.", "還沒有 Studio 的資料。那台無法回應這次請求。", "还没有 Studio 的数据。那台设备无法响应这次请求。"),
         new(DeviceOverlayCopy.NoDataYet, "Studio", null, "No data from Studio yet.", "還沒有 Studio 的資料。", "还没有 Studio 的数据。"),
         new(DeviceOverlayCopy.Combined, "3", null, "3 devices combined", "3 台裝置合計", "3 台设备合计"),
@@ -571,7 +571,7 @@ public class DeviceOverlayCopyTableTests : IDisposable
             Assert.Equal(lit.Hans, Fill(lit.Key, lit));
         }
         Assert.Equal(
-            "连不上 Studio。请确认那台设备已打开 Syrtis，并且在同一个网络。显示的是 5m ago的数据。",
+            "连不上 Studio。请确认那台设备已打开 Syrtis，并且在同一个网络。显示的是5m ago的数据。",
             C.UnreachableData.Localized("Studio", "5m ago"));
     }
 
@@ -585,10 +585,10 @@ public class DeviceOverlayCopyTableTests : IDisposable
     [Fact] // :24521
     public void TheUnreachableLineHasNoSpaceBetweenTheTimeAndTheNextWordInEnglishAndZh()
     {
-        // The literal check: the zh-Hant sentence ends "...顯示的是 5m ago的資料。" (time, then 的).
+        // The literal check: the zh-Hant sentence ends "...顯示的是5m ago的資料。" (time, then 的).
         Load("zh-Hant");
         Assert.Equal(
-            "連不上 Studio。請確認那台有開 Syrtis 而且在同一個網路。顯示的是 5m ago的資料。",
+            "連不上 Studio。請確認那台有開 Syrtis 而且在同一個網路。顯示的是5m ago的資料。",
             C.UnreachableData.Localized("Studio", "5m ago"));
     }
 
@@ -613,14 +613,14 @@ public class DeviceOverlayCopyTableTests : IDisposable
 
     [Theory] // :24147-24151 and :23716 style: the approved zh-Hant copy, as .NET placeholders
     [InlineData(C.GettingUsage, "◌ 正在向 {0} 取得用量…")]
-    [InlineData(C.UnreachableData, "連不上 {0}。請確認那台有開 Syrtis 而且在同一個網路。顯示的是 {1}的資料。")]
+    [InlineData(C.UnreachableData, "連不上 {0}。請確認那台有開 Syrtis 而且在同一個網路。顯示的是{1}的資料。")]
     [InlineData(C.UnreachableNoData, "還沒有 {0} 的資料。連不上那台，請確認它有開 Syrtis 而且在同一個網路。")]
-    [InlineData(C.BusyDataRetry, "{0} 暫時忙碌，1 分鐘後自動再試。顯示的是 {1}的資料。")]
-    [InlineData(C.BusyData, "{0} 暫時忙碌。顯示的是 {1}的資料。")]
+    [InlineData(C.BusyDataRetry, "{0} 暫時忙碌，1 分鐘後自動再試。顯示的是{1}的資料。")]
+    [InlineData(C.BusyData, "{0} 暫時忙碌。顯示的是{1}的資料。")]
     [InlineData(C.BusyNoDataRetry, "還沒有 {0} 的資料。那台暫時忙碌，1 分鐘後自動再試。")]
     [InlineData(C.BusyNoData, "還沒有 {0} 的資料。那台暫時忙碌。")]
     [InlineData(C.Stopped, "{0} 已停止分享。到「設定 → 裝置」重新連結。")]
-    [InlineData(C.ErrorData, "{0} 無法回應這次請求。顯示的是 {1}的資料。")]
+    [InlineData(C.ErrorData, "{0} 無法回應這次請求。顯示的是{1}的資料。")]
     [InlineData(C.ErrorNoData, "還沒有 {0} 的資料。那台無法回應這次請求。")]
     [InlineData(C.NoDataYet, "還沒有 {0} 的資料。")]
     [InlineData(C.Combined, "{0} 台裝置合計")]
