@@ -525,9 +525,28 @@ public sealed class DevicesModel
         var grants = await Call(c => c.Grants()).ConfigureAwait(false);
         if (token.IsCancellationRequested) { return; }
         if (grants.Ok) { Set(() => _grants = grants.Value!); }
+        var pairingBefore = Read(() => _pairing);
         var peers = await Call(c => c.Peers()).ConfigureAwait(false);
         if (token.IsCancellationRequested) { return; }
-        if (peers.Ok) { Set(() => _peers = peers.Value!); }
+        if (peers.Ok)
+        {
+            Set(() =>
+            {
+                _peers = peers.Value!;
+                // "Linked." is about the device just linked: it goes once that device is
+                // listed as no longer active (the other side revoked it, or it expired).
+                // A list that does not have the device yet says nothing, and neither does
+                // a list read before this link finished (it can still show the device's
+                // old revoked row when a device is linked again): the pairing must be the
+                // same one that was current before the list was read.
+                if (ReferenceEquals(_pairing, pairingBefore)
+                    && _pairing is { Kind: PairingKind.Linked, Fingerprint: { } linked }
+                    && _peers.Any(p => p.Fingerprint == linked && p.State != "active"))
+                {
+                    _pairing = DevicesPairing.Idle;
+                }
+            });
+        }
     }
 
     public async Task RetryStart()
@@ -758,7 +777,13 @@ public sealed class DevicesModel
         var key = peer.ProducerStatic;
         var result = await Call(c => { c.PeerRemove(key); return true; }).ConfigureAwait(false);
         if (!result.Ok) { Set(() => _manageError = DevicesCopy.GenericFailure); }
-        else { RaisePeersChanged(); }
+        else
+        {
+            // Removing the device just linked takes its "Linked." line with it.
+            var fingerprint = peer.Fingerprint;
+            Set(() => { if (_pairing is { Kind: PairingKind.Linked } p && p.Fingerprint == fingerprint) { _pairing = DevicesPairing.Idle; } });
+            RaisePeersChanged();
+        }
         await RefreshAsync().ConfigureAwait(false);
     }
 

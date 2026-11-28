@@ -42,6 +42,7 @@ internal sealed class FakeDevicesClient : IDevicesRemoteClient
         public bool DestinationEntered;
         public List<string> Peers = [];
         public List<string> RemovedPeers = [];
+        public string PeerState = "active"; // the state every listed peer reports
         public List<string> Calls = [];
         public List<bool> SharingCalls = [];
         public bool HoldStatus;
@@ -235,7 +236,7 @@ internal sealed class FakeDevicesClient : IDevicesRemoteClient
     {
         s.Calls.Add("peers");
         return (IReadOnlyList<RemotePeer>)[.. s.Peers.Select(p =>
-            new RemotePeer(p, p[..16], "192.0.2.10", 47_001, 1, Far, "active"))];
+            new RemotePeer(p, p[..16], "192.0.2.10", 47_001, 1, Far, s.PeerState))];
     });
 
     public void PeerRemove(string producerStatic) =>

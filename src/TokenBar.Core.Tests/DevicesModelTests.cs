@@ -497,6 +497,47 @@ public class DevicesModelTests
         Assert.True(Eventually(() => model.Peers.Any(p => p.ProducerStatic == F.ProducerA)));
     }
 
+    // Windows-only (SA-5): "Linked." is about the device just linked and must not outlive it.
+    private async Task<DevicesModel> Linked()
+    {
+        var model = await Confirming(Model());
+        await model.ConfirmLink();
+        _fake.ReleasePoll(F.ProducerA);
+        Assert.True(Eventually(() => model.Pairing.Kind == PairingKind.Linked && model.Peers.Count == 1));
+        return model;
+    }
+
+    [Fact]
+    public async Task LinkedStaysWhileTheDeviceIsActiveAndGoesOnceItIsListedAsRevoked()
+    {
+        var model = await Linked();
+        await model.RefreshAsync();
+        Assert.Equal(PairingKind.Linked, model.Pairing.Kind); // control: an active device keeps the line
+        _fake.Set(s => s.PeerState = "revoked");
+        await model.RefreshAsync();
+        Assert.Equal("revoked", model.Peers.Single().State);
+        Assert.Equal(PairingKind.Idle, model.Pairing.Kind);
+    }
+
+    [Fact]
+    public async Task LinkedStaysWhenTheListDoesNotHaveTheDevice()
+    {
+        var model = await Linked();
+        _fake.Set(s => { s.PeerState = "revoked"; s.Peers.Clear(); });
+        await model.RefreshAsync();
+        Assert.Empty(model.Peers);
+        Assert.Equal(PairingKind.Linked, model.Pairing.Kind);
+    }
+
+    [Fact]
+    public async Task RemovingTheDeviceJustLinkedClearsLinked()
+    {
+        var model = await Linked();
+        await model.RemovePeer(model.Peers[0]);
+        Assert.Empty(model.Peers);
+        Assert.Equal(PairingKind.Idle, model.Pairing.Kind);
+    }
+
     [Fact] // :23084-23121 (DR2B2 D2): a link and a removal tell the dashboard; a plain refresh does not
     public async Task LinkAndRemoveRaisePeersChangedAndARefreshDoesNot()
     {
